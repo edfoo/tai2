@@ -1,0 +1,105 @@
+from __future__ import annotations
+
+import asyncio
+from collections import deque
+from typing import Any, List
+
+import pytest
+
+from app.services.market_service import MarketService
+
+
+class DummyStateService:
+    def __init__(self) -> None:
+        self.snapshots: list[dict[str, Any]] = []
+
+    async def set_market_snapshot(self, snapshot: dict[str, Any]) -> None:
+        self.snapshots.append(snapshot)
+
+
+def test_market_service_builds_snapshot_with_mocked_fetchers(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def scenario() -> dict[str, Any]:
+        state = DummyStateService()
+        service = MarketService(
+            state_service=state,
+            enable_websocket=False,
+            account_api=object(),
+            market_api=object(),
+            public_api=object(),
+        )
+        service._trade_buffers[service.symbol] = deque(
+            [
+                {"side": 1.0, "volume": 2.0},
+                {"side": -1.0, "volume": 0.5},
+            ],
+            maxlen=500,
+        )
+        order_book = {
+            "bids": [[100.0, 3.0], [99.5, 1.0]],
+            "asks": [[100.5, 1.0], [101.0, 0.5]],
+        }
+
+        async def fake_fetch_positions() -> list[dict[str, Any]]:
+            return [{"instId": service.symbol, "pos": "1"}]
+
+        async def fake_fetch_account_balance() -> dict[str, Any]:
+            return {
+                "details": [{"ccy": "USDT", "eq": "1000"}],
+                "total_equity": 1000.0,
+                "total_account_value": 1000.0,
+                "total_eq_usd": 1000.0,
+            }
+
+        async def fake_fetch_order_book(symbol: str) -> dict[str, Any]:
+            return order_book
+
+        async def fake_fetch_ticker(symbol: str) -> dict[str, Any]:
+            return {"last": "42050"}
+
+        async def fake_fetch_funding(symbol: str) -> dict[str, Any]:
+            return {"fundingRate": "0.0001"}
+
+        async def fake_fetch_open_interest(symbol: str) -> dict[str, Any]:
+            return {"oi": "12345"}
+
+        async def fake_fetch_ohlcv(symbol: str) -> list[list[Any]]:
+            rows: List[list[Any]] = []
+            for i in range(30):
+                rows.append(
+                    [
+                        str(1_700_000_000_000 + i * 60_000),
+                        str(42000 + i),
+                        str(42100 + i),
+                        str(41900 + i),
+                        str(42050 + i),
+                        str(5 + i / 10),
+                    ]
+                )
+            return rows
+
+        monkeypatch.setattr(service, "_fetch_positions", fake_fetch_positions)
+        monkeypatch.setattr(service, "_fetch_account_balance", fake_fetch_account_balance)
+        monkeypatch.setattr(service, "_fetch_order_book", fake_fetch_order_book)
+        monkeypatch.setattr(service, "_fetch_ticker", fake_fetch_ticker)
+        monkeypatch.setattr(service, "_fetch_funding_rate", fake_fetch_funding)
+        monkeypatch.setattr(service, "_fetch_open_interest", fake_fetch_open_interest)
+        monkeypatch.setattr(service, "_fetch_ohlcv", fake_fetch_ohlcv)
+
+        return await service._build_snapshot()
+
+    snapshot = asyncio.run(scenario())
+    assert snapshot["positions"][0]["pos"] == "1"
+    assert snapshot["account"][0]["eq"] == "1000"
+    assert snapshot["account_equity"] == pytest.approx(1000.0)
+    assert snapshot["custom_metrics"]["cumulative_volume_delta"] == pytest.approx(1.5)
+    assert snapshot["custom_metrics"]["order_flow_imbalance"] == pytest.approx(2.5)
+    assert snapshot["indicators"]["bollinger_bands"]["upper"] is not None
+    assert snapshot["indicators"]["vwap"] is not None
+    assert snapshot["market_data"][snapshot["symbol"]]["ticker"]["last"] == "42050"
+
+
+def test_indicator_helper_handles_empty_data() -> None:
+    indicators = MarketService._compute_indicators([])
+    assert indicators["vwap"] is None
+    assert indicators["bollinger_bands"] == {}
+    assert indicators["stoch_rsi"] == {}

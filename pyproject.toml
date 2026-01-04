@@ -1,0 +1,33 @@
+[project]
+name = "tai2"
+version = "0.1.0"
+description = "Trading automation interface tai2"
+readme = "README.md"
+authors = [{ name = "tai2" }]
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "nicegui",
+    "python-okx",
+    "pandas-ta",
+    "redis",
+    "asyncpg",
+    "pydantic-settings",
+    "httpx<0.28",
+    "pandas",
+    "pytest",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+managed = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]

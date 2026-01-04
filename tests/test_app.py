@@ -1,0 +1,204 @@
+from typing import Any
+
+from fastapi.testclient import TestClient
+
+from app.core import config
+from app.main import create_app
+from app.services.prompt_builder import PromptBuilder
+
+
+def test_settings_reads_environment_variables(monkeypatch) -> None:
+    monkeypatch.setenv("WS_UPDATE_INTERVAL", "240")
+    monkeypatch.setenv("OKX_API_KEY", "demo")
+    config.get_settings.cache_clear()
+
+    settings = config.get_settings()
+
+    assert settings.okx_api_key == "demo"
+    assert settings.ws_update_interval == 240
+
+
+def test_fastapi_app_health_endpoint() -> None:
+    app = create_app()
+    with TestClient(app) as client:
+        response = client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+
+
+def test_state_endpoint_returns_503_when_state_service_missing() -> None:
+    app = create_app()
+    with TestClient(app) as client:
+        response = client.get("/state/latest")
+
+    assert response.status_code == 503
+
+
+def test_recent_trades_endpoint_handles_missing_database() -> None:
+    app = create_app()
+    with TestClient(app) as client:
+        response = client.get("/trades/recent")
+
+    assert response.status_code == 503
+
+
+def _sample_snapshot() -> dict:
+    return {
+        "generated_at": "2025-12-31T00:00:00Z",
+        "symbol": "BTC-USDT-SWAP",
+        "symbols": ["BTC-USDT-SWAP"],
+        "positions": [
+            {
+                "instId": "BTC-USDT-SWAP",
+                "pos": "1",
+                "avgPx": "42000",
+                "posSide": "long",
+                "lever": "3",
+            }
+        ],
+        "account_equity": 100000,
+        "total_account_value": 100000,
+        "total_eq_usd": 100000,
+        "market_data": {
+            "BTC-USDT-SWAP": {
+                "ticker": {
+                    "last": "43000",
+                    "bidPx": "42995",
+                    "askPx": "43005",
+                    "volCcy24h": "12345",
+                    "changeRate": "0.02",
+                },
+                "funding_rate": {"fundingRate": "0.0001"},
+                "open_interest": {"oi": "1000", "oiCcy": "43000000"},
+                "custom_metrics": {
+                    "order_flow_imbalance": 10,
+                    "cumulative_volume_delta": 25,
+                },
+                "risk_metrics": {
+                    "atr": 150,
+                    "atr_pct": 0.35,
+                    "suggested_stop": 225,
+                    "suggested_stop_pct": 0.52,
+                },
+                "strategy_signal": {
+                    "action": "BUY",
+                    "confidence": 0.66,
+                    "reason": "RSI oversold",
+                },
+                "order_book": {
+                    "bids": [["42990", "20"], ["42980", "10"]],
+                    "asks": [["43010", "15"], ["43020", "5"]],
+                },
+                "indicators": {
+                    "rsi": 45,
+                    "macd": {"value": 1.2, "signal": 0.8, "hist": 0.4, "series": [0.1, 0.2]},
+                    "bollinger_bands": {"upper": 44000, "middle": 43000, "lower": 42000},
+                    "stoch_rsi": {"k": 55, "d": 45},
+                    "moving_averages": {"ema_50": 42800, "ema_200": 41000},
+                    "vwap": 43100,
+                    "atr": 150,
+                    "atr_pct": 0.35,
+                    "volume": {"last": 1200, "average": 950, "series": [1000, 1100]},
+                    "vwap_series": [42900, 43000, 43100],
+                    "volume_rsi_series": [45, 55],
+                    "ohlcv": [
+                        {"ts": 1, "open": 1, "high": 2, "low": 0.5, "close": 1.5, "volume": 100},
+                        {"ts": 2, "open": 1.5, "high": 2.5, "low": 1.2, "close": 2.0, "volume": 120},
+                    ],
+                },
+            }
+        },
+    }
+
+
+def test_prompt_builder_compiles_structured_payload() -> None:
+    snapshot = _sample_snapshot()
+    metadata = {"ta_timeframe": "1H", "guardrails": {"max_leverage": 4}}
+    builder = PromptBuilder(snapshot, metadata=metadata, max_candles=1)
+
+    payload = builder.build(symbol="BTC-USDT-SWAP", timeframe="1H")
+    context = payload["context"]
+    prompt = payload["prompt"]
+
+    assert context["symbol"] == "BTC-USDT-SWAP"
+    assert context["timeframe"] == "1H"
+    assert context["market"]["spread"] == 10.0
+    assert len(context["history"]["candles"]) == 1  # trimmed to max_candles
+    assert context["positions"][0]["side"] == "LONG"
+    assert context["strategy_signal"]["action"] == "BUY"
+    assert prompt["response_schema"]["properties"]["action"]["enum"] == ["BUY", "SELL", "HOLD"]
+    assert prompt["model"] is None
+
+
+def test_llm_prompt_endpoint_uses_builder(monkeypatch) -> None:
+    snapshot = _sample_snapshot()
+    app = create_app(enable_background_services=False)
+
+    class _DummyState:
+        async def get_market_snapshot(self) -> dict:
+            return snapshot
+
+    recorded: dict[str, Any] = {}
+
+    async def fake_insert_prompt_run(**kwargs):
+        recorded.update(kwargs)
+        return "prompt-1"
+
+    monkeypatch.setattr("app.main.insert_prompt_run", fake_insert_prompt_run)
+
+    with TestClient(app) as client:
+        app.state.state_service = _DummyState()
+        response = client.get("/llm/prompt", params={"symbol": "BTC-USDT-SWAP", "timeframe": "4H"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["payload"]["context"]["market"]["last_price"] == 43000.0
+    assert body["prompt_id"] == "prompt-1"
+    assert recorded["symbol"] == "BTC-USDT-SWAP"
+    assert recorded["timeframe"] == "4H"
+
+
+def test_equity_history_endpoint_returns_items(monkeypatch) -> None:
+    app = create_app(enable_background_services=False)
+
+    async def fake_fetch_equity_history(limit: int = 200):
+        return [
+            {
+                "observed_at": "2025-12-31T00:00:00Z",
+                "account_equity": 100000.0,
+                "total_eq_usd": 100000.0,
+                "total_account_value": 100000.0,
+            }
+        ]
+
+    monkeypatch.setattr("app.main.fetch_equity_history", fake_fetch_equity_history)
+
+    with TestClient(app) as client:
+        response = client.get("/equity/history", params={"limit": 5})
+
+    assert response.status_code == 200
+    assert response.json()["items"][0]["total_eq_usd"] == 100000.0
+
+
+def test_llm_execute_endpoint_returns_decision(monkeypatch) -> None:
+    snapshot = _sample_snapshot()
+    app = create_app(enable_background_services=False)
+
+    class _DummyState:
+        async def get_market_snapshot(self) -> dict:
+            return snapshot
+
+    async def fake_insert_prompt_run(**kwargs):
+        return "prompt-xyz"
+
+    monkeypatch.setattr("app.main.insert_prompt_run", fake_insert_prompt_run)
+
+    with TestClient(app) as client:
+        app.state.state_service = _DummyState()
+        response = client.post("/llm/execute", params={"symbol": "BTC-USDT-SWAP", "timeframe": "1H"})
+
+    body = response.json()
+    assert response.status_code == 200
+    assert body["decision"]["action"] in {"BUY", "SELL", "HOLD"}
+    assert body["prompt_id"] == "prompt-xyz"
