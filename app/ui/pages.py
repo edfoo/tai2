@@ -273,13 +273,15 @@ def register_pages(app: FastAPI) -> None:
                 if not size_abs or size_abs <= 0:
                     continue
                 current_price = to_float(ticker_info.get("last") or ticker_info.get("px"))
-                leverage = pos.get("lever") or pos.get("leverage") or "--"
+                leverage_raw = pos.get("lever") or pos.get("leverage")
+                leverage_display = str(leverage_raw) if leverage_raw not in (None, "") else "--"
+                leverage_value = to_float(leverage_raw)
 
-                pnl = None
-                pnl_pct = None
-                multiplier = 1.0
-                if side == "SHORT":
-                    multiplier = -1.0
+                upl_value = to_float(pos.get("upl"))
+                upl_ratio = to_float(pos.get("uplRatio"))
+
+                fallback_pnl = None
+                multiplier = -1.0 if side == "SHORT" else 1.0
                 if (
                     entry_price
                     and entry_price != 0
@@ -287,8 +289,19 @@ def register_pages(app: FastAPI) -> None:
                     and size_abs is not None
                 ):
                     delta = current_price - entry_price
-                    pnl = delta * size_abs * multiplier
-                    pnl_pct = (delta / entry_price) * 100 * multiplier
+                    fallback_pnl = delta * size_abs * multiplier
+
+                pnl = upl_value if upl_value is not None else fallback_pnl
+                pnl_pct = upl_ratio * 100 if upl_ratio is not None else None
+                if pnl_pct is None and pnl is not None and size_abs is not None and entry_price:
+                    notional = entry_price * size_abs
+                    margin_base = None
+                    if leverage_value and leverage_value > 0:
+                        margin_base = notional / leverage_value if leverage_value else None
+                    else:
+                        margin_base = notional
+                    if margin_base:
+                        pnl_pct = (pnl / margin_base) * 100
 
                 if pnl is None:
                     pnl_color = "text-slate-900"
@@ -318,7 +331,7 @@ def register_pages(app: FastAPI) -> None:
                     "pnl_cls": pnl_color,
                     "pnl_pct": f"{pnl_pct:,.2f}%" if pnl_pct is not None else "--",
                     "pnl_pct_cls": pnl_pct_color,
-                    "leverage": str(leverage) if leverage not in (None, "") else "--",
+                    "leverage": leverage_display,
                 }
                 rows.append(row)
 
@@ -346,6 +359,7 @@ def register_pages(app: FastAPI) -> None:
     def render_ta_page() -> None:
         navigation("TA")
         wrapper = page_container()
+        wrapper.style("max-width: 100%; width: 100%; margin-left: 0; margin-right: 0;")
         store = make_snapshot_store()
         config = getattr(app.state, "runtime_config", {}) or {}
         initial_timeframe = config.get("ta_timeframe") or "4H"
@@ -362,206 +376,209 @@ def register_pages(app: FastAPI) -> None:
 
         with wrapper:
             ui.label("Technical Analysis").classes("text-2xl font-bold")
-            with ui.row().classes("w-full flex-wrap gap-4"):
-                symbol_select = ui.select(options=[], label="Symbol").classes("w-full md:w-64")
-                symbol_select.disable()
-                timeframe_select = ui.select(
-                    options=TA_TIMEFRAME_OPTIONS,
-                    label="Timeframe",
-                    value=initial_timeframe,
-                ).classes("w-full md:w-32")
+            with ui.row().classes("w-full flex-col xl:flex-row gap-6"):
+                with ui.column().classes("flex-[7] w-full gap-4"):
+                    with ui.row().classes("w-full flex-wrap gap-4"):
+                        symbol_select = ui.select(options=[], label="Symbol").classes("w-full md:w-64")
+                        symbol_select.disable()
+                        timeframe_select = ui.select(
+                            options=TA_TIMEFRAME_OPTIONS,
+                            label="Timeframe",
+                            value=initial_timeframe,
+                        ).classes("w-full md:w-32")
 
-            indicator_cards: dict[str, ui.label] = {}
-            card_specs = [
-                ("rsi", "RSI (14)"),
-                ("stoch", "Stoch RSI"),
-                ("macd", "MACD"),
-                ("close", "Close"),
-                ("ls_ratio", "L/S Ratio"),
-            ]
-            with ui.row().classes("w-full flex flex-wrap gap-4"):
-                for key, label_text in card_specs:
-                    with ui.card().classes(
-                        "flex-1 min-w-[150px] p-4 shadow-sm border border-slate-200"
-                    ):
-                        ui.label(label_text).classes("text-xs uppercase text-slate-500")
-                        value_label = ui.label("--").classes("text-2xl font-semibold text-slate-900")
-                    indicator_cards[key] = value_label
+                    indicator_cards: dict[str, ui.label] = {}
+                    card_specs = [
+                        ("rsi", "RSI (14)"),
+                        ("stoch", "Stoch RSI"),
+                        ("macd", "MACD"),
+                        ("close", "Close"),
+                        ("ls_ratio", "L/S Ratio"),
+                    ]
+                    with ui.row().classes("w-full flex flex-wrap gap-4"):
+                        for key, label_text in card_specs:
+                            with ui.card().classes(
+                                "flex-1 min-w-[150px] p-4 shadow-sm border border-slate-200"
+                            ):
+                                ui.label(label_text).classes("text-xs uppercase text-slate-500")
+                                value_label = ui.label("--").classes("text-2xl font-semibold text-slate-900")
+                            indicator_cards[key] = value_label
 
-            bb_labels: dict[str, ui.label] = {}
-            trend_labels: dict[str, ui.label] = {}
-            ma_labels: dict[str, ui.label] = {}
-            risk_labels: dict[str, ui.label] = {}
-            with ui.card().classes("w-full p-4 shadow-sm border border-slate-200"):
-                with ui.row().classes("w-full flex-col md:flex-row gap-6"):
-                    with ui.column().classes("flex-1 gap-1"):
-                        ui.label("Bollinger Bands").classes("font-semibold text-slate-800")
-                        for band in ("upper", "middle", "lower"):
-                            label = ui.label(f"{band.title()}: --").classes("text-sm text-slate-600")
-                            bb_labels[band] = label
-                    with ui.column().classes("flex-1 gap-1"):
-                        ui.label("Trend Analysis").classes("font-semibold text-slate-800")
-                        for key, text in [
-                            ("vwap", "VWAP"),
-                            ("funding", "Funding Rate"),
-                            ("ofi", "Order Flow Imbalance"),
-                        ]:
-                            label = ui.label(f"{text}: --").classes("text-sm text-slate-600")
-                            trend_labels[key] = label
-                    with ui.column().classes("flex-1 gap-1"):
-                        ui.label("Moving Averages").classes("font-semibold text-slate-800")
-                        for key, text in [("ema_50", "EMA 50"), ("ema_200", "EMA 200")]:
-                            label = ui.label(f"{text}: --").classes("text-sm text-slate-600")
-                            ma_labels[key] = label
-                    with ui.column().classes("flex-1 gap-1"):
-                        ui.label("Risk Metrics").classes("font-semibold text-slate-800")
-                        for key, text in [
-                            ("atr", "ATR"),
-                            ("atr_pct", "ATR %"),
-                            ("stop", "Suggested Stop"),
-                            ("stop_pct", "Stop %"),
-                        ]:
-                            label = ui.label(f"{text}: --").classes("text-sm text-slate-600")
-                            risk_labels[key] = label
+                    bb_labels: dict[str, ui.label] = {}
+                    trend_labels: dict[str, ui.label] = {}
+                    ma_labels: dict[str, ui.label] = {}
+                    risk_labels: dict[str, ui.label] = {}
+                    with ui.card().classes("w-full p-4 shadow-sm border border-slate-200"):
+                        with ui.row().classes("w-full flex-col md:flex-row gap-6"):
+                            with ui.column().classes("flex-1 gap-1"):
+                                ui.label("Bollinger Bands").classes("font-semibold text-slate-800")
+                                for band in ("upper", "middle", "lower"):
+                                    label = ui.label(f"{band.title()}: --").classes("text-sm text-slate-600")
+                                    bb_labels[band] = label
+                            with ui.column().classes("flex-1 gap-1"):
+                                ui.label("Trend Analysis").classes("font-semibold text-slate-800")
+                                for key, text in [
+                                    ("vwap", "VWAP"),
+                                    ("funding", "Funding Rate"),
+                                    ("ofi", "Order Flow Imbalance"),
+                                ]:
+                                    label = ui.label(f"{text}: --").classes("text-sm text-slate-600")
+                                    trend_labels[key] = label
+                            with ui.column().classes("flex-1 gap-1"):
+                                ui.label("Moving Averages").classes("font-semibold text-slate-800")
+                                for key, text in [("ema_50", "EMA 50"), ("ema_200", "EMA 200")]:
+                                    label = ui.label(f"{text}: --").classes("text-sm text-slate-600")
+                                    ma_labels[key] = label
+                            with ui.column().classes("flex-1 gap-1"):
+                                ui.label("Risk Metrics").classes("font-semibold text-slate-800")
+                                for key, text in [
+                                    ("atr", "ATR"),
+                                    ("atr_pct", "ATR %"),
+                                    ("stop", "Suggested Stop"),
+                                    ("stop_pct", "Stop %"),
+                                ]:
+                                    label = ui.label(f"{text}: --").classes("text-sm text-slate-600")
+                                    risk_labels[key] = label
 
-            with ui.card().classes("w-full p-4 shadow-sm border border-emerald-100 bg-white"):
-                ui.label("Strategy Signal").classes("text-lg font-semibold text-emerald-800")
-                strategy_action_label = ui.label("--").classes("text-3xl font-bold text-slate-900")
-                strategy_confidence_label = ui.label("Confidence: --").classes("text-sm text-slate-600")
-                strategy_reason_label = ui.label("Reason: awaiting signal").classes("text-sm text-slate-500")
-                with ui.row().classes("gap-3 mt-3"):
-                    simulate_button = ui.button("Simulate Trade", icon="science")
-                    execute_button = ui.button("Send to Engine", icon="send")
-                    execute_button.classes("bg-emerald-600 text-white")
+                    with ui.card().classes("w-full p-4 shadow-sm border border-emerald-100 bg-white"):
+                        ui.label("Strategy Signal").classes("text-lg font-semibold text-emerald-800")
+                        strategy_action_label = ui.label("--").classes("text-3xl font-bold text-slate-900")
+                        strategy_confidence_label = ui.label("Confidence: --").classes("text-sm text-slate-600")
+                        strategy_reason_label = ui.label("Reason: awaiting signal").classes("text-sm text-slate-500")
+                        with ui.row().classes("gap-3 mt-3"):
+                            simulate_button = ui.button("Simulate Trade", icon="science")
+                            execute_button = ui.button("Send to Engine", icon="send")
+                            execute_button.classes("bg-emerald-600 text-white")
 
-            with ui.card().classes("w-full p-4 shadow-sm border border-slate-200"):
-                ui.label("Trade Intent Feed").classes("text-lg font-semibold text-slate-800")
-                strategy_feed = ui.log(max_lines=100).classes("w-full h-48 bg-slate-950 text-emerald-100")
+                    with ui.card().classes("w-full p-4 shadow-sm border border-slate-200"):
+                        ui.label("Trade Intent Feed").classes("text-lg font-semibold text-slate-800")
+                        strategy_feed = ui.log(max_lines=100).classes("w-full h-48 bg-slate-950 text-emerald-100")
 
-            kline_chart = ui.echart(
-                {
-                    "legend": {"data": ["K-Line", "VWAP"], "textStyle": {"color": "#0f172a"}},
-                    "tooltip": {"trigger": "axis"},
-                    "grid": {"left": 50, "right": 20, "top": 30, "bottom": 30},
-                    "xAxis": [{"type": "category", "data": [], "boundaryGap": False, "axisLabel": {"color": "#475569"}}],
-                    "yAxis": [{"scale": True, "axisLabel": {"color": "#475569"}}],
-                    "series": [
+                with ui.column().classes("flex-[5] w-full gap-4"):
+                    kline_chart = ui.echart(
                         {
-                            "type": "candlestick",
-                            "name": "K-Line",
-                            "data": [],
-                            "itemStyle": {"color": "#22c55e", "color0": "#ef4444"},
-                        },
-                        {
-                            "type": "line",
-                            "name": "VWAP",
-                            "data": [],
-                            "smooth": True,
-                            "lineStyle": {"color": "#6366f1", "width": 2},
-                            "showSymbol": False,
-                        },
-                    ],
-                }
-            ).classes("w-full h-96 bg-white rounded-lg shadow")
+                            "legend": {"data": ["K-Line", "VWAP"], "textStyle": {"color": "#0f172a"}},
+                            "tooltip": {"trigger": "axis"},
+                            "grid": {"left": 50, "right": 20, "top": 30, "bottom": 30},
+                            "xAxis": [{"type": "category", "data": [], "boundaryGap": False, "axisLabel": {"color": "#475569"}}],
+                            "yAxis": [{"scale": True, "axisLabel": {"color": "#475569"}}],
+                            "series": [
+                                {
+                                    "type": "candlestick",
+                                    "name": "K-Line",
+                                    "data": [],
+                                    "itemStyle": {"color": "#22c55e", "color0": "#ef4444"},
+                                },
+                                {
+                                    "type": "line",
+                                    "name": "VWAP",
+                                    "data": [],
+                                    "smooth": True,
+                                    "lineStyle": {"color": "#6366f1", "width": 2},
+                                    "showSymbol": False,
+                                },
+                            ],
+                        }
+                    ).classes("w-full h-96 bg-white rounded-lg shadow")
 
-            ui.label("Flow & Volatility Series").classes("text-base font-semibold text-slate-700 mt-2")
-            with ui.row().classes("w-full flex-wrap gap-4"):
-                vwap_chart = ui.echart(
-                    {
-                        "tooltip": {"trigger": "axis"},
-                        "grid": {"left": 40, "right": 10, "top": 30, "bottom": 25},
-                        "xAxis": {"type": "category", "data": []},
-                        "yAxis": {"type": "value", "scale": True},
-                        "series": [
+                    ui.label("Flow & Volatility Series").classes("text-base font-semibold text-slate-700 mt-2")
+                    with ui.row().classes("w-full flex-wrap gap-4"):
+                        vwap_chart = ui.echart(
                             {
-                                "type": "line",
-                                "name": "VWAP",
-                                "data": [],
-                                "lineStyle": {"color": "#3b82f6", "width": 2},
-                                "areaStyle": {"color": "rgba(59,130,246,0.15)"},
-                                "showSymbol": False,
+                                "tooltip": {"trigger": "axis"},
+                                "grid": {"left": 40, "right": 10, "top": 30, "bottom": 25},
+                                "xAxis": {"type": "category", "data": []},
+                                "yAxis": {"type": "value", "scale": True},
+                                "series": [
+                                    {
+                                        "type": "line",
+                                        "name": "VWAP",
+                                        "data": [],
+                                        "lineStyle": {"color": "#3b82f6", "width": 2},
+                                        "areaStyle": {"color": "rgba(59,130,246,0.15)"},
+                                        "showSymbol": False,
+                                    }
+                                ],
                             }
-                        ],
-                    }
-                ).classes("flex-1 min-w-[280px] h-64 bg-white rounded-lg shadow")
+                        ).classes("flex-1 min-w-[280px] h-64 bg-white rounded-lg shadow")
 
-                volume_rsi_chart = ui.echart(
-                    {
-                        "tooltip": {"trigger": "axis"},
-                        "grid": {"left": 40, "right": 10, "top": 30, "bottom": 25},
-                        "xAxis": {"type": "category", "data": []},
-                        "yAxis": {"type": "value", "scale": True},
-                        "series": [
+                        volume_rsi_chart = ui.echart(
                             {
-                                "type": "line",
-                                "name": "Volume RSI",
-                                "data": [],
-                                "lineStyle": {"color": "#ef4444", "width": 2},
-                                "areaStyle": {"color": "rgba(239,68,68,0.15)"},
-                                "showSymbol": False,
+                                "tooltip": {"trigger": "axis"},
+                                "grid": {"left": 40, "right": 10, "top": 30, "bottom": 25},
+                                "xAxis": {"type": "category", "data": []},
+                                "yAxis": {"type": "value", "scale": True},
+                                "series": [
+                                    {
+                                        "type": "line",
+                                        "name": "Volume RSI",
+                                        "data": [],
+                                        "lineStyle": {"color": "#ef4444", "width": 2},
+                                        "areaStyle": {"color": "rgba(239,68,68,0.15)"},
+                                        "showSymbol": False,
+                                    }
+                                ],
                             }
-                        ],
-                    }
-                ).classes("flex-1 min-w-[280px] h-64 bg-white rounded-lg shadow")
+                        ).classes("flex-1 min-w-[280px] h-64 bg-white rounded-lg shadow")
 
-                cvd_chart = ui.echart(
-                    {
-                        "tooltip": {"trigger": "axis"},
-                        "grid": {"left": 40, "right": 10, "top": 30, "bottom": 25},
-                        "xAxis": {"type": "category", "data": []},
-                        "yAxis": {"type": "value", "scale": True},
-                        "series": [
+                        cvd_chart = ui.echart(
                             {
-                                "type": "line",
-                                "name": "CVD",
-                                "data": [],
-                                "lineStyle": {"color": "#10b981", "width": 2},
-                                "areaStyle": {"color": "rgba(16,185,129,0.15)"},
-                                "showSymbol": False,
+                                "tooltip": {"trigger": "axis"},
+                                "grid": {"left": 40, "right": 10, "top": 30, "bottom": 25},
+                                "xAxis": {"type": "category", "data": []},
+                                "yAxis": {"type": "value", "scale": True},
+                                "series": [
+                                    {
+                                        "type": "line",
+                                        "name": "CVD",
+                                        "data": [],
+                                        "lineStyle": {"color": "#10b981", "width": 2},
+                                        "areaStyle": {"color": "rgba(16,185,129,0.15)"},
+                                        "showSymbol": False,
+                                    }
+                                ],
                             }
-                        ],
-                    }
-                ).classes("flex-1 min-w-[280px] h-64 bg-white rounded-lg shadow")
+                        ).classes("flex-1 min-w-[280px] h-64 bg-white rounded-lg shadow")
 
-            ui.label("Order Flow Strength").classes("text-base font-semibold text-slate-700 mt-4")
-            with ui.row().classes("w-full flex-wrap gap-4"):
-                obv_chart = ui.echart(
-                    {
-                        "tooltip": {"trigger": "axis"},
-                        "grid": {"left": 40, "right": 10, "top": 30, "bottom": 25},
-                        "xAxis": {"type": "category", "data": []},
-                        "yAxis": {"type": "value", "scale": True},
-                        "series": [
+                    ui.label("Order Flow Strength").classes("text-base font-semibold text-slate-700 mt-4")
+                    with ui.row().classes("w-full flex-wrap gap-4"):
+                        obv_chart = ui.echart(
                             {
-                                "type": "line",
-                                "name": "OBV",
-                                "data": [],
-                                "lineStyle": {"color": "#a855f7", "width": 2},
-                                "areaStyle": {"color": "rgba(168,85,247,0.15)"},
-                                "showSymbol": False,
+                                "tooltip": {"trigger": "axis"},
+                                "grid": {"left": 40, "right": 10, "top": 30, "bottom": 25},
+                                "xAxis": {"type": "category", "data": []},
+                                "yAxis": {"type": "value", "scale": True},
+                                "series": [
+                                    {
+                                        "type": "line",
+                                        "name": "OBV",
+                                        "data": [],
+                                        "lineStyle": {"color": "#a855f7", "width": 2},
+                                        "areaStyle": {"color": "rgba(168,85,247,0.15)"},
+                                        "showSymbol": False,
+                                    }
+                                ],
                             }
-                        ],
-                    }
-                ).classes("flex-1 min-w-[280px] h-64 bg-white rounded-lg shadow")
+                        ).classes("flex-1 min-w-[280px] h-64 bg-white rounded-lg shadow")
 
-                cmf_chart = ui.echart(
-                    {
-                        "tooltip": {"trigger": "axis"},
-                        "grid": {"left": 40, "right": 10, "top": 30, "bottom": 25},
-                        "xAxis": {"type": "category", "data": []},
-                        "yAxis": {"type": "value", "scale": True},
-                        "series": [
+                        cmf_chart = ui.echart(
                             {
-                                "type": "line",
-                                "name": "CMF",
-                                "data": [],
-                                "lineStyle": {"color": "#14b8a6", "width": 2},
-                                "areaStyle": {"color": "rgba(20,184,166,0.15)"},
-                                "showSymbol": False,
+                                "tooltip": {"trigger": "axis"},
+                                "grid": {"left": 40, "right": 10, "top": 30, "bottom": 25},
+                                "xAxis": {"type": "category", "data": []},
+                                "yAxis": {"type": "value", "scale": True},
+                                "series": [
+                                    {
+                                        "type": "line",
+                                        "name": "CMF",
+                                        "data": [],
+                                        "lineStyle": {"color": "#14b8a6", "width": 2},
+                                        "areaStyle": {"color": "rgba(20,184,166,0.15)"},
+                                        "showSymbol": False,
+                                    }
+                                ],
                             }
-                        ],
-                    }
-                ).classes("flex-1 min-w-[280px] h-64 bg-white rounded-lg shadow")
+                        ).classes("flex-1 min-w-[280px] h-64 bg-white rounded-lg shadow")
 
         current_symbol = {"value": None}
         last_snapshot = {"value": None}
