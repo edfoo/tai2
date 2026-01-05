@@ -85,6 +85,7 @@ def register_pages(app: FastAPI) -> None:
     def render_live_page() -> None:
         navigation("LIVE")
         wrapper = page_container()
+        wrapper.style("max-width: 100%; width: 100%; margin-left: 0; margin-right: 0;")
         store = make_snapshot_store()
 
         current_symbol = {"value": None}
@@ -100,83 +101,160 @@ def register_pages(app: FastAPI) -> None:
             label.set_text("WS: LIVE" if active else "WS: IDLE")
 
         with wrapper:
-            header_row = ui.row().classes("w-full justify-between items-start flex-wrap gap-4")
-            with header_row:
-                with ui.column().classes("gap-1"):
-                    ui.label("Live Market Overview").classes("text-2xl font-bold")
-                    ui.label("Account & execution snapshot").classes(
-                        "text-sm text-slate-500"
+            with ui.row().classes("w-full gap-6 flex-col xl:flex-row"):
+                with ui.column().classes("flex-[7] w-full gap-4"):
+                    header_row = ui.row().classes(
+                        "w-full justify-between items-start flex-wrap gap-4"
                     )
-                with ui.column().classes("items-end gap-1"):
-                    status_label["widget"] = ui.label("WS: IDLE").classes(
-                        "text-xs font-semibold text-slate-500"
-                    )
-                    refresh_label["widget"] = ui.label("Last refresh: --").classes(
-                        "text-xs text-slate-500"
-                    )
+                    with header_row:
+                        with ui.column().classes("gap-1"):
+                            ui.label("Live Market Overview").classes("text-2xl font-bold")
+                            ui.label("Account & execution snapshot").classes(
+                                "text-sm text-slate-500"
+                            )
+                        with ui.column().classes("items-end gap-1"):
+                            status_label["widget"] = ui.label("WS: IDLE").classes(
+                                "text-xs font-semibold text-slate-500"
+                            )
+                            refresh_label["widget"] = ui.label("Last refresh: --").classes(
+                                "text-xs text-slate-500"
+                            )
 
-            symbol_select = ui.select(options=[], label="Symbol").classes("w-full md:w-64")
-            symbol_select.disable()
-            with ui.row().classes("w-full gap-4"):
-                balance_card = badge_stat("Account Equity", "--")
-                position_card = badge_stat("Active Positions", "--", color="accent")
-                ticker_card = badge_stat("Last Price", "--", color="warning")
+                    symbol_select = ui.select(options=[], label="Symbol").classes(
+                        "w-full md:w-64"
+                    )
+                    symbol_select.disable()
+                    with ui.row().classes("w-full gap-4"):
+                        balance_card = badge_stat("Account Equity", "--")
+                        position_card = badge_stat("Active Positions", "--", color="accent")
+                        ticker_card = badge_stat("Last Price", "--", color="warning")
 
-            equity_chart = ui.echart(
-                {
-                    "tooltip": {"trigger": "axis"},
-                    "grid": {"left": 40, "right": 20, "top": 20, "bottom": 30},
-                    "xAxis": {"type": "category", "data": [], "axisLabel": {"color": "#475569"}},
-                    "yAxis": {"type": "value", "axisLabel": {"color": "#475569"}},
-                    "series": [
+                    equity_chart = ui.echart(
                         {
-                            "type": "line",
-                            "name": "Total Equity",
-                            "data": [],
-                            "smooth": True,
-                            "lineStyle": {"color": "#0ea5e9", "width": 2},
-                            "areaStyle": {"color": "rgba(14,165,233,0.15)"},
-                            "showSymbol": False,
+                            "tooltip": {"trigger": "axis"},
+                            "grid": {"left": 40, "right": 20, "top": 20, "bottom": 30},
+                            "xAxis": {
+                                "type": "category",
+                                "data": [],
+                                "axisLabel": {"color": "#475569"},
+                            },
+                            "yAxis": {"type": "value", "axisLabel": {"color": "#475569"}},
+                            "series": [
+                                {
+                                    "type": "line",
+                                    "name": "Total Equity",
+                                    "data": [],
+                                    "smooth": True,
+                                    "lineStyle": {"color": "#0ea5e9", "width": 2},
+                                    "areaStyle": {"color": "rgba(14,165,233,0.15)"},
+                                    "showSymbol": False,
+                                }
+                            ],
                         }
-                    ],
-                }
-            ).classes("w-full h-64 bg-white rounded-lg shadow")
+                    ).classes("w-full h-64 bg-white rounded-lg shadow")
 
-            positions_table = ui.table(
-                columns=[
-                    {"name": "symbol", "label": "Symbol", "field": "symbol"},
-                    {"name": "side", "label": "Side", "field": "side"},
-                    {"name": "size", "label": "Size", "field": "size"},
-                    {"name": "entry", "label": "Entry", "field": "entry"},
-                    {"name": "current", "label": "Current", "field": "current"},
-                    {"name": "pnl", "label": "PNL", "field": "pnl"},
-                    {"name": "pnl_pct", "label": "PNL %", "field": "pnl_pct"},
-                    {"name": "leverage", "label": "Leverage", "field": "leverage"},
-                ],
-                rows=[],
-            ).classes("w-full font-semibold")
+                    positions_table = ui.table(
+                        columns=[
+                            {"name": "symbol", "label": "Symbol", "field": "symbol"},
+                            {"name": "side", "label": "Side", "field": "side"},
+                            {"name": "size", "label": "Size", "field": "size"},
+                            {"name": "entry", "label": "Entry", "field": "entry"},
+                            {"name": "current", "label": "Current", "field": "current"},
+                            {"name": "pnl", "label": "PNL", "field": "pnl"},
+                            {"name": "pnl_pct", "label": "PNL %", "field": "pnl_pct"},
+                            {"name": "leverage", "label": "Leverage", "field": "leverage"},
+                        ],
+                        rows=[],
+                    ).classes("w-full font-semibold")
 
-            positions_table.add_slot(
-                "body-cell-pnl",
-                """
-                <q-td :props="props">
-                    <span :class="props.row.pnl_cls">{{ props.value }}</span>
-                </q-td>
-                """,
+                    positions_table.add_slot(
+                        "body-cell-pnl",
+                        """
+                        <q-td :props="props">
+                            <span :class="props.row.pnl_cls">{{ props.value }}</span>
+                        </q-td>
+                        """,
+                    )
+                    positions_table.add_slot(
+                        "body-cell-pnl_pct",
+                        """
+                        <q-td :props="props">
+                            <span :class="props.row.pnl_pct_cls">{{ props.value }}</span>
+                        </q-td>
+                        """,
+                    )
+
+                    ticker_details = ui.expansion("Ticker & Funding").classes("w-full")
+                    with ticker_details:
+                        ticker_label = ui.label("--")
+                        funding_label = ui.label("--")
+
+                with ui.column().classes("flex-[3] w-full gap-4"):
+                    with ui.card().classes(
+                        "w-full p-4 gap-3 bg-slate-50 border border-slate-200 shadow-sm"
+                    ):
+                        ui.label("LLM Insight Feed").classes("text-xl font-semibold")
+                        ui.label(
+                            "Latest response_schema guidance per tracked symbol"
+                        ).classes("text-sm text-slate-500")
+                        llm_empty_state = ui.label("No LLM interactions yet.").classes(
+                            "text-sm text-slate-400"
+                        )
+                        llm_card_container = ui.column().classes("w-full gap-3")
+
+        def format_llm_timestamp(raw: str | None) -> str:
+            if not raw:
+                return "--"
+            try:
+                parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+                return parsed.strftime("%H:%M:%S UTC")
+            except ValueError:
+                return raw
+
+        def refresh_llm_cards() -> None:
+            llm_card_container.clear()
+            interactions = getattr(app.state, "llm_interactions", {}) or {}
+            items = sorted(
+                interactions.values(),
+                key=lambda entry: entry.get("timestamp") or "",
+                reverse=True,
             )
-            positions_table.add_slot(
-                "body-cell-pnl_pct",
-                """
-                <q-td :props="props">
-                    <span :class="props.row.pnl_pct_cls">{{ props.value }}</span>
-                </q-td>
-                """,
-            )
+            if not items:
+                llm_empty_state.set_visibility(True)
+                return
+            llm_empty_state.set_visibility(False)
+            with llm_card_container:
+                for entry in items:
+                    symbol = entry.get("symbol") or "--"
+                    header = f"{symbol} · {format_llm_timestamp(entry.get('timestamp'))}"
+                    schema = entry.get("response_schema") or {}
+                    overview = entry.get("schema_overview") or []
+                    decision = entry.get("decision") or {}
+                    action = (decision.get("action") or "--").upper()
+                    confidence = decision.get("confidence")
+                    confidence_label = (
+                        f"{confidence:.2f}" if isinstance(confidence, (int, float)) else "--"
+                    )
+                    card = ui.expansion(header).classes(
+                        "w-full bg-white rounded-xl border border-slate-200 shadow-sm"
+                    )
+                    with card:
+                        ui.label(
+                            f"Decision: {action} (conf {confidence_label})"
+                        ).classes("text-sm font-semibold text-slate-700")
+                        with ui.column().classes("gap-1 text-xs text-slate-600"):
+                            if not overview:
+                                ui.label("No schema descriptions available.")
+                            else:
+                                for entry_summary in overview:
+                                    ui.label(entry_summary)
+                        schema_text = json.dumps(schema, indent=2, ensure_ascii=False)
+                        ui.code(schema_text).classes(
+                            "w-full text-xs bg-slate-900/90 text-white rounded-lg mt-2"
+                        )
 
-            ticker_details = ui.expansion("Ticker & Funding").classes("w-full")
-            with ticker_details:
-                ticker_label = ui.label("--")
-                funding_label = ui.label("--")
+        refresh_llm_cards()
+        ui.timer(15, refresh_llm_cards)
 
         async def refresh_equity_chart() -> None:
             try:
@@ -207,6 +285,7 @@ def register_pages(app: FastAPI) -> None:
         def update(snapshot: dict[str, Any] | None) -> None:
             last_snapshot["value"] = snapshot
             set_ws_status(snapshot is not None)
+            refresh_llm_cards()
             label = refresh_label["widget"]
             if label:
                 if snapshot:

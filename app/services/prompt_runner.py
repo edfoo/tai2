@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Optional, Tuple
 
 from fastapi import FastAPI
@@ -122,6 +123,7 @@ async def execute_llm_decision(
     market_service = getattr(app.state, "market_service", None)
     if market_service:
         await market_service.handle_llm_decision(decision, bundle.payload.get("context"))
+    _record_llm_interaction(app, bundle, decision)
     version_label = (
         bundle.metadata.get("prompt_version_name")
         or bundle.metadata.get("prompt_version_id")
@@ -133,6 +135,36 @@ async def execute_llm_decision(
             f"LLM decision ({version_label}) action={decision.get('action')} conf={decision.get('confidence', '--')}"
         )
     return decision, prompt_id
+
+
+def _record_llm_interaction(
+    app: FastAPI,
+    bundle: PromptPayloadBundle,
+    decision: dict[str, Any],
+) -> None:
+    interactions = getattr(app.state, "llm_interactions", None)
+    if interactions is None:
+        interactions = {}
+        app.state.llm_interactions = interactions
+    context = bundle.payload.get("context") or {}
+    symbol = str(context.get("symbol") or decision.get("symbol") or "--").upper()
+    schema = bundle.payload.get("prompt", {}).get("response_schema") or {}
+    overview: list[str] = []
+    properties = schema.get("properties") or {}
+    for name, meta in list(properties.items())[:4]:
+        desc = meta.get("description") or "No description provided."
+        overview.append(f"{name}: {desc}")
+    extra = max(0, len(properties) - 4)
+    if extra:
+        overview.append(f"+{extra} additional fields …")
+    interactions[symbol] = {
+        "symbol": symbol,
+        "timestamp": context.get("generated_at")
+        or datetime.now(timezone.utc).isoformat(),
+        "decision": decision,
+        "response_schema": schema,
+        "schema_overview": overview,
+    }
 
 
 __all__ = [
