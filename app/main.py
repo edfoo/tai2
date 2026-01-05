@@ -16,14 +16,18 @@ from app.db.postgres import (
     fetch_prompt_versions,
     fetch_trading_pairs,
     init_postgres_pool,
-    insert_prompt_run,
     load_guardrails,
-    get_prompt_version,
 )
 from app.services.llm_service import LLMService
 from app.services.market_service import MarketService
 from app.services.prompt_builder import DEFAULT_DECISION_PROMPT, DEFAULT_SYSTEM_PROMPT, PromptBuilder
 from app.services.state_service import StateService, close_redis_client, ensure_redis_connection
+from app.services.prompt_scheduler import PromptScheduler
+from app.services.prompt_runner import (
+    execute_llm_decision,
+    persist_prompt_run,
+    prepare_prompt_payload,
+)
 from app.ui.pages import register_pages
 
 logger = logging.getLogger(__name__)
@@ -36,6 +40,7 @@ def _create_lifespan(enable_background_services: bool):
         trading_pairs = settings.trading_pairs
         app.state.state_service = None
         app.state.market_service = None
+        app.state.prompt_scheduler = None
         app.state.backend_events = deque(maxlen=200)
         app.state.frontend_events = deque(maxlen=200)
         app.state.runtime_config = {
@@ -49,6 +54,8 @@ def _create_lifespan(enable_background_services: bool):
             "guardrails": PromptBuilder._default_guardrails(),
             "prompt_version_id": None,
             "prompt_version_name": None,
+            "auto_prompt_enabled": False,
+            "auto_prompt_interval": 300,
         }
         app.state.llm_service = LLMService(model_id=app.state.runtime_config["llm_model_id"])
 
@@ -105,6 +112,13 @@ def _create_lifespan(enable_background_services: bool):
                 )
                 app.state.market_service = market_service
                 await market_service.start()
+                scheduler = PromptScheduler(
+                    app,
+                    default_interval=app.state.runtime_config.get("auto_prompt_interval", 300),
+                )
+                app.state.prompt_scheduler = scheduler
+                if app.state.runtime_config.get("auto_prompt_enabled"):
+                    await scheduler.start()
         elif not enable_background_services:
             logger.info("Background Redis init disabled; skipping state service")
         else:
@@ -113,6 +127,9 @@ def _create_lifespan(enable_background_services: bool):
         try:
             yield
         finally:
+            scheduler = getattr(app.state, "prompt_scheduler", None)
+            if scheduler:
+                await scheduler.stop()
             if app.state.market_service:
                 await app.state.market_service.stop()
             await close_postgres_pool()
@@ -126,40 +143,6 @@ def create_app(enable_background_services: bool | None = None) -> FastAPI:
     if enable_background_services is None:
         enable_background_services = os.environ.get("PYTEST_CURRENT_TEST") is None
     app = FastAPI(title="tai2", version="0.1.0", lifespan=_create_lifespan(enable_background_services))
-
-    async def resolve_prompt_metadata(
-        requested_version_id: str | None,
-    ) -> tuple[dict[str, Any], JSONResponse | None]:
-        runtime_meta = getattr(app.state, "runtime_config", {}) or {}
-        metadata = dict(runtime_meta)
-        if requested_version_id:
-            if not settings.database_url:
-                return metadata, JSONResponse(
-                    {"detail": "prompt version storage unavailable"}, status_code=503
-                )
-            try:
-                version_record = await get_prompt_version(requested_version_id)
-            except Exception as exc:  # pragma: no cover - db optional
-                logger.error("Failed to load prompt version %s: %s", requested_version_id, exc)
-                return metadata, JSONResponse(
-                    {"detail": "prompt version lookup failed"}, status_code=500
-                )
-            if not version_record:
-                return metadata, JSONResponse(
-                    {"detail": "prompt version not found"}, status_code=404
-                )
-            metadata["llm_system_prompt"] = version_record.get(
-                "system_prompt", metadata.get("llm_system_prompt")
-            )
-            metadata["llm_decision_prompt"] = version_record.get(
-                "decision_prompt", metadata.get("llm_decision_prompt")
-            )
-            metadata["prompt_version_id"] = version_record.get("id")
-            metadata["prompt_version_name"] = version_record.get("name")
-        else:
-            metadata.setdefault("prompt_version_id", runtime_meta.get("prompt_version_id"))
-            metadata.setdefault("prompt_version_name", runtime_meta.get("prompt_version_name"))
-        return metadata, None
 
     @app.get("/health")
     async def health() -> dict[str, str]:
@@ -190,37 +173,17 @@ def create_app(enable_background_services: bool | None = None) -> FastAPI:
         timeframe: str | None = None,
         prompt_version_id: str | None = None,
     ) -> JSONResponse:
-        state_service: StateService | None = app.state.state_service
-        if not state_service:
-            return JSONResponse({"detail": "state service unavailable"}, status_code=503)
-        snapshot = await state_service.get_market_snapshot()
-        if not snapshot:
-            return JSONResponse({"detail": "snapshot unavailable"}, status_code=503)
-        runtime_meta = getattr(app.state, "runtime_config", {}) or {}
-        metadata, error_response = await resolve_prompt_metadata(prompt_version_id)
+        bundle, error_response = await prepare_prompt_payload(
+            app,
+            symbol=symbol,
+            timeframe=timeframe,
+            prompt_version_id=prompt_version_id,
+        )
         if error_response:
             return error_response
-        builder = PromptBuilder(snapshot, metadata=metadata)
-        payload = builder.build(symbol=symbol, timeframe=timeframe)
-        prompt_id: str | None = None
-        if settings.database_url:
-            try:
-                context_block = payload.get("context") or {}
-                prompt_id = await insert_prompt_run(
-                    symbol=context_block.get("symbol")
-                    or symbol
-                    or snapshot.get("symbol")
-                    or "BTC-USDT-SWAP",
-                    timeframe=context_block.get("timeframe"),
-                    model_id=runtime_meta.get("llm_model_id"),
-                    guardrails=context_block.get("guardrails"),
-                    payload=payload,
-                    notes=runtime_meta.get("llm_notes"),
-                    prompt_version_id=metadata.get("prompt_version_id"),
-                )
-            except Exception as exc:  # pragma: no cover - best effort persistence
-                logger.debug("Failed to persist LLM prompt: %s", exc)
-        return JSONResponse({"payload": payload, "prompt_id": prompt_id}, status_code=200)
+        assert bundle is not None  # for type-checkers
+        prompt_id = await persist_prompt_run(app, bundle)
+        return JSONResponse({"payload": bundle.payload, "prompt_id": prompt_id}, status_code=200)
 
     @app.post("/llm/execute")
     async def llm_execute(
@@ -228,50 +191,18 @@ def create_app(enable_background_services: bool | None = None) -> FastAPI:
         timeframe: str | None = None,
         prompt_version_id: str | None = None,
     ) -> JSONResponse:
-        state_service: StateService | None = app.state.state_service
-        if not state_service:
-            return JSONResponse({"detail": "state service unavailable"}, status_code=503)
-        snapshot = await state_service.get_market_snapshot()
-        if not snapshot:
-            return JSONResponse({"detail": "snapshot unavailable"}, status_code=503)
-        runtime_meta = getattr(app.state, "runtime_config", {}) or {}
-        metadata, error_response = await resolve_prompt_metadata(prompt_version_id)
+        bundle, error_response = await prepare_prompt_payload(
+            app,
+            symbol=symbol,
+            timeframe=timeframe,
+            prompt_version_id=prompt_version_id,
+        )
         if error_response:
             return error_response
-        builder = PromptBuilder(snapshot, metadata=metadata)
-        payload = builder.build(symbol=symbol, timeframe=timeframe)
-        llm_service = getattr(app.state, "llm_service", None)
-        if llm_service is None:
-            llm_service = LLMService(model_id=runtime_meta.get("llm_model_id"))
-            app.state.llm_service = llm_service
-        decision = await llm_service.run(payload)
-        prompt_id: str | None = None
-        if settings.database_url:
-            try:
-                context_block = payload.get("context") or {}
-                prompt_id = await insert_prompt_run(
-                    symbol=context_block.get("symbol")
-                    or symbol
-                    or snapshot.get("symbol")
-                    or "BTC-USDT-SWAP",
-                    timeframe=context_block.get("timeframe"),
-                    model_id=runtime_meta.get("llm_model_id"),
-                    guardrails=context_block.get("guardrails"),
-                    payload=payload,
-                    notes=runtime_meta.get("llm_notes"),
-                    decision=decision,
-                    prompt_version_id=metadata.get("prompt_version_id"),
-                )
-            except Exception as exc:  # pragma: no cover - best effort persistence
-                logger.debug("Failed to persist LLM decision: %s", exc)
-        market_service: MarketService | None = app.state.market_service
-        if market_service:
-            await market_service.handle_llm_decision(decision, payload.get("context"))
-        version_label = metadata.get("prompt_version_name") or metadata.get("prompt_version_id") or "default"
-        decision_summary = f"LLM decision ({version_label}) action={decision.get('action')} conf={decision.get('confidence', '--')}"
-        app.state.backend_events.append(decision_summary)
+        assert bundle is not None  # for type-checkers
+        decision, prompt_id = await execute_llm_decision(app, bundle)
         return JSONResponse(
-            {"payload": payload, "decision": decision, "prompt_id": prompt_id},
+            {"payload": bundle.payload, "decision": decision, "prompt_id": prompt_id},
             status_code=200,
         )
 

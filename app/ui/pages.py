@@ -21,6 +21,7 @@ from app.db.postgres import (
 from app.services.prompt_builder import (
     DEFAULT_DECISION_PROMPT,
     DEFAULT_SYSTEM_PROMPT,
+    RESPONSE_SCHEMA,
     PromptBuilder,
 )
 from app.ui.components import SnapshotStore, badge_stat
@@ -1052,6 +1053,15 @@ def register_pages(app: FastAPI) -> None:
                     value=config.get("ws_update_interval", 180),
                     min=1,
                 ).classes("w-full md:w-48")
+                auto_prompt_switch = ui.switch(
+                    "Auto Prompt Scheduler",
+                    value=config.get("auto_prompt_enabled", False),
+                ).classes("w-full md:w-48")
+                auto_prompt_interval_input = ui.number(
+                    label="Prompt Interval (seconds)",
+                    value=config.get("auto_prompt_interval", 300),
+                    min=30,
+                ).classes("w-full md:w-48")
                 model_select = ui.select(
                     {
                         "openrouter/gpt-4o-mini": "GPT-4o mini",
@@ -1108,6 +1118,19 @@ def register_pages(app: FastAPI) -> None:
                 value=schema_to_text(config.get("llm_model_id", "openrouter/gpt-4o-mini")),
                 placeholder="Leave blank to use default schema",
             ).classes("w-full h-40 font-mono text-sm")
+            with ui.column().classes(
+                "w-full gap-2 mt-4 bg-slate-50/80 p-4 rounded-xl border border-slate-200"
+            ):
+                ui.label("LLM Payload Preview").classes("text-lg font-semibold")
+                ui.label(
+                    "Exact prompt + context skeleton sent to the LLM"
+                ).classes("text-xs text-slate-500")
+                payload_preview = (
+                    ui.textarea(label="Prompt Payload", value="")
+                    .props("readonly outlined autogrow")
+                    .classes("w-full font-mono text-xs bg-white h-full")
+                    .style("min-height: 22rem; height: 100%;")
+                )
             ui.separator().classes("w-full my-4")
             ui.label("Execution Guardrails").classes("text-xl font-semibold")
             ui.label("Limits enforced before orders are placed").classes("text-sm text-slate-500")
@@ -1152,6 +1175,170 @@ def register_pages(app: FastAPI) -> None:
             ).classes("mt-2")
             save_button = ui.button("Save", icon="save", color="primary")
 
+        if not auto_prompt_switch.value:
+            auto_prompt_interval_input.disable()
+
+        def on_auto_prompt_toggle(e: Any) -> None:
+            if e.value:
+                auto_prompt_interval_input.enable()
+            else:
+                auto_prompt_interval_input.disable()
+
+        auto_prompt_switch.on_value_change(on_auto_prompt_toggle)
+
+        def _safe_float(value: Any) -> float | None:
+            try:
+                if value in (None, ""):
+                    return None
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
+        def _safe_int(value: Any) -> int | None:
+            try:
+                if value in (None, ""):
+                    return None
+                return int(value)
+            except (TypeError, ValueError):
+                return None
+
+        def build_guardrails_snapshot() -> dict[str, Any]:
+            snapshot = {
+                "max_leverage": _safe_float(max_leverage_input.value),
+                "max_position_pct": _safe_float(max_position_pct_input.value),
+                "daily_loss_limit_pct": _safe_float(daily_loss_limit_input.value),
+                "min_hold_seconds": _safe_int(min_hold_seconds_input.value),
+                "max_trades_per_hour": _safe_int(max_trades_per_hour_input.value),
+                "trade_window_seconds": _safe_int(trade_window_seconds_input.value),
+                "risk_model": guardrails.get("risk_model", "ATR based stops x1.5"),
+                "require_position_alignment": bool(require_alignment_switch.value),
+            }
+            return snapshot
+
+        def build_context_structure() -> dict[str, Any]:
+            return {
+                "generated_at": "<ISO8601 timestamp from latest snapshot>",
+                "symbol": "<primary trading symbol>",
+                "timeframe": config.get("ta_timeframe") or "4H",
+                "market": {
+                    "last_price": "<float>",
+                    "bid": "<float>",
+                    "ask": "<float>",
+                    "spread": "<float>",
+                    "spread_pct": "<float>",
+                    "change_24h": "<float>",
+                    "volume_24h": "<float>",
+                    "funding_rate": "<float>",
+                    "next_funding": "<timestamp>",
+                    "open_interest": {
+                        "contracts": "<float>",
+                        "usd": "<float>",
+                    },
+                    "order_flow": {
+                        "imbalance": "<float>",
+                        "cvd": "<float>",
+                        "bid_depth": "<float>",
+                        "ask_depth": "<float>",
+                        "cvd_series": "<list>",
+                        "ofi_ratio_series": "<list>",
+                    },
+                },
+                "history": {
+                    "candles": "[[ts, open, high, low, close, volume] ... up to 120 rows]",
+                    "vwap_series": "<list>",
+                    "volume_series": "<list>",
+                    "volume_rsi_series": "<list>",
+                },
+                "indicators": {
+                    "rsi": "<dict>",
+                    "stoch_rsi": "<dict>",
+                    "macd": {
+                        "value": "<float>",
+                        "signal": "<float>",
+                        "hist": "<float>",
+                        "series": "<list>",
+                    },
+                    "bollinger_bands": "<dict>",
+                    "moving_averages": "<dict>",
+                    "adx": {
+                        "value": "<float>",
+                        "di_plus": "<float>",
+                        "di_minus": "<float>",
+                        "series": "<list>",
+                    },
+                    "obv": "<dict>",
+                    "cmf": "<dict>",
+                    "vwap": "<dict>",
+                    "atr": "<float>",
+                    "atr_pct": "<float>",
+                    "volume": "<dict>",
+                },
+                "strategy_signal": "<custom engine signal block>",
+                "risk_metrics": "<dict of real-time risk metrics>",
+                "positions": [
+                    {
+                        "symbol": "<position symbol>",
+                        "side": "LONG/SHORT",
+                        "size": "<float>",
+                        "avg_px": "<float>",
+                        "leverage": "<float>",
+                        "margin_mode": "<cross/isolated>",
+                    }
+                ],
+                "account": {
+                    "account_equity": "<float>",
+                    "total_account_value": "<float>",
+                    "total_eq_usd": "<float>",
+                },
+                "guardrails": build_guardrails_snapshot(),
+                "notes": config.get("llm_notes") or "<optional runtime notes>",
+                "prompt_version_id": config.get("prompt_version_id"),
+                "prompt_version_name": config.get("prompt_version_name"),
+            }
+
+        def build_payload_preview() -> str:
+            schema_text = response_schema_input.value or ""
+            if schema_text.strip():
+                try:
+                    schema_value: Any = json.loads(schema_text)
+                except json.JSONDecodeError as exc:
+                    schema_value = f"<invalid JSON: {exc.msg} (line {exc.lineno}, col {exc.colno})>"
+            else:
+                schema_value = RESPONSE_SCHEMA
+            payload = {
+                "prompt": {
+                    "system": (prompt_input.value or "").strip(),
+                    "task": (decision_prompt_input.value or "").strip(),
+                    "model": model_select.value,
+                    "response_schema": schema_value,
+                },
+                "context": build_context_structure(),
+            }
+            return json.dumps(payload, indent=2)
+
+        def update_payload_preview() -> None:
+            payload_preview.value = build_payload_preview()
+            payload_preview.update()
+
+        def register_preview_listeners() -> None:
+            listeners = [
+                prompt_input,
+                decision_prompt_input,
+                response_schema_input,
+                max_leverage_input,
+                max_position_pct_input,
+                daily_loss_limit_input,
+                min_hold_seconds_input,
+                max_trades_per_hour_input,
+                trade_window_seconds_input,
+                require_alignment_switch,
+            ]
+            for widget in listeners:
+                widget.on_value_change(lambda _: update_payload_preview())
+
+        register_preview_listeners()
+        update_payload_preview()
+
         async def load_trading_pairs() -> None:
             market_service = getattr(app.state, "market_service", None)
             pairs = config.get("trading_pairs", ["BTC-USDT-SWAP"])
@@ -1173,6 +1360,7 @@ def register_pages(app: FastAPI) -> None:
         def on_model_change(e: Any) -> None:
             response_schema_input.value = schema_to_text(e.value)
             response_schema_input.update()
+            update_payload_preview()
 
         model_select.on_value_change(on_model_change)
 
@@ -1244,6 +1432,7 @@ def register_pages(app: FastAPI) -> None:
             config["prompt_version_id"] = record.get("id")
             config["prompt_version_name"] = record.get("name")
             update_prompt_version_param(record.get("id"))
+            update_payload_preview()
 
         def on_prompt_version_change(e: Any) -> None:
             label = e.value
@@ -1256,6 +1445,7 @@ def register_pages(app: FastAPI) -> None:
 
         async def save_settings(event: Any | None = None) -> None:
             config["ws_update_interval"] = int(ws_interval_input.value or 5)
+            config["auto_prompt_enabled"] = bool(auto_prompt_switch.value)
             config["llm_system_prompt"] = prompt_input.value
             config["llm_decision_prompt"] = decision_prompt_input.value
             config["llm_model_id"] = model_select.value
@@ -1269,6 +1459,7 @@ def register_pages(app: FastAPI) -> None:
             else:
                 response_schemas.pop(model_select.value, None)
             config["llm_response_schemas"] = response_schemas
+
             def _coerce(value: Any, fallback: Any, caster: Any) -> Any:
                 try:
                     if value is None:
@@ -1276,6 +1467,15 @@ def register_pages(app: FastAPI) -> None:
                     return caster(value)
                 except (TypeError, ValueError):
                     return caster(fallback)
+
+            config["auto_prompt_interval"] = max(
+                30,
+                _coerce(
+                    auto_prompt_interval_input.value,
+                    config.get("auto_prompt_interval", 300),
+                    int,
+                ),
+            )
 
             config["guardrails"] = {
                 "max_leverage": _coerce(max_leverage_input.value, guardrails.get("max_leverage", 5), float),
@@ -1361,6 +1561,10 @@ def register_pages(app: FastAPI) -> None:
             if app.state.market_service:
                 app.state.market_service.set_poll_interval(config["ws_update_interval"])
                 await app.state.market_service.update_symbols(symbols)
+            scheduler = getattr(app.state, "prompt_scheduler", None)
+            if scheduler:
+                await scheduler.update_interval(config["auto_prompt_interval"])
+                await scheduler.set_enabled(config["auto_prompt_enabled"])
             _set_prompt_version_value(config.get("prompt_version_id"))
             ui.notify("Configuration saved", color="positive")
             app.state.frontend_events.append("CFG updated")

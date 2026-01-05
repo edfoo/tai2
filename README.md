@@ -68,3 +68,7 @@ tests/             # pytest suites
 
 - Use `uv run` to execute any Python commands inside the managed environment.
 - Switching to Python 3.12+ is recommended because `pandas-ta` only supports 3.12 or newer.
+
+## Prompt Scheduler
+
+Enable "Auto Prompt Scheduler" on the CFG page to have the backend iterate every tracked symbol and send an LLM prompt automatically. You can configure the interval (minimum 30 seconds) there as well; the FastAPI lifespan wires those values into the new `PromptScheduler`, which reuses the same logic as the `/llm/prompt` and `/llm/execute` endpoints. Disable the toggle to keep prompts purely manual.
