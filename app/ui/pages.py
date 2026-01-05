@@ -884,10 +884,10 @@ def register_pages(app: FastAPI) -> None:
                 f"({cvd:.2f}) and liquidity imbalance {ofi_value or '--'} doesn't justify action."
             )
             with chat_column:
-                ui.chat_message("user", text=(question_input.value or "")).classes(
+                ui.chat_message(question_input.value or "", name="user").classes(
                     "self-end bg-slate-200 text-slate-900"
                 )
-                ui.chat_message("engine", text=response).classes("bg-emerald-50 text-emerald-900")
+                ui.chat_message(response, name="engine").classes("bg-emerald-50 text-emerald-900")
             app.state.frontend_events.append(
                 f"User Q at {datetime.utcnow().isoformat()}"
             )
@@ -905,6 +905,11 @@ def register_pages(app: FastAPI) -> None:
         navigation("HISTORY")
         wrapper = page_container()
         wrapper.style("max-width: 100%; width: 100%; margin-left: 0; margin-right: 0;")
+        client = ui.context.client
+
+        async def push_notification(message: str, *, color: str = "positive") -> None:
+            with client:
+                ui.notify(message, color=color)
 
         with wrapper:
             ui.label("History").classes("text-2xl font-bold")
@@ -942,16 +947,17 @@ def register_pages(app: FastAPI) -> None:
             try:
                 rows = await fetch_recent_trades(200)
             except Exception as exc:  # pragma: no cover - db optional
-                ui.notify(f"Unable to load trades: {exc}", color="warning")
+                await push_notification(f"Unable to load trades: {exc}", color="warning")
                 return
             trades_table.rows = rows
             trades_table.update()
+            await push_notification(f"Trades refreshed ({len(rows)})")
 
         async def refresh_prompts() -> None:
             try:
                 rows = await fetch_prompt_runs(200)
             except Exception as exc:  # pragma: no cover - db optional
-                ui.notify(f"Unable to load prompts: {exc}", color="warning")
+                await push_notification(f"Unable to load prompts: {exc}", color="warning")
                 return
             formatted: list[dict[str, Any]] = []
             for entry in rows:
@@ -972,6 +978,7 @@ def register_pages(app: FastAPI) -> None:
                 )
             prompt_table.rows = formatted
             prompt_table.update()
+            await push_notification(f"Prompts refreshed ({len(formatted)})")
 
         reload_button.on("click", lambda _: asyncio.create_task(refresh_trades()))
         prompt_reload_button.on("click", lambda _: asyncio.create_task(refresh_prompts()))

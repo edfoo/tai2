@@ -475,6 +475,18 @@ async def get_prompt_version(version_id: str) -> dict[str, Any] | None:
 
 async def _ensure_schema(pool: asyncpg.Pool) -> None:
     await pool.execute(SCHEMA_SQL)
+    await pool.execute(
+        """
+        ALTER TABLE executed_trades
+        ADD COLUMN IF NOT EXISTS timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        ADD COLUMN IF NOT EXISTS symbol TEXT,
+        ADD COLUMN IF NOT EXISTS side TEXT,
+        ADD COLUMN IF NOT EXISTS price NUMERIC,
+        ADD COLUMN IF NOT EXISTS amount NUMERIC,
+        ADD COLUMN IF NOT EXISTS llm_reasoning TEXT,
+        ADD COLUMN IF NOT EXISTS pnl NUMERIC
+        """
+    )
     await _ensure_equity_primary_key(pool)
     await _ensure_equity_hypertable(pool)
     await pool.execute(
