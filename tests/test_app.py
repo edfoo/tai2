@@ -35,8 +35,14 @@ def test_state_endpoint_returns_503_when_state_service_missing() -> None:
     assert response.status_code == 503
 
 
-def test_recent_trades_endpoint_handles_missing_database() -> None:
-    app = create_app()
+def test_recent_trades_endpoint_handles_missing_database(monkeypatch) -> None:
+    app = create_app(enable_background_services=False)
+
+    async def fake_fetch_recent_trades(limit: int = 100):
+        raise RuntimeError("db unavailable")
+
+    monkeypatch.setattr("app.main.fetch_recent_trades", fake_fetch_recent_trades)
+
     with TestClient(app) as client:
         response = client.get("/trades/recent")
 
@@ -69,11 +75,21 @@ def _sample_snapshot() -> dict:
                     "volCcy24h": "12345",
                     "changeRate": "0.02",
                 },
-                "funding_rate": {"fundingRate": "0.0001"},
+                    "funding_rate": {
+                        "fundingRate": "0.0001",
+                        "nextFundingRate": "0.0002",
+                        "fundingTime": "2025-12-31T04:00:00Z",
+                    },
                 "open_interest": {"oi": "1000", "oiCcy": "43000000"},
                 "custom_metrics": {
                     "order_flow_imbalance": 10,
                     "cumulative_volume_delta": 25,
+                        "market_long_short_ratio": {
+                            "value": 1.2,
+                            "series": [1.05, 1.1, 1.2],
+                            "timestamps": [1, 2, 3],
+                            "period": "5m",
+                        },
                 },
                 "risk_metrics": {
                     "atr": 150,
@@ -107,6 +123,10 @@ def _sample_snapshot() -> dict:
                         {"ts": 2, "open": 1.5, "high": 2.5, "low": 1.2, "close": 2.0, "volume": 120},
                     ],
                 },
+                    "liquidations": [
+                        {"px": "42500", "sz": "50", "side": "sell"},
+                        {"px": "43500", "sz": "35", "side": "buy"},
+                    ],
             }
         },
     }
@@ -127,6 +147,10 @@ def test_prompt_builder_compiles_structured_payload() -> None:
     assert len(context["history"]["candles"]) == 1  # trimmed to max_candles
     assert context["positions"][0]["side"] == "LONG"
     assert context["strategy_signal"]["action"] == "BUY"
+    assert context["trend_confirmation"]["moving_averages"]["bias"] == "bullish"
+    assert context["liquidity_context"]["liquidity_bias"] == "bid-supported"
+    assert context["derivatives_posture"]["long_short_ratio"]["value"] == 1.2
+    assert context["derivatives_posture"]["liquidation_clusters"]
     assert prompt["response_schema"]["properties"]["action"]["enum"] == ["BUY", "SELL", "HOLD"]
     assert prompt["model"] is None
 
@@ -141,11 +165,14 @@ def test_llm_prompt_endpoint_uses_builder(monkeypatch) -> None:
 
     recorded: dict[str, Any] = {}
 
-    async def fake_insert_prompt_run(**kwargs):
-        recorded.update(kwargs)
+    async def fake_persist_prompt_run(app_obj, bundle, *, decision=None):
+        context = bundle.payload.get("context") or {}
+        recorded["symbol"] = context.get("symbol")
+        recorded["timeframe"] = context.get("timeframe")
+        recorded["decision"] = decision
         return "prompt-1"
 
-    monkeypatch.setattr("app.main.insert_prompt_run", fake_insert_prompt_run)
+    monkeypatch.setattr("app.main.persist_prompt_run", fake_persist_prompt_run)
 
     with TestClient(app) as client:
         app.state.state_service = _DummyState()
@@ -189,10 +216,11 @@ def test_llm_execute_endpoint_returns_decision(monkeypatch) -> None:
         async def get_market_snapshot(self) -> dict:
             return snapshot
 
-    async def fake_insert_prompt_run(**kwargs):
-        return "prompt-xyz"
+    async def fake_execute_llm_decision(app_obj, bundle):
+        decision = {"action": "BUY", "confidence": 0.77}
+        return decision, "prompt-xyz"
 
-    monkeypatch.setattr("app.main.insert_prompt_run", fake_insert_prompt_run)
+    monkeypatch.setattr("app.main.execute_llm_decision", fake_execute_llm_decision)
 
     with TestClient(app) as client:
         app.state.state_service = _DummyState()

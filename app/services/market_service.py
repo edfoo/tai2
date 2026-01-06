@@ -413,10 +413,7 @@ class MarketService:
             instType="SWAP",
         )
         data = self._safe_data(response)
-        if not self.symbols:
-            return data
-        symbols = set(self.symbols)
-        return [row for row in data if row.get("instId") in symbols]
+        return data
 
     async def _fetch_account_balance(self) -> dict[str, Any]:
         if not self._account_api:

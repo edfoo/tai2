@@ -106,6 +106,7 @@ class PromptBuilder:
         risk_metrics = market_block.get("risk_metrics") or snapshot.get("risk_metrics") or {}
         strategy_signal = market_block.get("strategy_signal") or snapshot.get("strategy_signal") or {}
         order_book = market_block.get("order_book") or snapshot.get("order_book") or {}
+        liquidations = market_block.get("liquidations") or snapshot.get("liquidations") or []
 
         live_section = self._build_live_section(ticker, funding, open_interest, custom_metrics, order_book)
         history_section = self._build_history_section(indicators)
@@ -116,6 +117,9 @@ class PromptBuilder:
         model_id = runtime_meta.get("llm_model_id")
         schema_overrides = runtime_meta.get("llm_response_schemas") or {}
         timeframe_value = timeframe or runtime_meta.get("ta_timeframe") or snapshot.get("timeframe") or "4H"
+        trend_section = self._build_trend_confirmation(indicators, ticker, timeframe_value)
+        liquidity_section = self._build_liquidity_profile(live_section, indicators, ticker)
+        derivatives_section = self._build_derivatives_posture(funding, custom_metrics, liquidations)
 
         context = {
             "generated_at": snapshot.get("generated_at"),
@@ -129,6 +133,9 @@ class PromptBuilder:
             "positions": positions_section,
             "account": account_section,
             "guardrails": guardrails,
+            "trend_confirmation": trend_section,
+            "liquidity_context": liquidity_section,
+            "derivatives_posture": derivatives_section,
             "notes": runtime_meta.get("llm_notes"),
             "prompt_version_id": runtime_meta.get("prompt_version_id"),
             "prompt_version_name": runtime_meta.get("prompt_version_name"),
@@ -259,6 +266,233 @@ class PromptBuilder:
             "atr_pct": indicators.get("atr_pct"),
             "volume": indicators.get("volume"),
         }
+
+    def _build_trend_confirmation(
+        self,
+        indicators: dict[str, Any],
+        ticker: dict[str, Any],
+        timeframe: str,
+    ) -> dict[str, Any]:
+        adx_block = indicators.get("adx") or {}
+        ma_block = indicators.get("moving_averages") or {}
+        adx_value = _to_float(adx_block.get("value"))
+        di_plus = _to_float(adx_block.get("di_plus"))
+        di_minus = _to_float(adx_block.get("di_minus"))
+        ema_50 = _to_float(ma_block.get("ema_50"))
+        ema_200 = _to_float(ma_block.get("ema_200"))
+        price = _to_float(ticker.get("last") or ticker.get("px"))
+
+        if ema_50 is not None and ema_200 is not None:
+            if ema_50 > ema_200:
+                ema_bias = "bullish"
+            elif ema_50 < ema_200:
+                ema_bias = "bearish"
+            else:
+                ema_bias = "balanced"
+        else:
+            ema_bias = "unknown"
+
+        if price is not None and ema_50 is not None:
+            price_vs_ema = "above" if price > ema_50 else "below"
+        else:
+            price_vs_ema = "unknown"
+
+        adx_state = "unknown"
+        if adx_value is not None:
+            if adx_value >= 25:
+                adx_state = "trending"
+            elif adx_value >= 18:
+                adx_state = "transitioning"
+            else:
+                adx_state = "range-bound"
+
+        di_state = "neutral"
+        if di_plus is not None and di_minus is not None:
+            if di_plus > di_minus:
+                di_state = "+DI dominance"
+            elif di_minus > di_plus:
+                di_state = "-DI dominance"
+
+        summary_bits: list[str] = []
+        if adx_value is not None:
+            summary_bits.append(f"ADX {adx_value:.1f} ({adx_state})")
+        if di_state != "neutral":
+            summary_bits.append(di_state)
+        if ema_bias != "unknown":
+            summary_bits.append(f"EMA stack {ema_bias}")
+        if price_vs_ema != "unknown":
+            summary_bits.append(f"price {price_vs_ema} EMA50")
+        summary = ", ".join(summary_bits) or "Trend signals unavailable"
+
+        return {
+            "timeframe": timeframe,
+            "adx": {
+                "value": adx_value,
+                "di_plus": di_plus,
+                "di_minus": di_minus,
+                "state": adx_state,
+            },
+            "moving_averages": {
+                "ema_50": ema_50,
+                "ema_200": ema_200,
+                "bias": ema_bias,
+                "price_vs_ema_50": price_vs_ema,
+            },
+            "summary": summary,
+        }
+
+    def _build_liquidity_profile(
+        self,
+        market: dict[str, Any],
+        indicators: dict[str, Any],
+        ticker: dict[str, Any],
+    ) -> dict[str, Any]:
+        order_flow = market.get("order_flow") or {}
+        spread = _to_float(market.get("spread"))
+        spread_pct = _to_float(market.get("spread_pct"))
+        bid_depth = _to_float(order_flow.get("bid_depth"))
+        ask_depth = _to_float(order_flow.get("ask_depth"))
+        obv_block = indicators.get("obv") or {}
+        cmf_block = indicators.get("cmf") or {}
+        volume_block = indicators.get("volume") or {}
+        last_price = _to_float(market.get("last_price") or ticker.get("last") or ticker.get("px"))
+        depth_floor = None
+        if bid_depth is not None and ask_depth is not None:
+            depth_floor = min(bid_depth, ask_depth)
+
+        target_usd = 100000.0
+        target_units = (target_usd / last_price) if last_price else None
+        slippage_bps = None
+        if (
+            spread is not None
+            and spread > 0
+            and target_units is not None
+            and depth_floor is not None
+            and depth_floor > 0
+            and last_price
+        ):
+            depth_ratio = target_units / depth_floor
+            impact_multiplier = min(max(depth_ratio, 0.1), 3.0)
+            implied_move = spread * impact_multiplier
+            slippage_bps = (implied_move / last_price) * 10000
+
+        imbalance_raw = order_flow.get("imbalance")
+        if isinstance(imbalance_raw, dict):
+            imbalance_value = _to_float(imbalance_raw.get("net"))
+        else:
+            imbalance_value = _to_float(imbalance_raw)
+        if imbalance_value is None:
+            liquidity_bias = "balanced"
+        elif imbalance_value > 0:
+            liquidity_bias = "bid-supported"
+        elif imbalance_value < 0:
+            liquidity_bias = "ask-heavy"
+        else:
+            liquidity_bias = "balanced"
+
+        summary_bits: list[str] = []
+        if spread_pct is not None:
+            summary_bits.append(f"spread {spread_pct:.3f}%")
+        if slippage_bps is not None:
+            summary_bits.append(f"~{slippage_bps:.1f} bps est. slippage for $100k")
+        summary_bits.append(liquidity_bias)
+
+        return {
+            "obv": {
+                "value": _to_float(obv_block.get("value")),
+            },
+            "cmf": {
+                "value": _to_float(cmf_block.get("value")),
+            },
+            "volume": {
+                "last": _to_float(volume_block.get("last")),
+                "average": _to_float(volume_block.get("average")),
+            },
+            "spread": spread,
+            "spread_pct": spread_pct,
+            "bid_depth": bid_depth,
+            "ask_depth": ask_depth,
+            "estimated_slippage_bps": round(slippage_bps, 2) if slippage_bps is not None else None,
+            "liquidity_bias": liquidity_bias,
+            "summary": ", ".join(summary_bits),
+        }
+
+    def _build_derivatives_posture(
+        self,
+        funding: dict[str, Any],
+        custom_metrics: dict[str, Any],
+        liquidations: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        current_rate = _to_float(funding.get("fundingRate") or funding.get("fundRate"))
+        next_rate = _to_float(funding.get("nextFundingRate"))
+        previous_rate = _to_float(funding.get("prevFundingRate") or funding.get("fundingRatePrev"))
+        funding_delta = None
+        if current_rate is not None and next_rate is not None:
+            funding_delta = next_rate - current_rate
+        elif current_rate is not None and previous_rate is not None:
+            funding_delta = current_rate - previous_rate
+
+        long_short = custom_metrics.get("market_long_short_ratio") or {}
+        ls_value = _to_float(long_short.get("value"))
+        if ls_value is None:
+            ls_bias = "balanced"
+        elif ls_value > 1:
+            ls_bias = "long-heavy"
+        elif ls_value < 1:
+            ls_bias = "short-heavy"
+        else:
+            ls_bias = "balanced"
+
+        liquidation_clusters = self._summarize_liquidations(liquidations)
+
+        summary_bits: list[str] = []
+        if current_rate is not None:
+            summary_bits.append(f"funding {current_rate * 100:.3f}%")
+        if funding_delta is not None:
+            summary_bits.append(f"delta {funding_delta * 100:.3f}%")
+        summary_bits.append(f"L/S {ls_bias}")
+        if liquidation_clusters:
+            summary_bits.append(
+                f"top liq {liquidation_clusters[0]['side']} @ {liquidation_clusters[0]['price']:.0f}"
+            )
+
+        return {
+            "funding": {
+                "current": current_rate,
+                "next": next_rate,
+                "previous": previous_rate,
+                "delta": funding_delta,
+                "timestamp": funding.get("fundingTime"),
+            },
+            "long_short_ratio": long_short,
+            "liquidation_clusters": liquidation_clusters,
+            "summary": ", ".join(summary_bits),
+        }
+
+    def _summarize_liquidations(self, liquidations: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        clusters: list[dict[str, Any]] = []
+        if not liquidations:
+            return clusters
+        for entry in liquidations:
+            if not isinstance(entry, dict):
+                continue
+            price = _to_float(entry.get("px") or entry.get("price") or entry.get("fillPx"))
+            size = _to_float(entry.get("sz") or entry.get("size") or entry.get("qty"))
+            if price is None or size is None:
+                continue
+            side = str(entry.get("side") or entry.get("posSide") or "").upper() or "UNKNOWN"
+            notional = abs(price * size)
+            clusters.append(
+                {
+                    "price": price,
+                    "size": size,
+                    "side": side,
+                    "notional": notional,
+                    "raw": {k: entry.get(k) for k in ("px", "sz", "side", "posSide", "ccy", "ts")},
+                }
+            )
+        clusters.sort(key=lambda item: item.get("notional") or 0, reverse=True)
+        return clusters[:10]
 
     def _build_positions_section(self, positions: list[dict[str, Any]]) -> list[dict[str, Any]]:
         summary: list[dict[str, Any]] = []

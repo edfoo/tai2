@@ -134,9 +134,26 @@ def register_pages(app: FastAPI) -> None:
                             "tooltip": {"trigger": "axis"},
                             "grid": {"left": 40, "right": 20, "top": 20, "bottom": 30},
                             "xAxis": {
-                                "type": "category",
-                                "data": [],
-                                "axisLabel": {"color": "#475569"},
+                                "type": "time",
+                                "axisLabel": {
+                                    "color": "#475569",
+                                    ":formatter": (
+                                        "function(value) {"
+                                        "const date = new Date(value);"
+                                        "const hours = String(date.getHours()).padStart(2, '0');"
+                                        "const minutes = String(date.getMinutes()).padStart(2, '0');"
+                                        "if (hours === '00' && minutes === '00') {"
+                                        "const year = date.getFullYear();"
+                                        "const month = String(date.getMonth() + 1).padStart(2, '0');"
+                                        "const day = String(date.getDate()).padStart(2, '0');"
+                                        "return `${year}-${month}-${day} 00:00`;"
+                                        "}"
+                                        "return `${hours}:${minutes}`;"
+                                        "}"
+                                    ),
+                                    "hideOverlap": True,
+                                },
+                                "splitNumber": 6,
                             },
                             "yAxis": {"type": "value", "axisLabel": {"color": "#475569"}},
                             "series": [
@@ -263,23 +280,23 @@ def register_pages(app: FastAPI) -> None:
                 return
             if not history:
                 return
-            labels: list[str] = []
-            values: list[float] = []
+            points: list[list[float | str | None]] = []
             for entry in history:
                 ts = entry.get("observed_at")
+                timestamp_value: str | None = None
                 if ts:
                     try:
                         parsed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-                        labels.append(parsed.strftime("%H:%M"))
+                        timestamp_value = parsed.strftime("%Y-%m-%d %H:%M:%S")
                     except ValueError:
-                        labels.append(ts)
-                else:
-                    labels.append("--")
+                        timestamp_value = ts
+                if not timestamp_value:
+                    continue
                 value = entry.get("total_eq_usd") or entry.get("account_equity")
-                values.append(round(float(value), 2) if value is not None else None)
+                number_value = round(float(value), 2) if value is not None else None
+                points.append([timestamp_value, number_value])
             option = equity_chart.options
-            option["xAxis"]["data"] = labels
-            option["series"][0]["data"] = values
+            option["series"][0]["data"] = points
             equity_chart.update()
 
         def update(snapshot: dict[str, Any] | None) -> None:
@@ -336,7 +353,8 @@ def register_pages(app: FastAPI) -> None:
 
             rows: list[dict[str, Any]] = []
             for symbol, pos in position_lookup.items():
-                ticker_info = (market_data.get(symbol) or {}).get("ticker") or {}
+                market_entry_for_symbol = market_data.get(symbol) or {}
+                ticker_info = market_entry_for_symbol.get("ticker") or {}
                 if not ticker_info and symbol == snapshot.get("symbol"):
                     ticker_info = snapshot.get("ticker") or {}
                 entry_price = to_float(pos.get("avgPx"))
@@ -352,7 +370,12 @@ def register_pages(app: FastAPI) -> None:
                     size_abs = abs(size_raw) if size_raw is not None else None
                 if not size_abs or size_abs <= 0:
                     continue
-                current_price = to_float(ticker_info.get("last") or ticker_info.get("px"))
+                current_price = to_float(
+                    ticker_info.get("last")
+                    or ticker_info.get("px")
+                    or pos.get("markPx")
+                    or pos.get("last")
+                )
                 leverage_raw = pos.get("lever") or pos.get("leverage")
                 leverage_display = str(leverage_raw) if leverage_raw not in (None, "") else "--"
                 leverage_value = to_float(leverage_raw)
