@@ -1091,40 +1091,115 @@ def register_pages(app: FastAPI) -> None:
     def render_debug_page() -> None:
         navigation("DEBUG")
         wrapper = page_container()
+        wrapper.style("max-width: 100%; width: 100%; margin-left: 0; margin-right: 0;")
         config = getattr(app.state, "runtime_config", {}) or {}
         active_version = config.get("prompt_version_name") or config.get("prompt_version_id") or "default"
         with wrapper:
             ui.label(f"Active Prompt Version: {active_version}").classes(
                 "text-sm font-semibold text-slate-600"
             )
-            backend_log = ui.log(max_lines=200).classes("w-full h-72")
-            frontend_log = ui.log(max_lines=200).classes("w-full h-72")
-            ui.button(
-                "Emit Frontend Event",
-                on_click=lambda: app.state.frontend_events.append("Frontend heartbeat triggered"),
-            )
+            with ui.column().classes(
+                "w-full gap-4"
+            ):
+                with ui.card().classes(
+                    "w-full p-4 gap-2 bg-slate-50 border border-slate-200 shadow-sm"
+                ):
+                    ui.label("Backend Logs").classes("text-lg font-semibold")
+                    ui.label("Engine + scheduler diagnostics").classes("text-xs text-slate-500")
+                    backend_log = ui.log(max_lines=200).classes(
+                        "w-full h-64 font-mono text-xs bg-slate-900/90 text-white rounded-xl"
+                    )
+                with ui.card().classes(
+                    "w-full p-4 gap-2 bg-slate-50 border border-slate-200 shadow-sm"
+                ):
+                    with ui.row().classes("w-full items-center justify-between"):
+                        ui.label("Frontend Logs").classes("text-lg font-semibold")
+                        ui.button(
+                            "Emit Event",
+                            icon="bolt",
+                            on_click=lambda: app.state.frontend_events.append("Frontend heartbeat triggered"),
+                        ).props("outlined dense")
+                    ui.label("UI level actions + notifications").classes("text-xs text-slate-500")
+                    frontend_log = ui.log(max_lines=200).classes(
+                        "w-full h-64 font-mono text-xs bg-slate-900/90 text-white rounded-xl"
+                    )
+                with ui.card().classes(
+                    "w-full p-4 gap-2 bg-slate-50 border border-slate-200 shadow-sm"
+                ):
+                    ui.label("WebSocket Updates").classes("text-lg font-semibold")
+                    ui.label("Last snapshots streamed to clients").classes(
+                        "text-xs text-slate-500"
+                    )
+                    websocket_log = ui.log(max_lines=200).classes(
+                        "w-full h-64 font-mono text-xs bg-slate-900/90 text-white rounded-xl"
+                    )
 
         backend_seen = {"idx": 0}
         frontend_seen = {"idx": 0}
+        websocket_seen = {"idx": 0}
+
+        def _format_timestamp(raw: str | None) -> str:
+            if not raw:
+                return datetime.utcnow().strftime("%H:%M:%S UTC")
+            try:
+                parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+                return parsed.strftime("%H:%M:%S UTC")
+            except ValueError:
+                return raw
+
+        def _render_entry(entry: Any) -> str:
+            now_label = datetime.utcnow().strftime("%H:%M:%S UTC")
+            if isinstance(entry, dict):
+                message = entry.get("message") or entry.get("detail")
+                if not message:
+                    message = json.dumps(entry, ensure_ascii=False)
+                ts_raw = entry.get("timestamp") or entry.get("ts")
+                label = _format_timestamp(ts_raw) if ts_raw else now_label
+                symbol = entry.get("symbol")
+                if symbol:
+                    message = f"{symbol}: {message}"
+                return f"{label} · {message}"
+            return f"{now_label} · {entry}"
+
+        def _looks_like_websocket(entry: Any) -> bool:
+            if isinstance(entry, dict):
+                if entry.get("source") == "websocket":
+                    return True
+                text_value = entry.get("message") or entry.get("detail")
+            else:
+                text_value = entry
+            if not isinstance(text_value, str):
+                return False
+            lowered = text_value.lower()
+            return lowered.startswith("ws ") or "websocket" in lowered
 
         def push_backend() -> None:
             events = list(getattr(app.state, "backend_events", []))
             new_events = events[backend_seen["idx"] :]
             for entry in new_events:
-                backend_log.push(entry)
+                if _looks_like_websocket(entry):
+                    websocket_log.push(_render_entry(entry))
+                    continue
+                backend_log.push(_render_entry(entry))
             backend_seen["idx"] = len(events)
 
         def push_frontend() -> None:
             events = list(getattr(app.state, "frontend_events", []))
             new_events = events[frontend_seen["idx"] :]
             for entry in new_events:
-                frontend_log.push(entry)
+                frontend_log.push(_render_entry(entry))
             frontend_seen["idx"] = len(events)
+
+        def push_websocket() -> None:
+            events = list(getattr(app.state, "websocket_events", []))
+            new_events = events[websocket_seen["idx"] :]
+            for entry in new_events:
+                websocket_log.push(_render_entry(entry))
+            websocket_seen["idx"] = len(events)
 
         ui.timer(3, push_backend)
         ui.timer(3, push_frontend)
-
-        # button defined within wrapper
+        ui.timer(3, push_websocket)
 
     def render_cfg_page() -> None:
         navigation("CFG")

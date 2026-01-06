@@ -2,6 +2,7 @@ import logging
 import os
 from collections import deque
 from contextlib import asynccontextmanager
+from datetime import datetime
 from typing import Any
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -43,6 +44,7 @@ def _create_lifespan(enable_background_services: bool):
         app.state.prompt_scheduler = None
         app.state.backend_events = deque(maxlen=200)
         app.state.frontend_events = deque(maxlen=200)
+        app.state.websocket_events = deque(maxlen=200)
         app.state.runtime_config = {
             "ws_update_interval": settings.ws_update_interval,
             "llm_system_prompt": DEFAULT_SYSTEM_PROMPT,
@@ -228,6 +230,18 @@ def create_app(enable_background_services: bool | None = None) -> FastAPI:
             pairs = fallback or settings.trading_pairs
         return JSONResponse({"pairs": pairs}, status_code=200)
 
+    def _record_websocket_event(message: str, snapshot: dict[str, Any] | None = None) -> None:
+        events = getattr(app.state, "websocket_events", None)
+        if events is None:
+            return
+        entry = {
+            "message": message,
+            "symbol": (snapshot or {}).get("symbol"),
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "source": "websocket",
+        }
+        events.append(entry)
+
     @app.websocket("/ws/state")
     async def state_stream(ws: WebSocket) -> None:
         state_service = app.state.state_service
@@ -235,14 +249,23 @@ def create_app(enable_background_services: bool | None = None) -> FastAPI:
             await ws.close(code=1013)
             return
         await ws.accept()
+        _record_websocket_event("websocket client connected")
         initial = await state_service.get_market_snapshot()
         if initial:
             await ws.send_json(initial)
+            _record_websocket_event("initial snapshot delivered", initial)
+        else:
+            _record_websocket_event("snapshot unavailable for websocket client")
         try:
             async for snapshot in state_service.subscribe_snapshots():
                 await ws.send_json(snapshot)
+                _record_websocket_event("snapshot broadcast", snapshot)
         except WebSocketDisconnect:
+            _record_websocket_event("client disconnected from websocket")
             return
+        except Exception as exc:
+            _record_websocket_event(f"websocket stream error: {exc}")
+            raise
 
     register_pages(app)
     ui.run_with(app)
