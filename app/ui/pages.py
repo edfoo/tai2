@@ -1278,6 +1278,72 @@ def register_pages(app: FastAPI) -> None:
                 return ""
         with wrapper:
             ui.label("Engine Configuration").classes("text-2xl font-bold")
+            ui.label("Execution Guardrails").classes("text-xl font-semibold")
+            ui.label("Limits enforced before orders are placed").classes("text-sm text-slate-500")
+            with ui.row().classes("w-full flex-wrap gap-4"):
+                max_leverage_input = ui.number(
+                    label="Max Leverage",
+                    value=guardrails.get("max_leverage", 5),
+                    min=1,
+                ).classes("w-full md:w-48").props(
+                    "hint='Hard cap on leverage multiples for new positions' persistent-hint"
+                )
+                max_position_pct_input = ui.number(
+                    label="Max Position % of Equity",
+                    value=guardrails.get("max_position_pct", 0.2),
+                    step=0.01,
+                    min=0.01,
+                ).classes("w-full md:w-48").props(
+                    "hint='Upper bound on position notional as share of total equity' persistent-hint"
+                )
+                daily_loss_limit_input = ui.number(
+                    label="Daily Loss Limit %",
+                    value=guardrails.get("daily_loss_limit_pct", 3),
+                    step=0.1,
+                    min=0.1,
+                ).classes("w-full md:w-48").props(
+                    "hint='Soft kill switch when daily drawdown breaches this percentage' persistent-hint"
+                )
+            with ui.row().classes("w-full flex-wrap gap-4"):
+                min_hold_seconds_input = ui.number(
+                    label="Min Hold / Cooldown (sec)",
+                    value=guardrails.get("min_hold_seconds", 180),
+                    min=0,
+                ).classes("w-full md:w-48").props(
+                    "hint='Minimum time to wait before allowing another trade on the same symbol' persistent-hint"
+                )
+                max_trades_per_hour_input = ui.number(
+                    label="Max Trades Per Hour",
+                    value=guardrails.get("max_trades_per_hour", 2),
+                    min=0,
+                ).classes("w-full md:w-48").props(
+                    "hint='Prevents over-trading by limiting order count in any rolling hour' persistent-hint"
+                )
+                trade_window_seconds_input = ui.number(
+                    label="Trade Window (sec)",
+                    value=guardrails.get("trade_window_seconds", 3600),
+                    min=60,
+                    step=60,
+                ).classes("w-full md:w-48").props(
+                    "hint='Window used for trade limit and activity metrics' persistent-hint"
+                )
+            require_alignment_switch = ui.switch(
+                "Require Position Alignment",
+                value=guardrails.get("require_position_alignment", True),
+            ).classes("mt-2").props(
+                "hint='Blocks conflicting orders unless an opposite signal closes the position' persistent-hint"
+            )
+            snapshot_max_age_input = ui.number(
+                label="Snapshot Max Age (sec)",
+                value=config.get(
+                    "snapshot_max_age_seconds",
+                    settings.snapshot_max_age_seconds,
+                ),
+                min=60,
+            ).classes("w-full md:w-48").props(
+                "hint='Blocks LLM prompts whenever Redis snapshot is older than this' persistent-hint"
+            )
+            ui.separator().classes("w-full my-4")
             ui.label("Model, cadence, and prompt controls").classes("text-sm text-slate-500")
             with ui.row().classes("w-full flex-wrap gap-4"):
                 ws_interval_input = ui.number(
@@ -1363,72 +1429,6 @@ def register_pages(app: FastAPI) -> None:
                     .classes("w-full font-mono text-xs bg-white h-full")
                     .style("min-height: 22rem; height: 100%;")
                 )
-            ui.separator().classes("w-full my-4")
-            ui.label("Execution Guardrails").classes("text-xl font-semibold")
-            ui.label("Limits enforced before orders are placed").classes("text-sm text-slate-500")
-            with ui.row().classes("w-full flex-wrap gap-4"):
-                max_leverage_input = ui.number(
-                    label="Max Leverage",
-                    value=guardrails.get("max_leverage", 5),
-                    min=1,
-                ).classes("w-full md:w-48").props(
-                    "hint='Hard cap on leverage multiples for new positions' persistent-hint"
-                )
-                max_position_pct_input = ui.number(
-                    label="Max Position % of Equity",
-                    value=guardrails.get("max_position_pct", 0.2),
-                    step=0.01,
-                    min=0.01,
-                ).classes("w-full md:w-48").props(
-                    "hint='Upper bound on position notional as share of total equity' persistent-hint"
-                )
-                daily_loss_limit_input = ui.number(
-                    label="Daily Loss Limit %",
-                    value=guardrails.get("daily_loss_limit_pct", 3),
-                    step=0.1,
-                    min=0.1,
-                ).classes("w-full md:w-48").props(
-                    "hint='Soft kill switch when daily drawdown breaches this percentage' persistent-hint"
-                )
-            with ui.row().classes("w-full flex-wrap gap-4"):
-                min_hold_seconds_input = ui.number(
-                    label="Min Hold / Cooldown (sec)",
-                    value=guardrails.get("min_hold_seconds", 180),
-                    min=0,
-                ).classes("w-full md:w-48").props(
-                    "hint='Minimum time to wait before allowing another trade on the same symbol' persistent-hint"
-                )
-                max_trades_per_hour_input = ui.number(
-                    label="Max Trades Per Hour",
-                    value=guardrails.get("max_trades_per_hour", 2),
-                    min=0,
-                ).classes("w-full md:w-48").props(
-                    "hint='Prevents over-trading by limiting order count in any rolling hour' persistent-hint"
-                )
-                trade_window_seconds_input = ui.number(
-                    label="Trade Window (sec)",
-                    value=guardrails.get("trade_window_seconds", 3600),
-                    min=60,
-                    step=60,
-                ).classes("w-full md:w-48").props(
-                    "hint='Window used for trade limit and activity metrics' persistent-hint"
-                )
-            require_alignment_switch = ui.switch(
-                "Require Position Alignment",
-                value=guardrails.get("require_position_alignment", True),
-            ).classes("mt-2").props(
-                "hint='Blocks conflicting orders unless an opposite signal closes the position' persistent-hint"
-            )
-            snapshot_max_age_input = ui.number(
-                label="Snapshot Max Age (sec)",
-                value=config.get(
-                    "snapshot_max_age_seconds",
-                    settings.snapshot_max_age_seconds,
-                ),
-                min=60,
-            ).classes("w-full md:w-48").props(
-                "hint='Blocks LLM prompts whenever Redis snapshot is older than this' persistent-hint"
-            )
             save_button = ui.button("Save", icon="save", color="primary")
 
         if not auto_prompt_switch.value:
