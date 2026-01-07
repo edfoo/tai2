@@ -2,18 +2,23 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 
 DEFAULT_SYSTEM_PROMPT = (
-    "You are a professional hedge fund trader. Analyze the provided market context "
-    "(positions, technical indicators, order flow, funding, and risk metrics) to decide whether to execute a trade."
+    "You are a professional hedge fund trader with strict risk controls. Evaluate the provided snapshot, which includes "
+    "positions, exposures, technical indicators, order flow, derivatives, liquidity context, and guardrails. Always "
+    "verify how stale the snapshot is, whether open positions already exist on the symbol, and whether guardrails such "
+    "as leverage caps or cooldowns might block an order."
 )
 
 DEFAULT_DECISION_PROMPT = (
-    "You will receive a JSON object under the key 'context' that summarizes the latest market snapshot and guardrails. "
-    "Evaluate directional bias, momentum, liquidity, and risk before deciding on BUY/SELL/HOLD. "
-    "Respond strictly as JSON that matches 'response_schema'. Include stop/target suggestions and note any blocking risks."
+    "You will receive a JSON object under the key 'context' containing the latest market state, snapshot freshness metadata, "
+    "account/portfolio exposure, any pending orders, and execution guardrails. Before deciding on BUY/SELL/HOLD, confirm: "
+    "(1) the snapshot age is within limits, (2) your recommendation complies with leverage, position size, cooldown, and trade "
+    "limit guardrails, and (3) you are not duplicating an existing position or pending order. Respond strictly as JSON matching "
+    "'response_schema', and explicitly highlight blocking risks when you choose HOLD."
 )
 
 RESPONSE_SCHEMA = {
@@ -107,12 +112,19 @@ class PromptBuilder:
         strategy_signal = market_block.get("strategy_signal") or snapshot.get("strategy_signal") or {}
         order_book = market_block.get("order_book") or snapshot.get("order_book") or {}
         liquidations = market_block.get("liquidations") or snapshot.get("liquidations") or []
+        snapshot_health = self._build_snapshot_health(snapshot, runtime_meta)
 
         live_section = self._build_live_section(ticker, funding, open_interest, custom_metrics, order_book)
         history_section = self._build_history_section(indicators)
         indicator_section = self._build_indicator_section(indicators)
         positions_section = self._build_positions_section(snapshot.get("positions") or [])
         account_section = self._build_account_section(snapshot)
+        exposure_section = self._build_exposure_summary(
+            positions_section,
+            snapshot,
+            account_section,
+        )
+        pending_orders = self._build_pending_orders(snapshot.get("open_orders") or [])
         guardrails = runtime_meta.get("guardrails") or self._default_guardrails()
         model_id = runtime_meta.get("llm_model_id")
         schema_overrides = runtime_meta.get("llm_response_schemas") or {}
@@ -132,10 +144,13 @@ class PromptBuilder:
             "risk_metrics": risk_metrics,
             "positions": positions_section,
             "account": account_section,
+            "portfolio_exposure": exposure_section,
             "guardrails": guardrails,
             "trend_confirmation": trend_section,
             "liquidity_context": liquidity_section,
             "derivatives_posture": derivatives_section,
+            "pending_orders": pending_orders,
+            "snapshot_health": snapshot_health,
             "notes": runtime_meta.get("llm_notes"),
             "prompt_version_id": runtime_meta.get("prompt_version_id"),
             "prompt_version_name": runtime_meta.get("prompt_version_name"),
@@ -523,6 +538,116 @@ class PromptBuilder:
             "total_eq_usd": snapshot.get("total_eq_usd"),
         }
 
+    def _build_snapshot_health(self, snapshot: dict[str, Any], runtime_meta: dict[str, Any]) -> dict[str, Any]:
+        timestamp = snapshot.get("generated_at")
+        parsed = self._parse_timestamp(timestamp)
+        now = datetime.now(timezone.utc)
+        age_seconds: Optional[int] = None
+        if parsed is not None:
+            age_seconds = max(0, int((now - parsed).total_seconds()))
+        max_age = runtime_meta.get("snapshot_max_age_seconds")
+        try:
+            max_age_int = int(max_age) if max_age is not None else None
+        except (TypeError, ValueError):
+            max_age_int = None
+        stale = age_seconds is None or (
+            max_age_int is not None and age_seconds is not None and age_seconds > max_age_int
+        )
+        return {
+            "generated_at": timestamp,
+            "age_seconds": age_seconds,
+            "max_age_seconds": max_age_int,
+            "stale": stale,
+        }
+
+    def _build_exposure_summary(
+        self,
+        positions: list[dict[str, Any]],
+        snapshot: dict[str, Any],
+        account: dict[str, Any],
+    ) -> dict[str, Any]:
+        market_data = snapshot.get("market_data") or {}
+        fallback_ticker = snapshot.get("ticker") or {}
+        account_equity = _to_float(account.get("account_equity"))
+        long_notional = 0.0
+        short_notional = 0.0
+        for entry in positions:
+            symbol = entry.get("symbol")
+            if not symbol:
+                continue
+            size = _to_float(entry.get("size"))
+            if size is None:
+                continue
+            ticker = (market_data.get(symbol) or {}).get("ticker") or fallback_ticker
+            price = _to_float(ticker.get("last") if isinstance(ticker, dict) else None)
+            if price is None:
+                continue
+            notional = abs(size * price)
+            side = (entry.get("side") or "").upper()
+            if side == "SHORT":
+                short_notional += notional
+            else:
+                long_notional += notional
+        net_exposure = long_notional - short_notional
+        net_pct = _percent(net_exposure, account_equity) if account_equity else None
+        summary_bits: list[str] = []
+        if long_notional:
+            summary_bits.append(f"Long ${long_notional:,.0f}")
+        if short_notional:
+            summary_bits.append(f"Short ${short_notional:,.0f}")
+        if net_pct is not None:
+            summary_bits.append(f"Net {net_pct:.1f}% of equity")
+        if not summary_bits:
+            summary_bits.append("Flat")
+        return {
+            "long_notional": long_notional if long_notional else None,
+            "short_notional": short_notional if short_notional else None,
+            "net_exposure": net_exposure if (long_notional or short_notional) else None,
+            "net_pct_of_equity": net_pct,
+            "summary": ", ".join(summary_bits),
+        }
+
+    def _build_pending_orders(self, orders: list[dict[str, Any]]) -> dict[str, Any]:
+        if not orders:
+            return {"total": 0, "by_side": {}, "open": []}
+        formatted: list[dict[str, Any]] = []
+        counts: dict[str, int] = {}
+        for order in orders[:20]:
+            if not isinstance(order, dict):
+                continue
+            symbol = order.get("instId") or order.get("symbol")
+            side = str(order.get("side") or order.get("posSide") or "").upper() or "UNKNOWN"
+            price = _to_float(order.get("px") or order.get("price"))
+            size = _to_float(order.get("sz") or order.get("size"))
+            state = order.get("state") or order.get("status")
+            formatted.append({
+                "symbol": symbol,
+                "side": side,
+                "price": price,
+                "size": size,
+                "state": state,
+            })
+            counts[side] = counts.get(side, 0) + 1
+        return {
+            "total": len(formatted),
+            "by_side": counts,
+            "open": formatted,
+        }
+
+    @staticmethod
+    def _parse_timestamp(value: Any) -> Optional[datetime]:
+        if not value:
+            return None
+        if isinstance(value, datetime):
+            return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        try:
+            text = str(value).strip()
+            if text.endswith("Z"):
+                text = text[:-1] + "+00:00"
+            return datetime.fromisoformat(text)
+        except (ValueError, TypeError):
+            return None
+
     @staticmethod
     def _default_guardrails() -> dict[str, Any]:
         return {
@@ -534,6 +659,7 @@ class PromptBuilder:
             "max_trades_per_hour": 2,
             "trade_window_seconds": 3600,
             "require_position_alignment": True,
+            "snapshot_max_age_seconds": 900,
         }
 
     @staticmethod
