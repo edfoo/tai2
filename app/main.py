@@ -18,6 +18,7 @@ from app.db.postgres import (
     fetch_trading_pairs,
     init_postgres_pool,
     load_guardrails,
+    load_llm_model,
 )
 from app.services.llm_service import LLMService
 from app.services.market_service import MarketService
@@ -83,6 +84,16 @@ def _create_lifespan(enable_background_services: bool):
                 else:
                     if stored_guardrails:
                         app.state.runtime_config["guardrails"] = stored_guardrails
+                try:
+                    stored_model = await load_llm_model(
+                        app.state.runtime_config.get("llm_model_id")
+                    )
+                except Exception as exc:  # pragma: no cover - optional
+                    logger.error("Failed to load LLM model preference: %s", exc)
+                else:
+                    if stored_model:
+                        app.state.runtime_config["llm_model_id"] = stored_model
+                        app.state.llm_service.set_model(stored_model)
                 try:
                     prompt_versions = await fetch_prompt_versions(limit=1)
                 except Exception as exc:  # pragma: no cover - optional

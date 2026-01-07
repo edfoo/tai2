@@ -120,13 +120,14 @@ async def persist_prompt_run(
         return None
     context_block = bundle.payload.get("context") or {}
     runtime_meta = bundle.runtime_meta
+    model_id = bundle.metadata.get("llm_model_id") or runtime_meta.get("llm_model_id")
     try:
         prompt_id = await insert_prompt_run(
             symbol=context_block.get("symbol")
             or bundle.snapshot.get("symbol")
             or "BTC-USDT-SWAP",
             timeframe=context_block.get("timeframe"),
-            model_id=runtime_meta.get("llm_model_id"),
+            model_id=model_id,
             guardrails=context_block.get("guardrails"),
             payload=bundle.payload,
             notes=runtime_meta.get("llm_notes"),

@@ -445,6 +445,41 @@ async def load_guardrails() -> dict[str, Any]:
     return {}
 
 
+async def save_llm_model(model_id: str | None) -> None:
+    pool = await get_postgres_pool()
+    payload = json.dumps({"model_id": model_id} if model_id else {})
+    await pool.execute(
+        """
+        INSERT INTO runtime_settings (key, value, updated_at)
+        VALUES ('llm_model', $1::jsonb, NOW())
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+        """,
+        payload,
+    )
+
+
+async def load_llm_model(default: str | None = None) -> str | None:
+    pool = await get_postgres_pool()
+    row = await pool.fetchrow("SELECT value FROM runtime_settings WHERE key = 'llm_model'")
+    if not row:
+        return default
+    value = row["value"]
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return value or default
+    else:
+        parsed = value
+    if isinstance(parsed, dict):
+        candidate = parsed.get("model_id") or parsed.get("value") or parsed.get("id")
+        if candidate:
+            return str(candidate)
+    if isinstance(parsed, str) and parsed:
+        return parsed
+    return default
+
+
 async def get_prompt_version(version_id: str) -> dict[str, Any] | None:
     pool = await get_postgres_pool()
     row = await pool.fetchrow(
@@ -529,10 +564,12 @@ __all__ = [
     "get_prompt_version",
     "init_postgres_pool",
     "load_guardrails",
+    "load_llm_model",
     "insert_equity_point",
     "insert_executed_trade",
     "insert_prompt_run",
     "insert_prompt_version",
+    "save_llm_model",
     "save_guardrails",
     "set_enabled_trading_pairs",
 ]

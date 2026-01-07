@@ -17,6 +17,7 @@ from app.db.postgres import (
     fetch_recent_trades,
     insert_prompt_version,
     save_guardrails,
+    save_llm_model,
     set_enabled_trading_pairs,
 )
 from app.services.prompt_builder import (
@@ -24,6 +25,10 @@ from app.services.prompt_builder import (
     DEFAULT_SYSTEM_PROMPT,
     RESPONSE_SCHEMA,
     PromptBuilder,
+)
+from app.services.openrouter_service import (
+    DEFAULT_MODEL_OPTIONS,
+    list_openrouter_models,
 )
 from app.ui.components import SnapshotStore, badge_stat
 
@@ -1265,6 +1270,12 @@ def register_pages(app: FastAPI) -> None:
         config.setdefault("prompt_version_name", None)
         prompt_versions_cache: dict[str, dict[str, Any]] = {}
         prompt_version_options: dict[str, str] = {}
+        client = ui.context.client
+
+        model_options = {item["id"]: item["label"] for item in DEFAULT_MODEL_OPTIONS}
+        initial_model_value = config.get("llm_model_id") or next(iter(model_options), None)
+        if initial_model_value and initial_model_value not in model_options:
+            model_options[initial_model_value] = initial_model_value
 
         def schema_to_text(model_id: str | None) -> str:
             if not model_id:
@@ -1361,13 +1372,9 @@ def register_pages(app: FastAPI) -> None:
                     min=30,
                 ).classes("w-full md:w-48")
                 model_select = ui.select(
-                    {
-                        "openrouter/gpt-4o-mini": "GPT-4o mini",
-                        "openrouter/claude-3.5": "Claude 3.5",
-                        "openrouter/gpt-4o": "GPT-4o",
-                    },
+                    model_options,
                     label="Model",
-                    value=config.get("llm_model_id", "openrouter/gpt-4o-mini"),
+                    value=initial_model_value,
                 ).classes("w-full md:w-64")
                 trading_pairs_select = ui.select(
                     options=[],
@@ -1413,7 +1420,7 @@ def register_pages(app: FastAPI) -> None:
             )
             response_schema_input = ui.textarea(
                 label="Response Schema Override (JSON)",
-                value=schema_to_text(config.get("llm_model_id", "openrouter/gpt-4o-mini")),
+                value=schema_to_text(initial_model_value),
                 placeholder="Leave blank to use default schema",
             ).classes("w-full h-40 font-mono text-sm")
             with ui.column().classes(
@@ -1615,10 +1622,30 @@ def register_pages(app: FastAPI) -> None:
                 current = pairs[:1] if pairs else []
             trading_pairs_select.value = current
 
-        def on_model_change(e: Any) -> None:
-            response_schema_input.value = schema_to_text(e.value)
+        async def hydrate_model_select() -> None:
+            try:
+                records = await list_openrouter_models(app)
+            except Exception as exc:  # pragma: no cover - optional network
+                ui.notify(f"Failed to load OpenRouter models: {exc}", color="warning")
+                return
+            if not records:
+                return
+            options = {entry["id"]: entry["label"] for entry in records}
+            with client:
+                model_select.options = options
+                if model_select.value not in options and options:
+                    model_select.value = next(iter(options))
+                    config["llm_model_id"] = model_select.value
+                    apply_model_change(model_select.value)
+                model_select.update()
+
+        def apply_model_change(model_id: str | None) -> None:
+            response_schema_input.value = schema_to_text(model_id)
             response_schema_input.update()
             update_payload_preview()
+
+        def on_model_change(e: Any) -> None:
+            apply_model_change(getattr(e, "value", None))
 
         model_select.on_value_change(on_model_change)
 
@@ -1717,6 +1744,10 @@ def register_pages(app: FastAPI) -> None:
             else:
                 response_schemas.pop(model_select.value, None)
             config["llm_response_schemas"] = response_schemas
+            try:
+                await save_llm_model(config["llm_model_id"])
+            except Exception as exc:  # pragma: no cover - db optional
+                ui.notify(f"Failed to persist default model: {exc}", color="warning")
 
             def _coerce(value: Any, fallback: Any, caster: Any) -> Any:
                 try:
@@ -1838,6 +1869,7 @@ def register_pages(app: FastAPI) -> None:
 
         save_button.on("click", save_settings)
         asyncio.create_task(load_trading_pairs())
+        asyncio.create_task(hydrate_model_select())
         asyncio.create_task(load_prompt_versions_list())
 
     @ui.page("/")
