@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi.testclient import TestClient
@@ -49,9 +50,14 @@ def test_recent_trades_endpoint_handles_missing_database(monkeypatch) -> None:
     assert response.status_code == 503
 
 
+def _iso_timestamp(when: datetime) -> str:
+    return when.isoformat().replace("+00:00", "Z")
+
+
 def _sample_snapshot() -> dict:
+    now = datetime.now(timezone.utc)
     return {
-        "generated_at": "2025-12-31T00:00:00Z",
+        "generated_at": _iso_timestamp(now),
         "symbol": "BTC-USDT-SWAP",
         "symbols": ["BTC-USDT-SWAP"],
         "positions": [
@@ -75,11 +81,11 @@ def _sample_snapshot() -> dict:
                     "volCcy24h": "12345",
                     "changeRate": "0.02",
                 },
-                    "funding_rate": {
-                        "fundingRate": "0.0001",
-                        "nextFundingRate": "0.0002",
-                        "fundingTime": "2025-12-31T04:00:00Z",
-                    },
+                "funding_rate": {
+                    "fundingRate": "0.0001",
+                    "nextFundingRate": "0.0002",
+                    "fundingTime": _iso_timestamp(now + timedelta(hours=4)),
+                },
                 "open_interest": {"oi": "1000", "oiCcy": "43000000"},
                 "custom_metrics": {
                     "order_flow_imbalance": 10,
@@ -123,10 +129,10 @@ def _sample_snapshot() -> dict:
                         {"ts": 2, "open": 1.5, "high": 2.5, "low": 1.2, "close": 2.0, "volume": 120},
                     ],
                 },
-                    "liquidations": [
-                        {"px": "42500", "sz": "50", "side": "sell"},
-                        {"px": "43500", "sz": "35", "side": "buy"},
-                    ],
+                "liquidations": [
+                    {"px": "42500", "sz": "50", "side": "sell"},
+                    {"px": "43500", "sz": "35", "side": "buy"},
+                ],
             }
         },
     }
@@ -184,6 +190,25 @@ def test_llm_prompt_endpoint_uses_builder(monkeypatch) -> None:
     assert body["prompt_id"] == "prompt-1"
     assert recorded["symbol"] == "BTC-USDT-SWAP"
     assert recorded["timeframe"] == "4H"
+
+
+def test_llm_prompt_endpoint_blocks_stale_snapshot() -> None:
+    stale_snapshot = _sample_snapshot()
+    stale_snapshot["generated_at"] = _iso_timestamp(
+        datetime.now(timezone.utc) - timedelta(hours=2)
+    )
+    app = create_app(enable_background_services=False)
+
+    class _DummyState:
+        async def get_market_snapshot(self) -> dict:
+            return stale_snapshot
+
+    with TestClient(app) as client:
+        app.state.state_service = _DummyState()
+        response = client.get("/llm/prompt", params={"symbol": "BTC-USDT-SWAP"})
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "snapshot stale; awaiting refresh"
 
 
 def test_equity_history_endpoint_returns_items(monkeypatch) -> None:

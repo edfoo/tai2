@@ -28,11 +28,35 @@ def _response(message: str, status_code: int) -> JSONResponse:
     return JSONResponse({"detail": message}, status_code=status_code)
 
 
+def _parse_timestamp(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        normalized = value.strip()
+        if normalized.endswith("Z"):
+            normalized = normalized[:-1] + "+00:00"
+        return datetime.fromisoformat(normalized)
+    except (ValueError, AttributeError):
+        return None
+
+
+def _snapshot_is_stale(snapshot: dict[str, Any], max_age_seconds: int) -> bool:
+    timestamp = _parse_timestamp(snapshot.get("generated_at"))
+    if timestamp is None:
+        return True
+    now = datetime.now(timezone.utc)
+    delta = now - timestamp
+    if delta.total_seconds() < 0:
+        return False
+    return delta.total_seconds() > max(0, max_age_seconds)
+
+
 async def resolve_prompt_metadata(
     runtime_meta: dict[str, Any], requested_version_id: str | None
 ) -> Tuple[dict[str, Any], Optional[JSONResponse]]:
     settings = get_settings()
     metadata = dict(runtime_meta)
+    metadata.setdefault("snapshot_max_age_seconds", runtime_meta.get("snapshot_max_age_seconds"))
     if requested_version_id:
         if not settings.database_url:
             return metadata, _response("prompt version storage unavailable", 503)
@@ -71,6 +95,12 @@ async def prepare_prompt_payload(
     if not snapshot:
         return None, _response("snapshot unavailable", 503)
     runtime_meta = getattr(app.state, "runtime_config", {}) or {}
+    max_age = int(
+        runtime_meta.get("snapshot_max_age_seconds")
+        or get_settings().snapshot_max_age_seconds
+    )
+    if _snapshot_is_stale(snapshot, max_age):
+        return None, _response("snapshot stale; awaiting refresh", 503)
     metadata, error_response = await resolve_prompt_metadata(runtime_meta, prompt_version_id)
     if error_response:
         return None, error_response

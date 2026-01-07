@@ -1003,6 +1003,17 @@ class MarketService:
                 snapshot_positions = latest_snapshot.get("positions") or []
 
         positions = context.get("positions") or snapshot_positions
+        if not positions:
+            try:
+                positions = await self._fetch_positions()
+            except Exception as exc:  # pragma: no cover - network fallback
+                self._emit_debug(f"Position fetch failed for {symbol}: {exc}")
+                positions = []
+        if not positions:
+            self._emit_debug(
+                f"Guardrail blocked {action} for {symbol}: positions unavailable"
+            )
+            return
         current_side = self._detect_position_side(positions, symbol)
         now = time.time()
         summary = (

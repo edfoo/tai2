@@ -17,6 +17,11 @@ class DummyStateService:
         self.snapshots.append(snapshot)
 
 
+class DummySnapshotStore(DummyStateService):
+    async def get_market_snapshot(self) -> dict[str, Any]:
+        return {"positions": []}
+
+
 def test_market_service_builds_snapshot_with_mocked_fetchers(monkeypatch: pytest.MonkeyPatch) -> None:
     async def scenario() -> dict[str, Any]:
         state = DummyStateService()
@@ -92,7 +97,7 @@ def test_market_service_builds_snapshot_with_mocked_fetchers(monkeypatch: pytest
     assert snapshot["account"][0]["eq"] == "1000"
     assert snapshot["account_equity"] == pytest.approx(1000.0)
     assert snapshot["custom_metrics"]["cumulative_volume_delta"] == pytest.approx(1.5)
-    assert snapshot["custom_metrics"]["order_flow_imbalance"] == pytest.approx(2.5)
+    assert snapshot["custom_metrics"]["order_flow_imbalance"]["net"] == pytest.approx(2.5)
     assert snapshot["indicators"]["bollinger_bands"]["upper"] is not None
     assert snapshot["indicators"]["vwap"] is not None
     assert snapshot["market_data"][snapshot["symbol"]]["ticker"]["last"] == "42050"
@@ -103,3 +108,37 @@ def test_indicator_helper_handles_empty_data() -> None:
     assert indicators["vwap"] is None
     assert indicators["bollinger_bands"] == {}
     assert indicators["stoch_rsi"] == {}
+
+
+def test_handle_llm_decision_blocks_without_positions(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def scenario() -> tuple[int, list[str]]:
+        state = DummySnapshotStore()
+        service = MarketService(
+            state_service=state,
+            enable_websocket=False,
+            account_api=None,
+            market_api=None,
+            public_api=None,
+        )
+
+        fetch_calls = {"count": 0}
+
+        async def fake_fetch_positions() -> list[dict[str, Any]]:
+            fetch_calls["count"] += 1
+            return []
+
+        monkeypatch.setattr(service, "_fetch_positions", fake_fetch_positions)
+
+        captured: list[str] = []
+        monkeypatch.setattr(service, "_emit_debug", lambda message: captured.append(message))
+
+        await service.handle_llm_decision(
+            {"action": "BUY", "confidence": 0.9},
+            {"symbol": service.symbol},
+        )
+
+        return fetch_calls["count"], captured
+
+    calls, messages = asyncio.run(scenario())
+    assert calls == 1
+    assert any("positions unavailable" in message for message in messages)

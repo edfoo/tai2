@@ -3,12 +3,13 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import FastAPI
 from nicegui import ui
 
+from app.core.config import get_settings
 from app.db.postgres import (
     fetch_equity_history,
     fetch_prompt_versions,
@@ -38,10 +39,40 @@ NAV_LINKS = [
 TA_TIMEFRAME_OPTIONS = ["15m", "1H", "4H", "1D"]
 
 def register_pages(app: FastAPI) -> None:
+    settings = get_settings()
+
     def get_refresh_interval() -> float:
         config = getattr(app.state, "runtime_config", {}) or {}
         interval = config.get("ws_update_interval", 10)
         return max(3.0, float(interval) / 2.0)
+
+    def _parse_timestamp(raw: str | None) -> datetime | None:
+        if not raw:
+            return None
+        value = raw.strip()
+        try:
+            if value.endswith("Z"):
+                value = value[:-1] + "+00:00"
+            return datetime.fromisoformat(value)
+        except ValueError:
+            return None
+
+    def _snapshot_age(snapshot: dict[str, Any] | None) -> tuple[bool, str]:
+        config = getattr(app.state, "runtime_config", {}) or {}
+        max_age = int(
+            config.get("snapshot_max_age_seconds")
+            or settings.snapshot_max_age_seconds
+        )
+        if not snapshot:
+            return True, "No snapshot yet"
+        timestamp = _parse_timestamp(snapshot.get("generated_at"))
+        if not timestamp:
+            return True, "Snapshot timestamp missing"
+        now = datetime.now(timezone.utc)
+        delta = max(0, int((now - timestamp).total_seconds()))
+        if delta > max_age:
+            return True, f"{delta}s old (limit {max_age}s)"
+        return False, f"{delta}s old (limit {max_age}s)"
 
     def make_snapshot_store() -> SnapshotStore:
         async def fetch_snapshot() -> dict[str, Any]:
@@ -93,6 +124,7 @@ def register_pages(app: FastAPI) -> None:
         equity_refresh = {"last": 0.0}
         refresh_label: dict[str, ui.label | None] = {"widget": None}
         status_label: dict[str, ui.label | None] = {"widget": None}
+        stale_indicator: dict[str, ui.element | None] = {"widget": None}
 
         def set_ws_status(active: bool) -> None:
             label = status_label["widget"]
@@ -119,6 +151,12 @@ def register_pages(app: FastAPI) -> None:
                             refresh_label["widget"] = ui.label("Last refresh: --").classes(
                                 "text-xs text-slate-500"
                             )
+                            notice = (
+                                ui.label("Snapshot stale")
+                                .classes("text-xs font-semibold text-red-600 uppercase tracking-wide")
+                            )
+                            notice.set_visibility(False)
+                            stale_indicator["widget"] = notice
 
                     symbol_select = ui.select(options=[], label="Symbol").classes(
                         "w-full md:w-64"
@@ -299,10 +337,22 @@ def register_pages(app: FastAPI) -> None:
             option["series"][0]["data"] = points
             equity_chart.update()
 
+        def update_snapshot_health(snapshot: dict[str, Any] | None) -> None:
+            notice = stale_indicator.get("widget")
+            if not notice:
+                return
+            stale, detail = _snapshot_age(snapshot)
+            notice.set_visibility(stale)
+            if stale:
+                notice.set_text(f"Snapshot stale · {detail}")
+            else:
+                notice.set_text("")
+
         def update(snapshot: dict[str, Any] | None) -> None:
             last_snapshot["value"] = snapshot
             set_ws_status(snapshot is not None)
             refresh_llm_cards()
+            update_snapshot_health(snapshot)
             label = refresh_label["widget"]
             if label:
                 if snapshot:
@@ -451,6 +501,7 @@ def register_pages(app: FastAPI) -> None:
                 asyncio.create_task(refresh_equity_chart())
 
         store.subscribe(update)
+        ui.timer(5, lambda: update_snapshot_health(last_snapshot["value"]))
         asyncio.create_task(refresh_equity_chart())
 
         def on_symbol_change(e: Any) -> None:
@@ -1205,8 +1256,12 @@ def register_pages(app: FastAPI) -> None:
         navigation("CFG")
         wrapper = page_container()
         config = getattr(app.state, "runtime_config", {})
+        config.setdefault("snapshot_max_age_seconds", settings.snapshot_max_age_seconds)
         response_schemas = config.setdefault("llm_response_schemas", {})
         guardrails = config.setdefault("guardrails", PromptBuilder._default_guardrails())
+        guardrails.setdefault(
+            "snapshot_max_age_seconds", config.get("snapshot_max_age_seconds")
+        )
         config.setdefault("prompt_version_name", None)
         prompt_versions_cache: dict[str, dict[str, Any]] = {}
         prompt_version_options: dict[str, str] = {}
@@ -1316,40 +1371,64 @@ def register_pages(app: FastAPI) -> None:
                     label="Max Leverage",
                     value=guardrails.get("max_leverage", 5),
                     min=1,
-                ).classes("w-full md:w-48")
+                ).classes("w-full md:w-48").props(
+                    "hint='Hard cap on leverage multiples for new positions' persistent-hint"
+                )
                 max_position_pct_input = ui.number(
                     label="Max Position % of Equity",
                     value=guardrails.get("max_position_pct", 0.2),
                     step=0.01,
                     min=0.01,
-                ).classes("w-full md:w-48")
+                ).classes("w-full md:w-48").props(
+                    "hint='Upper bound on position notional as share of total equity' persistent-hint"
+                )
                 daily_loss_limit_input = ui.number(
                     label="Daily Loss Limit %",
                     value=guardrails.get("daily_loss_limit_pct", 3),
                     step=0.1,
                     min=0.1,
-                ).classes("w-full md:w-48")
+                ).classes("w-full md:w-48").props(
+                    "hint='Soft kill switch when daily drawdown breaches this percentage' persistent-hint"
+                )
             with ui.row().classes("w-full flex-wrap gap-4"):
                 min_hold_seconds_input = ui.number(
                     label="Min Hold / Cooldown (sec)",
                     value=guardrails.get("min_hold_seconds", 180),
                     min=0,
-                ).classes("w-full md:w-48")
+                ).classes("w-full md:w-48").props(
+                    "hint='Minimum time to wait before allowing another trade on the same symbol' persistent-hint"
+                )
                 max_trades_per_hour_input = ui.number(
                     label="Max Trades Per Hour",
                     value=guardrails.get("max_trades_per_hour", 2),
                     min=0,
-                ).classes("w-full md:w-48")
+                ).classes("w-full md:w-48").props(
+                    "hint='Prevents over-trading by limiting order count in any rolling hour' persistent-hint"
+                )
                 trade_window_seconds_input = ui.number(
                     label="Trade Window (sec)",
                     value=guardrails.get("trade_window_seconds", 3600),
                     min=60,
                     step=60,
-                ).classes("w-full md:w-48")
+                ).classes("w-full md:w-48").props(
+                    "hint='Window used for trade limit and activity metrics' persistent-hint"
+                )
             require_alignment_switch = ui.switch(
                 "Require Position Alignment",
                 value=guardrails.get("require_position_alignment", True),
-            ).classes("mt-2")
+            ).classes("mt-2").props(
+                "hint='Blocks conflicting orders unless an opposite signal closes the position' persistent-hint"
+            )
+            snapshot_max_age_input = ui.number(
+                label="Snapshot Max Age (sec)",
+                value=config.get(
+                    "snapshot_max_age_seconds",
+                    settings.snapshot_max_age_seconds,
+                ),
+                min=60,
+            ).classes("w-full md:w-48").props(
+                "hint='Blocks LLM prompts whenever Redis snapshot is older than this' persistent-hint"
+            )
             save_button = ui.button("Save", icon="save", color="primary")
 
         if not auto_prompt_switch.value:
@@ -1389,6 +1468,8 @@ def register_pages(app: FastAPI) -> None:
                 "trade_window_seconds": _safe_int(trade_window_seconds_input.value),
                 "risk_model": guardrails.get("risk_model", "ATR based stops x1.5"),
                 "require_position_alignment": bool(require_alignment_switch.value),
+                "snapshot_max_age_seconds": _safe_int(snapshot_max_age_input.value)
+                or config.get("snapshot_max_age_seconds"),
             }
             return snapshot
 
@@ -1683,7 +1764,16 @@ def register_pages(app: FastAPI) -> None:
                 ),
                 "risk_model": guardrails.get("risk_model", "ATR based stops x1.5"),
                 "require_position_alignment": bool(require_alignment_switch.value),
+                "snapshot_max_age_seconds": _coerce(
+                    snapshot_max_age_input.value,
+                    config.get("snapshot_max_age_seconds", settings.snapshot_max_age_seconds),
+                    int,
+                ),
             }
+            config["snapshot_max_age_seconds"] = config["guardrails"].get(
+                "snapshot_max_age_seconds",
+                settings.snapshot_max_age_seconds,
+            )
             version_name = (prompt_version_name_input.value or "").strip()
             created_version_id: str | None = None
             selected_label = prompt_version_select.value
