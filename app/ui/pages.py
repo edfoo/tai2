@@ -28,6 +28,7 @@ from app.services.prompt_builder import (
 )
 from app.services.openrouter_service import (
     DEFAULT_MODEL_OPTIONS,
+    fetch_openrouter_credits,
     list_openrouter_models,
 )
 from app.ui.components import SnapshotStore, badge_stat
@@ -171,6 +172,15 @@ def register_pages(app: FastAPI) -> None:
                         balance_card = badge_stat("Account Equity", "--")
                         position_card = badge_stat("Active Positions", "--", color="accent")
                         ticker_card = badge_stat("Last Price", "--", color="warning")
+                        openrouter_credit_card = badge_stat(
+                            "OpenRouter Credits",
+                            "--",
+                            color="info",
+                        )
+                    credit_hint_label = ui.label("OpenRouter credits unavailable").classes(
+                        "text-xs text-slate-500"
+                    )
+                    credit_hint_label.set_visibility(False)
 
                     equity_chart = ui.echart(
                         {
@@ -315,6 +325,61 @@ def register_pages(app: FastAPI) -> None:
 
         refresh_llm_cards()
         ui.timer(15, refresh_llm_cards)
+
+        def _format_credit_amount(usage: dict[str, Any] | None) -> str:
+            if not usage:
+                return "--"
+            amount = usage.get("remaining")
+            if amount is None:
+                return "--"
+            currency = (usage.get("currency") or "USD").upper()
+            if currency == "USD":
+                return f"${amount:,.2f}"
+            return f"{amount:,.2f} {currency}"
+
+        def _format_credit_hint(usage: dict[str, Any] | None) -> str | None:
+            if not usage:
+                return None
+            used = usage.get("used")
+            granted = usage.get("granted")
+            currency = (usage.get("currency") or "USD").upper()
+            parts: list[str] = []
+            if used is not None and granted is not None:
+                if currency == "USD":
+                    parts.append(f"Used ${used:,.2f} / ${granted:,.2f}")
+                else:
+                    parts.append(f"Used {used:,.2f} / {granted:,.2f} {currency}")
+            elif used is not None:
+                if currency == "USD":
+                    parts.append(f"Used ${used:,.2f}")
+                else:
+                    parts.append(f"Used {used:,.2f} {currency}")
+            resets_at = usage.get("resets_at")
+            if resets_at:
+                parts.append(f"Renews {resets_at}")
+            if not parts:
+                return None
+            return " · ".join(parts)
+
+        def _update_credit_display(usage: dict[str, Any] | None) -> None:
+            display_value = _format_credit_amount(usage)
+            openrouter_credit_card.value_label.set_text(display_value)
+            hint = _format_credit_hint(usage)
+            if hint:
+                credit_hint_label.set_text(hint)
+                credit_hint_label.set_visibility(True)
+            else:
+                credit_hint_label.set_visibility(False)
+
+        async def refresh_openrouter_credits() -> None:
+            try:
+                usage = await fetch_openrouter_credits(app)
+            except Exception:
+                usage = None
+            _update_credit_display(usage)
+
+        asyncio.create_task(refresh_openrouter_credits())
+        ui.timer(300, lambda: asyncio.create_task(refresh_openrouter_credits()))
 
         async def refresh_equity_chart() -> None:
             try:
@@ -1272,10 +1337,47 @@ def register_pages(app: FastAPI) -> None:
         prompt_version_options: dict[str, str] = {}
         client = ui.context.client
 
-        model_options = {item["id"]: item["label"] for item in DEFAULT_MODEL_OPTIONS}
+        model_metadata: dict[str, dict[str, Any]] = {
+            item["id"]: item for item in DEFAULT_MODEL_OPTIONS
+        }
+
+        def _format_price(value: float | None) -> str | None:
+            if value is None:
+                return None
+            if value >= 1:
+                return f"{value:,.2f}"
+            return f"{value:.4f}".rstrip("0").rstrip(".")
+
+        def _pricing_suffix(pricing: dict[str, Any] | None) -> str:
+            if not pricing:
+                return ""
+            prompt = _format_price(pricing.get("prompt"))
+            completion = _format_price(pricing.get("completion"))
+            if not prompt and not completion:
+                return ""
+            currency = (pricing.get("currency") or "USD").upper()
+            unit = pricing.get("unit") or "per 1M tokens"
+            symbol = "$" if currency == "USD" else f"{currency} "
+            prompt_text = f"{symbol}{prompt}" if prompt else None
+            completion_text = f"{symbol}{completion}" if completion else None
+            if prompt_text and completion_text:
+                pair = f"{prompt_text}/{completion_text}"
+            else:
+                pair = prompt_text or completion_text or ""
+            return f" · {pair} {unit}" if pair else ""
+
+        def _option_label(entry: dict[str, Any]) -> str:
+            label = entry.get("label") or entry.get("id") or "Model"
+            return f"{label}{_pricing_suffix(entry.get('pricing'))}".strip()
+
+        model_options = {key: _option_label(meta) for key, meta in model_metadata.items()}
         initial_model_value = config.get("llm_model_id") or next(iter(model_options), None)
         if initial_model_value and initial_model_value not in model_options:
             model_options[initial_model_value] = initial_model_value
+            model_metadata.setdefault(
+                initial_model_value,
+                {"id": initial_model_value, "label": initial_model_value, "pricing": None},
+            )
 
         def schema_to_text(model_id: str | None) -> str:
             if not model_id:
@@ -1376,6 +1478,9 @@ def register_pages(app: FastAPI) -> None:
                     label="Model",
                     value=initial_model_value,
                 ).classes("w-full md:w-64")
+                model_cost_label = ui.label("Pricing unavailable").classes(
+                    "text-xs text-slate-500"
+                )
                 trading_pairs_select = ui.select(
                     options=[],
                     value=config.get("trading_pairs", ["BTC-USDT-SWAP"]),
@@ -1440,6 +1545,34 @@ def register_pages(app: FastAPI) -> None:
 
         if not auto_prompt_switch.value:
             auto_prompt_interval_input.disable()
+
+        def describe_model_cost(model_id: str | None) -> str:
+            if not model_id:
+                return "Select a model to view pricing"
+            entry = model_metadata.get(model_id)
+            if not entry:
+                return "Pricing unavailable for this model"
+            pricing = entry.get("pricing")
+            if not pricing:
+                return "Pricing unavailable for this model"
+            prompt = _format_price(pricing.get("prompt"))
+            completion = _format_price(pricing.get("completion"))
+            currency = (pricing.get("currency") or "USD").upper()
+            symbol = "$" if currency == "USD" else f"{currency} "
+            unit = pricing.get("unit") or "per 1M tokens"
+            parts = []
+            if prompt:
+                parts.append(f"prompt {symbol}{prompt}")
+            if completion:
+                parts.append(f"completion {symbol}{completion}")
+            if not parts:
+                return "Pricing unavailable for this model"
+            joined = " / ".join(parts)
+            return f"Cost: {joined} ({unit})"
+
+        def update_model_cost_label(model_id: str | None) -> None:
+            model_cost_label.set_text(describe_model_cost(model_id))
+            model_cost_label.update()
 
         def on_auto_prompt_toggle(e: Any) -> None:
             if e.value:
@@ -1603,6 +1736,7 @@ def register_pages(app: FastAPI) -> None:
 
         register_preview_listeners()
         update_payload_preview()
+        update_model_cost_label(initial_model_value)
 
         async def load_trading_pairs() -> None:
             market_service = getattr(app.state, "market_service", None)
@@ -1630,7 +1764,10 @@ def register_pages(app: FastAPI) -> None:
                 return
             if not records:
                 return
-            options = {entry["id"]: entry["label"] for entry in records}
+            model_metadata.clear()
+            for entry in records:
+                model_metadata[entry["id"]] = entry
+            options = {entry["id"]: _option_label(entry) for entry in records}
             with client:
                 model_select.options = options
                 if model_select.value not in options and options:
@@ -1638,11 +1775,13 @@ def register_pages(app: FastAPI) -> None:
                     config["llm_model_id"] = model_select.value
                     apply_model_change(model_select.value)
                 model_select.update()
+                update_model_cost_label(model_select.value)
 
         def apply_model_change(model_id: str | None) -> None:
             response_schema_input.value = schema_to_text(model_id)
             response_schema_input.update()
             update_payload_preview()
+            update_model_cost_label(model_id)
 
         def on_model_change(e: Any) -> None:
             apply_model_change(getattr(e, "value", None))
