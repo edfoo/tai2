@@ -167,7 +167,6 @@ def register_pages(app: FastAPI) -> None:
                     with ui.row().classes("w-full gap-4"):
                         balance_card = badge_stat("Account Equity", "--")
                         position_card = badge_stat("Active Positions", "--", color="accent")
-                        ticker_card = badge_stat("Last Price", "--", color="warning")
                         openrouter_credit_card = badge_stat(
                             "OpenRouter Credits",
                             "--",
@@ -492,10 +491,6 @@ def register_pages(app: FastAPI) -> None:
                 total_equity = 0.0
             balance_card.value_label.set_text(f"${total_equity:,.2f}")
             position_card.value_label.set_text(str(len(positions)))
-            ticker_value = ticker.get("last") or ticker.get("px")
-            ticker_card.value_label.set_text(
-                f"${float(ticker_value):,.2f}" if ticker_value else "--"
-            )
             position_lookup: dict[str, dict[str, Any]] = {}
             for pos in positions:
                 key = pos.get("instId") or pos.get("symbol")
