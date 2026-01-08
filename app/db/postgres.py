@@ -24,7 +24,8 @@ CREATE TABLE IF NOT EXISTS executed_trades (
     price NUMERIC NOT NULL,
     amount NUMERIC NOT NULL,
     llm_reasoning TEXT,
-    pnl NUMERIC
+    pnl NUMERIC,
+    fee NUMERIC
 );
 
 CREATE TABLE IF NOT EXISTS prompt_runs (
@@ -60,12 +61,12 @@ CREATE TABLE IF NOT EXISTS prompt_versions (
 """
 
 INSERT_SQL = (
-    "INSERT INTO executed_trades (id, timestamp, symbol, side, price, amount, llm_reasoning, pnl) "
-    "VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"
+    "INSERT INTO executed_trades (id, timestamp, symbol, side, price, amount, llm_reasoning, pnl, fee) "
+    "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"
 )
 
 FETCH_RECENT_SQL = (
-    "SELECT id, timestamp, symbol, side, price, amount, llm_reasoning, pnl "
+    "SELECT id, timestamp, symbol, side, price, amount, llm_reasoning, pnl, fee "
     "FROM executed_trades ORDER BY timestamp DESC LIMIT $1"
 )
 
@@ -126,6 +127,12 @@ FETCH_PROMPTS_SQL = (
     ORDER BY pr.created_at DESC
     LIMIT $1
     """
+)
+
+FETCH_TOTAL_FEES_SQL = "SELECT COALESCE(SUM(fee), 0) AS total_fee FROM executed_trades"
+FETCH_WINDOW_FEES_SQL = (
+    "SELECT COALESCE(SUM(fee), 0) AS total_fee "
+    "FROM executed_trades WHERE timestamp >= NOW() - ($1::double precision * INTERVAL '1 hour')"
 )
 
 UPSERT_PAIR_SQL = (
@@ -202,6 +209,7 @@ async def insert_executed_trade(trade: ExecutedTrade) -> None:
         payload["amount"],
         payload.get("llm_reasoning"),
         payload.get("pnl"),
+        payload.get("fee"),
     )
 
 
@@ -220,9 +228,35 @@ async def fetch_recent_trades(limit: int = 200) -> list[dict[str, Any]]:
                 "amount": float(row["amount"]),
                 "pnl": float(row["pnl"]) if row["pnl"] is not None else None,
                 "llm_reasoning": row["llm_reasoning"],
+                "fee": float(row["fee"]) if row["fee"] is not None else None,
             }
         )
     return results
+
+
+async def fetch_total_okx_fees() -> float:
+    pool = await get_postgres_pool()
+    row = await pool.fetchrow(FETCH_TOTAL_FEES_SQL)
+    if not row:
+        return 0.0
+    value = row.get("total_fee") if isinstance(row, dict) else row[0]
+    try:
+        return abs(float(value)) if value is not None else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
+async def fetch_okx_fees_window(hours: float = 24.0) -> float:
+    pool = await get_postgres_pool()
+    window = max(1.0, float(hours or 0.0))
+    row = await pool.fetchrow(FETCH_WINDOW_FEES_SQL, window)
+    if not row:
+        return 0.0
+    value = row.get("total_fee") if isinstance(row, dict) else row[0]
+    try:
+        return abs(float(value)) if value is not None else 0.0
+    except (TypeError, ValueError):
+        return 0.0
 
 
 async def fetch_trading_pairs(*, enabled_only: bool = True) -> list[dict[str, Any]]:
@@ -519,7 +553,8 @@ async def _ensure_schema(pool: asyncpg.Pool) -> None:
         ADD COLUMN IF NOT EXISTS price NUMERIC,
         ADD COLUMN IF NOT EXISTS amount NUMERIC,
         ADD COLUMN IF NOT EXISTS llm_reasoning TEXT,
-        ADD COLUMN IF NOT EXISTS pnl NUMERIC
+        ADD COLUMN IF NOT EXISTS pnl NUMERIC,
+        ADD COLUMN IF NOT EXISTS fee NUMERIC
         """
     )
     await _ensure_equity_primary_key(pool)
@@ -558,6 +593,8 @@ __all__ = [
     "fetch_prompt_runs",
     "fetch_prompt_versions",
     "fetch_equity_history",
+    "fetch_total_okx_fees",
+    "fetch_okx_fees_window",
     "fetch_recent_trades",
     "fetch_trading_pairs",
     "get_postgres_pool",

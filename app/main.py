@@ -60,6 +60,11 @@ def _create_lifespan(enable_background_services: bool):
             "auto_prompt_enabled": False,
             "auto_prompt_interval": 300,
             "snapshot_max_age_seconds": settings.snapshot_max_age_seconds,
+            "execution_enabled": False,
+            "execution_trade_mode": "cross",
+            "execution_order_type": "market",
+            "execution_min_size": 1.0,
+            "fee_window_hours": 24.0,
         }
         app.state.llm_service = LLMService(model_id=app.state.runtime_config["llm_model_id"])
 

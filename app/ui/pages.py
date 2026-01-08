@@ -12,6 +12,7 @@ from nicegui import ui
 from app.core.config import get_settings
 from app.db.postgres import (
     fetch_equity_history,
+    fetch_okx_fees_window,
     fetch_prompt_versions,
     fetch_prompt_runs,
     fetch_recent_trades,
@@ -172,10 +173,19 @@ def register_pages(app: FastAPI) -> None:
                             "--",
                             color="info",
                         )
+                        okx_fee_card = badge_stat(
+                            "OKX Fees",
+                            "--",
+                            color="negative",
+                        )
                     credit_hint_label = ui.label("OpenRouter credits unavailable").classes(
                         "text-xs text-slate-500"
                     )
                     credit_hint_label.set_visibility(False)
+                    fee_hint_label = ui.label("OKX fees unavailable").classes(
+                        "text-xs text-slate-500"
+                    )
+                    fee_hint_label.set_visibility(False)
 
                     equity_chart = ui.echart(
                         {
@@ -361,6 +371,35 @@ def register_pages(app: FastAPI) -> None:
             else:
                 credit_hint_label.set_visibility(False)
 
+        def _get_fee_window_hours() -> float:
+            config = getattr(app.state, "runtime_config", {}) or {}
+            raw_value = config.get("fee_window_hours", 24.0)
+            try:
+                hours = float(raw_value)
+            except (TypeError, ValueError):
+                return 24.0
+            return max(1.0, hours)
+
+        def _update_fee_display(
+            total_fee: float | None,
+            *,
+            window_hours: float,
+            error: str | None = None,
+        ) -> None:
+            if error:
+                okx_fee_card.value_label.set_text("--")
+                fee_hint_label.set_text(error)
+                fee_hint_label.set_visibility(True)
+            elif total_fee is not None:
+                okx_fee_card.value_label.set_text(f"${total_fee:,.2f}")
+                fee_hint_label.set_text(
+                    f"OKX fees · last {window_hours:g}h"
+                )
+                fee_hint_label.set_visibility(True)
+            else:
+                okx_fee_card.value_label.set_text("--")
+                fee_hint_label.set_visibility(False)
+
         async def refresh_openrouter_credits() -> None:
             try:
                 usage = await fetch_openrouter_credits(app)
@@ -370,6 +409,22 @@ def register_pages(app: FastAPI) -> None:
 
         asyncio.create_task(refresh_openrouter_credits())
         ui.timer(300, lambda: asyncio.create_task(refresh_openrouter_credits()))
+
+        async def refresh_okx_fees() -> None:
+            window_hours = _get_fee_window_hours()
+            try:
+                total_fee = await fetch_okx_fees_window(window_hours)
+            except Exception as exc:
+                _update_fee_display(
+                    None,
+                    window_hours=window_hours,
+                    error=f"OKX fees unavailable: {exc}",
+                )
+                return
+            _update_fee_display(total_fee, window_hours=window_hours)
+
+        asyncio.create_task(refresh_okx_fees())
+        ui.timer(300, lambda: asyncio.create_task(refresh_okx_fees()))
 
         async def refresh_equity_chart() -> None:
             try:
@@ -1130,6 +1185,7 @@ def register_pages(app: FastAPI) -> None:
                             {"name": "side", "label": "Side", "field": "side"},
                             {"name": "price", "label": "Price", "field": "price"},
                             {"name": "amount", "label": "Amount", "field": "amount"},
+                            {"name": "fee", "label": "Fee", "field": "fee"},
                         ],
                         rows=[],
                     ).classes("w-full")
@@ -1310,6 +1366,11 @@ def register_pages(app: FastAPI) -> None:
         wrapper = page_container()
         config = getattr(app.state, "runtime_config", {})
         config.setdefault("snapshot_max_age_seconds", settings.snapshot_max_age_seconds)
+        config.setdefault("execution_enabled", False)
+        config.setdefault("execution_trade_mode", "cross")
+        config.setdefault("execution_order_type", "market")
+        config.setdefault("execution_min_size", 1.0)
+        config.setdefault("fee_window_hours", 24.0)
         response_schemas = config.setdefault("llm_response_schemas", {})
         guardrails = config.setdefault("guardrails", PromptBuilder._default_guardrails())
         guardrails.setdefault(
@@ -1447,6 +1508,14 @@ def register_pages(app: FastAPI) -> None:
                     value=config.get("ws_update_interval", 180),
                     min=1,
                 ).classes("w-full md:w-48")
+                fee_window_input = ui.number(
+                    label="Fee Window (hours)",
+                    value=config.get("fee_window_hours", 24.0),
+                    min=1,
+                    step=1,
+                ).classes("w-full md:w-48").props(
+                    "hint='Rolling hours of OKX fees shown on LIVE' persistent-hint"
+                )
                 auto_prompt_switch = ui.switch(
                     "Auto Prompt Scheduler",
                     value=config.get("auto_prompt_enabled", False),
@@ -1471,6 +1540,28 @@ def register_pages(app: FastAPI) -> None:
                     label="Trading Pairs",
                 ).classes("w-full flex-1")
                 trading_pairs_select.disable()
+            ui.label("Live Execution").classes("text-sm font-semibold text-rose-600 mt-2")
+            with ui.row().classes("w-full flex-wrap gap-4"):
+                execution_switch = ui.switch(
+                    "Auto-Execute OKX Trades",
+                    value=config.get("execution_enabled", False),
+                ).classes("w-full md:w-64 text-rose-700")
+                execution_trade_mode_select = ui.select(
+                    ["cross", "isolated"],
+                    label="Trade Mode",
+                    value=config.get("execution_trade_mode", "cross"),
+                ).classes("w-full md:w-40")
+                execution_min_size_input = ui.number(
+                    label="Min Order Size",
+                    value=config.get("execution_min_size", 1.0),
+                    min=0.0001,
+                    step=0.0001,
+                ).classes("w-full md:w-48").props(
+                    "hint='Prevents dust trades; measured in contracts/base units' persistent-hint"
+                )
+            ui.label(
+                "Orders are sent as market orders on OKX. Enable only on funded accounts."
+            ).classes("text-xs text-rose-600")
             ui.label("Choose all perpetual instruments to monitor").classes(
                 "text-sm text-slate-500"
             )
@@ -1528,6 +1619,9 @@ def register_pages(app: FastAPI) -> None:
 
         if not auto_prompt_switch.value:
             auto_prompt_interval_input.disable()
+        if not execution_switch.value:
+            execution_trade_mode_select.disable()
+            execution_min_size_input.disable()
 
         def describe_model_cost(model_id: str | None) -> str:
             if not model_id:
@@ -1564,6 +1658,16 @@ def register_pages(app: FastAPI) -> None:
                 auto_prompt_interval_input.disable()
 
         auto_prompt_switch.on_value_change(on_auto_prompt_toggle)
+
+        def on_execution_toggle(e: Any) -> None:
+            if e.value:
+                execution_trade_mode_select.enable()
+                execution_min_size_input.enable()
+            else:
+                execution_trade_mode_select.disable()
+                execution_min_size_input.disable()
+
+        execution_switch.on_value_change(on_execution_toggle)
 
         def _safe_float(value: Any) -> float | None:
             try:
@@ -1672,6 +1776,12 @@ def register_pages(app: FastAPI) -> None:
                     "total_eq_usd": "<float>",
                 },
                 "guardrails": build_guardrails_snapshot(),
+                "execution": {
+                    "enabled": config.get("execution_enabled", False),
+                    "trade_mode": config.get("execution_trade_mode", "cross"),
+                    "order_type": config.get("execution_order_type", "market"),
+                    "min_size": config.get("execution_min_size", 1.0),
+                },
                 "notes": config.get("llm_notes") or "<optional runtime notes>",
                 "prompt_version_id": config.get("prompt_version_id"),
                 "prompt_version_name": config.get("prompt_version_name"),
@@ -1853,6 +1963,7 @@ def register_pages(app: FastAPI) -> None:
         async def save_settings(event: Any | None = None) -> None:
             config["ws_update_interval"] = int(ws_interval_input.value or 5)
             config["auto_prompt_enabled"] = bool(auto_prompt_switch.value)
+            config["execution_enabled"] = bool(execution_switch.value)
             config["llm_system_prompt"] = prompt_input.value
             config["llm_decision_prompt"] = decision_prompt_input.value
             config["llm_model_id"] = model_select.value
@@ -1885,6 +1996,24 @@ def register_pages(app: FastAPI) -> None:
                     auto_prompt_interval_input.value,
                     config.get("auto_prompt_interval", 300),
                     int,
+                ),
+            )
+            config["execution_trade_mode"] = execution_trade_mode_select.value or "cross"
+            config["execution_order_type"] = "market"
+            config["execution_min_size"] = max(
+                0.0001,
+                _coerce(
+                    execution_min_size_input.value,
+                    config.get("execution_min_size", 1.0),
+                    float,
+                ),
+            )
+            config["fee_window_hours"] = max(
+                1.0,
+                _coerce(
+                    fee_window_input.value,
+                    config.get("fee_window_hours", 24.0),
+                    float,
                 ),
             )
 

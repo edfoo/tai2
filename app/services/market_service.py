@@ -7,23 +7,27 @@ import logging
 import time
 from collections import deque
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any, Callable, Deque, Iterable, Optional
 
 import pandas as pd
 import pandas_ta as ta
 
 from app.core.config import get_settings
-from app.db.postgres import insert_equity_point
+from app.db.postgres import insert_equity_point, insert_executed_trade
+from app.models.trade import ExecutedTrade
 from app.services.state_service import StateService
 
 try:  # pragma: no cover - import guarded for optional dependency
     import okx.Account as OkxAccount
+    import okx.Trade as OkxTrade
     import okx.MarketData as OkxMarket
     import okx.PublicData as OkxPublic
     import okx.TradingData as OkxTrading
     from okx.websocket.WsPublicAsync import WsPublicAsync
 except ImportError:  # pragma: no cover
     OkxAccount = None
+    OkxTrade = None
     OkxMarket = None
     OkxPublic = None
     OkxTrading = None
@@ -71,6 +75,7 @@ class MarketService:
         market_api: Any | None = None,
         public_api: Any | None = None,
         trading_api: Any | None = None,
+        trade_api: Any | None = None,
         websocket_factory: Callable[[str], WsPublicAsync] | None = None,
         enable_websocket: bool = True,
         log_sink: Callable[[str], None] | None = None,
@@ -84,6 +89,7 @@ class MarketService:
         self._market_api = market_api or self._build_market_api()
         self._public_api = public_api or self._build_public_api()
         self._trading_api = trading_api or self._build_trading_api()
+        self._trade_api = trade_api or self._build_trade_api()
         default_ws_class = SafeWsPublicAsync or WsPublicAsync
         self._websocket_factory = websocket_factory or default_ws_class
         self._enable_websocket = enable_websocket
@@ -1009,12 +1015,17 @@ class MarketService:
             except Exception as exc:  # pragma: no cover - network fallback
                 self._emit_debug(f"Position fetch failed for {symbol}: {exc}")
                 positions = []
-        if not positions:
-            self._emit_debug(
-                f"Guardrail blocked {action} for {symbol}: positions unavailable"
-            )
-            return
         current_side = self._detect_position_side(positions, symbol)
+        dual_side_mode = False
+        for pos in positions:
+            if not isinstance(pos, dict):
+                continue
+            pos_symbol = str(pos.get("instId") or pos.get("symbol") or "").upper()
+            if pos_symbol != symbol:
+                continue
+            if isinstance(pos.get("posSide"), str):
+                dual_side_mode = True
+                break
         now = time.time()
         summary = (
             f"LLM decision {action} size={decision.get('position_size', '--')} "
@@ -1054,6 +1065,105 @@ class MarketService:
         history.append(now)
         self._decision_state[symbol] = {"action": action, "timestamp": now}
         self._emit_debug(summary)
+
+        execution_cfg = context.get("execution") or {}
+        execution_enabled = bool(execution_cfg.get("enabled"))
+        if not execution_enabled:
+            self._emit_debug(f"Execution disabled for {symbol}; skipping OKX order")
+            return
+        if not self._trade_api:
+            self._emit_debug("Trade API unavailable; cannot execute decision")
+            return
+
+        raw_size = self._extract_float(decision.get("position_size")) or 0.0
+        if raw_size <= 0:
+            self._emit_debug(f"Execution skipped for {symbol}: invalid position size {raw_size}")
+            return
+
+        trade_mode = str(execution_cfg.get("trade_mode") or "cross").lower()
+        if trade_mode not in {"cross", "isolated"}:
+            trade_mode = "cross"
+        order_type = str(execution_cfg.get("order_type") or "market").lower()
+        if order_type != "market":
+            order_type = "market"
+        min_size = self._extract_float(execution_cfg.get("min_size")) or 0.001
+
+        market_block = context.get("market") or {}
+        last_price = (
+            self._extract_float(market_block.get("last_price"))
+            or self._extract_float(market_block.get("bid"))
+            or self._extract_float(market_block.get("ask"))
+        )
+        if last_price is None:
+            ticker_snapshot = self._latest_ticker.get(symbol, {})
+            last_price = self._extract_float(ticker_snapshot.get("last"))
+
+        account_block = context.get("account") or {}
+        account_equity = self._extract_float(
+            account_block.get("account_equity")
+            or account_block.get("total_account_value")
+            or account_block.get("total_eq_usd")
+        )
+        max_pct = self._extract_float(guardrails.get("max_position_pct"))
+        if account_equity and max_pct and last_price:
+            notional_cap = max(0.0, account_equity * max_pct)
+            contract_cap = notional_cap / last_price if last_price else None
+            if contract_cap and contract_cap > 0:
+                raw_size = min(raw_size, contract_cap)
+
+        if raw_size < min_size:
+            self._emit_debug(
+                f"Execution skipped for {symbol}: computed size {raw_size:.6f} below minimum {min_size}"
+            )
+            return
+
+        side = "buy" if action == "BUY" else "sell"
+        pos_side = "long" if action == "BUY" else "short"
+        reduce_only = False
+        if action == "SELL" and current_side == "LONG":
+            pos_side = "long"
+            reduce_only = True
+        elif action == "BUY" and current_side == "SHORT":
+            pos_side = "short"
+            reduce_only = True
+
+        client_order_id = f"tai2-{int(now * 1000)}"
+        order = await self._submit_order(
+            symbol=symbol,
+            side=side,
+            pos_side=pos_side if dual_side_mode else None,
+            size=raw_size,
+            trade_mode=trade_mode,
+            order_type=order_type,
+            reduce_only=reduce_only,
+            client_order_id=client_order_id,
+        )
+        if not order:
+            self._emit_debug(f"Order placement failed for {symbol}")
+            return
+
+        order_id = order.get("ordId") or order.get("orderId") or client_order_id
+        self._emit_debug(
+            f"OKX order submitted {side.upper()} {raw_size:.4f} {symbol} ({order_id})"
+        )
+
+        executed_size = self._extract_float(order.get("fillSz") or order.get("sz")) or raw_size
+        executed_price = (
+            self._extract_float(order.get("fillPx") or order.get("avgPx"))
+            or last_price
+        )
+        fee_value = self._extract_float(order.get("fee") or order.get("fillFee"))
+        if fee_value is not None:
+            fee_value = abs(fee_value)
+        await self._record_trade_execution(
+            symbol=symbol,
+            side=side,
+            price=executed_price,
+            amount=executed_size,
+            rationale=decision.get("rationale"),
+            fee=fee_value,
+        )
+        await self._publish_snapshot()
 
     async def _persist_equity(self, snapshot: dict[str, Any]) -> None:
         if not self.settings.database_url:
@@ -1155,6 +1265,107 @@ class MarketService:
             logger.warning("python-okx not installed; TradingDataAPI unavailable")
             return None
         return OkxTrading.TradingDataAPI(flag="0")
+
+    def _build_trade_api(self) -> Any | None:
+        if OkxTrade is None:
+            logger.warning("python-okx not installed; TradeAPI unavailable")
+            return None
+        if not (self.settings.okx_api_key and self.settings.okx_secret_key and self.settings.okx_passphrase):
+            logger.warning("OKX credentials missing; TradeAPI disabled")
+            return None
+        return OkxTrade.TradeAPI(
+            api_key=self.settings.okx_api_key,
+            api_secret_key=self.settings.okx_secret_key,
+            passphrase=self.settings.okx_passphrase,
+            flag="0",
+        )
+
+    @staticmethod
+    def _format_size(value: float) -> str:
+        return (f"{value:.6f}".rstrip("0").rstrip(".") or "0") if value is not None else "0"
+
+    def _normalize_order_response(self, response: Any) -> dict[str, Any] | None:
+        if not isinstance(response, dict):
+            return None
+        top_code = str(response.get("code", ""))
+        if top_code not in {"0", "200", ""}:
+            detail = response.get("msg") or response
+            self._emit_debug(f"OKX order rejected: {detail}")
+            return None
+        data = response.get("data")
+        if isinstance(data, list) and data:
+            entry = data[0]
+            sub_code = str(entry.get("sCode", top_code))
+            if sub_code not in {"0", "200", ""}:
+                self._emit_debug(f"OKX order failed: {entry.get('sMsg')}")
+                return None
+            return entry
+        return response
+
+    async def _submit_order(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        pos_side: str | None,
+        size: float,
+        trade_mode: str,
+        order_type: str,
+        reduce_only: bool,
+        client_order_id: str,
+    ) -> dict[str, Any] | None:
+        if not self._trade_api:
+            self._emit_debug("Trade API unavailable; cannot place order")
+            return None
+        payload = {
+            "instId": symbol,
+            "tdMode": trade_mode,
+            "side": side,
+            "ordType": order_type,
+            "sz": self._format_size(size),
+            "clOrdId": client_order_id,
+        }
+        if pos_side:
+            payload["posSide"] = pos_side
+        if reduce_only:
+            payload["reduceOnly"] = "true"
+
+        def _place() -> Any:
+            return self._trade_api.place_order(**payload)
+
+        try:
+            response = await asyncio.to_thread(_place)
+        except Exception as exc:  # pragma: no cover - network dependency
+            self._emit_debug(f"OKX place_order exception: {exc}")
+            return None
+        return self._normalize_order_response(response)
+
+    async def _record_trade_execution(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        price: float,
+        amount: float,
+        rationale: str | None,
+        fee: float | None,
+    ) -> None:
+        if not self.settings.database_url:
+            return
+        if price is None or amount is None:
+            return
+        try:
+            trade = ExecutedTrade(
+                symbol=symbol,
+                side=side,
+                price=Decimal(str(price)),
+                amount=Decimal(str(amount)),
+                llm_reasoning=rationale,
+                fee=Decimal(str(fee)) if fee is not None else None,
+            )
+            await insert_executed_trade(trade)
+        except Exception as exc:  # pragma: no cover - persistence best-effort
+            self._emit_debug(f"Failed to persist executed trade: {exc}")
 
 
 __all__ = ["MarketService"]

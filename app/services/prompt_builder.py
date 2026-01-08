@@ -127,6 +127,12 @@ class PromptBuilder:
         pending_orders = self._build_pending_orders(snapshot.get("open_orders") or [])
         guardrails = runtime_meta.get("guardrails") or self._default_guardrails()
         model_id = runtime_meta.get("llm_model_id")
+        execution_settings = {
+            "enabled": bool(runtime_meta.get("execution_enabled")),
+            "trade_mode": runtime_meta.get("execution_trade_mode") or "cross",
+            "order_type": runtime_meta.get("execution_order_type") or "market",
+            "min_size": runtime_meta.get("execution_min_size"),
+        }
         schema_overrides = runtime_meta.get("llm_response_schemas") or {}
         timeframe_value = timeframe or runtime_meta.get("ta_timeframe") or snapshot.get("timeframe") or "4H"
         trend_section = self._build_trend_confirmation(indicators, ticker, timeframe_value)
@@ -154,6 +160,7 @@ class PromptBuilder:
             "notes": runtime_meta.get("llm_notes"),
             "prompt_version_id": runtime_meta.get("prompt_version_id"),
             "prompt_version_name": runtime_meta.get("prompt_version_name"),
+            "execution": execution_settings,
         }
         prompt_block = {
             "system": (runtime_meta.get("llm_system_prompt") or DEFAULT_SYSTEM_PROMPT).strip(),
