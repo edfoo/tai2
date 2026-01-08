@@ -12,6 +12,8 @@ class Settings(BaseSettings):
     okx_secret_key: Optional[str] = Field(default=None, alias="OKX_SECRET_KEY")
     okx_passphrase: Optional[str] = Field(default=None, alias="OKX_PASSPHRASE")
     okx_sub_account: Optional[str] = Field(default=None, alias="OKX_SUB_ACCOUNT")
+    okx_sub_account_use_master: bool = Field(default=False, alias="OKX_SUB_ACCOUNT_USE_MASTER")
+    okx_api_flag: str = Field(default="0", alias="OKX_API_FLAG")
     openrouter_api_key: Optional[str] = Field(default=None, alias="OPENROUTER_API_KEY")
     database_url: Optional[str] = Field(default=None, alias="DATABASE_URL")
     redis_url: Optional[str] = Field(default=None, alias="REDIS_URL")

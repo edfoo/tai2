@@ -18,6 +18,7 @@ from app.db.postgres import (
     fetch_recent_trades,
     insert_prompt_version,
     save_guardrails,
+    save_execution_settings,
     save_llm_model,
     save_okx_sub_account,
     set_enabled_trading_pairs,
@@ -1368,6 +1369,8 @@ def register_pages(app: FastAPI) -> None:
         config.setdefault("execution_min_size", 1.0)
         config.setdefault("fee_window_hours", 24.0)
         config.setdefault("okx_sub_account", settings.okx_sub_account)
+        config.setdefault("okx_sub_account_use_master", settings.okx_sub_account_use_master)
+        config.setdefault("okx_api_flag", str(settings.okx_api_flag or "0") or "0")
         response_schemas = config.setdefault("llm_response_schemas", {})
         guardrails = config.setdefault("guardrails", PromptBuilder._default_guardrails())
         guardrails.setdefault(
@@ -1562,6 +1565,22 @@ def register_pages(app: FastAPI) -> None:
                     placeholder="Leave blank for primary",
                 ).classes("w-full md:w-64").props(
                     "hint='Orders + balances will target this sub-account' persistent-hint"
+                )
+                okx_master_routing_switch = ui.switch(
+                    "API key created on parent account",
+                    value=config.get("okx_sub_account_use_master", False),
+                ).classes("w-full md:w-64").props(
+                    "hint='Enable when using parent-account API keys that need the subAcct flag to reach this sub-account.' persistent-hint"
+                )
+                okx_env_select = ui.select(
+                    {
+                        "0": "Live (Production)",
+                        "1": "Paper / Demo",
+                    },
+                    label="OKX Environment",
+                    value=str(config.get("okx_api_flag", "0") or "0"),
+                ).classes("w-full md:w-64").props(
+                    "hint='Flag=0 targets live trading; Flag=1 targets OKX simulated trading endpoints.' persistent-hint"
                 )
             ui.label(
                 "Orders are sent as market orders on OKX. Enable only on funded accounts."
@@ -2012,6 +2031,17 @@ def register_pages(app: FastAPI) -> None:
                     float,
                 ),
             )
+            try:
+                await save_execution_settings(
+                    {
+                        "enabled": config["execution_enabled"],
+                        "trade_mode": config["execution_trade_mode"],
+                        "order_type": config["execution_order_type"],
+                        "min_size": config["execution_min_size"],
+                    }
+                )
+            except Exception as exc:  # pragma: no cover - db optional
+                ui.notify(f"Failed to persist execution settings: {exc}", color="warning")
             config["fee_window_hours"] = max(
                 1.0,
                 _coerce(
@@ -2022,8 +2052,15 @@ def register_pages(app: FastAPI) -> None:
             )
             sub_account_value = (okx_sub_account_input.value or "").strip()
             config["okx_sub_account"] = sub_account_value or None
+            config["okx_sub_account_use_master"] = bool(okx_master_routing_switch.value)
+            api_flag_value = str(okx_env_select.value or config.get("okx_api_flag") or "0").strip()
+            config["okx_api_flag"] = api_flag_value if api_flag_value in {"0", "1"} else "0"
             try:
-                await save_okx_sub_account(config["okx_sub_account"])
+                await save_okx_sub_account(
+                    config["okx_sub_account"],
+                    config["okx_sub_account_use_master"],
+                    config["okx_api_flag"],
+                )
             except Exception as exc:  # pragma: no cover - db optional
                 ui.notify(f"Failed to persist OKX sub-account: {exc}", color="warning")
 
@@ -2119,7 +2156,11 @@ def register_pages(app: FastAPI) -> None:
                 llm_service.set_model(model_select.value)
             market_service = getattr(app.state, "market_service", None)
             if market_service:
-                await market_service.set_sub_account(config.get("okx_sub_account"))
+                await market_service.set_okx_flag(config.get("okx_api_flag"))
+                await market_service.set_sub_account(
+                    config.get("okx_sub_account"),
+                    config.get("okx_sub_account_use_master"),
+                )
                 market_service.set_poll_interval(config["ws_update_interval"])
                 await market_service.update_symbols(symbols)
             scheduler = getattr(app.state, "prompt_scheduler", None)

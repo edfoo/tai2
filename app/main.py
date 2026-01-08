@@ -19,6 +19,7 @@ from app.db.postgres import (
     init_postgres_pool,
     load_guardrails,
     load_llm_model,
+    load_execution_settings,
     load_okx_sub_account,
 )
 from app.services.llm_service import LLMService
@@ -99,6 +100,8 @@ def _create_lifespan(enable_background_services: bool):
             "execution_min_size": 1.0,
             "fee_window_hours": 24.0,
             "okx_sub_account": settings.okx_sub_account,
+            "okx_sub_account_use_master": settings.okx_sub_account_use_master,
+            "okx_api_flag": str(settings.okx_api_flag or "0") or "0",
         }
         app.state.llm_service = LLMService(model_id=app.state.runtime_config["llm_model_id"])
 
@@ -146,13 +149,46 @@ def _create_lifespan(enable_background_services: bool):
                         app.state.runtime_config["prompt_version_name"] = latest_version["name"]
                 try:
                     stored_sub_account = await load_okx_sub_account(
-                        app.state.runtime_config.get("okx_sub_account")
+                        {
+                            "sub_account": app.state.runtime_config.get("okx_sub_account"),
+                            "use_master": app.state.runtime_config.get(
+                                "okx_sub_account_use_master",
+                                False,
+                            ),
+                        }
                     )
                 except Exception as exc:  # pragma: no cover - optional
                     logger.error("Failed to load OKX sub-account preference: %s", exc)
                 else:
-                    if stored_sub_account is not None:
-                        app.state.runtime_config["okx_sub_account"] = stored_sub_account
+                    app.state.runtime_config["okx_sub_account"] = stored_sub_account.get("sub_account")
+                    app.state.runtime_config["okx_sub_account_use_master"] = stored_sub_account.get(
+                        "use_master",
+                        app.state.runtime_config.get("okx_sub_account_use_master", False),
+                    )
+                    api_flag = stored_sub_account.get("api_flag")
+                    if api_flag in {"0", "1"}:
+                        app.state.runtime_config["okx_api_flag"] = api_flag
+                try:
+                    execution_settings = await load_execution_settings()
+                except Exception as exc:  # pragma: no cover - optional
+                    logger.error("Failed to load execution settings: %s", exc)
+                else:
+                    if execution_settings:
+                        app.state.runtime_config["execution_enabled"] = execution_settings.get(
+                            "enabled",
+                            app.state.runtime_config.get("execution_enabled"),
+                        )
+                        app.state.runtime_config["execution_trade_mode"] = execution_settings.get(
+                            "trade_mode",
+                            app.state.runtime_config.get("execution_trade_mode"),
+                        )
+                        app.state.runtime_config["execution_order_type"] = execution_settings.get(
+                            "order_type",
+                            app.state.runtime_config.get("execution_order_type"),
+                        )
+                        min_size = execution_settings.get("min_size")
+                        if min_size is not None:
+                            app.state.runtime_config["execution_min_size"] = float(min_size)
         elif not enable_background_services:
             logger.info("Background DB init disabled; skipping Postgres init")
         else:
@@ -172,6 +208,11 @@ def _create_lifespan(enable_background_services: bool):
                     log_sink=lambda msg: app.state.backend_events.append(msg),
                     ohlc_bar=app.state.runtime_config.get("ta_timeframe"),
                     sub_account=app.state.runtime_config.get("okx_sub_account"),
+                    sub_account_use_master=app.state.runtime_config.get(
+                        "okx_sub_account_use_master",
+                        False,
+                    ),
+                    okx_flag=app.state.runtime_config.get("okx_api_flag"),
                 )
                 app.state.market_service = market_service
                 await market_service.start()

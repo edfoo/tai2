@@ -514,9 +514,22 @@ async def load_llm_model(default: str | None = None) -> str | None:
     return default
 
 
-async def save_okx_sub_account(sub_account: str | None) -> None:
+async def save_okx_sub_account(
+    sub_account: str | None,
+    use_master: bool = False,
+    api_flag: str | None = None,
+) -> None:
     pool = await get_postgres_pool()
-    payload = json.dumps({"sub_account": sub_account} if sub_account else {})
+    normalized_flag = str(api_flag).strip() if api_flag is not None else None
+    if normalized_flag not in {"0", "1"}:
+        normalized_flag = None
+    payload = json.dumps(
+        {
+            "sub_account": sub_account,
+            "use_master": bool(use_master),
+            "api_flag": normalized_flag,
+        }
+    )
     await pool.execute(
         """
         INSERT INTO runtime_settings (key, value, updated_at)
@@ -527,26 +540,97 @@ async def save_okx_sub_account(sub_account: str | None) -> None:
     )
 
 
-async def load_okx_sub_account(default: str | None = None) -> str | None:
+async def load_okx_sub_account(
+    default: dict[str, Any] | str | None = None,
+) -> dict[str, Any]:
     pool = await get_postgres_pool()
     row = await pool.fetchrow("SELECT value FROM runtime_settings WHERE key = 'okx_sub_account'")
+    base: dict[str, Any] = {
+        "sub_account": None,
+        "use_master": False,
+        "api_flag": "0",
+    }
+    if isinstance(default, dict):
+        base["sub_account"] = (default.get("sub_account") or default.get("value") or "").strip() or None
+        base["use_master"] = bool(default.get("use_master"))
+        candidate_flag = str(default.get("api_flag")) if default.get("api_flag") is not None else None
+        if candidate_flag in {"0", "1"}:
+            base["api_flag"] = candidate_flag
+    elif isinstance(default, str):
+        base["sub_account"] = default.strip() or None
     if not row:
-        return default
+        return base
     value = row["value"]
     if isinstance(value, str):
         try:
             parsed = json.loads(value)
         except json.JSONDecodeError:
-            return value or default
+            parsed = {"sub_account": value}
     else:
         parsed = value
     if isinstance(parsed, dict):
         candidate = parsed.get("sub_account") or parsed.get("value")
-        if candidate:
-            return str(candidate).strip() or None
-    if isinstance(parsed, str) and parsed:
-        return parsed.strip() or default
-    return default
+        if candidate is not None:
+            base["sub_account"] = str(candidate).strip() or None
+        if "use_master" in parsed:
+            base["use_master"] = bool(parsed.get("use_master"))
+        if "api_flag" in parsed:
+            candidate_flag = str(parsed.get("api_flag") or "").strip()
+            if candidate_flag in {"0", "1"}:
+                base["api_flag"] = candidate_flag
+    elif isinstance(parsed, str) and parsed:
+        base["sub_account"] = parsed.strip() or base["sub_account"]
+    return base
+
+
+async def save_execution_settings(config: dict[str, Any]) -> None:
+    pool = await get_postgres_pool()
+    payload = json.dumps(
+        {
+            "enabled": bool(config.get("enabled")),
+            "trade_mode": (config.get("trade_mode") or "cross").lower(),
+            "order_type": (config.get("order_type") or "market").lower(),
+            "min_size": float(config.get("min_size") or 0.0),
+        }
+    )
+    await pool.execute(
+        """
+        INSERT INTO runtime_settings (key, value, updated_at)
+        VALUES ('execution', $1::jsonb, NOW())
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+        """,
+        payload,
+    )
+
+
+async def load_execution_settings() -> dict[str, Any]:
+    pool = await get_postgres_pool()
+    row = await pool.fetchrow("SELECT value FROM runtime_settings WHERE key = 'execution'")
+    if not row:
+        return {}
+    value = row["value"]
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+    else:
+        parsed = value or {}
+    if not isinstance(parsed, dict):
+        return {}
+    result: dict[str, Any] = {}
+    if "enabled" in parsed:
+        result["enabled"] = bool(parsed["enabled"])
+    if "trade_mode" in parsed:
+        result["trade_mode"] = str(parsed["trade_mode"] or "cross")
+    if "order_type" in parsed:
+        result["order_type"] = str(parsed["order_type"] or "market")
+    if "min_size" in parsed:
+        try:
+            result["min_size"] = float(parsed["min_size"])
+        except (TypeError, ValueError):
+            pass
+    return result
 
 
 async def get_prompt_version(version_id: str) -> dict[str, Any] | None:

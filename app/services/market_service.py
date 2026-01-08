@@ -73,6 +73,8 @@ class MarketService:
         symbol: str = "BTC-USDT-SWAP",
         symbols: list[str] | None = None,
         sub_account: str | None = None,
+        sub_account_use_master: bool = False,
+        okx_flag: str | int | None = None,
         account_api: Any | None = None,
         market_api: Any | None = None,
         public_api: Any | None = None,
@@ -87,6 +89,8 @@ class MarketService:
         self.symbols = self._normalize_symbols(symbols) or [symbol]
         self.symbol = self.symbols[0]
         self._sub_account = (sub_account or self.settings.okx_sub_account or "").strip() or None
+        self._sub_account_use_master = bool(sub_account_use_master)
+        self._okx_flag = self._normalize_okx_flag(okx_flag or self.settings.okx_api_flag)
         self.state_service = state_service
         self._account_api = account_api or self._build_account_api()
         self._market_api = market_api or self._build_market_api()
@@ -303,13 +307,38 @@ class MarketService:
         self._poll_interval = max(1, seconds)
         self._emit_debug(f"Poll interval updated to {self._poll_interval}s")
 
-    async def set_sub_account(self, value: str | None) -> None:
+    async def set_sub_account(self, value: str | None, use_master: bool | None = None) -> None:
         normalized = (value or "").strip() or None
-        if normalized == self._sub_account:
+        updated = False
+        if normalized != self._sub_account:
+            self._sub_account = normalized
+            updated = True
+        if use_master is not None and bool(use_master) != self._sub_account_use_master:
+            self._sub_account_use_master = bool(use_master)
+            updated = True
+        if not updated:
             return
-        self._sub_account = normalized
         label = normalized or "<primary>"
-        self._emit_debug(f"Sub-account preference updated to {label}")
+        mode = "master routing" if self._sub_account_use_master else "scoped credentials"
+        self._emit_debug(f"Sub-account preference updated to {label} ({mode})")
+        await self._publish_snapshot()
+
+    @staticmethod
+    def _normalize_okx_flag(flag: str | int | None) -> str:
+        if isinstance(flag, str) and flag.strip() == "1":
+            return "1"
+        if isinstance(flag, int) and flag == 1:
+            return "1"
+        return "0"
+
+    async def set_okx_flag(self, value: str | int | None) -> None:
+        normalized = self._normalize_okx_flag(value)
+        if normalized == self._okx_flag:
+            return
+        self._okx_flag = normalized
+        env_label = "LIVE" if normalized == "0" else "PAPER"
+        self._emit_debug(f"OKX API environment set to {env_label} (flag={normalized})")
+        self._rebuild_okx_clients()
         await self._publish_snapshot()
 
     async def update_symbols(self, symbols: list[str]) -> None:
@@ -427,7 +456,7 @@ class MarketService:
         if not self._account_api:
             return []
         kwargs = {"instType": "SWAP"}
-        if self._sub_account:
+        if self._sub_account and self._sub_account_use_master:
             kwargs["subAcct"] = self._sub_account
         response = await asyncio.to_thread(
             self._account_api.get_positions,
@@ -444,7 +473,7 @@ class MarketService:
                 "total_account_value": 0.0,
                 "total_eq_usd": 0.0,
             }
-        if self._sub_account:
+        if self._sub_account and self._sub_account_use_master:
             response = await asyncio.to_thread(
                 self._account_api.get_account_balance,
                 subAcct=self._sub_account,
@@ -1266,7 +1295,7 @@ class MarketService:
             api_key=self.settings.okx_api_key,
             api_secret_key=self.settings.okx_secret_key,
             passphrase=self.settings.okx_passphrase,
-            flag="0",
+            flag=self._okx_flag,
         )
         return OkxAccountAdapter(raw_api)
 
@@ -1274,19 +1303,19 @@ class MarketService:
         if OkxMarket is None:
             logger.warning("python-okx not installed; MarketAPI unavailable")
             return None
-        return OkxMarket.MarketAPI(flag="0")
+        return OkxMarket.MarketAPI(flag=self._okx_flag)
 
     def _build_public_api(self) -> Any | None:
         if OkxPublic is None:
             logger.warning("python-okx not installed; PublicAPI unavailable")
             return None
-        return OkxPublic.PublicAPI(flag="0")
+        return OkxPublic.PublicAPI(flag=self._okx_flag)
 
     def _build_trading_api(self) -> Any | None:
         if OkxTrading is None:
             logger.warning("python-okx not installed; TradingDataAPI unavailable")
             return None
-        return OkxTrading.TradingDataAPI(flag="0")
+        return OkxTrading.TradingDataAPI(flag=self._okx_flag)
 
     def _build_trade_api(self) -> Any | None:
         if OkxTrade is None:
@@ -1299,9 +1328,16 @@ class MarketService:
             api_key=self.settings.okx_api_key,
             api_secret_key=self.settings.okx_secret_key,
             passphrase=self.settings.okx_passphrase,
-            flag="0",
+            flag=self._okx_flag,
         )
         return OkxTradeAdapter(raw_api)
+
+    def _rebuild_okx_clients(self) -> None:
+        self._account_api = self._build_account_api()
+        self._market_api = self._build_market_api()
+        self._public_api = self._build_public_api()
+        self._trading_api = self._build_trading_api()
+        self._trade_api = self._build_trade_api()
 
     @staticmethod
     def _format_size(value: float) -> str:
@@ -1352,7 +1388,7 @@ class MarketService:
             payload["posSide"] = pos_side
         if reduce_only:
             payload["reduceOnly"] = "true"
-        if self._sub_account:
+        if self._sub_account and self._sub_account_use_master:
             payload["subAcct"] = self._sub_account
 
         def _place() -> Any:
