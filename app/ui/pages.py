@@ -125,7 +125,6 @@ def register_pages(app: FastAPI) -> None:
         wrapper.style("max-width: 100%; width: 100%; margin-left: 0; margin-right: 0;")
         store = make_snapshot_store()
 
-        current_symbol = {"value": None}
         last_snapshot = {"value": None}
         equity_refresh = {"last": 0.0}
         refresh_label: dict[str, ui.label | None] = {"widget": None}
@@ -164,10 +163,6 @@ def register_pages(app: FastAPI) -> None:
                             notice.set_visibility(False)
                             stale_indicator["widget"] = notice
 
-                    symbol_select = ui.select(options=[], label="Symbol").classes(
-                        "w-full md:w-64"
-                    )
-                    symbol_select.disable()
                     with ui.row().classes("w-full gap-4"):
                         balance_card = badge_stat("Account Equity", "--")
                         position_card = badge_stat("Active Positions", "--", color="accent")
@@ -253,11 +248,6 @@ def register_pages(app: FastAPI) -> None:
                         </q-td>
                         """,
                     )
-
-                    ticker_details = ui.expansion("Ticker & Funding").classes("w-full")
-                    with ticker_details:
-                        ticker_label = ui.label("--")
-                        funding_label = ui.label("--")
 
                 with ui.column().classes("flex-[3] w-full gap-4"):
                     with ui.card().classes(
@@ -434,16 +424,9 @@ def register_pages(app: FastAPI) -> None:
             positions = snapshot.get("positions") or []
             symbols = snapshot.get("symbols") or []
             market_data = snapshot.get("market_data") or {}
-            if symbols:
-                symbol_select.options = symbols
-                symbol_select.enable()
-                if current_symbol["value"] not in symbols:
-                    current_symbol["value"] = symbols[0]
-                    symbol_select.value = current_symbol["value"]
-            else:
-                symbol_select.options = []
-                symbol_select.disable()
-            selected_symbol = current_symbol["value"] or snapshot.get("symbol")
+            selected_symbol = snapshot.get("symbol")
+            if not selected_symbol and symbols:
+                selected_symbol = symbols[0]
             market_entry = market_data.get(selected_symbol, {})
             ticker = market_entry.get("ticker") or snapshot.get("ticker") or {}
             funding = market_entry.get("funding_rate") or snapshot.get("funding_rate") or {}
@@ -560,10 +543,6 @@ def register_pages(app: FastAPI) -> None:
 
             positions_table.rows = rows
             positions_table.update()
-            ticker_label.set_text(
-                f"Mark: {ticker.get('last', '--')} / 24h Vol: {ticker.get('volCcy24h', '--')}"
-            )
-            funding_label.set_text(f"Funding Rate: {funding.get('fundingRate', '--')}")
 
             now = time.monotonic()
             if now - equity_refresh["last"] > 30:
@@ -574,11 +553,6 @@ def register_pages(app: FastAPI) -> None:
         ui.timer(5, lambda: update_snapshot_health(last_snapshot["value"]))
         asyncio.create_task(refresh_equity_chart())
 
-        def on_symbol_change(e: Any) -> None:
-            current_symbol["value"] = e.value
-            update(last_snapshot["value"])
-
-        symbol_select.on_value_change(on_symbol_change)
 
     def render_ta_page() -> None:
         navigation("TA")
@@ -644,6 +618,7 @@ def register_pages(app: FastAPI) -> None:
                                 for key, text in [
                                     ("vwap", "VWAP"),
                                     ("funding", "Funding Rate"),
+                                    ("volume_24h", "24h Volume"),
                                     ("ofi", "Order Flow Imbalance"),
                                 ]:
                                     label = ui.label(f"{text}: --").classes("text-sm text-slate-600")
@@ -884,6 +859,14 @@ def register_pages(app: FastAPI) -> None:
 
             trend_labels["vwap"].set_text(f"VWAP: {fmt_number(indicators.get('vwap'), 2)}")
             trend_labels["funding"].set_text(f"Funding Rate: {funding.get('fundingRate', '--')}")
+            volume_value = (
+                ticker.get("volCcy24h")
+                or ticker.get("volCcy")
+                or ticker.get("vol24h")
+                or ticker.get("vol")
+                or custom.get("volume_24h")
+            )
+            trend_labels["volume_24h"].set_text(f"24h Volume: {fmt_number(volume_value, 0)}")
             trend_labels["ofi"].set_text(
                 f"Order Flow Imbalance: {fmt_number(custom.get('order_flow_imbalance'))}"
             )
