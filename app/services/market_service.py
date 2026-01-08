@@ -16,6 +16,7 @@ import pandas_ta as ta
 from app.core.config import get_settings
 from app.db.postgres import insert_equity_point, insert_executed_trade
 from app.models.trade import ExecutedTrade
+from app.services.okx_sdk_adapter import OkxAccountAdapter, OkxTradeAdapter
 from app.services.state_service import StateService
 
 try:  # pragma: no cover - import guarded for optional dependency
@@ -71,6 +72,7 @@ class MarketService:
         state_service: StateService,
         symbol: str = "BTC-USDT-SWAP",
         symbols: list[str] | None = None,
+        sub_account: str | None = None,
         account_api: Any | None = None,
         market_api: Any | None = None,
         public_api: Any | None = None,
@@ -84,6 +86,7 @@ class MarketService:
         self.settings = get_settings()
         self.symbols = self._normalize_symbols(symbols) or [symbol]
         self.symbol = self.symbols[0]
+        self._sub_account = (sub_account or self.settings.okx_sub_account or "").strip() or None
         self.state_service = state_service
         self._account_api = account_api or self._build_account_api()
         self._market_api = market_api or self._build_market_api()
@@ -300,6 +303,15 @@ class MarketService:
         self._poll_interval = max(1, seconds)
         self._emit_debug(f"Poll interval updated to {self._poll_interval}s")
 
+    async def set_sub_account(self, value: str | None) -> None:
+        normalized = (value or "").strip() or None
+        if normalized == self._sub_account:
+            return
+        self._sub_account = normalized
+        label = normalized or "<primary>"
+        self._emit_debug(f"Sub-account preference updated to {label}")
+        await self._publish_snapshot()
+
     async def update_symbols(self, symbols: list[str]) -> None:
         cleaned = self._normalize_symbols(symbols)
         if not cleaned:
@@ -414,9 +426,12 @@ class MarketService:
     async def _fetch_positions(self) -> list[dict[str, Any]]:
         if not self._account_api:
             return []
+        kwargs = {"instType": "SWAP"}
+        if self._sub_account:
+            kwargs["subAcct"] = self._sub_account
         response = await asyncio.to_thread(
             self._account_api.get_positions,
-            instType="SWAP",
+            **kwargs,
         )
         data = self._safe_data(response)
         return data
@@ -429,7 +444,13 @@ class MarketService:
                 "total_account_value": 0.0,
                 "total_eq_usd": 0.0,
             }
-        response = await asyncio.to_thread(self._account_api.get_account_balance)
+        if self._sub_account:
+            response = await asyncio.to_thread(
+                self._account_api.get_account_balance,
+                subAcct=self._sub_account,
+            )
+        else:
+            response = await asyncio.to_thread(self._account_api.get_account_balance)
         data = self._safe_data(response)
         return self._normalize_account_balances(data)
 
@@ -1236,17 +1257,18 @@ class MarketService:
 
     def _build_account_api(self) -> Any | None:
         if OkxAccount is None:
-            logger.warning("python-okx not installed; AccountAPI unavailable")
+            logger.warning("okx SDK not installed; AccountAPI unavailable")
             return None
         if not (self.settings.okx_api_key and self.settings.okx_secret_key and self.settings.okx_passphrase):
             logger.warning("OKX credentials missing; AccountAPI disabled")
             return None
-        return OkxAccount.AccountAPI(
+        raw_api = OkxAccount.AccountAPI(
             api_key=self.settings.okx_api_key,
             api_secret_key=self.settings.okx_secret_key,
             passphrase=self.settings.okx_passphrase,
             flag="0",
         )
+        return OkxAccountAdapter(raw_api)
 
     def _build_market_api(self) -> Any | None:
         if OkxMarket is None:
@@ -1268,17 +1290,18 @@ class MarketService:
 
     def _build_trade_api(self) -> Any | None:
         if OkxTrade is None:
-            logger.warning("python-okx not installed; TradeAPI unavailable")
+            logger.warning("okx SDK not installed; TradeAPI unavailable")
             return None
         if not (self.settings.okx_api_key and self.settings.okx_secret_key and self.settings.okx_passphrase):
             logger.warning("OKX credentials missing; TradeAPI disabled")
             return None
-        return OkxTrade.TradeAPI(
+        raw_api = OkxTrade.TradeAPI(
             api_key=self.settings.okx_api_key,
             api_secret_key=self.settings.okx_secret_key,
             passphrase=self.settings.okx_passphrase,
             flag="0",
         )
+        return OkxTradeAdapter(raw_api)
 
     @staticmethod
     def _format_size(value: float) -> str:
@@ -1329,6 +1352,8 @@ class MarketService:
             payload["posSide"] = pos_side
         if reduce_only:
             payload["reduceOnly"] = "true"
+        if self._sub_account:
+            payload["subAcct"] = self._sub_account
 
         def _place() -> Any:
             return self._trade_api.place_order(**payload)

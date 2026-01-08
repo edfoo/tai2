@@ -19,6 +19,7 @@ class ExecutedTrade(BaseModel):
     amount: Decimal
     llm_reasoning: Optional[str] = None
     pnl: Optional[Decimal] = None
+    fee: Optional[Decimal] = None
 
     @field_validator("symbol", mode="before")
     def normalize_symbol(cls, value: str) -> str:  # noqa: N805

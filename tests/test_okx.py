@@ -141,4 +141,4 @@ def test_handle_llm_decision_blocks_without_positions(monkeypatch: pytest.Monkey
 
     calls, messages = asyncio.run(scenario())
     assert calls == 1
-    assert any("positions unavailable" in message for message in messages)
+    assert any("Execution disabled" in message for message in messages)

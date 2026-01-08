@@ -19,6 +19,7 @@ from app.db.postgres import (
     insert_prompt_version,
     save_guardrails,
     save_llm_model,
+    save_okx_sub_account,
     set_enabled_trading_pairs,
 )
 from app.services.prompt_builder import (
@@ -1262,7 +1263,7 @@ def register_pages(app: FastAPI) -> None:
                     ui.label("Backend Logs").classes("text-lg font-semibold")
                     ui.label("Engine + scheduler diagnostics").classes("text-xs text-slate-500")
                     backend_log = ui.log(max_lines=200).classes(
-                        "w-full h-64 font-mono text-xs bg-slate-900/90 text-white rounded-xl"
+                        "w-full h-256 font-mono text-xs bg-slate-900/90 text-white rounded-xl"
                     )
                 with ui.card().classes(
                     "w-full p-4 gap-2 bg-slate-50 border border-slate-200 shadow-sm"
@@ -1366,6 +1367,7 @@ def register_pages(app: FastAPI) -> None:
         config.setdefault("execution_order_type", "market")
         config.setdefault("execution_min_size", 1.0)
         config.setdefault("fee_window_hours", 24.0)
+        config.setdefault("okx_sub_account", settings.okx_sub_account)
         response_schemas = config.setdefault("llm_response_schemas", {})
         guardrails = config.setdefault("guardrails", PromptBuilder._default_guardrails())
         guardrails.setdefault(
@@ -1553,6 +1555,13 @@ def register_pages(app: FastAPI) -> None:
                     step=0.0001,
                 ).classes("w-full md:w-48").props(
                     "hint='Prevents dust trades; measured in contracts/base units' persistent-hint"
+                )
+                okx_sub_account_input = ui.input(
+                    label="OKX Sub-Account",
+                    value=config.get("okx_sub_account") or "",
+                    placeholder="Leave blank for primary",
+                ).classes("w-full md:w-64").props(
+                    "hint='Orders + balances will target this sub-account' persistent-hint"
                 )
             ui.label(
                 "Orders are sent as market orders on OKX. Enable only on funded accounts."
@@ -2011,6 +2020,12 @@ def register_pages(app: FastAPI) -> None:
                     float,
                 ),
             )
+            sub_account_value = (okx_sub_account_input.value or "").strip()
+            config["okx_sub_account"] = sub_account_value or None
+            try:
+                await save_okx_sub_account(config["okx_sub_account"])
+            except Exception as exc:  # pragma: no cover - db optional
+                ui.notify(f"Failed to persist OKX sub-account: {exc}", color="warning")
 
             config["guardrails"] = {
                 "max_leverage": _coerce(max_leverage_input.value, guardrails.get("max_leverage", 5), float),
@@ -2102,9 +2117,11 @@ def register_pages(app: FastAPI) -> None:
             llm_service = getattr(app.state, "llm_service", None)
             if llm_service:
                 llm_service.set_model(model_select.value)
-            if app.state.market_service:
-                app.state.market_service.set_poll_interval(config["ws_update_interval"])
-                await app.state.market_service.update_symbols(symbols)
+            market_service = getattr(app.state, "market_service", None)
+            if market_service:
+                await market_service.set_sub_account(config.get("okx_sub_account"))
+                market_service.set_poll_interval(config["ws_update_interval"])
+                await market_service.update_symbols(symbols)
             scheduler = getattr(app.state, "prompt_scheduler", None)
             if scheduler:
                 await scheduler.update_interval(config["auto_prompt_interval"])

@@ -514,6 +514,41 @@ async def load_llm_model(default: str | None = None) -> str | None:
     return default
 
 
+async def save_okx_sub_account(sub_account: str | None) -> None:
+    pool = await get_postgres_pool()
+    payload = json.dumps({"sub_account": sub_account} if sub_account else {})
+    await pool.execute(
+        """
+        INSERT INTO runtime_settings (key, value, updated_at)
+        VALUES ('okx_sub_account', $1::jsonb, NOW())
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+        """,
+        payload,
+    )
+
+
+async def load_okx_sub_account(default: str | None = None) -> str | None:
+    pool = await get_postgres_pool()
+    row = await pool.fetchrow("SELECT value FROM runtime_settings WHERE key = 'okx_sub_account'")
+    if not row:
+        return default
+    value = row["value"]
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return value or default
+    else:
+        parsed = value
+    if isinstance(parsed, dict):
+        candidate = parsed.get("sub_account") or parsed.get("value")
+        if candidate:
+            return str(candidate).strip() or None
+    if isinstance(parsed, str) and parsed:
+        return parsed.strip() or default
+    return default
+
+
 async def get_prompt_version(version_id: str) -> dict[str, Any] | None:
     pool = await get_postgres_pool()
     row = await pool.fetchrow(
@@ -602,10 +637,12 @@ __all__ = [
     "init_postgres_pool",
     "load_guardrails",
     "load_llm_model",
+    "load_okx_sub_account",
     "insert_equity_point",
     "insert_executed_trade",
     "insert_prompt_run",
     "insert_prompt_version",
+    "save_okx_sub_account",
     "save_llm_model",
     "save_guardrails",
     "set_enabled_trading_pairs",

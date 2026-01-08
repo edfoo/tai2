@@ -11,10 +11,14 @@ class Settings(BaseSettings):
     okx_api_key: Optional[str] = Field(default=None, alias="OKX_API_KEY")
     okx_secret_key: Optional[str] = Field(default=None, alias="OKX_SECRET_KEY")
     okx_passphrase: Optional[str] = Field(default=None, alias="OKX_PASSPHRASE")
+    okx_sub_account: Optional[str] = Field(default=None, alias="OKX_SUB_ACCOUNT")
     openrouter_api_key: Optional[str] = Field(default=None, alias="OPENROUTER_API_KEY")
     database_url: Optional[str] = Field(default=None, alias="DATABASE_URL")
     redis_url: Optional[str] = Field(default=None, alias="REDIS_URL")
     ws_update_interval: int = Field(default=180, alias="WS_UPDATE_INTERVAL", ge=1)
+    snapshot_max_age_seconds: int = Field(
+        default=900, alias="SNAPSHOT_MAX_AGE_SECONDS", ge=60
+    )
     trading_pairs_raw: str = Field(default="BTC-USDT-SWAP", alias="TRADING_PAIRS")
 
     @property

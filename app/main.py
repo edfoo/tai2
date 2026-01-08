@@ -19,6 +19,7 @@ from app.db.postgres import (
     init_postgres_pool,
     load_guardrails,
     load_llm_model,
+    load_okx_sub_account,
 )
 from app.services.llm_service import LLMService
 from app.services.market_service import MarketService
@@ -35,6 +36,31 @@ from app.ui.pages import register_pages
 logger = logging.getLogger(__name__)
 
 
+class BackendEventHandler(logging.Handler):
+    """Mirror application logs into the Debug page backend log."""
+
+    def __init__(self, sink):
+        super().__init__()
+        self._sink = sink
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            message = self.format(record)
+        except Exception:  # pragma: no cover - defensive
+            message = record.getMessage()
+        timestamp = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+        entry = {
+            "timestamp": timestamp,
+            "message": message,
+            "level": (record.levelname or "INFO").lower(),
+            "source": "backend",
+        }
+        try:
+            self._sink(entry)
+        except Exception:  # pragma: no cover - defensive
+            pass
+
+
 def _create_lifespan(enable_background_services: bool):
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -46,6 +72,13 @@ def _create_lifespan(enable_background_services: bool):
         app.state.backend_events = deque(maxlen=200)
         app.state.frontend_events = deque(maxlen=200)
         app.state.websocket_events = deque(maxlen=200)
+        backend_handler = BackendEventHandler(app.state.backend_events.append)
+        backend_handler.setLevel(logging.INFO)
+        backend_handler.setFormatter(logging.Formatter("%(message)s"))
+        app_logger = logging.getLogger("app")
+        app_logger.setLevel(logging.INFO)
+        app_logger.addHandler(backend_handler)
+        app.state.backend_log_handler = backend_handler
         app.state.runtime_config = {
             "ws_update_interval": settings.ws_update_interval,
             "llm_system_prompt": DEFAULT_SYSTEM_PROMPT,
@@ -65,6 +98,7 @@ def _create_lifespan(enable_background_services: bool):
             "execution_order_type": "market",
             "execution_min_size": 1.0,
             "fee_window_hours": 24.0,
+            "okx_sub_account": settings.okx_sub_account,
         }
         app.state.llm_service = LLMService(model_id=app.state.runtime_config["llm_model_id"])
 
@@ -110,6 +144,15 @@ def _create_lifespan(enable_background_services: bool):
                         app.state.runtime_config["llm_system_prompt"] = latest_version["system_prompt"]
                         app.state.runtime_config["llm_decision_prompt"] = latest_version["decision_prompt"]
                         app.state.runtime_config["prompt_version_name"] = latest_version["name"]
+                try:
+                    stored_sub_account = await load_okx_sub_account(
+                        app.state.runtime_config.get("okx_sub_account")
+                    )
+                except Exception as exc:  # pragma: no cover - optional
+                    logger.error("Failed to load OKX sub-account preference: %s", exc)
+                else:
+                    if stored_sub_account is not None:
+                        app.state.runtime_config["okx_sub_account"] = stored_sub_account
         elif not enable_background_services:
             logger.info("Background DB init disabled; skipping Postgres init")
         else:
@@ -128,6 +171,7 @@ def _create_lifespan(enable_background_services: bool):
                     symbols=trading_pairs,
                     log_sink=lambda msg: app.state.backend_events.append(msg),
                     ohlc_bar=app.state.runtime_config.get("ta_timeframe"),
+                    sub_account=app.state.runtime_config.get("okx_sub_account"),
                 )
                 app.state.market_service = market_service
                 await market_service.start()
@@ -146,6 +190,10 @@ def _create_lifespan(enable_background_services: bool):
         try:
             yield
         finally:
+            handler = getattr(app.state, "backend_log_handler", None)
+            if handler:
+                logging.getLogger("app").removeHandler(handler)
+                handler.close()
             scheduler = getattr(app.state, "prompt_scheduler", None)
             if scheduler:
                 await scheduler.stop()
