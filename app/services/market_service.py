@@ -150,13 +150,7 @@ class MarketService:
         while True:
             interval = max(1, self._poll_interval)
             try:
-                snapshot = await self._build_snapshot()
-                if snapshot:
-                    await self.state_service.set_market_snapshot(snapshot)
-                    await self._persist_equity(snapshot)
-                    self._emit_debug(
-                        f"Snapshot @ {snapshot['generated_at']} price={snapshot.get('ticker', {}).get('last', 'n/a')}"
-                    )
+                await self.refresh_snapshot(reason="poller")
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # pragma: no cover - defensive logging
@@ -322,6 +316,20 @@ class MarketService:
         mode = "master routing" if self._sub_account_use_master else "scoped credentials"
         self._emit_debug(f"Sub-account preference updated to {label} ({mode})")
         await self._publish_snapshot()
+
+    async def refresh_snapshot(self, reason: str | None = None) -> dict[str, Any] | None:
+        snapshot = await self._build_snapshot()
+        if not snapshot:
+            return None
+        await self.state_service.set_market_snapshot(snapshot)
+        await self._persist_equity(snapshot)
+        ticker = snapshot.get("ticker") or {}
+        price = ticker.get("last") or ticker.get("px") or "n/a"
+        label = reason or "manual"
+        self._emit_debug(
+            f"Snapshot[{label}] @ {snapshot.get('generated_at')} price={price}"
+        )
+        return snapshot
 
     @staticmethod
     def _normalize_okx_flag(flag: str | int | None) -> str:

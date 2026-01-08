@@ -133,6 +133,9 @@ def register_pages(app: FastAPI) -> None:
         refresh_label: dict[str, ui.label | None] = {"widget": None}
         status_label: dict[str, ui.label | None] = {"widget": None}
         stale_indicator: dict[str, ui.element | None] = {"widget": None}
+        manual_refresh_button: dict[str, ui.button | None] = {"widget": None}
+        manual_refresh_state = {"busy": False}
+        page_client = ui.context.client
 
         def set_ws_status(active: bool) -> None:
             label = status_label["widget"]
@@ -165,6 +168,11 @@ def register_pages(app: FastAPI) -> None:
                             )
                             notice.set_visibility(False)
                             stale_indicator["widget"] = notice
+                            refresh_btn = ui.button("Refresh Snapshot", icon="refresh")
+                            refresh_btn.classes(
+                                "text-xs bg-slate-900 text-white px-3 py-1 rounded-lg hover:bg-slate-800"
+                            )
+                            manual_refresh_button["widget"] = refresh_btn
 
                     with ui.row().classes("w-full gap-4"):
                         balance_card = badge_stat("Account Equity", "--")
@@ -452,6 +460,45 @@ def register_pages(app: FastAPI) -> None:
             option = equity_chart.options
             option["series"][0]["data"] = points
             equity_chart.update()
+
+        async def trigger_manual_refresh() -> None:
+            if manual_refresh_state["busy"]:
+                return
+            manual_refresh_state["busy"] = True
+            button = manual_refresh_button.get("widget")
+            with page_client:
+                if button:
+                    button.disable()
+            try:
+                market_service = getattr(app.state, "market_service", None)
+                if not market_service:
+                    with page_client:
+                        ui.notify("Market service unavailable", color="warning")
+                    return
+                snapshot = await market_service.refresh_snapshot(reason="manual")
+                await store.refresh_now()
+                await refresh_equity_chart()
+                if snapshot:
+                    with page_client:
+                        ui.notify("Live data refreshed", color="positive")
+                else:
+                    with page_client:
+                        ui.notify("Snapshot refresh returned no data", color="warning")
+            except Exception as exc:  # pragma: no cover - UI feedback
+                with page_client:
+                    ui.notify(f"Refresh failed: {exc}", color="negative")
+            finally:
+                manual_refresh_state["busy"] = False
+                with page_client:
+                    if button:
+                        button.enable()
+
+        refresh_btn_widget = manual_refresh_button.get("widget")
+        if refresh_btn_widget:
+            refresh_btn_widget.on(
+                "click",
+                lambda _: asyncio.create_task(trigger_manual_refresh()),
+            )
 
         def update_snapshot_health(snapshot: dict[str, Any] | None) -> None:
             notice = stale_indicator.get("widget")
