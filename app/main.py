@@ -89,17 +89,13 @@ def _create_lifespan(enable_background_services: bool):
             "httpx",
             "app.services.prompt_scheduler",
         }
-        attached_loggers: list[logging.Logger] = []
         root_logger = logging.getLogger()
+        attached_loggers: list[logging.Logger] = []
         if backend_handler not in root_logger.handlers:
             root_logger.addHandler(backend_handler)
             attached_loggers.append(root_logger)
         for name in target_logger_names:
-            logger_ref = logging.getLogger(name)
-            logger_ref.setLevel(logging.INFO)
-            if backend_handler not in logger_ref.handlers:
-                logger_ref.addHandler(backend_handler)
-                attached_loggers.append(logger_ref)
+            logging.getLogger(name).setLevel(logging.INFO)
         app.state.backend_log_handler = backend_handler
         app.state.backend_log_targets = attached_loggers
         app.state.runtime_config = {
