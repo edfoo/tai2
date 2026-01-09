@@ -1461,6 +1461,7 @@ def register_pages(app: FastAPI) -> None:
         config.setdefault("okx_sub_account", settings.okx_sub_account)
         config.setdefault("okx_sub_account_use_master", settings.okx_sub_account_use_master)
         config.setdefault("okx_api_flag", str(settings.okx_api_flag or "0") or "0")
+        config.setdefault("enable_websocket", True)
         response_schemas = config.setdefault("llm_response_schemas", {})
         guardrails = config.setdefault("guardrails", PromptBuilder._default_guardrails())
         guardrails.setdefault(
@@ -1633,6 +1634,12 @@ def register_pages(app: FastAPI) -> None:
                     value=config.get("ws_update_interval", 180),
                     min=1,
                 ).classes("w-full md:w-48")
+                websocket_switch = ui.switch(
+                    "Live Websocket Stream",
+                    value=config.get("enable_websocket", True),
+                ).classes("w-full md:w-48").props(
+                    "hint='Disabling falls back to REST polling every interval' persistent-hint"
+                )
                 fee_window_input = ui.number(
                     label="Fee Window (hours)",
                     value=config.get("fee_window_hours", 24.0),
@@ -2272,6 +2279,7 @@ def register_pages(app: FastAPI) -> None:
 
         async def save_settings(event: Any | None = None) -> None:
             config["ws_update_interval"] = int(ws_interval_input.value or 5)
+            config["enable_websocket"] = bool(websocket_switch.value)
             config["auto_prompt_enabled"] = bool(auto_prompt_switch.value)
             config["execution_enabled"] = bool(execution_switch.value)
             config["llm_system_prompt"] = prompt_input.value
@@ -2455,6 +2463,7 @@ def register_pages(app: FastAPI) -> None:
                     config.get("okx_sub_account_use_master"),
                 )
                 market_service.set_poll_interval(config["ws_update_interval"])
+                await market_service.set_websocket_enabled(config.get("enable_websocket", True))
                 await market_service.update_symbols(symbols)
             scheduler = getattr(app.state, "prompt_scheduler", None)
             if scheduler:

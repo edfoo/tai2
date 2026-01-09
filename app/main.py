@@ -78,7 +78,7 @@ def _create_lifespan(enable_background_services: bool):
         app.state.frontend_log_buffer = deque(maxlen=1000)
         app.state.websocket_log_buffer = deque(maxlen=1000)
         backend_handler = BackendEventHandler(app.state.backend_events.append)
-        backend_handler.setLevel(logging.INFO)
+        backend_handler.setLevel(logging.DEBUG)
         backend_handler.setFormatter(logging.Formatter("%(message)s"))
         target_logger_names = {
             "app",
@@ -102,6 +102,7 @@ def _create_lifespan(enable_background_services: bool):
         app.state.backend_log_targets = attached_loggers
         app.state.runtime_config = {
             "ws_update_interval": settings.ws_update_interval,
+            "enable_websocket": True,
             "llm_system_prompt": DEFAULT_SYSTEM_PROMPT,
             "llm_decision_prompt": DEFAULT_DECISION_PROMPT,
             "llm_model_id": "openrouter/gpt-4o-mini",
@@ -237,6 +238,7 @@ def _create_lifespan(enable_background_services: bool):
                         False,
                     ),
                     okx_flag=app.state.runtime_config.get("okx_api_flag"),
+                    enable_websocket=app.state.runtime_config.get("enable_websocket", True),
                 )
                 app.state.market_service = market_service
                 await market_service.start()

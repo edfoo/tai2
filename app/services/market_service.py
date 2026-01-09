@@ -8,7 +8,7 @@ import time
 from collections import deque
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any, Callable, Deque, Iterable, Optional
+from typing import Any, Callable, Deque, Dict, Iterable, Optional
 
 import pandas as pd
 import pandas_ta as ta
@@ -51,6 +51,7 @@ else:  # pragma: no cover - optional dependency
     SafeWsPublicAsync = None
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 PUBLIC_WS_URL = "wss://ws.okx.com:8443/ws/v5/public"
 
 
@@ -120,6 +121,8 @@ class MarketService:
         self._poll_interval = max(1, self.settings.ws_update_interval)
         self._ohlc_bar = self._normalize_bar(ohlc_bar)
         self._log_sink = log_sink or (lambda msg: None)
+        self._ws_debug_interval = max(5.0, float(self._poll_interval))
+        self._ws_last_debug: Dict[str, float] = {}
 
     async def start(self) -> None:
         if self._poller_task:
@@ -220,7 +223,18 @@ class MarketService:
                 self._latest_liquidations[symbol] = data if isinstance(data, list) else []
             else:
                 continue
-            self._emit_debug(f"WS update: {channel}::{symbol}")
+            if self._should_emit_ws_debug(channel, symbol):
+                self._emit_debug(f"WS update: {channel}::{symbol}", mirror_logger=False)
+
+    def _should_emit_ws_debug(self, channel: str, symbol: str) -> bool:
+        key = f"{channel}:{symbol}"
+        interval = max(1.0, self._ws_debug_interval)
+        now = time.time()
+        last = self._ws_last_debug.get(key)
+        if last is None or now - last >= interval:
+            self._ws_last_debug[key] = now
+            return True
+        return False
 
     @staticmethod
     def _build_channel_args(symbols: Iterable[str]) -> list[dict[str, str]]:
@@ -299,7 +313,32 @@ class MarketService:
 
     def set_poll_interval(self, seconds: int) -> None:
         self._poll_interval = max(1, seconds)
+        self._ws_debug_interval = max(5.0, float(self._poll_interval))
         self._emit_debug(f"Poll interval updated to {self._poll_interval}s")
+
+    async def set_websocket_enabled(self, enabled: bool) -> None:
+        flag = bool(enabled)
+        if flag == self._enable_websocket:
+            return
+        self._enable_websocket = flag
+        if not flag:
+            self._emit_debug("Websocket streaming disabled; relying on REST poller")
+            if self._ws_task:
+                self._ws_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._ws_task
+                self._ws_task = None
+            if self._ws_client:
+                await self._ws_client.stop()
+                self._ws_client = None
+            self._subscribed_symbols.clear()
+            return
+        self._emit_debug("Websocket streaming enabled; starting listener")
+        if not self._poller_task:
+            return
+        if self._ws_task:
+            return
+        self._ws_task = asyncio.create_task(self._run_public_ws(), name="okx-ws")
 
     async def set_sub_account(self, value: str | None, use_master: bool | None = None) -> None:
         normalized = (value or "").strip() or None
@@ -990,11 +1029,14 @@ class MarketService:
         except (TypeError, ValueError):
             return None
 
-    def _emit_debug(self, message: str) -> None:
+    def _emit_debug(self, message: str, *, mirror_logger: bool = True) -> None:
+        text = str(message)
         try:
-            self._log_sink(message)
+            self._log_sink(text)
         except Exception:  # pragma: no cover - defensive
             logger.debug("Debug sink failed", exc_info=True)
+        if mirror_logger:
+            logger.debug(text)
 
     @staticmethod
     def _prune_trade_history(history: Deque[float], now: float, window: int) -> None:
