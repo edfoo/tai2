@@ -16,6 +16,7 @@ from app.db.postgres import (
     fetch_prompt_versions,
     fetch_prompt_runs,
     fetch_recent_trades,
+    load_execution_settings,
     insert_prompt_version,
     save_guardrails,
     save_execution_settings,
@@ -1979,6 +1980,34 @@ def register_pages(app: FastAPI) -> None:
             }
             return snapshot
 
+        async def hydrate_execution_settings() -> None:
+            try:
+                stored = await load_execution_settings()
+            except Exception as exc:  # pragma: no cover - optional DB
+                with client:
+                    ui.notify(f"Failed to load execution settings: {exc}", color="warning")
+                return
+            if not stored:
+                return
+            with client:
+                min_size = stored.get("min_size")
+                if isinstance(min_size, (int, float)) and min_size > 0:
+                    config["execution_min_size"] = float(min_size)
+                    execution_min_size_input.value = float(min_size)
+                    execution_min_size_input.update()
+                stored_min_sizes = stored.get("min_sizes")
+                if isinstance(stored_min_sizes, dict) and stored_min_sizes:
+                    cleaned = {
+                        str(symbol).upper(): float(value)
+                        for symbol, value in stored_min_sizes.items()
+                        if isinstance(value, (int, float)) and value > 0
+                    }
+                    if cleaned:
+                        config["execution_min_sizes"] = cleaned
+                        min_size_overrides.clear()
+                        min_size_overrides.update(cleaned)
+                        render_min_size_rows()
+
         def build_context_structure() -> dict[str, Any]:
             return {
                 "generated_at": "<ISO8601 timestamp from latest snapshot>",
@@ -2110,6 +2139,7 @@ def register_pages(app: FastAPI) -> None:
         register_preview_listeners()
         update_payload_preview()
         update_model_cost_label(initial_model_value)
+        asyncio.create_task(hydrate_execution_settings())
 
         async def load_trading_pairs() -> None:
             market_service = getattr(app.state, "market_service", None)

@@ -585,12 +585,26 @@ async def load_okx_sub_account(
 
 async def save_execution_settings(config: dict[str, Any]) -> None:
     pool = await get_postgres_pool()
+    min_sizes = config.get("min_sizes")
+    if isinstance(min_sizes, dict):
+        normalized_min_sizes = {}
+        for key, value in min_sizes.items():
+            try:
+                normalized_value = float(value)
+            except (TypeError, ValueError):
+                continue
+            if normalized_value <= 0:
+                continue
+            normalized_min_sizes[str(key).upper()] = normalized_value
+    else:
+        normalized_min_sizes = None
     payload = json.dumps(
         {
             "enabled": bool(config.get("enabled")),
             "trade_mode": (config.get("trade_mode") or "cross").lower(),
             "order_type": (config.get("order_type") or "market").lower(),
             "min_size": float(config.get("min_size") or 0.0),
+            "min_sizes": normalized_min_sizes,
         }
     )
     await pool.execute(
@@ -630,6 +644,19 @@ async def load_execution_settings() -> dict[str, Any]:
             result["min_size"] = float(parsed["min_size"])
         except (TypeError, ValueError):
             pass
+    min_sizes = parsed.get("min_sizes")
+    if isinstance(min_sizes, dict):
+        normalized: dict[str, float] = {}
+        for key, value in min_sizes.items():
+            try:
+                normalized_value = float(value)
+            except (TypeError, ValueError):
+                continue
+            if normalized_value <= 0:
+                continue
+            normalized[str(key).upper()] = normalized_value
+        if normalized:
+            result["min_sizes"] = normalized
     return result
 
 
