@@ -4,7 +4,7 @@ import asyncio
 import json
 import time
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 
 from fastapi import FastAPI
 from nicegui import ui
@@ -83,6 +83,21 @@ def register_pages(app: FastAPI) -> None:
             return True, f"{delta}s old (limit {max_age}s)"
         return False, f"{delta}s old (limit {max_age}s)"
 
+    def _ticker_price(ticker: dict[str, Any] | None) -> float | None:
+        if not ticker:
+            return None
+        for key in ("last", "lastPx", "px", "close", "askPx", "bidPx"):
+            value = ticker.get(key)
+            if value in (None, ""):
+                continue
+            try:
+                price = float(value)
+            except (TypeError, ValueError):
+                continue
+            if price > 0:
+                return price
+        return None
+
     def make_snapshot_store() -> SnapshotStore:
         async def fetch_snapshot() -> dict[str, Any]:
             state_service = getattr(app.state, "state_service", None)
@@ -117,7 +132,7 @@ def register_pages(app: FastAPI) -> None:
                         if label == active:
                             link.classes("bg-white/10 text-white font-semibold")
                         nav_refs[label] = link
-                ui.label(datetime.utcnow().strftime("%H:%M UTC")).classes(
+                ui.label(datetime.now(timezone.utc).strftime("%H:%M UTC")).classes(
                     "text-xs text-white/70"
                 )
         return nav_refs
@@ -519,7 +534,7 @@ def register_pages(app: FastAPI) -> None:
             label = refresh_label["widget"]
             if label:
                 if snapshot:
-                    label.set_text(f"Last refresh: {datetime.utcnow().strftime('%H:%M:%S UTC')}")
+                    label.set_text(f"Last refresh: {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}")
                 else:
                     label.set_text("Last refresh: --")
             if not snapshot:
@@ -994,7 +1009,7 @@ def register_pages(app: FastAPI) -> None:
 
             summary = f"{action_text}-{conf_display}-{strategy_signal.get('reason')}"
             if summary != last_logged_signal.get("value") and action_text != "--":
-                timestamp = datetime.utcnow().strftime("%H:%M:%S")
+                timestamp = datetime.now(timezone.utc).strftime("%H:%M:%S")
                 strategy_feed.push(
                     f"{timestamp} | {selected_symbol} | {action_text} ({conf_display.split(': ')[1]})"
                 )
@@ -1082,7 +1097,7 @@ def register_pages(app: FastAPI) -> None:
                 return
             confidence = signal.get("confidence")
             confidence_pct = f"{confidence * 100:.0f}%" if isinstance(confidence, (int, float)) else "--"
-            timestamp = datetime.utcnow().strftime("%H:%M:%S")
+            timestamp = datetime.now(timezone.utc).strftime("%H:%M:%S")
             entry = f"{timestamp} | {symbol} | {kind}: {action} ({confidence_pct})"
             strategy_feed.push(entry)
             app.state.frontend_events.append(entry)
@@ -1195,7 +1210,7 @@ def register_pages(app: FastAPI) -> None:
                 )
                 ui.chat_message(response, name="engine").classes("bg-emerald-50 text-emerald-900")
             app.state.frontend_events.append(
-                f"User Q at {datetime.utcnow().isoformat()}"
+                f"User Q at {datetime.now(timezone.utc).isoformat()}"
             )
 
         send_button.on("click", lambda _: asyncio.create_task(handle_question()))
@@ -1351,7 +1366,7 @@ def register_pages(app: FastAPI) -> None:
 
         def _format_timestamp(raw: str | None) -> str:
             if not raw:
-                return datetime.utcnow().strftime("%H:%M:%S UTC")
+                return datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
             try:
                 parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
                 return parsed.strftime("%H:%M:%S UTC")
@@ -1359,7 +1374,7 @@ def register_pages(app: FastAPI) -> None:
                 return raw
 
         def _render_entry(entry: Any) -> str:
-            now_label = datetime.utcnow().strftime("%H:%M:%S UTC")
+            now_label = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
             if isinstance(entry, dict):
                 message = entry.get("message") or entry.get("detail")
                 if not message:
@@ -1440,6 +1455,7 @@ def register_pages(app: FastAPI) -> None:
         config.setdefault("execution_trade_mode", "cross")
         config.setdefault("execution_order_type", "market")
         config.setdefault("execution_min_size", 1.0)
+        config.setdefault("execution_min_sizes", {})
         config.setdefault("fee_window_hours", 24.0)
         config.setdefault("okx_sub_account", settings.okx_sub_account)
         config.setdefault("okx_sub_account_use_master", settings.okx_sub_account_use_master)
@@ -1453,6 +1469,41 @@ def register_pages(app: FastAPI) -> None:
         prompt_versions_cache: dict[str, dict[str, Any]] = {}
         prompt_version_options: dict[str, str] = {}
         client = ui.context.client
+        price_cache: dict[str, tuple[float, float]] = {}
+
+        async def lookup_symbol_price(symbol: str | None) -> float | None:
+            normalized = (symbol or "").strip().upper()
+            if not normalized:
+                return None
+            now = time.time()
+            cached = price_cache.get(normalized)
+            if cached and now - cached[0] < 15:
+                return cached[1]
+            market_service = getattr(app.state, "market_service", None)
+            getter = getattr(market_service, "get_last_price", None)
+            if callable(getter):
+                price = getter(normalized)
+                if price:
+                    price_cache[normalized] = (now, price)
+                    return price
+            state_service = getattr(app.state, "state_service", None)
+            if state_service:
+                try:
+                    snapshot = await state_service.get_market_snapshot()
+                except Exception:  # pragma: no cover - defensive snapshot access
+                    snapshot = None
+                if snapshot:
+                    market_entry = (snapshot.get("market_data") or {}).get(normalized) or {}
+                    ticker = market_entry.get("ticker")
+                    price = _ticker_price(ticker)
+                    if not price:
+                        primary_symbol = str(snapshot.get("symbol") or "").upper()
+                        if primary_symbol == normalized:
+                            price = _ticker_price(snapshot.get("ticker"))
+                    if price:
+                        price_cache[normalized] = (time.time(), price)
+                        return price
+            return None
 
         model_metadata: dict[str, dict[str, Any]] = {
             item["id"]: item for item in DEFAULT_MODEL_OPTIONS
@@ -1632,6 +1683,138 @@ def register_pages(app: FastAPI) -> None:
                 ).classes("w-full md:w-48").props(
                     "hint='Prevents dust trades; measured in contracts/base units' persistent-hint"
                 )
+            with ui.column().classes("w-full gap-2"):
+                ui.label("Per-Symbol Overrides (optional)").classes("text-xs text-slate-500")
+                min_size_rows = ui.column().classes("w-full gap-2")
+                min_size_overrides = {
+                    str(symbol).upper(): float(value)
+                    for symbol, value in (config.get("execution_min_sizes", {}) or {}).items()
+                    if isinstance(value, (int, float)) and value > 0
+                }
+                override_widgets: dict[str, ui.number] = {}
+                quote_inputs: dict[str, ui.number] = {}
+                price_labels: dict[str, ui.label] = {}
+
+                def sync_widget(sym_key: str, value: float | None) -> None:
+                    widget = override_widgets.get(sym_key)
+                    if widget is None:
+                        return
+                    widget.value = value
+                    widget.update()
+
+                def update_price_label(sym_key: str, price: float | None) -> None:
+                    label = price_labels.get(sym_key)
+                    if not label:
+                        return
+                    if price:
+                        label.set_text(f"Price ${price:,.2f}")
+                    else:
+                        label.set_text("Price --")
+                    label.update()
+
+                async def handle_usdt_conversion(sym_key: str) -> None:
+                    widget = quote_inputs.get(sym_key)
+                    if widget is None:
+                        return
+                    amount = widget.value
+                    if amount in (None, "") or float(amount) <= 0:
+                        with client:
+                            ui.notify("Enter a positive USDT amount", color="warning")
+                        return
+                    price = await lookup_symbol_price(sym_key)
+                    if not price:
+                        with client:
+                            ui.notify(f"No live price for {sym_key}", color="warning")
+                        return
+                    size = max(0.0001, round(float(amount) / price, 6))
+                    min_size_overrides[sym_key] = size
+                    sync_widget(sym_key, size)
+                    update_price_label(sym_key, price)
+                    with client:
+                        ui.notify(f"{sym_key} min size set to {size}", color="positive")
+
+                async def refresh_price_label(sym_key: str) -> None:
+                    price = await lookup_symbol_price(sym_key)
+                    update_price_label(sym_key, price)
+
+                def render_min_size_rows() -> None:
+                    min_size_rows.clear()
+                    override_widgets.clear()
+                    quote_inputs.clear()
+                    price_labels.clear()
+                    symbols_list = sorted(config.get("trading_pairs", []))
+                    pending_price_fetch: list[str] = []
+                    for symbol in symbols_list:
+                        normalized = str(symbol).upper()
+                        with min_size_rows:
+                            with ui.row().classes("w-full items-start gap-2"):
+                                ui.label(symbol).classes("text-sm font-semibold text-slate-600 w-32")
+                                with ui.column().classes("flex-1 gap-2"):
+                                    input_widget = ui.number(
+                                        label="Min size (base units)",
+                                        value=min_size_overrides.get(normalized),
+                                        min=0.0001,
+                                        step=0.0001,
+                                        placeholder="Follow default",
+                                    ).classes("w-full").props("outlined dense")
+                                    override_widgets[normalized] = input_widget
+
+                                    def create_handler(sym_key: str) -> Callable[[Any], None]:
+                                        def handler(e: Any) -> None:
+                                            try:
+                                                if e.value in (None, ""):
+                                                    min_size_overrides.pop(sym_key, None)
+                                                else:
+                                                    value = float(e.value)
+                                                    if value <= 0:
+                                                        min_size_overrides.pop(sym_key, None)
+                                                    else:
+                                                        min_size_overrides[sym_key] = value
+                                            except (TypeError, ValueError):
+                                                min_size_overrides.pop(sym_key, None)
+                                        return handler
+
+                                    input_widget.on_value_change(create_handler(normalized))
+
+                                    with ui.row().classes("w-full items-center gap-2 flex-wrap"):
+                                        usdt_input = ui.number(
+                                            label="Budget (USDT)",
+                                            value=None,
+                                            min=0.01,
+                                            step=1,
+                                            placeholder="e.g. 25",
+                                        ).classes("flex-1 md:w-48").props("outlined dense")
+                                        quote_inputs[normalized] = usdt_input
+                                        ui.button(
+                                            "Convert",
+                                            icon="currency_exchange",
+                                            on_click=lambda sym_key=normalized: asyncio.create_task(
+                                                handle_usdt_conversion(sym_key)
+                                            ),
+                                        ).props("outline dense")
+                                        price_label = ui.label("Price --").classes(
+                                            "text-xs text-slate-500 w-32 text-right"
+                                        )
+                                        price_labels[normalized] = price_label
+                                    pending_price_fetch.append(normalized)
+
+                                def clear_override(sym_key: str) -> Callable[[Any], None]:
+                                    def _handler(_: Any) -> None:
+                                        min_size_overrides.pop(sym_key, None)
+                                        sync_widget(sym_key, None)
+                                        update_price_label(sym_key, None)
+                                        quote_widget = quote_inputs.get(sym_key)
+                                        if quote_widget:
+                                            quote_widget.value = None
+                                            quote_widget.update()
+                                    return _handler
+
+                                ui.button("Clear", on_click=clear_override(normalized)).props("flat dense")
+
+                    for sym_key in pending_price_fetch:
+                        asyncio.create_task(refresh_price_label(sym_key))
+
+                render_min_size_rows()
                 okx_sub_account_input = ui.input(
                     label="OKX Sub-Account",
                     value=config.get("okx_sub_account") or "",
@@ -1877,6 +2060,7 @@ def register_pages(app: FastAPI) -> None:
                     "trade_mode": config.get("execution_trade_mode", "cross"),
                     "order_type": config.get("execution_order_type", "market"),
                     "min_size": config.get("execution_min_size", 1.0),
+                    "min_sizes": config.get("execution_min_sizes", {}),
                 },
                 "notes": config.get("llm_notes") or "<optional runtime notes>",
                 "prompt_version_id": config.get("prompt_version_id"),
@@ -2104,6 +2288,11 @@ def register_pages(app: FastAPI) -> None:
                     float,
                 ),
             )
+            config["execution_min_sizes"] = {
+                str(symbol).upper(): float(value)
+                for symbol, value in min_size_overrides.items()
+                if isinstance(value, (int, float)) and value > 0
+            }
             try:
                 await save_execution_settings(
                     {
@@ -2111,6 +2300,7 @@ def register_pages(app: FastAPI) -> None:
                         "trade_mode": config["execution_trade_mode"],
                         "order_type": config["execution_order_type"],
                         "min_size": config["execution_min_size"],
+                        "min_sizes": config["execution_min_sizes"],
                     }
                 )
             except Exception as exc:  # pragma: no cover - db optional

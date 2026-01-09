@@ -2,7 +2,7 @@ import logging
 import os
 from collections import deque
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -49,7 +49,8 @@ class BackendEventHandler(logging.Handler):
             message = self.format(record)
         except Exception:  # pragma: no cover - defensive
             message = record.getMessage()
-        timestamp = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+        now_utc = datetime.now(timezone.utc).replace(microsecond=0)
+        timestamp = now_utc.isoformat().replace("+00:00", "Z")
         entry = {
             "timestamp": timestamp,
             "message": message,
@@ -117,6 +118,7 @@ def _create_lifespan(enable_background_services: bool):
             "execution_trade_mode": "cross",
             "execution_order_type": "market",
             "execution_min_size": 1.0,
+            "execution_min_sizes": {},
             "fee_window_hours": 24.0,
             "okx_sub_account": settings.okx_sub_account,
             "okx_sub_account_use_master": settings.okx_sub_account_use_master,
@@ -208,6 +210,9 @@ def _create_lifespan(enable_background_services: bool):
                         min_size = execution_settings.get("min_size")
                         if min_size is not None:
                             app.state.runtime_config["execution_min_size"] = float(min_size)
+                        min_sizes = execution_settings.get("min_sizes")
+                        if isinstance(min_sizes, dict):
+                            app.state.runtime_config["execution_min_sizes"] = min_sizes
         elif not enable_background_services:
             logger.info("Background DB init disabled; skipping Postgres init")
         else:
@@ -366,7 +371,7 @@ def create_app(enable_background_services: bool | None = None) -> FastAPI:
         entry = {
             "message": message,
             "symbol": (snapshot or {}).get("symbol"),
-            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "source": "websocket",
         }
         events.append(entry)

@@ -410,6 +410,16 @@ class MarketService:
             self._latest_long_short_ratio.pop(symbol, None)
             self._last_long_short_fetch.pop(symbol, None)
 
+    def get_cached_ticker(self, symbol: str | None) -> dict[str, Any] | None:
+        normalized = self._normalize_symbols([symbol]) if symbol else []
+        if not normalized:
+            return None
+        return self._latest_ticker.get(normalized[0])
+
+    def get_last_price(self, symbol: str | None) -> float | None:
+        ticker = self.get_cached_ticker(symbol)
+        return self._price_from_ticker(ticker)
+
     async def _publish_snapshot(self) -> None:
         try:
             snapshot = await self._build_snapshot()
@@ -1285,6 +1295,22 @@ class MarketService:
         if isinstance(response, list):
             return response
         return []
+
+    @staticmethod
+    def _price_from_ticker(ticker: dict[str, Any] | None) -> float | None:
+        if not ticker:
+            return None
+        for key in ("last", "lastPx", "px", "close", "askPx", "bidPx"):
+            value = ticker.get(key)
+            if value in (None, ""):
+                continue
+            try:
+                price = float(value)
+            except (TypeError, ValueError):
+                continue
+            if price > 0:
+                return price
+        return None
 
     @staticmethod
     def _normalize_order_book(data: dict[str, Any]) -> dict[str, Any]:
