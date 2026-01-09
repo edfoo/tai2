@@ -1310,7 +1310,7 @@ def register_pages(app: FastAPI) -> None:
                 ):
                     ui.label("Backend Logs").classes("text-lg font-semibold")
                     ui.label("Engine + scheduler diagnostics").classes("text-xs text-slate-500")
-                    backend_log = ui.log(max_lines=200).classes(
+                    backend_log = ui.log(max_lines=2000).classes(
                         "w-full h-256 font-mono text-xs bg-slate-900/90 text-white rounded-xl"
                     )
                 with ui.card().classes(
@@ -1324,7 +1324,7 @@ def register_pages(app: FastAPI) -> None:
                             on_click=lambda: app.state.frontend_events.append("Frontend heartbeat triggered"),
                         ).props("outlined dense")
                     ui.label("UI level actions + notifications").classes("text-xs text-slate-500")
-                    frontend_log = ui.log(max_lines=200).classes(
+                    frontend_log = ui.log(max_lines=1000).classes(
                         "w-full h-64 font-mono text-xs bg-slate-900/90 text-white rounded-xl"
                     )
                 with ui.card().classes(
@@ -1334,13 +1334,20 @@ def register_pages(app: FastAPI) -> None:
                     ui.label("Last snapshots streamed to clients").classes(
                         "text-xs text-slate-500"
                     )
-                    websocket_log = ui.log(max_lines=200).classes(
+                    websocket_log = ui.log(max_lines=1000).classes(
                         "w-full h-64 font-mono text-xs bg-slate-900/90 text-white rounded-xl"
                     )
 
-        backend_seen = {"idx": 0}
-        frontend_seen = {"idx": 0}
-        websocket_seen = {"idx": 0}
+        backend_seen = {"idx": len(getattr(app.state, "backend_events", []))}
+        frontend_seen = {"idx": len(getattr(app.state, "frontend_events", []))}
+        websocket_seen = {"idx": len(getattr(app.state, "websocket_events", []))}
+
+        for line in list(getattr(app.state, "backend_log_buffer", [])):
+            backend_log.push(line)
+        for line in list(getattr(app.state, "frontend_log_buffer", [])):
+            frontend_log.push(line)
+        for line in list(getattr(app.state, "websocket_log_buffer", [])):
+            websocket_log.push(line)
 
         def _format_timestamp(raw: str | None) -> str:
             if not raw:
@@ -1382,28 +1389,47 @@ def register_pages(app: FastAPI) -> None:
             new_events = events[backend_seen["idx"] :]
             for entry in new_events:
                 if _looks_like_websocket(entry):
-                    websocket_log.push(_render_entry(entry))
+                    rendered_ws = _render_entry(entry)
+                    websocket_log.push(rendered_ws)
+                    buffer = getattr(app.state, "websocket_log_buffer", None)
+                    if buffer is not None:
+                        buffer.append(rendered_ws)
                     continue
-                backend_log.push(_render_entry(entry))
+                rendered = _render_entry(entry)
+                backend_log.push(rendered)
+                buffer = getattr(app.state, "backend_log_buffer", None)
+                if buffer is not None:
+                    buffer.append(rendered)
             backend_seen["idx"] = len(events)
 
         def push_frontend() -> None:
             events = list(getattr(app.state, "frontend_events", []))
             new_events = events[frontend_seen["idx"] :]
             for entry in new_events:
-                frontend_log.push(_render_entry(entry))
+                rendered = _render_entry(entry)
+                frontend_log.push(rendered)
+                buffer = getattr(app.state, "frontend_log_buffer", None)
+                if buffer is not None:
+                    buffer.append(rendered)
             frontend_seen["idx"] = len(events)
 
         def push_websocket() -> None:
             events = list(getattr(app.state, "websocket_events", []))
             new_events = events[websocket_seen["idx"] :]
             for entry in new_events:
-                websocket_log.push(_render_entry(entry))
+                rendered = _render_entry(entry)
+                websocket_log.push(rendered)
+                buffer = getattr(app.state, "websocket_log_buffer", None)
+                if buffer is not None:
+                    buffer.append(rendered)
             websocket_seen["idx"] = len(events)
 
         ui.timer(3, push_backend)
         ui.timer(3, push_frontend)
         ui.timer(3, push_websocket)
+        push_backend()
+        push_frontend()
+        push_websocket()
 
     def render_cfg_page() -> None:
         navigation("CFG")

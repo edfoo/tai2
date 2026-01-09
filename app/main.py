@@ -70,16 +70,35 @@ def _create_lifespan(enable_background_services: bool):
         app.state.state_service = None
         app.state.market_service = None
         app.state.prompt_scheduler = None
-        app.state.backend_events = deque(maxlen=200)
-        app.state.frontend_events = deque(maxlen=200)
-        app.state.websocket_events = deque(maxlen=200)
+        app.state.backend_events = deque(maxlen=2000)
+        app.state.frontend_events = deque(maxlen=1000)
+        app.state.websocket_events = deque(maxlen=1000)
+        app.state.backend_log_buffer = deque(maxlen=2000)
+        app.state.frontend_log_buffer = deque(maxlen=1000)
+        app.state.websocket_log_buffer = deque(maxlen=1000)
         backend_handler = BackendEventHandler(app.state.backend_events.append)
         backend_handler.setLevel(logging.INFO)
         backend_handler.setFormatter(logging.Formatter("%(message)s"))
-        app_logger = logging.getLogger("app")
-        app_logger.setLevel(logging.INFO)
-        app_logger.addHandler(backend_handler)
+        target_logger_names = {
+            "app",
+            "uvicorn",
+            "uvicorn.error",
+            "uvicorn.access",
+            "uvicorn.asgi",
+        }
+        attached_loggers: list[logging.Logger] = []
+        root_logger = logging.getLogger()
+        if backend_handler not in root_logger.handlers:
+            root_logger.addHandler(backend_handler)
+            attached_loggers.append(root_logger)
+        for name in target_logger_names:
+            logger_ref = logging.getLogger(name)
+            logger_ref.setLevel(logging.INFO)
+            if backend_handler not in logger_ref.handlers:
+                logger_ref.addHandler(backend_handler)
+                attached_loggers.append(logger_ref)
         app.state.backend_log_handler = backend_handler
+        app.state.backend_log_targets = attached_loggers
         app.state.runtime_config = {
             "ws_update_interval": settings.ws_update_interval,
             "llm_system_prompt": DEFAULT_SYSTEM_PROMPT,
@@ -233,7 +252,11 @@ def _create_lifespan(enable_background_services: bool):
         finally:
             handler = getattr(app.state, "backend_log_handler", None)
             if handler:
-                logging.getLogger("app").removeHandler(handler)
+                for logger_ref in getattr(app.state, "backend_log_targets", []):
+                    try:
+                        logger_ref.removeHandler(handler)
+                    except (ValueError, AttributeError):
+                        continue
                 handler.close()
             scheduler = getattr(app.state, "prompt_scheduler", None)
             if scheduler:
