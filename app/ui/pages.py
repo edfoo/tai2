@@ -160,7 +160,7 @@ def register_pages(app: FastAPI) -> None:
             label.set_text("WS: LIVE" if active else "WS: IDLE")
 
         with wrapper:
-            with ui.row().classes("w-full gap-6 flex-col xl:flex-row"):
+            with ui.row().classes("w-full gap-6 flex-col xl:flex-row xl:flex-nowrap xl:items-start"):
                 with ui.column().classes("flex-[7] w-full gap-4"):
                     header_row = ui.row().classes(
                         "w-full justify-between items-start flex-wrap gap-4"
