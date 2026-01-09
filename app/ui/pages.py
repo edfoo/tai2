@@ -1326,8 +1326,12 @@ def register_pages(app: FastAPI) -> None:
                 ):
                     ui.label("Backend Logs").classes("text-lg font-semibold")
                     ui.label("Engine + scheduler diagnostics").classes("text-xs text-slate-500")
-                    backend_log = ui.log(max_lines=2000).classes(
-                        "w-full h-256 font-mono text-xs bg-slate-900/90 text-white rounded-xl"
+                    backend_log = (
+                        ui.log(max_lines=2000)
+                        .classes(
+                            "w-full font-mono text-xs bg-slate-900/90 text-white rounded-xl"
+                        )
+                        .style("min-height: 32rem; max-height: 32rem; overflow-y: auto;")
                     )
                 with ui.card().classes(
                     "w-full p-4 gap-2 bg-slate-50 border border-slate-200 shadow-sm"

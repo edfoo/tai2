@@ -79,13 +79,15 @@ def _create_lifespan(enable_background_services: bool):
         app.state.websocket_log_buffer = deque(maxlen=1000)
         backend_handler = BackendEventHandler(app.state.backend_events.append)
         backend_handler.setLevel(logging.DEBUG)
-        backend_handler.setFormatter(logging.Formatter("%(message)s"))
+        backend_handler.setFormatter(logging.Formatter("%(levelname)s:%(name)s:%(message)s"))
         target_logger_names = {
             "app",
             "uvicorn",
             "uvicorn.error",
             "uvicorn.access",
             "uvicorn.asgi",
+            "httpx",
+            "app.services.prompt_scheduler",
         }
         attached_loggers: list[logging.Logger] = []
         root_logger = logging.getLogger()

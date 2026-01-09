@@ -4,6 +4,8 @@ import asyncio
 import contextlib
 import json
 import logging
+import math
+import secrets
 import time
 from collections import deque
 from datetime import datetime, timezone
@@ -118,6 +120,7 @@ class MarketService:
         self._recent_trades: dict[str, Deque[float]] = {}
         self._subscribed_symbols: set[str] = set()
         self._available_symbols: list[str] = []
+        self._instrument_specs: dict[str, dict[str, float]] = {}
         self._poll_interval = max(1, self.settings.ws_update_interval)
         self._ohlc_bar = self._normalize_bar(ohlc_bar)
         self._log_sink = log_sink or (lambda msg: None)
@@ -504,7 +507,16 @@ class MarketService:
                 continue
             inst_id = entry.get("instId")
             if inst_id:
-                pairs.append(str(inst_id).upper())
+                symbol = str(inst_id).upper()
+                pairs.append(symbol)
+                lot_size = self._extract_float(entry.get("lotSz"))
+                min_size = self._extract_float(entry.get("minSz"))
+                tick_size = self._extract_float(entry.get("tickSz"))
+                self._instrument_specs[symbol] = {
+                    "lot_size": lot_size or 0.0,
+                    "min_size": min_size or 0.0,
+                    "tick_size": tick_size or 0.0,
+                }
         if not pairs:
             return list(self.symbols)
         return sorted(set(pairs))
@@ -1208,6 +1220,31 @@ class MarketService:
             ticker_snapshot = self._latest_ticker.get(symbol, {})
             last_price = self._extract_float(ticker_snapshot.get("last"))
 
+        take_profit_price = self._normalize_take_profit(
+            action,
+            self._extract_float(decision.get("take_profit")),
+            last_price,
+        )
+        stop_loss_price = self._normalize_stop_loss(
+            action,
+            self._extract_float(decision.get("stop_loss")),
+            last_price,
+        )
+        if take_profit_price:
+            prefer_up = action == "BUY"
+            take_profit_price = self._quantize_price(
+                symbol,
+                take_profit_price,
+                prefer_up=prefer_up,
+            )
+        if stop_loss_price:
+            prefer_up = action == "SELL"
+            stop_loss_price = self._quantize_price(
+                symbol,
+                stop_loss_price,
+                prefer_up=prefer_up,
+            )
+
         account_block = context.get("account") or {}
         account_equity = self._extract_float(
             account_block.get("account_equity")
@@ -1227,6 +1264,17 @@ class MarketService:
             )
             return
 
+        quantized_size = self._quantize_order_size(symbol, raw_size)
+        if quantized_size is None or quantized_size <= 0:
+            self._emit_debug(f"Execution skipped for {symbol}: size {raw_size:.6f} below lot size")
+            return
+        if quantized_size < min_size:
+            self._emit_debug(
+                f"Execution skipped for {symbol}: quantized size {quantized_size:.6f} below minimum {min_size}"
+            )
+            return
+        raw_size = quantized_size
+
         side = "buy" if action == "BUY" else "sell"
         pos_side = "long" if action == "BUY" else "short"
         reduce_only = False
@@ -1237,16 +1285,22 @@ class MarketService:
             pos_side = "short"
             reduce_only = True
 
-        client_order_id = f"tai2-{int(now * 1000)}"
+        if reduce_only:
+            take_profit_price = None
+            stop_loss_price = None
+
+        client_order_id = self._generate_client_order_id()
         order = await self._submit_order(
             symbol=symbol,
             side=side,
-            pos_side=pos_side if dual_side_mode else None,
+            pos_side=pos_side,
             size=raw_size,
             trade_mode=trade_mode,
             order_type=order_type,
             reduce_only=reduce_only,
             client_order_id=client_order_id,
+            take_profit=take_profit_price,
+            stop_loss=stop_loss_price,
         )
         if not order:
             self._emit_debug(f"Order placement failed for {symbol}")
@@ -1419,23 +1473,131 @@ class MarketService:
     def _format_size(value: float) -> str:
         return (f"{value:.6f}".rstrip("0").rstrip(".") or "0") if value is not None else "0"
 
+    @staticmethod
+    def _format_price(value: float) -> str:
+        return (f"{value:.8f}".rstrip("0").rstrip(".") or "0") if value is not None else "0"
+
+    @staticmethod
+    def _generate_client_order_id(prefix: str = "tai2") -> str:
+        safe_prefix = "".join(ch for ch in (prefix or "") if ch.isalnum()) or "tai2"
+        timestamp = str(int(time.time() * 1000))
+        random_suffix = secrets.token_hex(3)
+        value = f"{safe_prefix}{timestamp}{random_suffix}"
+        return value[:32]
+
     def _normalize_order_response(self, response: Any) -> dict[str, Any] | None:
         if not isinstance(response, dict):
             return None
         top_code = str(response.get("code", ""))
         if top_code not in {"0", "200", ""}:
             detail = response.get("msg") or response
-            self._emit_debug(f"OKX order rejected: {detail}")
+            self._emit_debug(f"OKX order rejected: code={top_code} detail={detail}")
             return None
         data = response.get("data")
         if isinstance(data, list) and data:
             entry = data[0]
             sub_code = str(entry.get("sCode", top_code))
             if sub_code not in {"0", "200", ""}:
-                self._emit_debug(f"OKX order failed: {entry.get('sMsg')}")
+                self._emit_debug(
+                    f"OKX order failed: sCode={sub_code} sMsg={entry.get('sMsg')}"
+                )
+                self._emit_debug(f"OKX order failure payload: {entry}")
                 return None
             return entry
         return response
+
+    @staticmethod
+    def _response_indicates_pos_side_error(response: Any) -> bool:
+        if not isinstance(response, dict):
+            return False
+        def _entry_has_issue(entry: Any) -> bool:
+            if not isinstance(entry, dict):
+                return False
+            msg = str(entry.get("sMsg") or "").lower()
+            code = str(entry.get("sCode") or "")
+            return "posside" in msg and code == "51000"
+        data = response.get("data")
+        if isinstance(data, list):
+            return any(_entry_has_issue(item) for item in data)
+        if data:
+            return _entry_has_issue(data)
+        msg = str(response.get("msg") or "").lower()
+        return "posside" in msg
+
+    def _quantize_order_size(self, symbol: str, size: float) -> float | None:
+        if size is None or size <= 0:
+            return None
+        spec = self._instrument_specs.get(symbol)
+        if not spec:
+            return size
+        lot = spec.get("lot_size") or 0.0
+        min_size = spec.get("min_size") or 0.0
+        if lot > 0:
+            multiples = math.floor((size + 1e-9) / lot)
+            quantized = multiples * lot
+        else:
+            quantized = size
+        if quantized < min_size and min_size > 0:
+            return None
+        return quantized if quantized > 0 else None
+
+    def _quantize_price(self, symbol: str, price: float | None, *, prefer_up: bool) -> float | None:
+        if price is None or price <= 0:
+            return None
+        spec = self._instrument_specs.get(symbol)
+        tick = (spec or {}).get("tick_size") or 0.0
+        if tick > 0:
+            scaled = price / tick
+            if prefer_up:
+                quantized = math.ceil(scaled - 1e-9) * tick
+            else:
+                quantized = math.floor(scaled + 1e-9) * tick
+            if quantized <= 0:
+                quantized = tick
+            return quantized
+        return price
+
+    def _normalize_take_profit(
+        self,
+        action: str,
+        take_profit: float | None,
+        reference_price: float | None,
+    ) -> float | None:
+        if take_profit is None or take_profit <= 0:
+            return None
+        if reference_price and reference_price > 0:
+            if action == "BUY" and take_profit <= reference_price:
+                self._emit_debug(
+                    f"Ignoring take profit {take_profit:.6f}: BUY action expects target above {reference_price:.6f}"
+                )
+                return None
+            if action == "SELL" and take_profit >= reference_price:
+                self._emit_debug(
+                    f"Ignoring take profit {take_profit:.6f}: SELL action expects target below {reference_price:.6f}"
+                )
+                return None
+        return take_profit
+
+    def _normalize_stop_loss(
+        self,
+        action: str,
+        stop_loss: float | None,
+        reference_price: float | None,
+    ) -> float | None:
+        if stop_loss is None or stop_loss <= 0:
+            return None
+        if reference_price and reference_price > 0:
+            if action == "BUY" and stop_loss >= reference_price:
+                self._emit_debug(
+                    f"Ignoring stop loss {stop_loss:.6f}: BUY action expects protection below {reference_price:.6f}"
+                )
+                return None
+            if action == "SELL" and stop_loss <= reference_price:
+                self._emit_debug(
+                    f"Ignoring stop loss {stop_loss:.6f}: SELL action expects protection above {reference_price:.6f}"
+                )
+                return None
+        return stop_loss
 
     async def _submit_order(
         self,
@@ -1448,34 +1610,69 @@ class MarketService:
         order_type: str,
         reduce_only: bool,
         client_order_id: str,
+        take_profit: float | None,
+        stop_loss: float | None,
     ) -> dict[str, Any] | None:
         if not self._trade_api:
             self._emit_debug("Trade API unavailable; cannot place order")
             return None
-        payload = {
-            "instId": symbol,
-            "tdMode": trade_mode,
-            "side": side,
-            "ordType": order_type,
-            "sz": self._format_size(size),
-            "clOrdId": client_order_id,
-        }
-        if pos_side:
-            payload["posSide"] = pos_side
-        if reduce_only:
-            payload["reduceOnly"] = "true"
-        if self._sub_account and self._sub_account_use_master:
-            payload["subAcct"] = self._sub_account
+        include_pos_side = pos_side
+        attempt = 0
+        while True:
+            payload = {
+                "instId": symbol,
+                "tdMode": trade_mode,
+                "side": side,
+                "ordType": order_type,
+                "sz": self._format_size(size),
+                "clOrdId": client_order_id,
+            }
+            if include_pos_side:
+                payload["posSide"] = include_pos_side
+            if reduce_only:
+                payload["reduceOnly"] = "true"
+            if take_profit and take_profit > 0:
+                payload["tpTriggerPx"] = self._format_price(take_profit)
+                payload["tpOrdPx"] = "-1"
+                payload["tpTriggerPxType"] = "last"
+            if stop_loss and stop_loss > 0:
+                payload["slTriggerPx"] = self._format_price(stop_loss)
+                payload["slOrdPx"] = "-1"
+                payload["slTriggerPxType"] = "last"
+            if self._sub_account and self._sub_account_use_master:
+                payload["subAcct"] = self._sub_account
 
-        def _place() -> Any:
-            return self._trade_api.place_order(**payload)
+            trace_payload = {
+                "instId": payload["instId"],
+                "side": payload["side"],
+                "tdMode": payload["tdMode"],
+                "ordType": payload["ordType"],
+                "sz": payload["sz"],
+                "posSide": payload.get("posSide"),
+                "reduceOnly": payload.get("reduceOnly"),
+                "subAcct": bool(payload.get("subAcct")),
+                "clientOrderId": payload.get("clOrdId"),
+            }
+            self._emit_debug(f"OKX order payload: {trace_payload}")
 
-        try:
-            response = await asyncio.to_thread(_place)
-        except Exception as exc:  # pragma: no cover - network dependency
-            self._emit_debug(f"OKX place_order exception: {exc}")
+            def _place() -> Any:
+                return self._trade_api.place_order(**payload)
+
+            try:
+                response = await asyncio.to_thread(_place)
+            except Exception as exc:  # pragma: no cover - network dependency
+                self._emit_debug(f"OKX place_order exception: {exc}")
+                return None
+            self._emit_debug(f"OKX order response raw: {response}")
+            normalized = self._normalize_order_response(response)
+            if normalized:
+                return normalized
+            if include_pos_side and self._response_indicates_pos_side_error(response):
+                self._emit_debug("Retrying OKX order without posSide for net-mode account")
+                include_pos_side = None
+                attempt += 1
+                continue
             return None
-        return self._normalize_order_response(response)
 
     async def _record_trade_execution(
         self,

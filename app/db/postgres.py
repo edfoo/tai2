@@ -198,18 +198,17 @@ async def close_postgres_pool() -> None:
 
 async def insert_executed_trade(trade: ExecutedTrade) -> None:
     pool = await get_postgres_pool()
-    payload = trade.model_dump()
     await pool.execute(
         INSERT_SQL,
-        payload["id"],
-        payload["timestamp"],
-        payload["symbol"],
-        payload["side"],
-        payload["price"],
-        payload["amount"],
-        payload.get("llm_reasoning"),
-        payload.get("pnl"),
-        payload.get("fee"),
+        trade.id,
+        trade.timestamp,
+        trade.symbol,
+        trade.side,
+        trade.price,
+        trade.amount,
+        trade.llm_reasoning,
+        trade.pnl,
+        trade.fee,
     )
 
 
