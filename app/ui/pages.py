@@ -260,6 +260,7 @@ def register_pages(app: FastAPI) -> None:
                             {"name": "size", "label": "Size", "field": "size"},
                             {"name": "entry", "label": "Entry", "field": "entry"},
                             {"name": "current", "label": "Current", "field": "current"},
+                            {"name": "last_trade", "label": "Last Trade", "field": "last_trade"},
                             {"name": "pnl", "label": "PNL", "field": "pnl"},
                             {"name": "pnl_pct", "label": "PNL %", "field": "pnl_pct"},
                             {"name": "leverage", "label": "Leverage", "field": "leverage"},
@@ -544,6 +545,7 @@ def register_pages(app: FastAPI) -> None:
             positions = snapshot.get("positions") or []
             symbols = snapshot.get("symbols") or []
             market_data = snapshot.get("market_data") or {}
+            position_activity = snapshot.get("position_activity") or {}
             selected_symbol = snapshot.get("symbol")
             if not selected_symbol and symbols:
                 selected_symbol = symbols[0]
@@ -569,6 +571,15 @@ def register_pages(app: FastAPI) -> None:
                     return float(value)
                 except (TypeError, ValueError):
                     return None
+
+            def format_activity_ts(value: Any) -> str:
+                if not value:
+                    return "--"
+                try:
+                    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+                    return parsed.strftime("%H:%M:%S UTC")
+                except ValueError:
+                    return str(value)
 
             rows: list[dict[str, Any]] = []
             for symbol, pos in position_lookup.items():
@@ -643,12 +654,20 @@ def register_pages(app: FastAPI) -> None:
                 else:
                     pnl_pct_color = "text-slate-900"
 
+                activity_meta = position_activity.get(symbol) or position_activity.get(symbol.upper()) or {}
+                last_trade_label = "--"
+                if isinstance(activity_meta, dict):
+                    last_trade_label = format_activity_ts(activity_meta.get("last_trade"))
+                elif isinstance(activity_meta, str):
+                    last_trade_label = format_activity_ts(activity_meta)
+
                 row = {
                     "symbol": symbol,
                     "side": side if side != "" else "--",
                     "size": f"{size_abs:,.4f}" if size_abs is not None else "--",
                     "entry": f"{entry_price:,.2f}" if entry_price is not None else "--",
                     "current": f"{current_price:,.2f}" if current_price is not None else "--",
+                    "last_trade": last_trade_label,
                     "pnl": f"{pnl:,.2f}" if pnl is not None else "--",
                     "pnl_cls": pnl_color,
                     "pnl_pct": f"{pnl_pct:,.2f}%" if pnl_pct is not None else "--",
