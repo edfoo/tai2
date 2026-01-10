@@ -31,6 +31,8 @@ class _FakeTradeAPI:
     def __init__(self) -> None:
         self.placed_with_request: list[dict[str, Any]] = []
         self.legacy_orders: list[dict[str, Any]] = []
+        self.algo_orders: list[dict[str, Any]] = []
+        self.cancelled_algos: list[list[dict[str, Any]]] = []
 
     def _request_with_params(self, method: str, path: str, params: dict[str, Any]):
         self.placed_with_request.append({"method": method, "path": path, "params": params})
@@ -38,6 +40,14 @@ class _FakeTradeAPI:
 
     def place_order(self, **kwargs: Any):
         self.legacy_orders.append(kwargs)
+        return {"data": []}
+
+    def place_algo_order(self, **kwargs: Any):
+        self.algo_orders.append(kwargs)
+        return {"data": []}
+
+    def cancel_algo_order(self, params):
+        self.cancelled_algos.append(params)
         return {"data": []}
 
 
@@ -98,3 +108,76 @@ def test_trade_adapter_delegates_without_sub_account() -> None:
 
     assert api.legacy_orders, "Non sub-account orders should call legacy place_order"
     assert api.legacy_orders[0]["instId"] == "BTC-USDT-SWAP"
+
+
+def test_trade_adapter_place_algo_order_with_sub_account() -> None:
+    api = _FakeTradeAPI()
+    adapter = OkxTradeAdapter(api)
+
+    adapter.place_algo_order(
+        instId="BTC-USDT-SWAP",
+        tdMode="cross",
+        side="sell",
+        ordType="conditional",
+        closeFraction="1",
+        tpTriggerPx="100",
+        tpOrdPx="-1",
+        subAcct="beta",
+    )
+
+    assert api.placed_with_request, "Sub-account algo orders should use raw request"
+    params = api.placed_with_request[0]["params"]
+    assert params["subAcct"] == "beta"
+    assert params["instId"] == "BTC-USDT-SWAP"
+
+
+def test_trade_adapter_place_algo_order_without_sub_account() -> None:
+    api = _FakeTradeAPI()
+    adapter = OkxTradeAdapter(api)
+
+    adapter.place_algo_order(
+        instId="BTC-USDT-SWAP",
+        tdMode="cross",
+        side="sell",
+        ordType="conditional",
+        sz="1",
+        slTriggerPx="95",
+        slOrdPx="-1",
+    )
+
+    assert api.algo_orders, "Algo orders without sub account should call legacy method"
+    assert api.algo_orders[0]["instId"] == "BTC-USDT-SWAP"
+
+
+def test_trade_adapter_cancel_algo_order_with_sub_account() -> None:
+    api = _FakeTradeAPI()
+    adapter = OkxTradeAdapter(api)
+
+    adapter.cancel_algo_order(
+        [
+            {
+                "instId": "BTC-USDT-SWAP",
+                "algoId": "123",
+                "subAcct": "beta",
+            }
+        ]
+    )
+
+    assert api.placed_with_request, "Cancel with sub account should use raw request"
+    params = api.placed_with_request[0]["params"]
+    assert params[0]["algoId"] == "123"
+
+
+def test_trade_adapter_cancel_algo_order_without_sub_account() -> None:
+    api = _FakeTradeAPI()
+    adapter = OkxTradeAdapter(api)
+
+    adapter.cancel_algo_order([
+        {
+            "instId": "BTC-USDT-SWAP",
+            "algoId": "123",
+        }
+    ])
+
+    assert api.cancelled_algos, "Cancel without sub account should call legacy method"
+    assert api.cancelled_algos[0][0]["algoId"] == "123"

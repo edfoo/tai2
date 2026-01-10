@@ -1295,22 +1295,9 @@ class MarketService:
             pos_side = "short"
             reduce_only = True
 
-        attach_algo_orders: list[dict[str, Any]] = []
         if reduce_only:
             take_profit_price = None
             stop_loss_price = None
-        else:
-            algo_entry: dict[str, Any] = {}
-            if take_profit_price:
-                algo_entry["tpTriggerPx"] = self._format_price(take_profit_price)
-                algo_entry["tpOrdPx"] = "-1"
-                algo_entry["tpTriggerPxType"] = "last"
-            if stop_loss_price:
-                algo_entry["slTriggerPx"] = self._format_price(stop_loss_price)
-                algo_entry["slOrdPx"] = "-1"
-                algo_entry["slTriggerPxType"] = "last"
-            if algo_entry:
-                attach_algo_orders.append(algo_entry)
 
         client_order_id = self._generate_client_order_id()
         order = await self._submit_order(
@@ -1322,7 +1309,7 @@ class MarketService:
             order_type=order_type,
             reduce_only=reduce_only,
             client_order_id=client_order_id,
-            attach_algo_orders=attach_algo_orders,
+            attach_algo_orders=None,
         )
         if not order:
             self._emit_debug(f"Order placement failed for {symbol}")
@@ -1341,6 +1328,18 @@ class MarketService:
         fee_value = self._extract_float(order.get("fee") or order.get("fillFee"))
         if fee_value is not None:
             fee_value = abs(fee_value)
+
+        if not reduce_only and (take_profit_price or stop_loss_price):
+            await self._refresh_position_protection(
+                symbol=symbol,
+                trade_mode=trade_mode,
+                action=action,
+                take_profit_price=take_profit_price,
+                stop_loss_price=stop_loss_price,
+                dual_side_mode=dual_side_mode,
+                pos_side=pos_side if dual_side_mode else None,
+            )
+
         await self._record_trade_execution(
             symbol=symbol,
             side=side,
@@ -1716,6 +1715,106 @@ class MarketService:
             self._position_activity[symbol.upper()] = time.time()
         except Exception as exc:  # pragma: no cover - persistence best-effort
             self._emit_debug(f"Failed to persist executed trade: {exc}")
+
+    @staticmethod
+    def _build_tpsl_client_id(symbol: str) -> str:
+        sanitized = "".join(ch for ch in str(symbol) if ch.isalnum()).lower() or "symbol"
+        value = f"tai2{sanitized}tpsl"
+        return value[:32]
+
+    async def _refresh_position_protection(
+        self,
+        *,
+        symbol: str,
+        trade_mode: str,
+        action: str,
+        take_profit_price: float | None,
+        stop_loss_price: float | None,
+        dual_side_mode: bool,
+        pos_side: str | None,
+    ) -> None:
+        if not self._trade_api:
+            return
+        await self._cancel_position_protection(symbol)
+        await self._place_position_protection(
+            symbol=symbol,
+            trade_mode=trade_mode,
+            action=action,
+            take_profit_price=take_profit_price,
+            stop_loss_price=stop_loss_price,
+            dual_side_mode=dual_side_mode,
+            pos_side=pos_side,
+        )
+
+    async def _cancel_position_protection(self, symbol: str) -> None:
+        if not self._trade_api:
+            return
+        client_id = self._build_tpsl_client_id(symbol)
+        payload = [{"instId": symbol, "algoClOrdId": client_id}]
+        if self._sub_account and self._sub_account_use_master:
+            payload[0]["subAcct"] = self._sub_account
+        try:
+            await asyncio.to_thread(self._trade_api.cancel_algo_order, payload)
+        except Exception as exc:  # pragma: no cover - network dependency
+            self._emit_debug(f"Failed to cancel TP/SL algo for {symbol}: {exc}")
+
+    async def _place_position_protection(
+        self,
+        *,
+        symbol: str,
+        trade_mode: str,
+        action: str,
+        take_profit_price: float | None,
+        stop_loss_price: float | None,
+        dual_side_mode: bool,
+        pos_side: str | None,
+    ) -> None:
+        if not (take_profit_price or stop_loss_price):
+            return
+        if not self._trade_api:
+            return
+        payload: dict[str, Any] = {
+            "instId": symbol,
+            "tdMode": trade_mode,
+            "side": "sell" if action == "BUY" else "buy",
+            "ordType": "conditional",
+            "reduceOnly": "true",
+            "closeFraction": "1",
+            "algoClOrdId": self._build_tpsl_client_id(symbol),
+            "cxlOnClosePos": "true",
+        }
+        if take_profit_price:
+            payload["tpTriggerPx"] = self._format_price(take_profit_price)
+            payload["tpOrdPx"] = "-1"
+            payload["tpTriggerPxType"] = "last"
+        if stop_loss_price:
+            payload["slTriggerPx"] = self._format_price(stop_loss_price)
+            payload["slOrdPx"] = "-1"
+            payload["slTriggerPxType"] = "last"
+        include_pos_side = pos_side if dual_side_mode and pos_side else None
+        while True:
+            submission = dict(payload)
+            if include_pos_side:
+                submission["posSide"] = include_pos_side
+            if self._sub_account and self._sub_account_use_master:
+                submission["subAcct"] = self._sub_account
+            try:
+                response = await asyncio.to_thread(self._trade_api.place_algo_order, **submission)
+            except Exception as exc:  # pragma: no cover - network dependency
+                self._emit_debug(f"Failed to place TP/SL algo for {symbol}: {exc}")
+                return
+            normalized = self._normalize_order_response(response)
+            if normalized:
+                algo_id = normalized.get("algoId") or normalized.get("algoClOrdId")
+                self._emit_debug(
+                    f"Registered TP/SL algo {algo_id or payload['algoClOrdId']} for {symbol}"
+                )
+                return
+            if include_pos_side and self._response_indicates_pos_side_error(response):
+                include_pos_side = None
+                continue
+            self._emit_debug(f"OKX rejected TP/SL algo for {symbol}: {response}")
+            return
 
 
 __all__ = ["MarketService"]

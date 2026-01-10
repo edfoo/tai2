@@ -8,7 +8,7 @@ try:  # pragma: no cover - optional dependency wiring
     import okx.Account as OkxAccount
     import okx.Trade as OkxTrade
     import okx.utils as OkxUtils
-    from okx.consts import ACCOUNT_INFO, GET, PLACR_ORDER, POSITION_INFO, POST
+    from okx.consts import ACCOUNT_INFO, GET, PLACR_ORDER, POSITION_INFO, PLACE_ALGO_ORDER, CANCEL_ALGOS, POST
 except ImportError:  # pragma: no cover - runtime fallback
     OkxAccount = None
     OkxTrade = None
@@ -190,6 +190,44 @@ class OkxTradeAdapter:
             pxVol=pxVol,
             banAmend=banAmend,
         )
+
+    def place_algo_order(self, **kwargs: Any) -> Any:
+        if not self._api:
+            raise RuntimeError("Trade API unavailable")
+        params = {
+            key: value
+            for key, value in kwargs.items()
+            if value not in (None, "", [])
+        }
+        sub_account = params.pop("subAcct", None)
+        if sub_account:
+            params["subAcct"] = sub_account
+        use_raw = bool(sub_account)
+        if use_raw and hasattr(self._api, "_request_with_params") and PLACE_ALGO_ORDER and POST:
+            return self._api._request_with_params(POST, PLACE_ALGO_ORDER, params)
+        return self._api.place_algo_order(**params)
+
+    def cancel_algo_order(self, params: list[dict[str, Any]] | tuple[dict[str, Any], ...]) -> Any:
+        if not self._api:
+            raise RuntimeError("Trade API unavailable")
+        normalized: list[dict[str, Any]] = []
+        use_raw = False
+        for entry in params:
+            cleaned = {
+                key: value
+                for key, value in entry.items()
+                if value not in (None, "", [])
+            }
+            if not cleaned:
+                continue
+            if "subAcct" in cleaned:
+                use_raw = True
+            normalized.append(cleaned)
+        if not normalized:
+            return {}
+        if use_raw and hasattr(self._api, "_request_with_params") and CANCEL_ALGOS and POST:
+            return self._api._request_with_params(POST, CANCEL_ALGOS, normalized)
+        return self._api.cancel_algo_order(normalized)
 
 
 def build_okx_sdk_clients(

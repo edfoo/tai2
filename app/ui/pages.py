@@ -260,6 +260,8 @@ def register_pages(app: FastAPI) -> None:
                             {"name": "size", "label": "Size", "field": "size"},
                             {"name": "entry", "label": "Entry", "field": "entry"},
                             {"name": "current", "label": "Current", "field": "current"},
+                            {"name": "tp", "label": "TP", "field": "tp"},
+                            {"name": "sl", "label": "SL", "field": "sl"},
                             {"name": "last_trade", "label": "Last Trade", "field": "last_trade"},
                             {"name": "pnl", "label": "PNL", "field": "pnl"},
                             {"name": "pnl_pct", "label": "PNL %", "field": "pnl_pct"},
@@ -602,6 +604,55 @@ def register_pages(app: FastAPI) -> None:
                 except ValueError:
                     return str(value)
 
+            def _first_price(*values: Any) -> float | None:
+                for candidate in values:
+                    price = to_float(candidate)
+                    if price is not None and price > 0:
+                        return price
+                return None
+
+            def extract_tp_sl(position: dict[str, Any]) -> tuple[float | None, float | None]:
+                tp_value = _first_price(
+                    position.get("tpTriggerPx"),
+                    position.get("tpOrdPx"),
+                    position.get("takeProfit"),
+                )
+                sl_value = _first_price(
+                    position.get("slTriggerPx"),
+                    position.get("slOrdPx"),
+                    position.get("stopLoss"),
+                )
+                close_order_algo = position.get("closeOrderAlgo")
+                if isinstance(close_order_algo, list):
+                    for algo in close_order_algo:
+                        if tp_value is None:
+                            tp_value = _first_price(
+                                algo.get("tpTriggerPx"),
+                                algo.get("tpOrdPx"),
+                            )
+                        if sl_value is None:
+                            sl_value = _first_price(
+                                algo.get("slTriggerPx"),
+                                algo.get("slOrdPx"),
+                            )
+                        if tp_value is not None and sl_value is not None:
+                            break
+                        order_type = str(algo.get("orderType") or "").lower()
+                        trigger_px = _first_price(
+                            algo.get("triggerPx"),
+                            algo.get("ordPx"),
+                            algo.get("closePx"),
+                        )
+                        if trigger_px is None:
+                            continue
+                        if tp_value is None and order_type in {"take_profit", "tp"}:
+                            tp_value = trigger_px
+                        if sl_value is None and order_type in {"stop_loss", "sl"}:
+                            sl_value = trigger_px
+                        if tp_value is not None and sl_value is not None:
+                            break
+                return tp_value, sl_value
+
             rows: list[dict[str, Any]] = []
             for symbol, pos in position_lookup.items():
                 market_entry_for_symbol = market_data.get(symbol) or {}
@@ -682,12 +733,16 @@ def register_pages(app: FastAPI) -> None:
                 elif isinstance(activity_meta, str):
                     last_trade_label = format_activity_ts(activity_meta)
 
+                tp_value, sl_value = extract_tp_sl(pos)
+
                 row = {
                     "symbol": symbol,
                     "side": side if side != "" else "--",
                     "size": f"{size_abs:,.4f}" if size_abs is not None else "--",
-                    "entry": f"{entry_price:,.2f}" if entry_price is not None else "--",
-                    "current": f"{current_price:,.2f}" if current_price is not None else "--",
+                    "entry": f"{entry_price:,.4f}" if entry_price is not None else "--",
+                    "current": f"{current_price:,.4f}" if current_price is not None else "--",
+                    "tp": f"{tp_value:,.4f}" if tp_value is not None else "--",
+                    "sl": f"{sl_value:,.4f}" if sl_value is not None else "--",
                     "last_trade": last_trade_label,
                     "pnl": f"{pnl:,.2f}" if pnl is not None else "--",
                     "pnl_cls": pnl_color,
