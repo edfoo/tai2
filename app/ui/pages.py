@@ -307,6 +307,19 @@ def register_pages(app: FastAPI) -> None:
             except ValueError:
                 return raw
 
+        def format_decision_value(value: Any) -> str:
+            if value is None or value == "":
+                return "--"
+            if isinstance(value, float):
+                return f"{value:,.4f}".rstrip("0").rstrip(".")
+            if isinstance(value, (int, bool)):
+                return str(value)
+            if isinstance(value, list):
+                return ", ".join(format_decision_value(item) for item in value) or "[]"
+            if isinstance(value, dict):
+                return json.dumps(value, ensure_ascii=False)
+            return str(value)
+
         def refresh_llm_cards() -> None:
             llm_card_container.clear()
             interactions = getattr(app.state, "llm_interactions", {}) or {}
@@ -326,12 +339,17 @@ def register_pages(app: FastAPI) -> None:
                     action = (decision.get("action") or "--").upper()
                     header = f"{symbol} · {action} · {format_llm_timestamp(entry.get('timestamp'))}"
                     schema = entry.get("response_schema") or {}
-                    overview = entry.get("schema_overview") or []
-                    decision = entry.get("decision") or {}
                     confidence = decision.get("confidence")
                     confidence_label = (
                         f"{confidence:.2f}" if isinstance(confidence, (int, float)) else "--"
                     )
+                    schema_props = list((schema.get("properties") or {}).keys())
+                    ordered_fields: list[str] = [
+                        name for name in schema_props if name in decision
+                    ]
+                    for key in decision.keys():
+                        if key not in ordered_fields:
+                            ordered_fields.append(key)
                     card = ui.expansion(header).classes(
                         "w-full bg-white rounded-xl border border-slate-200 shadow-sm"
                     )
@@ -339,16 +357,19 @@ def register_pages(app: FastAPI) -> None:
                         ui.label(
                             f"Decision: {action} (conf {confidence_label})"
                         ).classes("text-sm font-semibold text-slate-700")
-                        with ui.column().classes("gap-1 text-xs text-slate-600"):
-                            if not overview:
-                                ui.label("No schema descriptions available.")
+                        with ui.column().classes("gap-2 text-xs text-slate-600"):
+                            if not ordered_fields:
+                                ui.label("No decision values returned.")
                             else:
-                                for entry_summary in overview:
-                                    ui.label(entry_summary)
-                        schema_text = json.dumps(schema, indent=2, ensure_ascii=False)
-                        ui.code(schema_text).classes(
-                            "w-full text-xs bg-slate-900/90 text-white rounded-lg mt-2"
-                        )
+                                schema_meta = schema.get("properties") or {}
+                                for field in ordered_fields:
+                                    rendered_value = format_decision_value(decision.get(field))
+                                    desc = schema_meta.get(field, {}).get("description")
+                                    ui.label(f"{field}: {rendered_value}").classes(
+                                        "text-xs text-slate-700 font-medium"
+                                    )
+                                    if desc:
+                                        ui.label(desc).classes("text-[11px] text-slate-400")
 
         refresh_llm_cards()
         ui.timer(15, refresh_llm_cards)
