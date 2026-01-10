@@ -118,6 +118,7 @@ class MarketService:
         self._trade_buffers: dict[str, Deque[dict[str, float]]] = {}
         self._decision_state: dict[str, dict[str, Any]] = {}
         self._recent_trades: dict[str, Deque[float]] = {}
+        self._position_activity: dict[str, float] = {}
         self._subscribed_symbols: set[str] = set()
         self._available_symbols: list[str] = []
         self._instrument_specs: dict[str, dict[str, float]] = {}
@@ -291,6 +292,13 @@ class MarketService:
 
         primary_symbol = self.symbols[0]
         primary_market = market_data.get(primary_symbol, {})
+        position_activity = {
+            symbol: {
+                "last_trade": datetime.fromtimestamp(ts, timezone.utc).isoformat()
+            }
+            for symbol, ts in self._position_activity.items()
+            if ts > 0
+        }
         snapshot = {
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "symbol": primary_symbol,
@@ -311,6 +319,7 @@ class MarketService:
             "risk_metrics": primary_market.get("risk_metrics", {}),
             "ws_update_interval": self.settings.ws_update_interval,
             "market_data": market_data,
+            "position_activity": position_activity,
         }
         return snapshot
 
@@ -449,6 +458,7 @@ class MarketService:
             self._trade_buffers.pop(symbol, None)
             self._recent_trades.pop(symbol, None)
             self._decision_state.pop(symbol, None)
+            self._position_activity.pop(symbol, None)
             self._latest_long_short_ratio.pop(symbol, None)
             self._last_long_short_fetch.pop(symbol, None)
 
@@ -1703,6 +1713,7 @@ class MarketService:
                 fee=Decimal(str(fee)) if fee is not None else None,
             )
             await insert_executed_trade(trade)
+            self._position_activity[symbol.upper()] = time.time()
         except Exception as exc:  # pragma: no cover - persistence best-effort
             self._emit_debug(f"Failed to persist executed trade: {exc}")
 
