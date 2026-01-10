@@ -1285,9 +1285,22 @@ class MarketService:
             pos_side = "short"
             reduce_only = True
 
+        attach_algo_orders: list[dict[str, Any]] = []
         if reduce_only:
             take_profit_price = None
             stop_loss_price = None
+        else:
+            algo_entry: dict[str, Any] = {}
+            if take_profit_price:
+                algo_entry["tpTriggerPx"] = self._format_price(take_profit_price)
+                algo_entry["tpOrdPx"] = "-1"
+                algo_entry["tpTriggerPxType"] = "last"
+            if stop_loss_price:
+                algo_entry["slTriggerPx"] = self._format_price(stop_loss_price)
+                algo_entry["slOrdPx"] = "-1"
+                algo_entry["slTriggerPxType"] = "last"
+            if algo_entry:
+                attach_algo_orders.append(algo_entry)
 
         client_order_id = self._generate_client_order_id()
         order = await self._submit_order(
@@ -1299,8 +1312,7 @@ class MarketService:
             order_type=order_type,
             reduce_only=reduce_only,
             client_order_id=client_order_id,
-            take_profit=take_profit_price,
-            stop_loss=stop_loss_price,
+            attach_algo_orders=attach_algo_orders,
         )
         if not order:
             self._emit_debug(f"Order placement failed for {symbol}")
@@ -1610,8 +1622,7 @@ class MarketService:
         order_type: str,
         reduce_only: bool,
         client_order_id: str,
-        take_profit: float | None,
-        stop_loss: float | None,
+        attach_algo_orders: list[dict[str, Any]] | None,
     ) -> dict[str, Any] | None:
         if not self._trade_api:
             self._emit_debug("Trade API unavailable; cannot place order")
@@ -1631,14 +1642,8 @@ class MarketService:
                 payload["posSide"] = include_pos_side
             if reduce_only:
                 payload["reduceOnly"] = "true"
-            if take_profit and take_profit > 0:
-                payload["tpTriggerPx"] = self._format_price(take_profit)
-                payload["tpOrdPx"] = "-1"
-                payload["tpTriggerPxType"] = "last"
-            if stop_loss and stop_loss > 0:
-                payload["slTriggerPx"] = self._format_price(stop_loss)
-                payload["slOrdPx"] = "-1"
-                payload["slTriggerPxType"] = "last"
+            if attach_algo_orders:
+                payload["attachAlgoOrds"] = attach_algo_orders
             if self._sub_account and self._sub_account_use_master:
                 payload["subAcct"] = self._sub_account
 

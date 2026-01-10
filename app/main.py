@@ -1,5 +1,6 @@
 import logging
 import os
+import time
 from collections import deque
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -63,6 +64,10 @@ class BackendEventHandler(logging.Handler):
             pass
 
 
+class _UTCFormatter(logging.Formatter):
+    converter = time.gmtime
+
+
 def _create_lifespan(enable_background_services: bool):
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -80,22 +85,33 @@ def _create_lifespan(enable_background_services: bool):
         backend_handler = BackendEventHandler(app.state.backend_events.append)
         backend_handler.setLevel(logging.DEBUG)
         backend_handler.setFormatter(logging.Formatter("%(levelname)s:%(name)s:%(message)s"))
-        target_logger_names = {
-            "app",
-            "uvicorn",
-            "uvicorn.error",
-            "uvicorn.access",
-            "uvicorn.asgi",
-            "httpx",
-            "app.services.prompt_scheduler",
+        logger_levels = {
+            "app": logging.DEBUG,
+            "app.services.market_service": logging.DEBUG,
+            "app.services.prompt_scheduler": logging.DEBUG,
+            "uvicorn": logging.INFO,
+            "uvicorn.error": logging.INFO,
+            "uvicorn.access": logging.INFO,
+            "uvicorn.asgi": logging.INFO,
+            "httpx": logging.INFO,
+            "websockets": logging.WARNING,
+            "websockets.client": logging.WARNING,
+            "okx.websocket": logging.WARNING,
         }
         root_logger = logging.getLogger()
+        root_logger.setLevel(logging.INFO)
+        utc_formatter = _UTCFormatter("%(asctime)s UTC · %(levelname)s:%(name)s:%(message)s")
+        for handler in list(root_logger.handlers):
+            try:
+                handler.setFormatter(utc_formatter)
+            except Exception:  # pragma: no cover - defensive
+                continue
         attached_loggers: list[logging.Logger] = []
         if backend_handler not in root_logger.handlers:
             root_logger.addHandler(backend_handler)
             attached_loggers.append(root_logger)
-        for name in target_logger_names:
-            logging.getLogger(name).setLevel(logging.INFO)
+        for name, level in logger_levels.items():
+            logging.getLogger(name).setLevel(level)
         app.state.backend_log_handler = backend_handler
         app.state.backend_log_targets = attached_loggers
         app.state.runtime_config = {

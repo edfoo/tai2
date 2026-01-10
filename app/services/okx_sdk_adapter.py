@@ -136,31 +136,41 @@ class OkxTradeAdapter:
         pxVol="",
         banAmend="",
         subAcct: str | None = None,
+        **extra_fields,
     ) -> Any:
         if not self._api:
             raise RuntimeError("Trade API unavailable")
-        if subAcct and hasattr(self._api, "_request_with_params") and PLACR_ORDER and POST:
-            params = {
-                "instId": instId,
-                "tdMode": tdMode,
-                "side": side,
-                "ordType": ordType,
-                "sz": sz,
-                "ccy": ccy,
-                "clOrdId": clOrdId,
-                "tag": tag,
-                "posSide": posSide,
-                "px": px,
-                "reduceOnly": reduceOnly,
-                "tgtCcy": tgtCcy,
-                "stpMode": stpMode,
-                "pxUsd": pxUsd,
-                "pxVol": pxVol,
-                "banAmend": banAmend,
-                "subAcct": subAcct,
-            }
-            params["attachAlgoOrds"] = attachAlgoOrds
+        params = {
+            "instId": instId,
+            "tdMode": tdMode,
+            "side": side,
+            "ordType": ordType,
+            "sz": sz,
+            "ccy": ccy,
+            "clOrdId": clOrdId,
+            "tag": tag,
+            "posSide": posSide,
+            "px": px,
+            "reduceOnly": reduceOnly,
+            "tgtCcy": tgtCcy,
+            "stpMode": stpMode,
+            "attachAlgoOrds": attachAlgoOrds,
+            "pxUsd": pxUsd,
+            "pxVol": pxVol,
+            "banAmend": banAmend,
+        }
+        if subAcct:
+            params["subAcct"] = subAcct
+        for key, value in extra_fields.items():
+            if value in (None, ""):
+                continue
+            params[key] = value
+
+        should_use_raw_request = bool(subAcct or extra_fields)
+        if should_use_raw_request and hasattr(self._api, "_request_with_params") and PLACR_ORDER and POST:
             return self._api._request_with_params(POST, PLACR_ORDER, params)
+
+        # fall back to SDK method when no non-standard fields or sub-account routing required
         return self._api.place_order(
             instId=instId,
             tdMode=tdMode,

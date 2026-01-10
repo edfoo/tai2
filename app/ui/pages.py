@@ -321,11 +321,12 @@ def register_pages(app: FastAPI) -> None:
             with llm_card_container:
                 for entry in items:
                     symbol = entry.get("symbol") or "--"
-                    header = f"{symbol} · {format_llm_timestamp(entry.get('timestamp'))}"
+                    decision = entry.get("decision") or {}
+                    action = (decision.get("action") or "--").upper()
+                    header = f"{symbol} · {action} · {format_llm_timestamp(entry.get('timestamp'))}"
                     schema = entry.get("response_schema") or {}
                     overview = entry.get("schema_overview") or []
                     decision = entry.get("decision") or {}
-                    action = (decision.get("action") or "--").upper()
                     confidence = decision.get("confidence")
                     confidence_label = (
                         f"{confidence:.2f}" if isinstance(confidence, (int, float)) else "--"

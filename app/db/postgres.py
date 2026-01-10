@@ -707,6 +707,7 @@ async def _ensure_schema(pool: asyncpg.Pool) -> None:
     await pool.execute(
         "ALTER TABLE prompt_runs ADD COLUMN IF NOT EXISTS prompt_version_id UUID"
     )
+    await _ensure_executed_trade_id_uuid(pool)
 
 
 async def _ensure_timescale_extension(pool: asyncpg.Pool) -> None:
@@ -731,6 +732,43 @@ async def _ensure_equity_primary_key(pool: asyncpg.Pool) -> None:
         await pool.execute("ALTER TABLE equity_history ADD PRIMARY KEY (observed_at, id);")
     except asyncpg.PostgresError as exc:  # pragma: no cover - depends on perms/data
         logger.warning("Unable to enforce equity_history primary key: %s", exc)
+
+
+async def _ensure_executed_trade_id_uuid(pool: asyncpg.Pool) -> None:
+    row = await pool.fetchrow(
+        """
+        SELECT udt_name
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'executed_trades'
+          AND column_name = 'id'
+        """
+    )
+    if not row:
+        return
+    udt_name = row["udt_name"]
+    if udt_name == "uuid":
+        return
+    if udt_name not in {"int8", "int4", "int2"}:
+        logger.warning("executed_trades.id has unexpected type %s; skipping uuid migration", udt_name)
+        return
+    logger.info("Converting executed_trades.id column from %s to UUID", udt_name)
+    await pool.execute("ALTER TABLE executed_trades ALTER COLUMN id DROP DEFAULT")
+    await pool.execute(
+        """
+        ALTER TABLE executed_trades
+        ALTER COLUMN id TYPE uuid USING (
+            (
+                substr(md5(id::text), 1, 8) || '-' ||
+                substr(md5(id::text), 9, 4) || '-' ||
+                substr(md5(id::text), 13, 4) || '-' ||
+                substr(md5(id::text), 17, 4) || '-' ||
+                substr(md5(id::text), 21, 12)
+            )::uuid
+        )
+        """
+    )
+    await pool.execute("DROP SEQUENCE IF EXISTS executed_trades_id_seq")
 
 
 __all__ = [
