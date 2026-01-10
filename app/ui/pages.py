@@ -22,6 +22,7 @@ from app.db.postgres import (
     save_execution_settings,
     save_llm_model,
     save_okx_sub_account,
+    save_ta_timeframe,
     set_enabled_trading_pairs,
 )
 from app.services.prompt_builder import (
@@ -1659,6 +1660,10 @@ def register_pages(app: FastAPI) -> None:
                 return json.dumps(schema, indent=2)
             except (TypeError, ValueError):
                 return ""
+
+        timeframe_default = config.get("ta_timeframe") or "4H"
+        if timeframe_default not in TA_TIMEFRAME_OPTIONS:
+            timeframe_default = "4H"
         with wrapper:
             ui.label("Engine Configuration").classes("text-2xl font-bold")
             ui.label("Execution Guardrails").classes("text-xl font-semibold")
@@ -1757,6 +1762,11 @@ def register_pages(app: FastAPI) -> None:
                     value=config.get("auto_prompt_interval", 300),
                     min=30,
                 ).classes("w-full md:w-48")
+                ta_timeframe_select_cfg = ui.select(
+                    options=TA_TIMEFRAME_OPTIONS,
+                    label="Analysis Timeframe",
+                    value=timeframe_default,
+                ).classes("w-full md:w-40")
                 model_select = ui.select(
                     model_options,
                     label="Model",
@@ -2385,6 +2395,14 @@ def register_pages(app: FastAPI) -> None:
             config["llm_system_prompt"] = prompt_input.value
             config["llm_decision_prompt"] = decision_prompt_input.value
             config["llm_model_id"] = model_select.value
+            timeframe_value = (
+                ta_timeframe_select_cfg.value
+                or config.get("ta_timeframe")
+                or "4H"
+            )
+            if timeframe_value not in TA_TIMEFRAME_OPTIONS:
+                timeframe_value = "4H"
+            config["ta_timeframe"] = timeframe_value
             schema_text = response_schema_input.value or ""
             if schema_text.strip():
                 try:
@@ -2399,6 +2417,10 @@ def register_pages(app: FastAPI) -> None:
                 await save_llm_model(config["llm_model_id"])
             except Exception as exc:  # pragma: no cover - db optional
                 ui.notify(f"Failed to persist default model: {exc}", color="warning")
+            try:
+                await save_ta_timeframe(config["ta_timeframe"])
+            except Exception as exc:  # pragma: no cover - db optional
+                ui.notify(f"Failed to persist timeframe: {exc}", color="warning")
 
             def _coerce(value: Any, fallback: Any, caster: Any) -> Any:
                 try:
@@ -2562,6 +2584,7 @@ def register_pages(app: FastAPI) -> None:
                     config.get("okx_sub_account"),
                     config.get("okx_sub_account_use_master"),
                 )
+                await market_service.set_ohlc_bar(config["ta_timeframe"])
                 market_service.set_poll_interval(config["ws_update_interval"])
                 await market_service.set_websocket_enabled(config.get("enable_websocket", True))
                 await market_service.update_symbols(symbols)

@@ -19,6 +19,7 @@ from app.db.postgres import (
     fetch_trading_pairs,
     init_postgres_pool,
     load_guardrails,
+    load_ta_timeframe,
     load_llm_model,
     load_execution_settings,
     load_okx_sub_account,
@@ -228,6 +229,15 @@ def _create_lifespan(enable_background_services: bool):
                         min_sizes = execution_settings.get("min_sizes")
                         if isinstance(min_sizes, dict):
                             app.state.runtime_config["execution_min_sizes"] = min_sizes
+                try:
+                    stored_timeframe = await load_ta_timeframe(
+                        app.state.runtime_config.get("ta_timeframe")
+                    )
+                except Exception as exc:  # pragma: no cover - optional
+                    logger.error("Failed to load TA timeframe: %s", exc)
+                else:
+                    if stored_timeframe:
+                        app.state.runtime_config["ta_timeframe"] = stored_timeframe
         elif not enable_background_services:
             logger.info("Background DB init disabled; skipping Postgres init")
         else:

@@ -659,6 +659,46 @@ async def load_execution_settings() -> dict[str, Any]:
     return result
 
 
+async def save_ta_timeframe(timeframe: str | None) -> None:
+    pool = await get_postgres_pool()
+    normalized = (timeframe or "").strip()
+    payload = json.dumps({"timeframe": normalized} if normalized else {})
+    await pool.execute(
+        """
+        INSERT INTO runtime_settings (key, value, updated_at)
+        VALUES ('ta_timeframe', $1::jsonb, NOW())
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+        """,
+        payload,
+    )
+
+
+async def load_ta_timeframe(default: str | None = None) -> str | None:
+    pool = await get_postgres_pool()
+    row = await pool.fetchrow("SELECT value FROM runtime_settings WHERE key = 'ta_timeframe'")
+    if not row:
+        return default
+    value = row["value"]
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            parsed = value
+    else:
+        parsed = value
+    if isinstance(parsed, dict):
+        candidate = parsed.get("timeframe") or parsed.get("value")
+        if isinstance(candidate, str):
+            candidate = candidate.strip()
+            if candidate:
+                return candidate
+    if isinstance(parsed, str):
+        candidate = parsed.strip()
+        if candidate:
+            return candidate
+    return default
+
+
 async def get_prompt_version(version_id: str) -> dict[str, Any] | None:
     pool = await get_postgres_pool()
     row = await pool.fetchrow(
@@ -735,6 +775,8 @@ async def _ensure_equity_primary_key(pool: asyncpg.Pool) -> None:
 
 
 async def _ensure_executed_trade_id_uuid(pool: asyncpg.Pool) -> None:
+    if not hasattr(pool, "fetchrow"):
+        return
     row = await pool.fetchrow(
         """
         SELECT udt_name
@@ -783,6 +825,7 @@ __all__ = [
     "get_postgres_pool",
     "get_prompt_version",
     "init_postgres_pool",
+    "load_ta_timeframe",
     "load_guardrails",
     "load_llm_model",
     "load_okx_sub_account",
@@ -794,4 +837,5 @@ __all__ = [
     "save_llm_model",
     "save_guardrails",
     "set_enabled_trading_pairs",
+    "save_ta_timeframe",
 ]
