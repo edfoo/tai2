@@ -1723,6 +1723,9 @@ def register_pages(app: FastAPI) -> None:
         guardrails.setdefault(
             "snapshot_max_age_seconds", config.get("snapshot_max_age_seconds")
         )
+        if "wait_for_tp_sl" not in config:
+            config["wait_for_tp_sl"] = bool(guardrails.get("wait_for_tp_sl", False))
+        guardrails.setdefault("wait_for_tp_sl", bool(config.get("wait_for_tp_sl")))
         config.setdefault("prompt_version_name", None)
         prompt_versions_cache: dict[str, dict[str, Any]] = {}
         prompt_version_options: dict[str, str] = {}
@@ -1875,6 +1878,12 @@ def register_pages(app: FastAPI) -> None:
                 value=guardrails.get("require_position_alignment", True),
             ).classes("mt-2").props(
                 "hint='Blocks conflicting orders unless an opposite signal closes the position' persistent-hint"
+            )
+            wait_for_tp_sl_switch = ui.switch(
+                "Wait for TP/SL to Hit",
+                value=guardrails.get("wait_for_tp_sl", False),
+            ).classes("mt-2").props(
+                "hint='When enabled, opposing signals are ignored until the current position\'s TP or SL executes' persistent-hint"
             )
             snapshot_max_age_input = ui.number(
                 label="Snapshot Max Age (sec)",
@@ -2247,6 +2256,7 @@ def register_pages(app: FastAPI) -> None:
                 "trade_window_seconds": _safe_int(trade_window_seconds_input.value),
                 "risk_model": guardrails.get("risk_model", "ATR based stops x1.5"),
                 "require_position_alignment": bool(require_alignment_switch.value),
+                "wait_for_tp_sl": bool(wait_for_tp_sl_switch.value),
                 "snapshot_max_age_seconds": _safe_int(snapshot_max_age_input.value)
                 or config.get("snapshot_max_age_seconds"),
             }
@@ -2404,6 +2414,7 @@ def register_pages(app: FastAPI) -> None:
                 max_trades_per_hour_input,
                 trade_window_seconds_input,
                 require_alignment_switch,
+                wait_for_tp_sl_switch,
             ]
             for widget in listeners:
                 widget.on_value_change(lambda _: update_payload_preview())
@@ -2547,6 +2558,7 @@ def register_pages(app: FastAPI) -> None:
             config["enable_websocket"] = bool(websocket_switch.value)
             config["auto_prompt_enabled"] = bool(auto_prompt_switch.value)
             config["execution_enabled"] = bool(execution_switch.value)
+            config["wait_for_tp_sl"] = bool(wait_for_tp_sl_switch.value)
             config["llm_system_prompt"] = prompt_input.value
             config["llm_decision_prompt"] = decision_prompt_input.value
             config["llm_model_id"] = model_select.value
@@ -2671,6 +2683,7 @@ def register_pages(app: FastAPI) -> None:
                 ),
                 "risk_model": guardrails.get("risk_model", "ATR based stops x1.5"),
                 "require_position_alignment": bool(require_alignment_switch.value),
+                "wait_for_tp_sl": bool(wait_for_tp_sl_switch.value),
                 "snapshot_max_age_seconds": _coerce(
                     snapshot_max_age_input.value,
                     config.get("snapshot_max_age_seconds", settings.snapshot_max_age_seconds),
@@ -2680,6 +2693,9 @@ def register_pages(app: FastAPI) -> None:
             config["snapshot_max_age_seconds"] = config["guardrails"].get(
                 "snapshot_max_age_seconds",
                 settings.snapshot_max_age_seconds,
+            )
+            config["wait_for_tp_sl"] = bool(
+                config["guardrails"].get("wait_for_tp_sl", False)
             )
             version_name = (prompt_version_name_input.value or "").strip()
             created_version_id: str | None = None
@@ -2734,6 +2750,7 @@ def register_pages(app: FastAPI) -> None:
                 llm_service.set_model(model_select.value)
             market_service = getattr(app.state, "market_service", None)
             if market_service:
+                market_service.set_wait_for_tp_sl(config.get("wait_for_tp_sl", False))
                 await market_service.set_okx_flag(config.get("okx_api_flag"))
                 await market_service.set_sub_account(
                     config.get("okx_sub_account"),
