@@ -667,6 +667,7 @@ class PromptBuilder:
             "trade_window_seconds": 3600,
             "require_position_alignment": True,
             "snapshot_max_age_seconds": 900,
+            "wait_for_tp_sl": False,
         }
 
     @staticmethod

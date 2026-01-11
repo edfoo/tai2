@@ -139,7 +139,11 @@ def _create_lifespan(enable_background_services: bool):
             "okx_sub_account": settings.okx_sub_account,
             "okx_sub_account_use_master": settings.okx_sub_account_use_master,
             "okx_api_flag": str(settings.okx_api_flag or "0") or "0",
+            "wait_for_tp_sl": False,
         }
+        app.state.runtime_config["wait_for_tp_sl"] = bool(
+            app.state.runtime_config["guardrails"].get("wait_for_tp_sl", False)
+        )
         app.state.llm_service = LLMService(model_id=app.state.runtime_config["llm_model_id"])
 
         if enable_background_services and settings.database_url:
@@ -163,6 +167,9 @@ def _create_lifespan(enable_background_services: bool):
                 else:
                     if stored_guardrails:
                         app.state.runtime_config["guardrails"] = stored_guardrails
+                        app.state.runtime_config["wait_for_tp_sl"] = bool(
+                            stored_guardrails.get("wait_for_tp_sl", False)
+                        )
                 try:
                     stored_model = await load_llm_model(
                         app.state.runtime_config.get("llm_model_id")
@@ -263,6 +270,9 @@ def _create_lifespan(enable_background_services: bool):
                     ),
                     okx_flag=app.state.runtime_config.get("okx_api_flag"),
                     enable_websocket=app.state.runtime_config.get("enable_websocket", True),
+                )
+                market_service.set_wait_for_tp_sl(
+                    app.state.runtime_config.get("wait_for_tp_sl", False)
                 )
                 app.state.market_service = market_service
                 await market_service.start()

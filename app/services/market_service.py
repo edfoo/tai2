@@ -128,6 +128,7 @@ class MarketService:
         self._log_sink = log_sink or (lambda msg: None)
         self._ws_debug_interval = max(5.0, float(self._poll_interval))
         self._ws_last_debug: Dict[str, float] = {}
+        self._wait_for_tp_sl = False
 
     async def start(self) -> None:
         if self._poller_task:
@@ -341,6 +342,14 @@ class MarketService:
         self._poll_interval = max(1, seconds)
         self._ws_debug_interval = max(5.0, float(self._poll_interval))
         self._emit_debug(f"Poll interval updated to {self._poll_interval}s")
+
+    def set_wait_for_tp_sl(self, enabled: bool) -> None:
+        flag = bool(enabled)
+        if flag == self._wait_for_tp_sl:
+            return
+        self._wait_for_tp_sl = flag
+        state = "enabled" if flag else "disabled"
+        self._emit_debug(f"Wait-for-TP/SL guard {state}")
 
     async def set_websocket_enabled(self, enabled: bool) -> None:
         flag = bool(enabled)
@@ -560,12 +569,16 @@ class MarketService:
         data = self._safe_data(response)
         return data
 
-    async def _position_size(self, symbol: str) -> float | None:
+    async def _position_size(self, symbol: str, pos_side: str | None = None) -> float | None:
         records = await self._fetch_positions(symbol)
         normalized = symbol.upper()
+        normalized_side = (pos_side or "").lower()
         for entry in records:
             inst_id = str(entry.get("instId") or "").upper()
             if inst_id != normalized:
+                continue
+            entry_side = str(entry.get("posSide") or "").lower()
+            if normalized_side and entry_side != normalized_side:
                 continue
             size = self._extract_float(entry.get("pos") or entry.get("size"))
             if size is not None:
@@ -576,17 +589,18 @@ class MarketService:
         self,
         symbol: str,
         *,
+        pos_side: str | None = None,
         attempts: int = 6,
         delay: float = 0.25,
-    ) -> bool:
+    ) -> float | None:
         normalized = symbol.upper()
         for attempt in range(attempts):
-            size = await self._position_size(normalized)
+            size = await self._position_size(normalized, pos_side=pos_side)
             if size is not None and abs(size) > 0:
-                return True
+                return size
             if attempt < attempts - 1:
                 await asyncio.sleep(delay)
-        return False
+        return None
 
     async def _fetch_account_balance(self) -> dict[str, Any]:
         if not self._account_api:
@@ -1170,6 +1184,11 @@ class MarketService:
         trade_limit = int(self._extract_float(guardrails.get("max_trades_per_hour")) or 0)
         trade_window = int(self._extract_float(guardrails.get("trade_window_seconds")) or 3600)
         require_alignment = bool(guardrails.get("require_position_alignment", True))
+        wait_for_tp_sl = guardrails.get("wait_for_tp_sl")
+        if wait_for_tp_sl is None:
+            wait_for_tp_sl = self._wait_for_tp_sl
+        else:
+            wait_for_tp_sl = bool(wait_for_tp_sl)
         cooldown_seconds = max(0, cooldown_seconds)
         trade_limit = max(0, trade_limit)
         trade_window = max(60, trade_window)
@@ -1212,6 +1231,28 @@ class MarketService:
             self._decision_state[symbol] = {"action": action, "timestamp": now}
             self._emit_debug(summary)
             return
+
+        if wait_for_tp_sl and current_side in {"LONG", "SHORT"}:
+            closing_action = (
+                (current_side == "LONG" and action == "SELL")
+                or (current_side == "SHORT" and action == "BUY")
+            )
+            if closing_action:
+                symbol_key = symbol.upper()
+                protection_meta = self._position_protection.get(symbol_key)
+                has_protection = False
+                if protection_meta:
+                    tp_value = self._extract_float(protection_meta.get("take_profit"))
+                    sl_value = self._extract_float(protection_meta.get("stop_loss"))
+                    has_protection = bool(
+                        (tp_value is not None and tp_value > 0)
+                        or (sl_value is not None and sl_value > 0)
+                    )
+                if has_protection:
+                    self._emit_debug(
+                        f"Wait-for-TP/SL guard blocked {action} for {symbol}: protection active"
+                    )
+                    return
 
         if require_alignment and not self._transition_allowed(current_side, action):
             self._emit_debug(
@@ -1845,22 +1886,28 @@ class MarketService:
             return None
         if not self._trade_api:
             return None
-        position_ready = await self._wait_for_position(symbol)
-        if not position_ready:
+        detected_size = await self._wait_for_position(
+            symbol,
+            pos_side=pos_side if dual_side_mode else None,
+        )
+        if detected_size is None:
             self._emit_debug(
                 f"Skipping TP/SL algo for {symbol}: position not yet confirmed"
             )
             return None
+        close_size = abs(detected_size)
+        quantized_close_size = self._quantize_order_size(symbol, close_size) or close_size
         payload: dict[str, Any] = {
             "instId": symbol,
             "tdMode": trade_mode,
             "side": "sell" if action == "BUY" else "buy",
             "ordType": "conditional",
             "reduceOnly": "true",
-            "closeFraction": "1",
             "algoClOrdId": self._build_tpsl_client_id(symbol),
             "cxlOnClosePos": "true",
         }
+        if quantized_close_size > 0:
+            payload["sz"] = self._format_size(quantized_close_size)
         if take_profit_price:
             payload["tpTriggerPx"] = self._format_price(take_profit_price)
             payload["tpOrdPx"] = "-1"
@@ -1869,6 +1916,9 @@ class MarketService:
             payload["slTriggerPx"] = self._format_price(stop_loss_price)
             payload["slOrdPx"] = "-1"
             payload["slTriggerPxType"] = "last"
+        self._emit_debug(
+            f"Submitting TP/SL algo for {symbol} | sz={payload.get('sz')} tp={payload.get('tpTriggerPx')} sl={payload.get('slTriggerPx')}"
+        )
         include_pos_side = pos_side if dual_side_mode and pos_side else None
         while True:
             submission = dict(payload)
