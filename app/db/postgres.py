@@ -20,7 +20,9 @@ CREATE TABLE IF NOT EXISTS executed_trades (
     id UUID PRIMARY KEY,
     timestamp TIMESTAMPTZ NOT NULL,
     symbol TEXT NOT NULL,
+    instrument TEXT NOT NULL DEFAULT '',
     side TEXT NOT NULL CHECK (side IN ('buy', 'sell')),
+    size NUMERIC NOT NULL,
     price NUMERIC NOT NULL,
     amount NUMERIC NOT NULL,
     llm_reasoning TEXT,
@@ -61,12 +63,12 @@ CREATE TABLE IF NOT EXISTS prompt_versions (
 """
 
 INSERT_SQL = (
-    "INSERT INTO executed_trades (id, timestamp, symbol, side, price, amount, llm_reasoning, pnl, fee) "
-    "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"
+    "INSERT INTO executed_trades (id, timestamp, symbol, instrument, side, size, price, amount, llm_reasoning, pnl, fee) "
+    "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"
 )
 
 FETCH_RECENT_SQL = (
-    "SELECT id, timestamp, symbol, side, price, amount, llm_reasoning, pnl, fee "
+    "SELECT id, timestamp, symbol, instrument, side, size, price, amount, llm_reasoning, pnl, fee "
     "FROM executed_trades ORDER BY timestamp DESC LIMIT $1"
 )
 
@@ -203,7 +205,9 @@ async def insert_executed_trade(trade: ExecutedTrade) -> None:
         trade.id,
         trade.timestamp,
         trade.symbol,
+        trade.instrument,
         trade.side,
+        trade.size,
         trade.price,
         trade.amount,
         trade.llm_reasoning,
@@ -217,17 +221,21 @@ async def fetch_recent_trades(limit: int = 200) -> list[dict[str, Any]]:
     records = await pool.fetch(FETCH_RECENT_SQL, limit)
     results: list[dict[str, Any]] = []
     for row in records:
+        record = dict(row)
+        timestamp = record.get("timestamp")
         results.append(
             {
-                "id": str(row["id"]),
-                "timestamp": row["timestamp"].isoformat() if row["timestamp"] else None,
-                "symbol": row["symbol"],
-                "side": row["side"],
-                "price": float(row["price"]),
-                "amount": float(row["amount"]),
-                "pnl": float(row["pnl"]) if row["pnl"] is not None else None,
-                "llm_reasoning": row["llm_reasoning"],
-                "fee": float(row["fee"]) if row["fee"] is not None else None,
+                "id": str(record.get("id")),
+                "timestamp": timestamp.isoformat() if timestamp else None,
+                "symbol": record.get("symbol"),
+                "instrument": record.get("instrument") or record.get("symbol"),
+                "side": record.get("side"),
+                "size": float(record.get("size")) if record.get("size") is not None else None,
+                "price": float(record.get("price")) if record.get("price") is not None else None,
+                "amount": float(record.get("amount")) if record.get("amount") is not None else None,
+                "pnl": float(record.get("pnl")) if record.get("pnl") is not None else None,
+                "llm_reasoning": record.get("llm_reasoning"),
+                "fee": float(record.get("fee")) if record.get("fee") is not None else None,
             }
         )
     return results
@@ -734,6 +742,8 @@ async def _ensure_schema(pool: asyncpg.Pool) -> None:
         ALTER TABLE executed_trades
         ADD COLUMN IF NOT EXISTS timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         ADD COLUMN IF NOT EXISTS symbol TEXT,
+        ADD COLUMN IF NOT EXISTS instrument TEXT,
+        ADD COLUMN IF NOT EXISTS size NUMERIC,
         ADD COLUMN IF NOT EXISTS side TEXT,
         ADD COLUMN IF NOT EXISTS price NUMERIC,
         ADD COLUMN IF NOT EXISTS amount NUMERIC,

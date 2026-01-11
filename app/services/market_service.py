@@ -119,6 +119,7 @@ class MarketService:
         self._decision_state: dict[str, dict[str, Any]] = {}
         self._recent_trades: dict[str, Deque[float]] = {}
         self._position_activity: dict[str, float] = {}
+        self._position_protection: dict[str, dict[str, Any]] = {}
         self._subscribed_symbols: set[str] = set()
         self._available_symbols: list[str] = []
         self._instrument_specs: dict[str, dict[str, float]] = {}
@@ -299,6 +300,7 @@ class MarketService:
             for symbol, ts in self._position_activity.items()
             if ts > 0
         }
+        position_protection = self._snapshot_position_protection()
         snapshot = {
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "symbol": primary_symbol,
@@ -320,8 +322,20 @@ class MarketService:
             "ws_update_interval": self.settings.ws_update_interval,
             "market_data": market_data,
             "position_activity": position_activity,
+            "position_protection": position_protection,
         }
         return snapshot
+
+    def _snapshot_position_protection(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {}
+        for symbol, meta in self._position_protection.items():
+            payload[symbol] = {
+                "take_profit": meta.get("take_profit"),
+                "stop_loss": meta.get("stop_loss"),
+                "updated_at": meta.get("updated_at"),
+                "algo_cl_ord_id": meta.get("algo_cl_ord_id"),
+            }
+        return payload
 
     def set_poll_interval(self, seconds: int) -> None:
         self._poll_interval = max(1, seconds)
@@ -531,18 +545,48 @@ class MarketService:
             return list(self.symbols)
         return sorted(set(pairs))
 
-    async def _fetch_positions(self) -> list[dict[str, Any]]:
+    async def _fetch_positions(self, symbol: str | None = None) -> list[dict[str, Any]]:
         if not self._account_api:
             return []
         kwargs = {"instType": "SWAP"}
         if self._sub_account and self._sub_account_use_master:
             kwargs["subAcct"] = self._sub_account
+        if symbol:
+            kwargs["instId"] = symbol
         response = await asyncio.to_thread(
             self._account_api.get_positions,
             **kwargs,
         )
         data = self._safe_data(response)
         return data
+
+    async def _position_size(self, symbol: str) -> float | None:
+        records = await self._fetch_positions(symbol)
+        normalized = symbol.upper()
+        for entry in records:
+            inst_id = str(entry.get("instId") or "").upper()
+            if inst_id != normalized:
+                continue
+            size = self._extract_float(entry.get("pos") or entry.get("size"))
+            if size is not None:
+                return size
+        return None
+
+    async def _wait_for_position(
+        self,
+        symbol: str,
+        *,
+        attempts: int = 6,
+        delay: float = 0.25,
+    ) -> bool:
+        normalized = symbol.upper()
+        for attempt in range(attempts):
+            size = await self._position_size(normalized)
+            if size is not None and abs(size) > 0:
+                return True
+            if attempt < attempts - 1:
+                await asyncio.sleep(delay)
+        return False
 
     async def _fetch_account_balance(self) -> dict[str, Any]:
         if not self._account_api:
@@ -1702,9 +1746,13 @@ class MarketService:
             return
         if price is None or amount is None:
             return
+        symbol_key = symbol.upper()
+        self._position_activity[symbol_key] = time.time()
         try:
             trade = ExecutedTrade(
                 symbol=symbol,
+                instrument=symbol,
+                size=Decimal(str(amount)) if amount is not None else None,
                 side=side,
                 price=Decimal(str(price)),
                 amount=Decimal(str(amount)),
@@ -1735,8 +1783,20 @@ class MarketService:
     ) -> None:
         if not self._trade_api:
             return
+        symbol_key = symbol.upper()
         await self._cancel_position_protection(symbol)
-        await self._place_position_protection(
+        if not (take_profit_price or stop_loss_price):
+            self._position_protection.pop(symbol_key, None)
+            return
+        pending_meta = {
+            "take_profit": take_profit_price,
+            "stop_loss": stop_loss_price,
+            "algo_id": None,
+            "algo_cl_ord_id": self._build_tpsl_client_id(symbol),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "synced": False,
+        }
+        placement = await self._place_position_protection(
             symbol=symbol,
             trade_mode=trade_mode,
             action=action,
@@ -1745,10 +1805,22 @@ class MarketService:
             dual_side_mode=dual_side_mode,
             pos_side=pos_side,
         )
+        if placement:
+            pending_meta.update(
+                {
+                    "algo_id": placement.get("algo_id"),
+                    "algo_cl_ord_id": placement.get("algo_cl_ord_id")
+                    or pending_meta.get("algo_cl_ord_id"),
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                    "synced": True,
+                }
+            )
+        self._position_protection[symbol_key] = pending_meta
 
     async def _cancel_position_protection(self, symbol: str) -> None:
         if not self._trade_api:
             return
+        self._position_protection.pop(symbol.upper(), None)
         client_id = self._build_tpsl_client_id(symbol)
         payload = [{"instId": symbol, "algoClOrdId": client_id}]
         if self._sub_account and self._sub_account_use_master:
@@ -1768,11 +1840,17 @@ class MarketService:
         stop_loss_price: float | None,
         dual_side_mode: bool,
         pos_side: str | None,
-    ) -> None:
+    ) -> dict[str, str] | None:
         if not (take_profit_price or stop_loss_price):
-            return
+            return None
         if not self._trade_api:
-            return
+            return None
+        position_ready = await self._wait_for_position(symbol)
+        if not position_ready:
+            self._emit_debug(
+                f"Skipping TP/SL algo for {symbol}: position not yet confirmed"
+            )
+            return None
         payload: dict[str, Any] = {
             "instId": symbol,
             "tdMode": trade_mode,
@@ -1802,19 +1880,22 @@ class MarketService:
                 response = await asyncio.to_thread(self._trade_api.place_algo_order, **submission)
             except Exception as exc:  # pragma: no cover - network dependency
                 self._emit_debug(f"Failed to place TP/SL algo for {symbol}: {exc}")
-                return
+                return None
             normalized = self._normalize_order_response(response)
             if normalized:
                 algo_id = normalized.get("algoId") or normalized.get("algoClOrdId")
                 self._emit_debug(
                     f"Registered TP/SL algo {algo_id or payload['algoClOrdId']} for {symbol}"
                 )
-                return
+                return {
+                    "algo_id": algo_id,
+                    "algo_cl_ord_id": payload["algoClOrdId"],
+                }
             if include_pos_side and self._response_indicates_pos_side_error(response):
                 include_pos_side = None
                 continue
             self._emit_debug(f"OKX rejected TP/SL algo for {symbol}: {response}")
-            return
+            return None
 
 
 __all__ = ["MarketService"]

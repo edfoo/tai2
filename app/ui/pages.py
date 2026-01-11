@@ -570,6 +570,7 @@ def register_pages(app: FastAPI) -> None:
             symbols = snapshot.get("symbols") or []
             market_data = snapshot.get("market_data") or {}
             position_activity = snapshot.get("position_activity") or {}
+            position_protection = snapshot.get("position_protection") or {}
             selected_symbol = snapshot.get("symbol")
             if not selected_symbol and symbols:
                 selected_symbol = symbols[0]
@@ -612,7 +613,10 @@ def register_pages(app: FastAPI) -> None:
                         return price
                 return None
 
-            def extract_tp_sl(position: dict[str, Any]) -> tuple[float | None, float | None]:
+            def extract_tp_sl(
+                position: dict[str, Any],
+                cached_meta: dict[str, Any] | None,
+            ) -> tuple[float | None, float | None]:
                 tp_value = _first_price(
                     position.get("tpTriggerPx"),
                     position.get("tpOrdPx"),
@@ -734,7 +738,19 @@ def register_pages(app: FastAPI) -> None:
                 elif isinstance(activity_meta, str):
                     last_trade_label = format_activity_ts(activity_meta)
 
-                tp_value, sl_value = extract_tp_sl(pos)
+                protection_meta = position_protection.get(symbol) or position_protection.get(symbol.upper())
+                tp_value, sl_value = extract_tp_sl(pos, protection_meta if isinstance(protection_meta, dict) else None)
+                if protection_meta:
+                    if tp_value is None:
+                        tp_value = _first_price(
+                            protection_meta.get("take_profit"),
+                            protection_meta.get("tp"),
+                        )
+                    if sl_value is None:
+                        sl_value = _first_price(
+                            protection_meta.get("stop_loss"),
+                            protection_meta.get("sl"),
+                        )
 
                 row = {
                     "symbol": symbol,
