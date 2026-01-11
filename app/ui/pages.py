@@ -152,6 +152,7 @@ def register_pages(app: FastAPI) -> None:
         stale_indicator: dict[str, ui.element | None] = {"widget": None}
         manual_refresh_button: dict[str, ui.button | None] = {"widget": None}
         manual_refresh_state = {"busy": False}
+        selected_position_symbol = {"value": None}
         page_client = ui.context.client
 
         def set_ws_status(active: bool) -> None:
@@ -269,7 +270,8 @@ def register_pages(app: FastAPI) -> None:
                             {"name": "leverage", "label": "Leverage", "field": "leverage"},
                         ],
                         rows=[],
-                    ).classes("w-full font-semibold")
+                        row_key="symbol",
+                    ).classes("w-full font-semibold cursor-pointer")
 
                     positions_table.add_slot(
                         "body-cell-pnl",
@@ -287,6 +289,134 @@ def register_pages(app: FastAPI) -> None:
                         </q-td>
                         """,
                     )
+
+                    chart_series: dict[str, Any] = {"symbol": None}
+                    chart_container = ui.card().classes(
+                        "w-full h-64 bg-white rounded-xl shadow-sm border border-slate-200"
+                    )
+                    chart_container.set_visibility(False)
+                    with chart_container:
+                        chart_label = ui.label("Select a position to view candles").classes(
+                            "text-sm text-slate-500"
+                        )
+                        chart_widget = ui.echart(
+                            {
+                                "title": {"text": "Position Candles", "left": "center", "textStyle": {"color": "#0f172a", "fontSize": 14}},
+                                "tooltip": {"trigger": "axis"},
+                                "grid": {"left": 40, "right": 20, "top": 35, "bottom": 30},
+                                "xAxis": {
+                                    "type": "category",
+                                    "data": [],
+                                    "axisLabel": {"color": "#475569"},
+                                    "boundaryGap": False,
+                                },
+                                "yAxis": {"type": "value", "axisLabel": {"color": "#475569"}, "scale": True},
+                                "series": [
+                                    {
+                                        "type": "candlestick",
+                                        "name": "OHLC",
+                                        "data": [],
+                                        "itemStyle": {
+                                            "color": "#10b981",
+                                            "color0": "#f87171",
+                                            "borderColor": "#059669",
+                                            "borderColor0": "#dc2626",
+                                        },
+                                    }
+                                ],
+                            }
+                        ).classes("w-full h-60")
+                        chart_widget.set_visibility(False)
+                    chart_series["widget"] = chart_widget
+
+                    def update_position_chart(symbol: str | None) -> None:
+                        selected_position_symbol["value"] = symbol
+                        chart = chart_series["widget"]
+                        snapshot = last_snapshot["value"]
+                        if not symbol or not snapshot:
+                            chart_container.set_visibility(False)
+                            chart_label.set_text("Select a position to view candles")
+                            chart.set_visibility(False)
+                            chart_series["symbol"] = None
+                            return
+
+                        market_data = snapshot.get("market_data") or {}
+                        entry = (
+                            market_data.get(symbol)
+                            or market_data.get(symbol.upper())
+                            or market_data.get(symbol.lower())
+                        )
+                        indicators = (entry or {}).get("indicators") or {}
+                        ohlcv = indicators.get("ohlcv") or []
+                        if not ohlcv:
+                            chart_container.set_visibility(True)
+                            chart_label.set_text(f"Candle data unavailable for {symbol}")
+                            chart.set_visibility(False)
+                            chart_series["symbol"] = symbol
+                            return
+
+                        def _to_float(value: Any) -> float | None:
+                            try:
+                                return float(value)
+                            except (TypeError, ValueError):
+                                return None
+
+                        recent = ohlcv[-80:]
+                        categories: list[str] = []
+                        candles: list[list[float]] = []
+                        for candle in recent:
+                            ts_value = candle.get("ts")
+                            label = "--"
+                            if ts_value is not None:
+                                try:
+                                    label = datetime.fromtimestamp(float(ts_value) / 1000, timezone.utc).strftime("%H:%M")
+                                except (TypeError, ValueError, OSError, OverflowError):
+                                    label = str(ts_value)
+                            open_px = _to_float(candle.get("open"))
+                            close_px = _to_float(candle.get("close"))
+                            low_px = _to_float(candle.get("low"))
+                            high_px = _to_float(candle.get("high"))
+                            if None in (open_px, close_px, low_px, high_px):
+                                continue
+                            categories.append(label)
+                            candles.append([open_px, close_px, low_px, high_px])
+
+                        if not categories or not candles:
+                            chart_container.set_visibility(True)
+                            chart_label.set_text(f"Candle data unavailable for {symbol}")
+                            chart.set_visibility(False)
+                            chart_series["symbol"] = symbol
+                            return
+
+                        chart_container.set_visibility(True)
+                        chart_label.set_text(f"{symbol} recent candles")
+                        chart.options.setdefault("title", {})["text"] = f"{symbol} Candles"
+                        chart.options["xAxis"]["data"] = categories
+                        chart.options["series"][0]["data"] = candles
+                        chart_series["symbol"] = symbol
+                        chart.set_visibility(True)
+                        chart.update()
+
+                    def handle_position_row_click(event: Any) -> None:
+                        row_symbol: str | None = None
+                        args = getattr(event, "args", None)
+                        if isinstance(args, list):
+                            for item in args:
+                                if isinstance(item, dict) and item.get("symbol"):
+                                    row_symbol = item.get("symbol")
+                                    break
+                                if isinstance(item, dict) and "row" in item and isinstance(item["row"], dict):
+                                    row_symbol = item["row"].get("symbol")
+                                    break
+                        elif isinstance(args, dict):
+                            payload = args.get("row") if isinstance(args.get("row"), dict) else args
+                            if isinstance(payload, dict):
+                                row_symbol = payload.get("symbol")
+
+                        if row_symbol:
+                            update_position_chart(row_symbol)
+
+                    positions_table.on("rowClick", handle_position_row_click)
 
                 with ui.column().classes("flex-[3] w-full gap-4"):
                     with ui.card().classes(
@@ -771,6 +901,15 @@ def register_pages(app: FastAPI) -> None:
 
             positions_table.rows = rows
             positions_table.update()
+
+            target_symbol = selected_position_symbol["value"]
+            normalized_symbol: str | None = None
+            if target_symbol:
+                for candidate in (target_symbol, target_symbol.upper(), target_symbol.lower()):
+                    if candidate in position_lookup:
+                        normalized_symbol = candidate
+                        break
+            update_position_chart(normalized_symbol)
 
             now = time.monotonic()
             if now - equity_refresh["last"] > 30:
