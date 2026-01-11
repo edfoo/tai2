@@ -33,6 +33,8 @@ class _FakeTradeAPI:
         self.legacy_orders: list[dict[str, Any]] = []
         self.algo_orders: list[dict[str, Any]] = []
         self.cancelled_algos: list[list[dict[str, Any]]] = []
+        self.pending_queries: list[dict[str, Any]] = []
+        self.history_queries: list[dict[str, Any]] = []
 
     def _request_with_params(self, method: str, path: str, params: dict[str, Any]):
         self.placed_with_request.append({"method": method, "path": path, "params": params})
@@ -48,6 +50,14 @@ class _FakeTradeAPI:
 
     def cancel_algo_order(self, params):
         self.cancelled_algos.append(params)
+        return {"data": []}
+
+    def order_algo_pending(self, **kwargs: Any):
+        self.pending_queries.append(kwargs)
+        return {"data": []}
+
+    def order_algo_history(self, **kwargs: Any):
+        self.history_queries.append(kwargs)
         return {"data": []}
 
 
@@ -181,3 +191,33 @@ def test_trade_adapter_cancel_algo_order_without_sub_account() -> None:
 
     assert api.cancelled_algos, "Cancel without sub account should call legacy method"
     assert api.cancelled_algos[0][0]["algoId"] == "123"
+
+
+def test_trade_adapter_list_algo_orders_with_sub_account() -> None:
+    api = _FakeTradeAPI()
+    adapter = OkxTradeAdapter(api)
+
+    adapter.list_algo_orders(
+        state="live",
+        ordType="conditional",
+        instId="BTC-USDT-SWAP",
+        ordId="abc123",
+        subAcct="beta",
+    )
+
+    assert api.placed_with_request, "Listing with sub account should use raw request helper"
+    payload = api.placed_with_request[-1]
+    assert payload["path"].endswith("orders-algo-pending"), "Expected pending endpoint"
+    assert payload["params"]["subAcct"] == "beta"
+    assert payload["params"]["ordId"] == "abc123"
+
+
+def test_trade_adapter_list_algo_orders_without_sub_account() -> None:
+    api = _FakeTradeAPI()
+    adapter = OkxTradeAdapter(api)
+
+    adapter.list_algo_orders(state="history", instId="BTC-USDT-SWAP")
+
+    assert api.history_queries, "History queries without sub account should use legacy method"
+    assert api.history_queries[0]["instId"] == "BTC-USDT-SWAP"
+    assert api.history_queries[0]["state"] == "triggered"

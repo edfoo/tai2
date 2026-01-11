@@ -19,6 +19,10 @@ except ImportError:  # pragma: no cover - runtime fallback
     GET = None
     POST = None
 
+
+ORDERS_ALGO_PENDING_PATH = "/api/v5/trade/orders-algo-pending"
+ORDERS_ALGO_HISTORY_PATH = "/api/v5/trade/orders-algo-history"
+
 def _ensure_okx_utils() -> None:
     if not OkxUtils:
         return
@@ -228,6 +232,53 @@ class OkxTradeAdapter:
         if use_raw and hasattr(self._api, "_request_with_params") and CANCEL_ALGOS and POST:
             return self._api._request_with_params(POST, CANCEL_ALGOS, normalized)
         return self._api.cancel_algo_order(normalized)
+
+    def list_algo_orders(
+        self,
+        *,
+        state: str = "live",
+        ordType: str | None = None,
+        instId: str | None = None,
+        algoClOrdId: str | None = None,
+        algoId: str | None = None,
+        ordId: str | None = None,
+        after: str | None = None,
+        before: str | None = None,
+        limit: int | None = None,
+        subAcct: str | None = None,
+        history_state: str | None = None,
+    ) -> Any:
+        if not self._api:
+            raise RuntimeError("Trade API unavailable")
+        params = {
+            key: value
+            for key, value in {
+                "ordType": ordType,
+                "instId": instId,
+                "algoClOrdId": algoClOrdId,
+                "algoId": algoId,
+                "ordId": ordId,
+                "after": after,
+                "before": before,
+                "limit": limit,
+                "subAcct": subAcct,
+            }.items()
+            if value not in (None, "")
+        }
+        endpoint = ORDERS_ALGO_PENDING_PATH
+        method_name = "order_algo_pending"
+        if state != "live":
+            endpoint = ORDERS_ALGO_HISTORY_PATH
+            method_name = "order_algo_history"
+            params["state"] = history_state or "triggered"
+        if subAcct and hasattr(self._api, "_request_with_params") and GET:
+            return self._api._request_with_params(GET, endpoint, params)
+        getter = getattr(self._api, method_name, None)
+        if getter:
+            return getter(**params)
+        if hasattr(self._api, "_request_with_params") and GET:
+            return self._api._request_with_params(GET, endpoint, params)
+        raise RuntimeError("OKX trade client cannot list algo orders")
 
 
 def build_okx_sdk_clients(

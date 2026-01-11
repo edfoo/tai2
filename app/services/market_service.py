@@ -1241,7 +1241,7 @@ class MarketService:
                 symbol_key = symbol.upper()
                 protection_meta = self._position_protection.get(symbol_key)
                 has_protection = False
-                if protection_meta:
+                if protection_meta and protection_meta.get("synced"):
                     tp_value = self._extract_float(protection_meta.get("take_profit"))
                     sl_value = self._extract_float(protection_meta.get("stop_loss"))
                     has_protection = bool(
@@ -1380,9 +1380,18 @@ class MarketService:
             pos_side = "short"
             reduce_only = True
 
+        attach_algo_orders: list[dict[str, Any]] | None = None
         if reduce_only:
+            await self._cancel_position_protection(symbol)
             take_profit_price = None
             stop_loss_price = None
+        has_protection_targets = bool(take_profit_price or stop_loss_price)
+        if not reduce_only and has_protection_targets:
+            await self._cancel_position_protection(symbol)
+            attach_algo_orders = self._build_attach_algo_orders(
+                take_profit_price=take_profit_price,
+                stop_loss_price=stop_loss_price,
+            )
 
         client_order_id = self._generate_client_order_id()
         order = await self._submit_order(
@@ -1394,7 +1403,7 @@ class MarketService:
             order_type=order_type,
             reduce_only=reduce_only,
             client_order_id=client_order_id,
-            attach_algo_orders=None,
+            attach_algo_orders=attach_algo_orders,
         )
         if not order:
             self._emit_debug(f"Order placement failed for {symbol}")
@@ -1415,15 +1424,28 @@ class MarketService:
             fee_value = abs(fee_value)
 
         if not reduce_only and (take_profit_price or stop_loss_price):
-            await self._refresh_position_protection(
-                symbol=symbol,
-                trade_mode=trade_mode,
-                action=action,
-                take_profit_price=take_profit_price,
-                stop_loss_price=stop_loss_price,
-                dual_side_mode=dual_side_mode,
-                pos_side=pos_side if dual_side_mode else None,
-            )
+            protection_ready = False
+            if attach_algo_orders:
+                protection_ready = await self._confirm_attached_protection(
+                    symbol=symbol,
+                    order_id=str(order_id),
+                    take_profit_price=take_profit_price,
+                    stop_loss_price=stop_loss_price,
+                )
+                if not protection_ready:
+                    self._emit_debug(
+                        f"Attached TP/SL for {symbol} not confirmed; falling back to standalone algo"
+                    )
+            if not protection_ready:
+                await self._refresh_position_protection(
+                    symbol=symbol,
+                    trade_mode=trade_mode,
+                    action=action,
+                    take_profit_price=take_profit_price,
+                    stop_loss_price=stop_loss_price,
+                    dual_side_mode=dual_side_mode,
+                    pos_side=pos_side,
+                )
 
         await self._record_trade_execution(
             symbol=symbol,
@@ -1614,21 +1636,33 @@ class MarketService:
 
     @staticmethod
     def _response_indicates_pos_side_error(response: Any) -> bool:
-        if not isinstance(response, dict):
-            return False
         def _entry_has_issue(entry: Any) -> bool:
-            if not isinstance(entry, dict):
+            if entry is None:
                 return False
-            msg = str(entry.get("sMsg") or "").lower()
-            code = str(entry.get("sCode") or "")
-            return "posside" in msg and code == "51000"
-        data = response.get("data")
-        if isinstance(data, list):
-            return any(_entry_has_issue(item) for item in data)
-        if data:
-            return _entry_has_issue(data)
-        msg = str(response.get("msg") or "").lower()
-        return "posside" in msg
+            if isinstance(entry, dict):
+                msg = str(entry.get("sMsg") or entry.get("msg") or "").lower()
+                code = str(entry.get("sCode") or entry.get("code") or "")
+                if "posside" in msg:
+                    return True
+                if code == "51000" and ("pos" in msg or not msg):
+                    return True
+                flattened = json.dumps(entry, default=str).lower()
+                return "posside" in flattened
+            if isinstance(entry, (list, tuple, set)):
+                return any(_entry_has_issue(item) for item in entry)
+            try:
+                text = str(entry).lower()
+            except Exception:
+                return False
+            return "posside" in text
+
+        if isinstance(response, dict):
+            if _entry_has_issue(response.get("data")):
+                return True
+            if _entry_has_issue(response.get("msg") or response.get("sMsg")):
+                return True
+            return _entry_has_issue(response)
+        return _entry_has_issue(response)
 
     def _quantize_order_size(self, symbol: str, size: float) -> float | None:
         if size is None or size <= 0:
@@ -1847,29 +1881,123 @@ class MarketService:
             pos_side=pos_side,
         )
         if placement:
+            confirmed = bool(placement.get("confirmed"))
             pending_meta.update(
                 {
                     "algo_id": placement.get("algo_id"),
                     "algo_cl_ord_id": placement.get("algo_cl_ord_id")
                     or pending_meta.get("algo_cl_ord_id"),
                     "updated_at": datetime.now(timezone.utc).isoformat(),
-                    "synced": True,
+                    "synced": confirmed,
                 }
             )
+            if not confirmed:
+                self._emit_debug(
+                    f"OKX pending list does not show TP/SL algo for {symbol}; guard left unsynced"
+                )
         self._position_protection[symbol_key] = pending_meta
 
     async def _cancel_position_protection(self, symbol: str) -> None:
         if not self._trade_api:
             return
-        self._position_protection.pop(symbol.upper(), None)
-        client_id = self._build_tpsl_client_id(symbol)
-        payload = [{"instId": symbol, "algoClOrdId": client_id}]
+        meta = self._position_protection.pop(symbol.upper(), None) or {}
+        client_id = (meta.get("algo_cl_ord_id") or self._build_tpsl_client_id(symbol))
+        payload_entry: dict[str, Any] = {"instId": symbol}
+        if meta.get("algo_id"):
+            payload_entry["algoId"] = meta["algo_id"]
+        else:
+            payload_entry["algoClOrdId"] = client_id
+        payload = [payload_entry]
         if self._sub_account and self._sub_account_use_master:
             payload[0]["subAcct"] = self._sub_account
         try:
             await asyncio.to_thread(self._trade_api.cancel_algo_order, payload)
         except Exception as exc:  # pragma: no cover - network dependency
             self._emit_debug(f"Failed to cancel TP/SL algo for {symbol}: {exc}")
+
+    async def _fetch_algo_order(
+        self,
+        *,
+        symbol: str,
+        algo_client_id: str | None = None,
+        order_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        if not self._trade_api:
+            return None
+        if not (algo_client_id or order_id):
+            return None
+
+        def _call(state: str) -> Any:
+            sub_account = self._sub_account if self._sub_account_use_master else None
+            return self._trade_api.list_algo_orders(
+                state=state,
+                instId=symbol,
+                ordType="conditional",
+                algoClOrdId=algo_client_id,
+                ordId=order_id,
+                subAcct=sub_account,
+                history_state="triggered" if state != "live" else None,
+            )
+
+        def _select_entry(response: Any) -> dict[str, Any] | None:
+            entries = self._safe_data(response)
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                client_match = False
+                if algo_client_id:
+                    algo_keys = [
+                        str(entry.get("algoClOrdId") or ""),
+                        str(entry.get("algoId") or ""),
+                    ]
+                    client_match = algo_client_id in algo_keys
+                order_match = False
+                if order_id:
+                    order_match = str(entry.get("ordId") or entry.get("orderId") or "") == order_id
+                if client_match or order_match:
+                    return entry
+            return entries[0] if entries else None
+
+        for state in ("live", "history"):
+            try:
+                response = await asyncio.to_thread(_call, state)
+            except Exception as exc:  # pragma: no cover - network dependency
+                self._emit_debug(
+                    f"Failed to query {state} TP/SL algos for {symbol}: {exc}"
+                )
+                continue
+            match = _select_entry(response)
+            if match:
+                match["_source_state"] = state
+                return match
+        return None
+
+    def _build_attach_algo_orders(
+        self,
+        *,
+        take_profit_price: float | None,
+        stop_loss_price: float | None,
+    ) -> list[dict[str, Any]] | None:
+        if not (take_profit_price or stop_loss_price):
+            return None
+        attach_payload: dict[str, Any] = {}
+        if take_profit_price:
+            attach_payload.update(
+                {
+                    "tpTriggerPx": self._format_price(take_profit_price),
+                    "tpOrdPx": "-1",
+                    "tpTriggerPxType": "last",
+                }
+            )
+        if stop_loss_price:
+            attach_payload.update(
+                {
+                    "slTriggerPx": self._format_price(stop_loss_price),
+                    "slOrdPx": "-1",
+                    "slTriggerPxType": "last",
+                }
+            )
+        return [attach_payload] if attach_payload else None
 
     async def _place_position_protection(
         self,
@@ -1917,13 +2045,18 @@ class MarketService:
             payload["slOrdPx"] = "-1"
             payload["slTriggerPxType"] = "last"
         self._emit_debug(
-            f"Submitting TP/SL algo for {symbol} | sz={payload.get('sz')} tp={payload.get('tpTriggerPx')} sl={payload.get('slTriggerPx')}"
+            f"Submitting TP/SL algo for {symbol} | sz={payload.get('sz')} tp={payload.get('tpTriggerPx')} sl={payload.get('slTriggerPx')} posSide={pos_side or 'unset'}"
         )
-        include_pos_side = pos_side if dual_side_mode and pos_side else None
+        include_pos_side = pos_side if pos_side else None
+        tried_with_pos_side = False
+        tried_without_pos_side = False
         while True:
             submission = dict(payload)
             if include_pos_side:
                 submission["posSide"] = include_pos_side
+                tried_with_pos_side = True
+            else:
+                tried_without_pos_side = True
             if self._sub_account and self._sub_account_use_master:
                 submission["subAcct"] = self._sub_account
             try:
@@ -1937,15 +2070,80 @@ class MarketService:
                 self._emit_debug(
                     f"Registered TP/SL algo {algo_id or payload['algoClOrdId']} for {symbol}"
                 )
+                remote_entry = await self._fetch_algo_order(
+                    symbol=symbol,
+                    algo_client_id=payload["algoClOrdId"],
+                )
+                if remote_entry:
+                    source_state = remote_entry.get("_source_state", "live")
+                    tp_px = remote_entry.get("tpTriggerPx") or payload.get("tpTriggerPx")
+                    sl_px = remote_entry.get("slTriggerPx") or payload.get("slTriggerPx")
+                    self._emit_debug(
+                        f"OKX reports TP/SL algo {algo_id or payload['algoClOrdId']} for {symbol}: "
+                        f"state={source_state} tp={tp_px} sl={sl_px}"
+                    )
+                else:
+                    self._emit_debug(
+                        f"Unable to find TP/SL algo {payload['algoClOrdId']} for {symbol} via OKX pending/history APIs"
+                    )
                 return {
                     "algo_id": algo_id,
                     "algo_cl_ord_id": payload["algoClOrdId"],
+                    "confirmed": bool(remote_entry),
                 }
-            if include_pos_side and self._response_indicates_pos_side_error(response):
+            if include_pos_side and not tried_without_pos_side:
+                self._emit_debug(
+                    f"Retrying TP/SL algo for {symbol} without posSide after OKX rejection"
+                )
                 include_pos_side = None
+                continue
+            if pos_side and not tried_with_pos_side:
+                self._emit_debug(
+                    f"Retrying TP/SL algo for {symbol} with posSide after OKX rejection"
+                )
+                include_pos_side = pos_side
                 continue
             self._emit_debug(f"OKX rejected TP/SL algo for {symbol}: {response}")
             return None
+
+    async def _confirm_attached_protection(
+        self,
+        *,
+        symbol: str,
+        order_id: str,
+        take_profit_price: float | None,
+        stop_loss_price: float | None,
+    ) -> bool:
+        attempts = 3
+        remote_entry: dict[str, Any] | None = None
+        for attempt in range(attempts):
+            remote_entry = await self._fetch_algo_order(symbol=symbol, order_id=str(order_id))
+            if remote_entry:
+                break
+            await asyncio.sleep(0.35)
+        if not remote_entry:
+            self._emit_debug(
+                f"Attached TP/SL for {symbol} not visible on OKX after {attempts} checks"
+            )
+            return False
+        tp_value = self._extract_float(remote_entry.get("tpTriggerPx")) or take_profit_price
+        sl_value = self._extract_float(remote_entry.get("slTriggerPx")) or stop_loss_price
+        symbol_key = symbol.upper()
+        meta = {
+            "take_profit": tp_value,
+            "stop_loss": sl_value,
+            "algo_id": remote_entry.get("algoId"),
+            "algo_cl_ord_id": remote_entry.get("algoClOrdId"),
+            "attached_ord_id": str(order_id),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "synced": True,
+            "method": "attach",
+        }
+        self._position_protection[symbol_key] = meta
+        self._emit_debug(
+            f"Attached TP/SL confirmed for {symbol}: algo={meta.get('algo_id') or meta.get('algo_cl_ord_id')}"
+        )
+        return True
 
 
 __all__ = ["MarketService"]
