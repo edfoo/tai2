@@ -1179,7 +1179,18 @@ def register_pages(app: FastAPI) -> None:
                 equity_refresh["last"] = now
                 asyncio.create_task(refresh_equity_chart())
 
-        store.subscribe(update)
+        unsubscribe_update = store.subscribe(update)
+        cleanup_state = {"done": False}
+
+        def _teardown_client(_: Any | None = None) -> None:
+            if cleanup_state["done"]:
+                return
+            cleanup_state["done"] = True
+            unsubscribe_update()
+            store.stop()
+
+        page_client.on_disconnect(_teardown_client)
+        page_client.on_delete(_teardown_client)
         ui.timer(5, lambda: update_snapshot_health(last_snapshot["value"]))
         asyncio.create_task(refresh_equity_chart())
 
@@ -1602,7 +1613,19 @@ def register_pages(app: FastAPI) -> None:
                 cmf_chart.options["series"][0]["data"] = []
                 cmf_chart.update()
 
-        store.subscribe(update)
+        unsubscribe_update = store.subscribe(update)
+        client = ui.context.client
+        cleanup_state = {"done": False}
+
+        def _teardown_client(_: Any | None = None) -> None:
+            if cleanup_state["done"]:
+                return
+            cleanup_state["done"] = True
+            unsubscribe_update()
+            store.stop()
+
+        client.on_disconnect(_teardown_client)
+        client.on_delete(_teardown_client)
 
         def log_trade_event(kind: str) -> None:
             signal = current_signal.get("value") or {}
@@ -1730,7 +1753,19 @@ def register_pages(app: FastAPI) -> None:
             )
 
         send_button.on("click", lambda _: asyncio.create_task(handle_question()))
-        store.subscribe(update)
+        unsubscribe_update = store.subscribe(update)
+        client = ui.context.client
+        cleanup_state = {"done": False}
+
+        def _teardown_client(_: Any | None = None) -> None:
+            if cleanup_state["done"]:
+                return
+            cleanup_state["done"] = True
+            unsubscribe_update()
+            store.stop()
+
+        client.on_disconnect(_teardown_client)
+        client.on_delete(_teardown_client)
 
         def on_symbol_change(e: Any) -> None:
             current_symbol["value"] = e.value

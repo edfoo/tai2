@@ -30,14 +30,29 @@ class SnapshotStore:
         if self._timer is not None:
             self._timer.cancel()
             self._timer = None
+        self._listeners.clear()
 
-    def subscribe(self, callback: Callable[[dict[str, Any] | None], None]) -> None:
+    def subscribe(
+        self, callback: Callable[[dict[str, Any] | None], None]
+    ) -> Callable[[], None]:
         self._listeners.append(callback)
+
+        def _unsubscribe() -> None:
+            self.unsubscribe(callback)
+
+        return _unsubscribe
+
+    def unsubscribe(self, callback: Callable[[dict[str, Any] | None], None]) -> bool:
+        try:
+            self._listeners.remove(callback)
+        except ValueError:
+            return False
+        return True
 
     async def refresh_now(self) -> None:
         try:
             self.snapshot = await self._fetcher()
-            for listener in self._listeners:
+            for listener in list(self._listeners):
                 listener(self.snapshot)
         except Exception as exc:  # pragma: no cover - UI resilience
             ui.notify(f"Snapshot refresh failed: {exc}", color="negative")
