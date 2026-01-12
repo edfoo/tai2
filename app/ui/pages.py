@@ -1743,6 +1743,7 @@ def register_pages(app: FastAPI) -> None:
         wrapper = page_container()
         wrapper.style("max-width: 100%; width: 100%; margin-left: 0; margin-right: 0;")
         client = ui.context.client
+        max_history_rows = 100
 
         async def push_notification(message: str, *, color: str = "positive") -> None:
             with client:
@@ -1752,7 +1753,12 @@ def register_pages(app: FastAPI) -> None:
             ui.label("History").classes("text-2xl font-bold")
             with ui.row().classes("w-full gap-6 flex-col xl:flex-row items-stretch"):
                 with ui.card().classes("w-full flex-1 p-4 gap-3"):
-                    ui.label("Executed Trades").classes("text-lg font-semibold")
+                    with ui.row().classes("w-full items-center justify-between"):
+                        ui.label("Executed Trades").classes("text-lg font-semibold")
+                        reload_button = (
+                            ui.button("Reload Trades", icon="refresh")
+                            .props("dense outline")
+                        )
                     trades_table = ui.table(
                         columns=[
                             {"name": "timestamp", "label": "Timestamp", "field": "timestamp"},
@@ -1764,9 +1770,13 @@ def register_pages(app: FastAPI) -> None:
                         ],
                         rows=[],
                     ).classes("w-full")
-                    reload_button = ui.button("Reload Trades", icon="refresh").classes("self-end")
                 with ui.card().classes("w-full flex-1 p-4 gap-3"):
-                    ui.label("Prompt Runs").classes("text-lg font-semibold")
+                    with ui.row().classes("w-full items-center justify-between"):
+                        ui.label("Prompt Runs").classes("text-lg font-semibold")
+                        prompt_reload_button = (
+                            ui.button("Reload Prompts", icon="refresh")
+                            .props("dense outline")
+                        )
                     prompt_table = ui.table(
                         columns=[
                             {"name": "created_at", "label": "Created", "field": "created_at"},
@@ -1779,24 +1789,25 @@ def register_pages(app: FastAPI) -> None:
                         ],
                         rows=[],
                     ).classes("w-full")
-                    prompt_reload_button = ui.button("Reload Prompts", icon="refresh").classes("self-end")
 
         async def refresh_trades() -> None:
             try:
-                rows = await fetch_recent_trades(200)
+                rows = await fetch_recent_trades(max_history_rows)
             except Exception as exc:  # pragma: no cover - db optional
                 await push_notification(f"Unable to load trades: {exc}", color="warning")
                 return
+            rows = (rows or [])[:max_history_rows]
             trades_table.rows = rows
             trades_table.update()
             await push_notification(f"Trades refreshed ({len(rows)})")
 
         async def refresh_prompts() -> None:
             try:
-                rows = await fetch_prompt_runs(200)
+                rows = await fetch_prompt_runs(max_history_rows)
             except Exception as exc:  # pragma: no cover - db optional
                 await push_notification(f"Unable to load prompts: {exc}", color="warning")
                 return
+            rows = (rows or [])[:max_history_rows]
             formatted: list[dict[str, Any]] = []
             for entry in rows:
                 decision = entry.get("decision") or {}
