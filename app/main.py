@@ -22,6 +22,7 @@ from app.db.postgres import (
     load_ta_timeframe,
     load_llm_model,
     load_execution_settings,
+    load_prompt_interval,
     load_okx_sub_account,
 )
 from app.services.llm_service import LLMService
@@ -245,6 +246,15 @@ def _create_lifespan(enable_background_services: bool):
                 else:
                     if stored_timeframe:
                         app.state.runtime_config["ta_timeframe"] = stored_timeframe
+                try:
+                    stored_prompt_interval = await load_prompt_interval(
+                        app.state.runtime_config.get("auto_prompt_interval")
+                    )
+                except Exception as exc:  # pragma: no cover - optional
+                    logger.error("Failed to load prompt interval: %s", exc)
+                else:
+                    if stored_prompt_interval:
+                        app.state.runtime_config["auto_prompt_interval"] = int(stored_prompt_interval)
         elif not enable_background_services:
             logger.info("Background DB init disabled; skipping Postgres init")
         else:

@@ -521,6 +521,57 @@ async def load_llm_model(default: str | None = None) -> str | None:
     return default
 
 
+async def save_prompt_interval(interval_seconds: int | float) -> None:
+    pool = await get_postgres_pool()
+    try:
+        normalized = int(float(interval_seconds))
+    except (TypeError, ValueError):
+        normalized = 0
+    if normalized <= 0:
+        normalized = 30
+    payload = json.dumps({"interval": normalized})
+    await pool.execute(
+        """
+        INSERT INTO runtime_settings (key, value, updated_at)
+        VALUES ('prompt_interval', $1::jsonb, NOW())
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+        """,
+        payload,
+    )
+
+
+async def load_prompt_interval(default: int | None = None) -> int | None:
+    pool = await get_postgres_pool()
+    row = await pool.fetchrow("SELECT value FROM runtime_settings WHERE key = 'prompt_interval'")
+    if not row:
+        return default
+    value = row["value"]
+    if isinstance(value, str):
+        try:
+            parsed: Any = json.loads(value)
+        except json.JSONDecodeError:
+            parsed = value
+    else:
+        parsed = value
+    candidate: Any = None
+    if isinstance(parsed, dict):
+        candidate = parsed.get("interval") or parsed.get("value")
+    elif isinstance(parsed, (int, float)):
+        candidate = parsed
+    elif isinstance(parsed, str):
+        try:
+            candidate = float(parsed)
+        except ValueError:
+            candidate = None
+    if candidate is None:
+        return default
+    try:
+        normalized = int(float(candidate))
+    except (TypeError, ValueError):
+        return default
+    return normalized if normalized > 0 else default
+
+
 async def save_okx_sub_account(
     sub_account: str | None,
     use_master: bool = False,

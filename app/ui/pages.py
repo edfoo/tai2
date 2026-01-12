@@ -20,6 +20,7 @@ from app.db.postgres import (
     insert_prompt_version,
     save_guardrails,
     save_execution_settings,
+    save_prompt_interval,
     save_llm_model,
     save_okx_sub_account,
     save_ta_timeframe,
@@ -2789,6 +2790,10 @@ def register_pages(app: FastAPI) -> None:
                     int,
                 ),
             )
+            try:
+                await save_prompt_interval(config["auto_prompt_interval"])
+            except Exception as exc:  # pragma: no cover - db optional
+                ui.notify(f"Failed to persist prompt interval: {exc}", color="warning")
             config["execution_trade_mode"] = execution_trade_mode_select.value or "cross"
             config["execution_order_type"] = "market"
             config["execution_min_size"] = max(
