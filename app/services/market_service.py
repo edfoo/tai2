@@ -120,6 +120,7 @@ class MarketService:
         self._recent_trades: dict[str, Deque[float]] = {}
         self._position_activity: dict[str, float] = {}
         self._position_protection: dict[str, dict[str, Any]] = {}
+        self._protection_sync_ts: dict[str, float] = {}
         self._subscribed_symbols: set[str] = set()
         self._available_symbols: list[str] = []
         self._instrument_specs: dict[str, dict[str, float]] = {}
@@ -260,8 +261,9 @@ class MarketService:
         return channels
 
     async def _build_snapshot(self) -> dict[str, Any]:
-        positions = await self._fetch_positions()
-        positions = self._annotate_positions(positions)
+        positions_raw = await self._fetch_positions()
+        await self._sync_position_protection_entries(positions_raw)
+        positions = self._annotate_positions(positions_raw)
         account_payload = await self._fetch_account_balance()
         total_account_value = account_payload.get("total_account_value", 0.0)
         total_equity_value = account_payload.get("total_equity", 0.0)
@@ -366,6 +368,60 @@ class MarketService:
             annotated.append(enriched)
         return annotated
 
+    async def _sync_position_protection_entries(self, positions: list[dict[str, Any]] | None) -> None:
+        if not positions or not self._trade_api:
+            return
+        symbol_map: dict[str, str | None] = {}
+        for entry in positions:
+            if not isinstance(entry, dict):
+                continue
+            symbol_key = self._normalize_symbol_key(entry.get("instId") or entry.get("symbol"))
+            if not symbol_key:
+                continue
+            pos_side = (entry.get("posSide") or entry.get("side") or "").upper() or None
+            symbol_map.setdefault(symbol_key, pos_side)
+        if not symbol_map:
+            return
+        now = time.time()
+        for symbol, pos_side in symbol_map.items():
+            last_sync = self._protection_sync_ts.get(symbol, 0.0)
+            if now - last_sync < 15:
+                continue
+            try:
+                remote_entry = await self._fetch_latest_symbol_protection(symbol, pos_side=pos_side)
+                self._protection_sync_ts[symbol] = time.time()
+            except Exception as exc:  # pragma: no cover - network safety
+                self._emit_debug(f"Protection sync failed for {symbol}: {exc}")
+                continue
+            if remote_entry:
+                tp_value = self._extract_float(remote_entry.get("tpTriggerPx"))
+                sl_value = self._extract_float(remote_entry.get("slTriggerPx"))
+                if tp_value is None and sl_value is None:
+                    continue
+                updated_at = (
+                    self._format_okx_timestamp(
+                        remote_entry.get("updateTime")
+                        or remote_entry.get("uTime")
+                        or remote_entry.get("cTime")
+                    )
+                    or datetime.now(timezone.utc).isoformat()
+                )
+                meta: dict[str, Any] = {
+                    "take_profit": tp_value,
+                    "stop_loss": sl_value,
+                    "algo_id": remote_entry.get("algoId"),
+                    "algo_cl_ord_id": remote_entry.get("algoClOrdId"),
+                    "updated_at": updated_at,
+                    "synced": True,
+                    "method": "okx-sync",
+                }
+                remote_side = remote_entry.get("posSide")
+                if remote_side:
+                    meta["pos_side"] = remote_side
+                self._position_protection[symbol] = meta
+            else:
+                self._position_protection.pop(symbol, None)
+
     @staticmethod
     def _normalize_symbol_key(symbol: Any) -> str | None:
         if symbol is None:
@@ -389,6 +445,24 @@ class MarketService:
         if parsed.tzinfo is None:
             parsed = parsed.replace(tzinfo=timezone.utc)
         return parsed.timestamp()
+
+    @staticmethod
+    def _format_okx_timestamp(value: Any) -> str | None:
+        if value in (None, ""):
+            return None
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return None
+        if numeric > 1e15:  # guard against seconds vs milliseconds
+            numeric /= 1000.0
+        elif numeric > 1e12:  # milliseconds typical
+            numeric /= 1000.0
+        elif numeric > 1e9 * 10:  # microseconds
+            numeric /= 1_000_000.0
+        if numeric <= 0:
+            return None
+        return datetime.fromtimestamp(numeric, timezone.utc).isoformat()
 
     async def _hydrate_cached_annotations(self) -> None:
         try:
@@ -2130,6 +2204,58 @@ class MarketService:
             await asyncio.to_thread(self._trade_api.cancel_algo_order, payload)
         except Exception as exc:  # pragma: no cover - network dependency
             self._emit_debug(f"Failed to cancel TP/SL algo for {symbol}: {exc}")
+
+    async def _fetch_latest_symbol_protection(self, symbol: str, *, pos_side: str | None = None) -> dict[str, Any] | None:
+        if not self._trade_api:
+            return None
+        symbol_key = symbol.upper()
+
+        def _call(state: str) -> Any:
+            kwargs: dict[str, Any] = {
+                "state": state,
+                "instId": symbol,
+                "ordType": "conditional",
+            }
+            if self._sub_account and self._sub_account_use_master:
+                kwargs["subAcct"] = self._sub_account
+            return self._trade_api.list_algo_orders(**kwargs)
+
+        candidates: list[dict[str, Any]] = []
+        for state in ("live",):
+            try:
+                response = await asyncio.to_thread(_call, state)
+            except Exception as exc:  # pragma: no cover - network dependency
+                self._emit_debug(f"Failed to query {state} protection for {symbol}: {exc}")
+                continue
+            entries = self._safe_data(response)
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                entry_symbol = str(entry.get("instId") or "").upper()
+                if entry_symbol != symbol_key:
+                    continue
+                ord_type = str(entry.get("ordType") or "").lower()
+                if ord_type not in {"conditional", "oco"}:
+                    continue
+                reduce_only = str(entry.get("reduceOnly") or "").strip().lower()
+                if reduce_only not in {"true", "1", "yes"}:
+                    continue
+                if pos_side:
+                    remote_side = str(entry.get("posSide") or "").upper()
+                    if remote_side and remote_side != pos_side:
+                        continue
+                candidates.append(entry)
+        if not candidates:
+            return None
+
+        def _updated(entry: dict[str, Any]) -> float:
+            timestamp = self._extract_float(
+                entry.get("updateTime") or entry.get("uTime") or entry.get("cTime")
+            )
+            return timestamp or 0.0
+
+        candidates.sort(key=_updated, reverse=True)
+        return candidates[0]
 
     async def _fetch_algo_order(
         self,
