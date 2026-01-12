@@ -718,6 +718,11 @@ def register_pages(app: FastAPI) -> None:
             if not usage:
                 return "--"
             amount = usage.get("remaining")
+            granted = usage.get("granted")
+            used = usage.get("used")
+            if isinstance(granted, (int, float)) and isinstance(used, (int, float)):
+                derived = max(0.0, granted - used)
+                amount = derived
             if amount is None:
                 return "--"
             currency = (usage.get("currency") or "USD").upper()
@@ -788,15 +793,15 @@ def register_pages(app: FastAPI) -> None:
                 okx_fee_card.value_label.set_text("--")
                 fee_hint_label.set_visibility(False)
 
-        async def refresh_openrouter_credits() -> None:
+        async def refresh_openrouter_credits(force: bool = False) -> None:
             try:
-                usage = await fetch_openrouter_credits(app)
+                usage = await fetch_openrouter_credits(app, force_refresh=force)
             except Exception:
                 usage = None
             _update_credit_display(usage)
 
-        asyncio.create_task(refresh_openrouter_credits())
-        ui.timer(300, lambda: asyncio.create_task(refresh_openrouter_credits()))
+        asyncio.create_task(refresh_openrouter_credits(True))
+        ui.timer(300, lambda: asyncio.create_task(refresh_openrouter_credits(True)))
 
         async def refresh_okx_fees() -> None:
             window_hours = _get_fee_window_hours()
@@ -857,6 +862,7 @@ def register_pages(app: FastAPI) -> None:
                 snapshot = await market_service.refresh_snapshot(reason="manual")
                 await store.refresh_now()
                 await refresh_equity_chart()
+                await refresh_openrouter_credits(True)
                 if snapshot:
                     with page_client:
                         ui.notify("Live data refreshed", color="positive")
