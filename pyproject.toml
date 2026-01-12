@@ -15,9 +15,10 @@ dependencies = [
     "redis",
     "asyncpg",
     "pydantic-settings",
-    "httpx<0.28",
+    "httpx>=0.28.1",
     "pandas",
     "pytest",
+    "openrouter",
 ]
 
 [project.optional-dependencies]

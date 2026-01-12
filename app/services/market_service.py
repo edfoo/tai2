@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import contextlib
 import json
 import logging
@@ -12,6 +13,9 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Callable, Deque, Dict, Iterable, Optional
 
+import httpx
+import inspect
+
 import pandas as pd
 import pandas_ta as ta
 
@@ -20,6 +24,38 @@ from app.db.postgres import insert_equity_point, insert_executed_trade
 from app.models.trade import ExecutedTrade
 from app.services.okx_sdk_adapter import OkxAccountAdapter, OkxTradeAdapter
 from app.services.state_service import StateService
+
+
+def _ensure_httpx_proxies_compat() -> None:
+    """Allow legacy 'proxies' kwarg with httpx>=0.28."""
+
+    def _patch(cls: type) -> None:
+        if cls is None or getattr(cls, "_tai2_proxies_patched", False):
+            return
+        try:
+            signature = inspect.signature(cls.__init__)
+        except (TypeError, ValueError):  # pragma: no cover - CPython internals
+            return
+        if "proxies" in signature.parameters:
+            return
+        original_init = cls.__init__
+
+        @functools.wraps(original_init)
+        def patched_init(self, *args, proxies=None, **kwargs):
+            if proxies is not None:
+                if "proxy" in kwargs and kwargs["proxy"] is not None:
+                    raise TypeError("Cannot supply both 'proxy' and 'proxies'")
+                kwargs["proxy"] = proxies
+            return original_init(self, *args, **kwargs)
+
+        cls.__init__ = patched_init  # type: ignore[assignment]
+        setattr(cls, "_tai2_proxies_patched", True)
+
+    for attr in ("Client", "AsyncClient"):
+        _patch(getattr(httpx, attr, None))
+
+
+_ensure_httpx_proxies_compat()
 
 try:  # pragma: no cover - import guarded for optional dependency
     import okx.Account as OkxAccount
