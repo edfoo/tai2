@@ -99,7 +99,17 @@ class PromptScheduler:
                 return [primary]
         return symbols
 
+    async def _refresh_snapshot(self, reason: str) -> None:
+        market_service = getattr(self._app.state, "market_service", None)
+        if not market_service:
+            return
+        try:
+            await market_service.refresh_snapshot(reason=reason)
+        except Exception as exc:  # pragma: no cover - upstream network risks
+            logger.debug("Prompt scheduler snapshot refresh skipped (%s): %s", reason, exc)
+
     async def _evaluate_symbol(self, symbol: str) -> None:
+        await self._refresh_snapshot(reason=f"scheduler:{symbol}")
         bundle, error_response = await prepare_prompt_payload(self._app, symbol=symbol)
         if error_response:
             logger.debug(

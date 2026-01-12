@@ -129,12 +129,18 @@ class PromptBuilder:
         pending_orders = self._build_pending_orders(snapshot.get("open_orders") or [])
         guardrails = runtime_meta.get("guardrails") or self._default_guardrails()
         model_id = runtime_meta.get("llm_model_id")
+        instrument_spec = self._instrument_spec(snapshot, resolved_symbol)
+        runtime_min_size = _to_float(runtime_meta.get("execution_min_size"))
+        spec_min_size = instrument_spec.get("min_size") if instrument_spec else None
+        min_size_value = spec_min_size if spec_min_size is not None else runtime_min_size
         execution_settings = {
             "enabled": bool(runtime_meta.get("execution_enabled")),
             "trade_mode": runtime_meta.get("execution_trade_mode") or "cross",
             "order_type": runtime_meta.get("execution_order_type") or "market",
-            "min_size": runtime_meta.get("execution_min_size"),
+            "min_size": min_size_value,
         }
+        if instrument_spec:
+            execution_settings["symbol_rules"] = instrument_spec
         schema_overrides = runtime_meta.get("llm_response_schemas") or {}
         timeframe_value = timeframe or runtime_meta.get("ta_timeframe") or snapshot.get("timeframe") or "4H"
         trend_section = self._build_trend_confirmation(indicators, ticker, timeframe_value)
@@ -553,6 +559,25 @@ class PromptBuilder:
         if len(parts) >= 2:
             return parts[1].upper()
         return None
+
+    def _instrument_spec(self, snapshot: dict[str, Any], symbol: str | None) -> dict[str, float]:
+        if not symbol:
+            return {}
+        specs = snapshot.get("instrument_specs")
+        if not isinstance(specs, dict):
+            return {}
+        symbol_key = str(symbol).strip()
+        entry = specs.get(symbol_key)
+        if not entry and symbol_key:
+            entry = specs.get(symbol_key.upper()) or specs.get(symbol_key.lower())
+        if not isinstance(entry, dict):
+            return {}
+        normalized: dict[str, float] = {}
+        for key in ("min_size", "lot_size", "tick_size"):
+            value = _to_float(entry.get(key))
+            if value is not None and value > 0:
+                normalized[key] = value
+        return normalized
 
     def _build_account_section(self, snapshot: dict[str, Any], symbol: str | None) -> dict[str, Any]:
         raw_balances = snapshot.get("available_balances") or {}

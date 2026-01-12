@@ -274,6 +274,7 @@ class MarketService:
         account = account_payload.get("details", []) or []
         account_equity = float(total_eq_usd or total_equity_value or total_account_value or 0.0)
         market_data: dict[str, dict[str, Any]] = {}
+        instrument_specs: dict[str, dict[str, float]] = {}
         for symbol in self.symbols:
             order_book = await self._fetch_order_book(symbol)
             ticker = await self._fetch_ticker(symbol)
@@ -298,6 +299,13 @@ class MarketService:
                 "strategy_signal": strategy_signal,
                 "risk_metrics": risk_metrics,
             }
+            spec = self._instrument_specs.get(symbol)
+            if spec:
+                instrument_specs[symbol] = {
+                    "lot_size": self._extract_float(spec.get("lot_size")),
+                    "min_size": self._extract_float(spec.get("min_size")),
+                    "tick_size": self._extract_float(spec.get("tick_size")),
+                }
 
         primary_symbol = self.symbols[0]
         primary_market = market_data.get(primary_symbol, {})
@@ -334,6 +342,7 @@ class MarketService:
             "market_data": market_data,
             "position_activity": position_activity,
             "position_protection": position_protection,
+            "instrument_specs": instrument_specs,
         }
         return snapshot
 
