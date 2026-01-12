@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Optional, Tuple
@@ -9,9 +10,10 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
 from app.core.config import get_settings
-from app.db.postgres import get_prompt_version, insert_prompt_run
+from app.db.postgres import fetch_okx_fees_window, get_prompt_version, insert_prompt_run
 from app.services.llm_service import LLMService
 from app.services.prompt_builder import PromptBuilder
+from app.services.openrouter_service import fetch_openrouter_credits
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +106,26 @@ async def prepare_prompt_payload(
     metadata, error_response = await resolve_prompt_metadata(runtime_meta, prompt_version_id)
     if error_response:
         return None, error_response
+    credits_task = asyncio.create_task(fetch_openrouter_credits(app))
+    fee_window_hours = float(runtime_meta.get("fee_window_hours") or 24.0)
+    fee_task = None
+    settings = get_settings()
+    if settings.database_url:
+        fee_task = asyncio.create_task(fetch_okx_fees_window(fee_window_hours))
+    openrouter_usage: dict[str, Any] | None = None
+    okx_fee_total: float | None = None
+    try:
+        openrouter_usage = await credits_task
+    except Exception as exc:  # pragma: no cover - best effort
+        logger.debug("OpenRouter usage enrichment failed: %s", exc)
+    if fee_task:
+        try:
+            okx_fee_total = await fee_task
+        except Exception as exc:  # pragma: no cover - best effort
+            logger.debug("OKX fee enrichment failed: %s", exc)
+    metadata["openrouter_usage"] = openrouter_usage
+    metadata["fee_window_hours"] = fee_window_hours
+    metadata["okx_fee_window_total"] = okx_fee_total
     builder = PromptBuilder(snapshot, metadata=metadata)
     payload = builder.build(symbol=symbol, timeframe=timeframe)
     return PromptPayloadBundle(payload=payload, runtime_meta=runtime_meta, metadata=metadata, snapshot=snapshot), None

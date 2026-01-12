@@ -17,8 +17,10 @@ DEFAULT_DECISION_PROMPT = (
     "You will receive a JSON object under the key 'context' containing the latest market state, snapshot freshness metadata, "
     "account/portfolio exposure, any pending orders, and execution guardrails. Before deciding on BUY/SELL/HOLD, confirm: "
     "(1) the snapshot age is within limits, (2) your recommendation complies with leverage, position size, cooldown, and trade "
-    "limit guardrails, and (3) you are not duplicating an existing position or pending order. Respond strictly as JSON matching "
-    "'response_schema', and explicitly highlight blocking risks when you choose HOLD."
+    "limit guardrails, and (3) you are not duplicating an existing position or pending order. Explicitly cite snapshot freshness "
+    "and guardrail checks in your rationale. When existing stop-loss or take-profit levels are present, reuse or gently tune them "
+    "unless you can justify a safer alternative. Choose HOLD whenever cooldowns, capital constraints, fee/credit depletion, or "
+    "duplicate exposure prevent execution, and describe the blocker. Respond strictly as JSON matching 'response_schema'."
 )
 
 RESPONSE_SCHEMA = {
@@ -138,6 +140,8 @@ class PromptBuilder:
         trend_section = self._build_trend_confirmation(indicators, ticker, timeframe_value)
         liquidity_section = self._build_liquidity_profile(live_section, indicators, ticker)
         derivatives_section = self._build_derivatives_posture(funding, custom_metrics, liquidations)
+        fee_window_summary = self._build_fee_window_summary(account_section)
+        credit_availability = self._build_credit_availability()
 
         context = {
             "generated_at": snapshot.get("generated_at"),
@@ -151,6 +155,7 @@ class PromptBuilder:
             "positions": positions_section,
             "account": account_section,
             "portfolio_exposure": exposure_section,
+            "portfolio_heatmap": exposure_section.get("heatmap"),
             "guardrails": guardrails,
             "trend_confirmation": trend_section,
             "liquidity_context": liquidity_section,
@@ -161,6 +166,8 @@ class PromptBuilder:
             "prompt_version_id": runtime_meta.get("prompt_version_id"),
             "prompt_version_name": runtime_meta.get("prompt_version_name"),
             "execution": execution_settings,
+            "fee_availability": fee_window_summary,
+            "credit_availability": credit_availability,
         }
         prompt_block = {
             "system": (runtime_meta.get("llm_system_prompt") or DEFAULT_SYSTEM_PROMPT).strip(),
@@ -578,6 +585,7 @@ class PromptBuilder:
         account_equity = _to_float(account.get("account_equity"))
         long_notional = 0.0
         short_notional = 0.0
+        heatmap: list[dict[str, Any]] = []
         for entry in positions:
             symbol = entry.get("symbol")
             if not symbol:
@@ -595,6 +603,14 @@ class PromptBuilder:
                 short_notional += notional
             else:
                 long_notional += notional
+            heatmap.append(
+                {
+                    "symbol": symbol,
+                    "side": side or "LONG",
+                    "notional": notional,
+                    "pct_of_equity": _percent(notional, account_equity) if account_equity else None,
+                }
+            )
         net_exposure = long_notional - short_notional
         net_pct = _percent(net_exposure, account_equity) if account_equity else None
         summary_bits: list[str] = []
@@ -606,12 +622,52 @@ class PromptBuilder:
             summary_bits.append(f"Net {net_pct:.1f}% of equity")
         if not summary_bits:
             summary_bits.append("Flat")
+        heatmap.sort(key=lambda item: item.get("notional") or 0, reverse=True)
+        heatmap_trimmed = heatmap[:12]
         return {
             "long_notional": long_notional if long_notional else None,
             "short_notional": short_notional if short_notional else None,
             "net_exposure": net_exposure if (long_notional or short_notional) else None,
             "net_pct_of_equity": net_pct,
             "summary": ", ".join(summary_bits),
+            "heatmap": heatmap_trimmed or None,
+        }
+
+    def _build_fee_window_summary(self, account: dict[str, Any]) -> dict[str, Any] | None:
+        metadata = self.metadata or {}
+        total_fee = _to_float(metadata.get("okx_fee_window_total"))
+        if total_fee is None:
+            return None
+        window_hours_raw = metadata.get("fee_window_hours")
+        try:
+            window_hours = float(window_hours_raw) if window_hours_raw is not None else None
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            window_hours = None
+        account_equity = _to_float(account.get("account_equity"))
+        pct = _percent(total_fee, account_equity) if account_equity else None
+        return {
+            "window_hours": window_hours,
+            "total_fee": total_fee,
+            "pct_of_equity": pct,
+            "note": "Fees gathered from recent OKX fills",
+        }
+
+    def _build_credit_availability(self) -> dict[str, Any] | None:
+        metadata = self.metadata or {}
+        usage = metadata.get("openrouter_usage")
+        if not isinstance(usage, dict):
+            return None
+        remaining = _to_float(usage.get("remaining"))
+        granted = _to_float(usage.get("granted"))
+        used = _to_float(usage.get("used"))
+        if remaining is None and granted is None and used is None:
+            return None
+        return {
+            "remaining": remaining,
+            "granted": granted,
+            "used": used,
+            "currency": usage.get("currency") or "USD",
+            "resets_at": usage.get("resets_at"),
         }
 
     def _build_pending_orders(self, orders: list[dict[str, Any]]) -> dict[str, Any]:

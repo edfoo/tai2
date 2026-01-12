@@ -293,7 +293,7 @@ def register_pages(app: FastAPI) -> None:
 
                     chart_series: dict[str, Any] = {"symbol": None}
                     chart_container = ui.card().classes(
-                        "w-full h-64 bg-white rounded-xl shadow-sm border border-slate-200"
+                        "w-full bg-white rounded-xl shadow-sm border border-slate-200"
                     )
                     chart_container.set_visibility(False)
                     with chart_container:
@@ -303,8 +303,14 @@ def register_pages(app: FastAPI) -> None:
                         chart_widget = ui.echart(
                             {
                                 "title": {"text": "Position Candles", "left": "center", "textStyle": {"color": "#0f172a", "fontSize": 14}},
-                                "tooltip": {"trigger": "axis"},
-                                "grid": {"left": 40, "right": 20, "top": 35, "bottom": 30},
+                                "tooltip": {
+                                    "trigger": "axis",
+                                    "axisPointer": {"type": "cross", "link": [{"xAxisIndex": "all"}]},
+                                    "backgroundColor": "rgba(15,23,42,0.9)",
+                                    "borderColor": "rgba(15,23,42,0.4)",
+                                    "textStyle": {"color": "#f8fafc"},
+                                },
+                                "grid": {"left": 40, "right": 20, "top": 35, "bottom": 60},
                                 "xAxis": {
                                     "type": "category",
                                     "data": [],
@@ -312,6 +318,39 @@ def register_pages(app: FastAPI) -> None:
                                     "boundaryGap": False,
                                 },
                                 "yAxis": {"type": "value", "axisLabel": {"color": "#475569"}, "scale": True},
+                                "dataZoom": [
+                                    {
+                                        "type": "inside",
+                                        "xAxisIndex": [0],
+                                        "filterMode": "filter",
+                                        "zoomOnMouseWheel": False,
+                                        "moveOnMouseMove": True,
+                                        "moveOnMouseWheel": True,
+                                        "minSpan": 5,
+                                    },
+                                    {
+                                        "type": "slider",
+                                        "xAxisIndex": [0],
+                                        "height": 18,
+                                        "bottom": 10,
+                                        "backgroundColor": "rgba(15,23,42,0.05)",
+                                        "dataBackground": {
+                                            "areaStyle": {"color": "rgba(15,23,42,0.15)"},
+                                            "lineStyle": {"color": "rgba(15,23,42,0.4)"},
+                                        },
+                                        "selectedDataBackground": {
+                                            "areaStyle": {"color": "rgba(14,165,233,0.35)"},
+                                            "lineStyle": {"color": "#0ea5e9"},
+                                        },
+                                    },
+                                ],
+                                "brush": {
+                                    "xAxisIndex": "all",
+                                    "toolbox": ["rect", "keep", "clear"],
+                                    "brushLink": "all",
+                                    "throttleType": "debounce",
+                                    "throttleDelay": 300,
+                                },
                                 "series": [
                                     {
                                         "type": "candlestick",
@@ -337,7 +376,7 @@ def register_pages(app: FastAPI) -> None:
                                     }
                                 ],
                             }
-                        ).classes("w-full h-60")
+                        ).classes("w-full h-[30rem]")
                         chart_widget.set_visibility(False)
                     chart_series["widget"] = chart_widget
 
@@ -484,6 +523,7 @@ def register_pages(app: FastAPI) -> None:
                         chart.options["xAxis"]["data"] = categories
                         chart.options["series"][0]["data"] = candles
                         position_side = None
+                        entry_price_value: float | None = None
                         positions_list = snapshot.get("positions") or []
                         for candidate in positions_list:
                             pos_symbol = str(candidate.get("instId") or candidate.get("symbol") or "").upper()
@@ -499,6 +539,13 @@ def register_pages(app: FastAPI) -> None:
                                     except (TypeError, ValueError):
                                         side_value = ""
                                 position_side = side_value
+                                entry_price_value = _first_price(
+                                    candidate.get("avgPx"),
+                                    candidate.get("avgPrice"),
+                                    candidate.get("openAvgPx"),
+                                    candidate.get("openAvgPrice"),
+                                    candidate.get("fillPx"),
+                                )
                                 break
 
                         tp_line, sl_line = _resolve_protection_lines(position_side)
@@ -518,6 +565,22 @@ def register_pages(app: FastAPI) -> None:
                             },
                         )
                         mark_entries: list[dict[str, Any]] = []
+                        if entry_price_value is not None:
+                            mark_entries.append(
+                                {
+                                    "name": "Entry",
+                                    "yAxis": entry_price_value,
+                                    "lineStyle": {
+                                        "color": "#1d4ed8",
+                                        "type": "solid",
+                                        "width": 1.5,
+                                    },
+                                    "label": {
+                                        "formatter": f"Entry {entry_price_value:.4f}",
+                                        "color": "#1d4ed8",
+                                    },
+                                }
+                            )
                         if tp_line is not None:
                             mark_entries.append(
                                 {
@@ -976,6 +1039,20 @@ def register_pages(app: FastAPI) -> None:
                         tp_value, sl_value = sl_value, tp_value
                 return tp_value, sl_value
 
+            def normalize_tp_sl_for_side(
+                side_value: str | None,
+                tp_value: float | None,
+                sl_value: float | None,
+            ) -> tuple[float | None, float | None]:
+                if tp_value is None or sl_value is None:
+                    return tp_value, sl_value
+                normalized = (side_value or "").upper()
+                if normalized == "LONG" and tp_value < sl_value:
+                    return max(tp_value, sl_value), min(tp_value, sl_value)
+                if normalized == "SHORT" and tp_value > sl_value:
+                    return min(tp_value, sl_value), max(tp_value, sl_value)
+                return tp_value, sl_value
+
             rows: list[dict[str, Any]] = []
             for symbol, pos in position_lookup.items():
                 lookup_symbol = str(symbol).strip()
@@ -1066,6 +1143,7 @@ def register_pages(app: FastAPI) -> None:
                     protection_meta if isinstance(protection_meta, dict) else None,
                     side,
                 )
+                tp_value, sl_value = normalize_tp_sl_for_side(side, tp_value, sl_value)
 
                 row = {
                     "symbol": symbol,
@@ -2025,7 +2103,7 @@ def register_pages(app: FastAPI) -> None:
                     step=0.01,
                     min=0.01,
                 ).classes("w-full md:w-48").props(
-                    "hint='Upper bound on position notional as share of total equity' persistent-hint"
+                    "hint='Upper bound on per-symbol position notional as share of total equity' persistent-hint"
                 )
                 daily_loss_limit_input = ui.number(
                     label="Daily Loss Limit %",
@@ -2048,7 +2126,7 @@ def register_pages(app: FastAPI) -> None:
                     value=guardrails.get("max_trades_per_hour", 2),
                     min=0,
                 ).classes("w-full md:w-48").props(
-                    "hint='Prevents over-trading by limiting order count in any rolling hour' persistent-hint"
+                    "hint='Prevents over-trading by capping per-symbol order count in any rolling hour' persistent-hint"
                 )
                 trade_window_seconds_input = ui.number(
                     label="Trade Window (sec)",
