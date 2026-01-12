@@ -268,6 +268,9 @@ class MarketService:
         total_account_value = account_payload.get("total_account_value", 0.0)
         total_equity_value = account_payload.get("total_equity", 0.0)
         total_eq_usd = account_payload.get("total_eq_usd", total_equity_value)
+        available_equity = account_payload.get("available_equity")
+        available_eq_usd = account_payload.get("available_eq_usd")
+        available_balances = account_payload.get("available_balances") or {}
         account = account_payload.get("details", []) or []
         account_equity = float(total_eq_usd or total_equity_value or total_account_value or 0.0)
         market_data: dict[str, dict[str, Any]] = {}
@@ -315,6 +318,9 @@ class MarketService:
             "account_equity": account_equity,
             "total_account_value": total_account_value,
             "total_eq_usd": total_eq_usd,
+            "available_equity": available_equity,
+            "available_eq_usd": available_eq_usd,
+            "available_balances": available_balances,
             "order_book": primary_market.get("order_book", {}),
             "ticker": primary_market.get("ticker", {}),
             "funding_rate": primary_market.get("funding_rate", {}),
@@ -1245,8 +1251,60 @@ class MarketService:
         details: list[dict[str, Any]] = []
         total_equity = 0.0
         total_account_value = 0.0
-
         total_eq_usd = 0.0
+        balances: dict[str, dict[str, float]] = {}
+        available_equity_total = 0.0
+        available_eq_usd_total = 0.0
+        stable_ccy = {"USD", "USDT", "USDC", "USDK", "DAI"}
+
+        def track_balance(record: dict[str, Any]) -> None:
+            nonlocal available_equity_total, available_eq_usd_total
+            if not isinstance(record, dict):
+                return
+            currency_raw = record.get("ccy") or record.get("currency")
+            currency = str(currency_raw).upper() if currency_raw else None
+            if not currency:
+                return
+            bucket = balances.setdefault(
+                currency,
+                {
+                    "currency": currency,
+                    "equity": 0.0,
+                    "equity_usd": 0.0,
+                    "available": 0.0,
+                    "available_usd": 0.0,
+                    "cash": 0.0,
+                },
+            )
+            eq_value = MarketService._extract_float(record.get("eq"))
+            eq_usd_value = MarketService._extract_float(record.get("eqUsd"))
+            avail_eq_value = MarketService._extract_float(record.get("availEq"))
+            avail_bal_value = MarketService._extract_float(record.get("availBal"))
+            avail_usd_value = MarketService._extract_float(
+                record.get("availEqUsd") or record.get("availUsd")
+            )
+            if eq_usd_value is None and eq_value is not None and currency in stable_ccy:
+                eq_usd_value = eq_value
+            if avail_usd_value is None and avail_eq_value is not None:
+                px = None
+                if eq_value and eq_value > 0 and eq_usd_value:
+                    px = eq_usd_value / eq_value if eq_value else None
+                if px:
+                    avail_usd_value = avail_eq_value * px
+                elif currency in stable_ccy:
+                    avail_usd_value = avail_eq_value
+            if eq_value is not None:
+                bucket["equity"] += eq_value
+            if eq_usd_value is not None:
+                bucket["equity_usd"] += eq_usd_value
+            if avail_eq_value is not None:
+                bucket["available"] += avail_eq_value
+                available_equity_total += avail_eq_value
+            if avail_usd_value is not None:
+                bucket["available_usd"] += avail_usd_value
+                available_eq_usd_total += avail_usd_value
+            if avail_bal_value is not None:
+                bucket["cash"] += avail_bal_value
 
         for entry in entries:
             if not isinstance(entry, dict):
@@ -1264,11 +1322,13 @@ class MarketService:
                     if not isinstance(detail, dict):
                         continue
                     details.append(detail)
+                    track_balance(detail)
                     value = MarketService._extract_equity_value(detail)
                     if value is not None:
                         entry_total += value
             else:
                 details.append(entry)
+                track_balance(entry)
                 value = MarketService._extract_equity_value(entry)
                 if value is not None:
                     entry_total += value
@@ -1283,11 +1343,25 @@ class MarketService:
 
             total_equity += entry_total
 
+        cleaned_balances: dict[str, dict[str, float]] = {}
+        for currency, stats in balances.items():
+            cleaned_balances[currency] = {
+                "currency": currency,
+                "equity": stats.get("equity", 0.0),
+                "equity_usd": stats.get("equity_usd", 0.0),
+                "available": stats.get("available", 0.0),
+                "available_usd": stats.get("available_usd", 0.0),
+                "cash": stats.get("cash", 0.0),
+            }
+
         return {
             "details": details,
             "total_equity": total_equity,
             "total_account_value": total_account_value or total_equity,
             "total_eq_usd": total_eq_usd or total_equity,
+            "available_equity": available_equity_total or 0.0,
+            "available_eq_usd": available_eq_usd_total or 0.0,
+            "available_balances": cleaned_balances,
         }
 
     @staticmethod
@@ -1422,15 +1496,17 @@ class MarketService:
         self,
         decision: dict[str, Any],
         context: dict[str, Any] | None = None,
-    ) -> None:
+    ) -> bool:
         if not decision:
-            return
+            return False
         context = context or {}
         action = (decision.get("action") or "HOLD").upper()
         if action not in {"BUY", "SELL", "HOLD"}:
             self._emit_debug(f"Ignoring unsupported action {action}")
-            return
+            return False
         symbol = str(context.get("symbol") or decision.get("symbol") or self.symbol).upper()
+        symbol_parts = symbol.split("-")
+        quote_currency = symbol_parts[1].upper() if len(symbol_parts) >= 2 else None
         guardrails = context.get("guardrails") or {}
         cooldown_seconds = int(
             self._extract_float(
@@ -1487,7 +1563,7 @@ class MarketService:
         if action == "HOLD":
             self._decision_state[symbol] = {"action": action, "timestamp": now}
             self._emit_debug(summary)
-            return
+            return False
 
         if wait_for_tp_sl and current_side in {"LONG", "SHORT"}:
             closing_action = (
@@ -1509,14 +1585,14 @@ class MarketService:
                     self._emit_debug(
                         f"Wait-for-TP/SL guard blocked {action} for {symbol}: protection active"
                     )
-                    return
+                    return False
 
         if require_alignment and not self._transition_allowed(current_side, action):
             self._emit_debug(
                 f"Guardrail blocked {action} for {symbol}: current side={current_side}"
             )
             self._decision_state[symbol] = {"action": current_side, "timestamp": now}
-            return
+            return False
 
         last_decision = self._decision_state.get(symbol)
         if cooldown_seconds > 0 and last_decision:
@@ -1526,7 +1602,7 @@ class MarketService:
                 self._emit_debug(
                     f"Guardrail cooldown active for {symbol}; skipping {action} ({remaining:.0f}s left)"
                 )
-                return
+                return False
 
         history = self._recent_trades.setdefault(symbol, deque())
         self._prune_trade_history(history, now, trade_window)
@@ -1534,7 +1610,7 @@ class MarketService:
             self._emit_debug(
                 f"Guardrail trade limit hit for {symbol}; skipping {action}"
             )
-            return
+            return False
 
         history.append(now)
         self._decision_state[symbol] = {"action": action, "timestamp": now}
@@ -1544,10 +1620,10 @@ class MarketService:
         execution_enabled = bool(execution_cfg.get("enabled"))
         if not execution_enabled:
             self._emit_debug(f"Execution disabled for {symbol}; skipping OKX order")
-            return
+            return False
         if not self._trade_api:
             self._emit_debug("Trade API unavailable; cannot execute decision")
-            return
+            return False
 
         trade_mode = str(execution_cfg.get("trade_mode") or "cross").lower()
         if trade_mode not in {"cross", "isolated"}:
@@ -1582,6 +1658,22 @@ class MarketService:
             max_leverage = max(min_leverage or 0.0, 1.0)
         if max_leverage < min_leverage:
             min_leverage, max_leverage = max_leverage, min_leverage
+        available_balances_block = account_block.get("available_balances")
+        available_margin_usd = self._extract_float(account_block.get("available_eq_usd"))
+        quote_available_usd = None
+        if isinstance(available_balances_block, dict) and quote_currency:
+            quote_meta = available_balances_block.get(quote_currency)
+            if isinstance(quote_meta, dict):
+                quote_available_usd = self._extract_float(
+                    quote_meta.get("available_usd") or quote_meta.get("equity_usd")
+                )
+                if (
+                    quote_available_usd is None
+                    and quote_currency in {"USD", "USDT", "USDC", "USDK", "DAI"}
+                ):
+                    quote_available_usd = self._extract_float(quote_meta.get("available"))
+        if quote_available_usd is not None:
+            available_margin_usd = quote_available_usd
         confidence_value = self._normalize_confidence(decision.get("confidence"))
         size_hint = self._extract_float(decision.get("position_size"))
         raw_size = self._compute_leverage_adjusted_size(
@@ -1596,7 +1688,7 @@ class MarketService:
             self._emit_debug(
                 f"Execution skipped for {symbol}: unable to derive valid position size"
             )
-            return
+            return False
 
         take_profit_price = self._normalize_take_profit(
             action,
@@ -1644,21 +1736,36 @@ class MarketService:
                     f"{symbol} leverage clipped to {achieved_leverage:.2f}x by max position % limit"
                 )
 
+        if (
+            available_margin_usd is not None
+            and available_margin_usd > 0
+            and last_price
+            and max_leverage
+            and max_leverage > 0
+        ):
+            max_notional_from_margin = available_margin_usd * max_leverage
+            current_notional = raw_size * last_price
+            if current_notional > max_notional_from_margin:
+                raw_size = max_notional_from_margin / last_price
+                self._emit_debug(
+                    f"{symbol} size clipped by available margin ({available_margin_usd:,.4f} USD)"
+                )
+
         if raw_size < min_size:
             self._emit_debug(
                 f"Execution skipped for {symbol}: computed size {raw_size:.6f} below minimum {min_size}"
             )
-            return
+            return False
 
         quantized_size = self._quantize_order_size(symbol, raw_size)
         if quantized_size is None or quantized_size <= 0:
             self._emit_debug(f"Execution skipped for {symbol}: size {raw_size:.6f} below lot size")
-            return
+            return False
         if quantized_size < min_size:
             self._emit_debug(
                 f"Execution skipped for {symbol}: quantized size {quantized_size:.6f} below minimum {min_size}"
             )
-            return
+            return False
         raw_size = quantized_size
 
         side = "buy" if action == "BUY" else "sell"
@@ -1698,7 +1805,7 @@ class MarketService:
         )
         if not order:
             self._emit_debug(f"Order placement failed for {symbol}")
-            return
+            return False
 
         order_id = order.get("ordId") or order.get("orderId") or client_order_id
         self._emit_debug(
@@ -1746,7 +1853,7 @@ class MarketService:
             rationale=decision.get("rationale"),
             fee=fee_value,
         )
-        await self._publish_snapshot()
+        return True
 
     async def _persist_equity(self, snapshot: dict[str, Any]) -> None:
         if not self.settings.database_url:

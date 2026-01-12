@@ -174,11 +174,22 @@ async def execute_llm_decision(
     decision = await llm_service.run(bundle.payload)
     prompt_id = await persist_prompt_run(app, bundle, decision=decision)
     market_service = getattr(app.state, "market_service", None)
+    state_changed = False
     if market_service:
+        context_block = bundle.payload.get("context") or {}
         try:
-            await market_service.handle_llm_decision(decision, bundle.payload.get("context"))
+            state_changed = await market_service.handle_llm_decision(decision, context_block)
         except Exception as exc:  # pragma: no cover - execution path depends on adapters
             logger.error("Market service failed to apply decision: %s", exc)
+        else:
+            if state_changed:
+                reason_symbol = str(context_block.get("symbol") or decision.get("symbol") or "*")
+                try:
+                    await market_service.refresh_snapshot(
+                        reason=f"post-decision:{reason_symbol}"
+                    )
+                except Exception as exc:  # pragma: no cover - best-effort snapshot refresh
+                    logger.debug("Snapshot refresh after execution failed: %s", exc)
     _record_llm_interaction(app, bundle, decision)
     version_label = (
         bundle.metadata.get("prompt_version_name")

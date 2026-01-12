@@ -120,7 +120,7 @@ class PromptBuilder:
         history_section = self._build_history_section(indicators)
         indicator_section = self._build_indicator_section(indicators)
         positions_section = self._build_positions_section(snapshot.get("positions") or [])
-        account_section = self._build_account_section(snapshot)
+        account_section = self._build_account_section(snapshot, resolved_symbol)
         exposure_section = self._build_exposure_summary(
             positions_section,
             snapshot,
@@ -545,11 +545,42 @@ class PromptBuilder:
             )
         return summary
 
-    def _build_account_section(self, snapshot: dict[str, Any]) -> dict[str, Any]:
+    @staticmethod
+    def _quote_currency(symbol: str | None) -> str | None:
+        if not symbol:
+            return None
+        parts = str(symbol).split("-")
+        if len(parts) >= 2:
+            return parts[1].upper()
+        return None
+
+    def _build_account_section(self, snapshot: dict[str, Any], symbol: str | None) -> dict[str, Any]:
+        raw_balances = snapshot.get("available_balances") or {}
+        normalized_balances: dict[str, dict[str, Any]] = {}
+        for currency, stats in raw_balances.items():
+            if not isinstance(stats, dict):
+                continue
+            key = str(currency).upper()
+            normalized_balances[key] = {
+                "currency": key,
+                "equity": _to_float(stats.get("equity")),
+                "equity_usd": _to_float(stats.get("equity_usd")),
+                "available": _to_float(stats.get("available")),
+                "available_usd": _to_float(stats.get("available_usd")),
+                "cash": _to_float(stats.get("cash")),
+            }
+        quote_currency = self._quote_currency(symbol or snapshot.get("symbol"))
+        quote_stats = normalized_balances.get(quote_currency, {}) if quote_currency else {}
         return {
             "account_equity": snapshot.get("account_equity"),
             "total_account_value": snapshot.get("total_account_value"),
             "total_eq_usd": snapshot.get("total_eq_usd"),
+            "available_equity": _to_float(snapshot.get("available_equity")),
+            "available_eq_usd": _to_float(snapshot.get("available_eq_usd")),
+            "available_balances": normalized_balances or None,
+            "quote_currency": quote_currency,
+            "quote_available": _to_float(quote_stats.get("available")) if quote_stats else None,
+            "quote_available_usd": _to_float(quote_stats.get("available_usd")) if quote_stats else None,
         }
 
     def _build_snapshot_health(self, snapshot: dict[str, Any], runtime_meta: dict[str, Any]) -> dict[str, Any]:
