@@ -714,6 +714,7 @@ class PromptBuilder:
     @staticmethod
     def _default_guardrails() -> dict[str, Any]:
         return {
+            "min_leverage": 1,
             "max_leverage": 5,
             "max_position_pct": 0.2,
             "daily_loss_limit_pct": 3,

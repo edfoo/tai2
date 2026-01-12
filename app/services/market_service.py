@@ -1289,6 +1289,61 @@ class MarketService:
             return action == "BUY"
         return True
 
+    @staticmethod
+    def _normalize_confidence(value: Any) -> float:
+        try:
+            confidence = float(value)
+        except (TypeError, ValueError):
+            return 0.5
+        if math.isnan(confidence):
+            return 0.5
+        if confidence < 0:
+            return 0.0
+        if confidence > 1:
+            return 1.0
+        return confidence
+
+    @staticmethod
+    def _compute_leverage_adjusted_size(
+        *,
+        size_hint: float | None,
+        account_equity: float | None,
+        last_price: float | None,
+        min_leverage: float,
+        max_leverage: float,
+        confidence: float,
+    ) -> float | None:
+        size_hint_value = size_hint if size_hint and size_hint > 0 else None
+        equity = account_equity if account_equity and account_equity > 0 else None
+        price = last_price if last_price and last_price > 0 else None
+        if equity is None or price is None:
+            return size_hint_value
+        min_lev = max(0.0, float(min_leverage))
+        max_lev = max(min_lev, float(max_leverage) if max_leverage > 0 else (min_lev or 1.0))
+        if max_lev <= 0:
+            max_lev = 1.0
+        if min_lev > max_lev:
+            min_lev, max_lev = max_lev, min_lev
+        span = max_lev - min_lev
+        if span <= 0:
+            target_leverage = max_lev
+        else:
+            target_leverage = min_lev + span * confidence
+        target_leverage = max(min_lev, min(max_lev, target_leverage))
+        if target_leverage <= 0:
+            target_leverage = max(max_lev, 1.0)
+        if size_hint_value:
+            implied = (size_hint_value * price) / equity
+            if implied > 0:
+                adjusted = size_hint_value * (target_leverage / implied)
+                if adjusted > 0:
+                    return adjusted
+        notional = equity * target_leverage
+        size_from_target = notional / price if price else None
+        if size_from_target and size_from_target > 0:
+            return size_from_target
+        return size_hint_value
+
     async def handle_llm_decision(
         self,
         decision: dict[str, Any],
@@ -1420,11 +1475,6 @@ class MarketService:
             self._emit_debug("Trade API unavailable; cannot execute decision")
             return
 
-        raw_size = self._extract_float(decision.get("position_size")) or 0.0
-        if raw_size <= 0:
-            self._emit_debug(f"Execution skipped for {symbol}: invalid position size {raw_size}")
-            return
-
         trade_mode = str(execution_cfg.get("trade_mode") or "cross").lower()
         if trade_mode not in {"cross", "isolated"}:
             trade_mode = "cross"
@@ -1442,6 +1492,37 @@ class MarketService:
         if last_price is None:
             ticker_snapshot = self._latest_ticker.get(symbol, {})
             last_price = self._extract_float(ticker_snapshot.get("last"))
+
+        account_block = context.get("account") or {}
+        account_equity = self._extract_float(
+            account_block.get("account_equity")
+            or account_block.get("total_account_value")
+            or account_block.get("total_eq_usd")
+        )
+        max_pct = self._extract_float(guardrails.get("max_position_pct"))
+        min_leverage = self._extract_float(guardrails.get("min_leverage"))
+        max_leverage = self._extract_float(guardrails.get("max_leverage"))
+        if min_leverage is None:
+            min_leverage = 0.0
+        if max_leverage is None or max_leverage <= 0:
+            max_leverage = max(min_leverage or 0.0, 1.0)
+        if max_leverage < min_leverage:
+            min_leverage, max_leverage = max_leverage, min_leverage
+        confidence_value = self._normalize_confidence(decision.get("confidence"))
+        size_hint = self._extract_float(decision.get("position_size"))
+        raw_size = self._compute_leverage_adjusted_size(
+            size_hint=size_hint,
+            account_equity=account_equity,
+            last_price=last_price,
+            min_leverage=min_leverage,
+            max_leverage=max_leverage,
+            confidence=confidence_value,
+        ) or 0.0
+        if raw_size <= 0:
+            self._emit_debug(
+                f"Execution skipped for {symbol}: unable to derive valid position size"
+            )
+            return
 
         take_profit_price = self._normalize_take_profit(
             action,
@@ -1468,18 +1549,26 @@ class MarketService:
                 prefer_up=prefer_up,
             )
 
-        account_block = context.get("account") or {}
-        account_equity = self._extract_float(
-            account_block.get("account_equity")
-            or account_block.get("total_account_value")
-            or account_block.get("total_eq_usd")
-        )
-        max_pct = self._extract_float(guardrails.get("max_position_pct"))
+        clipped_by_cap = False
         if account_equity and max_pct and last_price:
             notional_cap = max(0.0, account_equity * max_pct)
             contract_cap = notional_cap / last_price if last_price else None
-            if contract_cap and contract_cap > 0:
-                raw_size = min(raw_size, contract_cap)
+            if contract_cap and contract_cap > 0 and raw_size > contract_cap:
+                raw_size = contract_cap
+                clipped_by_cap = True
+
+        if (
+            clipped_by_cap
+            and account_equity
+            and last_price
+            and min_leverage
+            and min_leverage > 0
+        ):
+            achieved_leverage = (raw_size * last_price) / account_equity
+            if achieved_leverage < min_leverage:
+                self._emit_debug(
+                    f"{symbol} leverage clipped to {achieved_leverage:.2f}x by max position % limit"
+                )
 
         if raw_size < min_size:
             self._emit_debug(

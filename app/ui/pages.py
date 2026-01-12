@@ -2097,6 +2097,14 @@ def register_pages(app: FastAPI) -> None:
                 ).classes("w-full md:w-48").props(
                     "hint='Hard cap on leverage multiples for new positions' persistent-hint"
                 )
+                min_leverage_input = ui.number(
+                    label="Min Leverage",
+                    value=guardrails.get("min_leverage", 1),
+                    min=0,
+                    step=0.1,
+                ).classes("w-full md:w-48").props(
+                    "hint='Confidence-scaling floor applied before execution' persistent-hint"
+                )
                 max_position_pct_input = ui.number(
                     label="Max Position % of Equity",
                     value=guardrails.get("max_position_pct", 0.2),
@@ -2511,6 +2519,7 @@ def register_pages(app: FastAPI) -> None:
 
         def build_guardrails_snapshot() -> dict[str, Any]:
             snapshot = {
+                "min_leverage": _safe_float(min_leverage_input.value),
                 "max_leverage": _safe_float(max_leverage_input.value),
                 "max_position_pct": _safe_float(max_position_pct_input.value),
                 "daily_loss_limit_pct": _safe_float(daily_loss_limit_input.value),
@@ -2671,6 +2680,7 @@ def register_pages(app: FastAPI) -> None:
                 decision_prompt_input,
                 response_schema_input,
                 max_leverage_input,
+                min_leverage_input,
                 max_position_pct_input,
                 daily_loss_limit_input,
                 min_hold_seconds_input,
@@ -2922,6 +2932,7 @@ def register_pages(app: FastAPI) -> None:
                 ui.notify(f"Failed to persist OKX sub-account: {exc}", color="warning")
 
             config["guardrails"] = {
+                "min_leverage": _coerce(min_leverage_input.value, guardrails.get("min_leverage", 1), float),
                 "max_leverage": _coerce(max_leverage_input.value, guardrails.get("max_leverage", 5), float),
                 "max_position_pct": _coerce(
                     max_position_pct_input.value,
