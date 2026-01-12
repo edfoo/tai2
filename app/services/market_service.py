@@ -133,6 +133,7 @@ class MarketService:
     async def start(self) -> None:
         if self._poller_task:
             return
+        await self._hydrate_cached_annotations()
         if self._enable_websocket:
             self._ws_task = asyncio.create_task(self._run_public_ws(), name="okx-ws")
         self._poller_task = asyncio.create_task(self._poll_loop(), name="okx-market-poller")
@@ -260,6 +261,7 @@ class MarketService:
 
     async def _build_snapshot(self) -> dict[str, Any]:
         positions = await self._fetch_positions()
+        positions = self._annotate_positions(positions)
         account_payload = await self._fetch_account_balance()
         total_account_value = account_payload.get("total_account_value", 0.0)
         total_equity_value = account_payload.get("total_equity", 0.0)
@@ -337,6 +339,132 @@ class MarketService:
                 "algo_cl_ord_id": meta.get("algo_cl_ord_id"),
             }
         return payload
+
+    def _annotate_positions(self, positions: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+        if not positions:
+            return []
+        annotated: list[dict[str, Any]] = []
+        for entry in positions:
+            if not isinstance(entry, dict):
+                annotated.append(entry)
+                continue
+            symbol_value = entry.get("instId") or entry.get("symbol")
+            symbol_key = str(symbol_value).strip().upper() if symbol_value else None
+            enriched = dict(entry)
+            if symbol_key:
+                protection_meta = self._position_protection.get(symbol_key)
+                if isinstance(protection_meta, dict):
+                    enriched.setdefault("tai2_take_profit", protection_meta.get("take_profit"))
+                    enriched.setdefault("tai2_stop_loss", protection_meta.get("stop_loss"))
+                    enriched.setdefault("tai2_protection_updated_at", protection_meta.get("updated_at"))
+                activity_ts = self._position_activity.get(symbol_key)
+                if activity_ts:
+                    enriched.setdefault(
+                        "tai2_last_trade",
+                        datetime.fromtimestamp(activity_ts, timezone.utc).isoformat(),
+                    )
+            annotated.append(enriched)
+        return annotated
+
+    @staticmethod
+    def _normalize_symbol_key(symbol: Any) -> str | None:
+        if symbol is None:
+            return None
+        value = str(symbol).strip().upper()
+        return value or None
+
+    @staticmethod
+    def _parse_cached_timestamp(value: Any) -> float | None:
+        if value in (None, ""):
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.timestamp()
+
+    async def _hydrate_cached_annotations(self) -> None:
+        try:
+            snapshot = await self.state_service.get_market_snapshot()
+        except Exception as exc:  # pragma: no cover - Redis/network safety
+            self._emit_debug(f"Snapshot hydrate skipped: {exc}")
+            return
+        if not snapshot:
+            return
+        restored_protection = 0
+        restored_activity = 0
+
+        protection_block = snapshot.get("position_protection")
+        if isinstance(protection_block, dict):
+            for symbol, meta in protection_block.items():
+                symbol_key = self._normalize_symbol_key(symbol)
+                if not symbol_key or not isinstance(meta, dict):
+                    continue
+                if symbol_key in self._position_protection:
+                    continue
+                tp_value = self._extract_float(
+                    meta.get("take_profit")
+                    or meta.get("tpTriggerPx")
+                    or meta.get("tp")
+                )
+                sl_value = self._extract_float(
+                    meta.get("stop_loss")
+                    or meta.get("slTriggerPx")
+                    or meta.get("sl")
+                )
+                hydrated_meta: dict[str, Any] = {}
+                if tp_value is not None:
+                    hydrated_meta["take_profit"] = tp_value
+                if sl_value is not None:
+                    hydrated_meta["stop_loss"] = sl_value
+                algo_id = meta.get("algo_id") or meta.get("algoId")
+                if algo_id:
+                    hydrated_meta["algo_id"] = algo_id
+                algo_cl_ord_id = meta.get("algo_cl_ord_id") or meta.get("algoClOrdId")
+                if algo_cl_ord_id:
+                    hydrated_meta["algo_cl_ord_id"] = algo_cl_ord_id
+                attached_ord_id = meta.get("attached_ord_id")
+                if attached_ord_id:
+                    hydrated_meta["attached_ord_id"] = attached_ord_id
+                updated_at = meta.get("updated_at") or meta.get("updatedAt")
+                if updated_at:
+                    hydrated_meta["updated_at"] = updated_at
+                if "synced" in meta:
+                    hydrated_meta["synced"] = bool(meta.get("synced"))
+                method = meta.get("method")
+                if method:
+                    hydrated_meta["method"] = method
+                if not hydrated_meta:
+                    continue
+                self._position_protection[symbol_key] = hydrated_meta
+                restored_protection += 1
+
+        activity_block = snapshot.get("position_activity")
+        if isinstance(activity_block, dict):
+            for symbol, meta in activity_block.items():
+                symbol_key = self._normalize_symbol_key(symbol)
+                if not symbol_key:
+                    continue
+                if symbol_key in self._position_activity:
+                    continue
+                raw_timestamp = meta.get("last_trade") if isinstance(meta, dict) else meta
+                parsed_ts = self._parse_cached_timestamp(raw_timestamp)
+                if parsed_ts is None:
+                    continue
+                self._position_activity[symbol_key] = parsed_ts
+                restored_activity += 1
+
+        if restored_protection or restored_activity:
+            self._emit_debug(
+                f"Hydrated {restored_protection} TP/SL entries and {restored_activity} last-trade marks from cached snapshot"
+            )
 
     def set_poll_interval(self, seconds: int) -> None:
         self._poll_interval = max(1, seconds)
@@ -1817,12 +1945,12 @@ class MarketService:
         rationale: str | None,
         fee: float | None,
     ) -> None:
-        if not self.settings.database_url:
-            return
         if price is None or amount is None:
             return
         symbol_key = symbol.upper()
         self._position_activity[symbol_key] = time.time()
+        if not self.settings.database_url:
+            return
         try:
             trade = ExecutedTrade(
                 symbol=symbol,
@@ -1835,7 +1963,6 @@ class MarketService:
                 fee=Decimal(str(fee)) if fee is not None else None,
             )
             await insert_executed_trade(trade)
-            self._position_activity[symbol.upper()] = time.time()
         except Exception as exc:  # pragma: no cover - persistence best-effort
             self._emit_debug(f"Failed to persist executed trade: {exc}")
 

@@ -322,6 +322,17 @@ def register_pages(app: FastAPI) -> None:
                                             "borderColor": "#059669",
                                             "borderColor0": "#dc2626",
                                         },
+                                        "markLine": {
+                                            "symbol": ["none", "none"],
+                                            "lineStyle": {"type": "dashed", "width": 1.5, "color": "#94a3b8"},
+                                            "label": {
+                                                "color": "#0f172a",
+                                                "backgroundColor": "rgba(255,255,255,0.85)",
+                                                "padding": [2, 4],
+                                                "borderRadius": 4,
+                                            },
+                                            "data": [],
+                                        },
                                     }
                                 ],
                             }
@@ -361,6 +372,84 @@ def register_pages(app: FastAPI) -> None:
                             except (TypeError, ValueError):
                                 return None
 
+                        def _first_price(*values: Any) -> float | None:
+                            for candidate in values:
+                                price = _to_float(candidate)
+                                if price is not None and price > 0:
+                                    return price
+                            return None
+
+                        def _resolve_protection_lines(position_side: str | None) -> tuple[float | None, float | None]:
+                            target_keys = [symbol, symbol.upper(), symbol.lower()]
+                            protection = snapshot.get("position_protection") or {}
+                            tp_value: float | None = None
+                            sl_value: float | None = None
+                            for key in target_keys:
+                                meta = protection.get(key)
+                                if not isinstance(meta, dict):
+                                    continue
+                                if tp_value is None:
+                                    tp_value = _first_price(
+                                        meta.get("take_profit"),
+                                        meta.get("tpTriggerPx"),
+                                        meta.get("tp"),
+                                    )
+                                if sl_value is None:
+                                    sl_value = _first_price(
+                                        meta.get("stop_loss"),
+                                        meta.get("slTriggerPx"),
+                                        meta.get("sl"),
+                                    )
+                                if tp_value is not None and sl_value is not None:
+                                    break
+
+                            if tp_value is not None and sl_value is not None:
+                                return tp_value, sl_value
+
+                            positions = snapshot.get("positions") or []
+                            symbol_upper = symbol.upper()
+                            for pos in positions:
+                                pos_symbol = str(pos.get("instId") or pos.get("symbol") or "").upper()
+                                if pos_symbol != symbol_upper:
+                                    continue
+                                if tp_value is None:
+                                    tp_value = _first_price(
+                                        pos.get("tpTriggerPx"),
+                                        pos.get("tpOrdPx"),
+                                        pos.get("takeProfit"),
+                                    )
+                                if sl_value is None:
+                                    sl_value = _first_price(
+                                        pos.get("slTriggerPx"),
+                                        pos.get("slOrdPx"),
+                                        pos.get("stopLoss"),
+                                    )
+                                close_algo = pos.get("closeOrderAlgo")
+                                if isinstance(close_algo, list):
+                                    for algo in close_algo:
+                                        if tp_value is None:
+                                            tp_value = _first_price(
+                                                algo.get("tpTriggerPx"),
+                                                algo.get("tpOrdPx"),
+                                            )
+                                        if sl_value is None:
+                                            sl_value = _first_price(
+                                                algo.get("slTriggerPx"),
+                                                algo.get("slOrdPx"),
+                                            )
+                                        if tp_value is not None and sl_value is not None:
+                                            break
+                                break
+
+                            if tp_value is not None and sl_value is not None:
+                                normalized_side = (position_side or "").upper()
+                                if normalized_side == "LONG" and tp_value < sl_value:
+                                    tp_value, sl_value = sl_value, tp_value
+                                elif normalized_side == "SHORT" and tp_value > sl_value:
+                                    tp_value, sl_value = sl_value, tp_value
+
+                            return tp_value, sl_value
+
                         recent = ohlcv[-80:]
                         categories: list[str] = []
                         candles: list[list[float]] = []
@@ -393,6 +482,60 @@ def register_pages(app: FastAPI) -> None:
                         chart.options.setdefault("title", {})["text"] = f"{symbol} Candles"
                         chart.options["xAxis"]["data"] = categories
                         chart.options["series"][0]["data"] = candles
+                        position_side = None
+                        positions_list = snapshot.get("positions") or []
+                        for candidate in positions_list:
+                            pos_symbol = str(candidate.get("instId") or candidate.get("symbol") or "").upper()
+                            if pos_symbol == symbol.upper():
+                                side_value = (candidate.get("posSide") or candidate.get("side") or "").upper()
+                                if not side_value:
+                                    try:
+                                        size_val = float(candidate.get("pos") or candidate.get("size") or 0)
+                                        if size_val > 0:
+                                            side_value = "LONG"
+                                        elif size_val < 0:
+                                            side_value = "SHORT"
+                                    except (TypeError, ValueError):
+                                        side_value = ""
+                                position_side = side_value
+                                break
+
+                        tp_line, sl_line = _resolve_protection_lines(position_side)
+                        series = chart.options["series"][0]
+                        mark_line = series.setdefault(
+                            "markLine",
+                            {
+                                "symbol": ["none", "none"],
+                                "lineStyle": {"type": "dashed", "width": 1.5, "color": "#94a3b8"},
+                                "label": {
+                                    "color": "#0f172a",
+                                    "backgroundColor": "rgba(255,255,255,0.85)",
+                                    "padding": [2, 4],
+                                    "borderRadius": 4,
+                                },
+                                "data": [],
+                            },
+                        )
+                        mark_entries: list[dict[str, Any]] = []
+                        if tp_line is not None:
+                            mark_entries.append(
+                                {
+                                    "name": "Take Profit",
+                                    "yAxis": tp_line,
+                                    "lineStyle": {"color": "#047857"},
+                                    "label": {"formatter": f"TP {tp_line:.4f}", "color": "#047857"},
+                                }
+                            )
+                        if sl_line is not None:
+                            mark_entries.append(
+                                {
+                                    "name": "Stop Loss",
+                                    "yAxis": sl_line,
+                                    "lineStyle": {"color": "#be123c"},
+                                    "label": {"formatter": f"SL {sl_line:.4f}", "color": "#be123c"},
+                                }
+                            )
+                        mark_line["data"] = mark_entries
                         chart_series["symbol"] = symbol
                         chart.set_visibility(True)
                         chart.update()
@@ -716,7 +859,8 @@ def register_pages(app: FastAPI) -> None:
             position_card.value_label.set_text(str(len(positions)))
             position_lookup: dict[str, dict[str, Any]] = {}
             for pos in positions:
-                key = pos.get("instId") or pos.get("symbol")
+                raw_key = pos.get("instId") or pos.get("symbol")
+                key = str(raw_key).strip() if raw_key else None
                 if not key or key in position_lookup:
                     continue
                 position_lookup[key] = pos
@@ -743,20 +887,57 @@ def register_pages(app: FastAPI) -> None:
                         return price
                 return None
 
+            def _resolve_dict_entry(mapping: dict[str, Any], symbol_key: str) -> Any:
+                if not mapping or not symbol_key:
+                    return None
+                candidates = []
+                normalized = str(symbol_key).strip()
+                if normalized:
+                    candidates.append(normalized)
+                    candidates.append(normalized.upper())
+                    candidates.append(normalized.lower())
+                unique = []
+                seen = set()
+                for candidate in candidates:
+                    if candidate and candidate not in seen:
+                        seen.add(candidate)
+                        unique.append(candidate)
+                for candidate in unique:
+                    value = mapping.get(candidate)
+                    if value is not None:
+                        return value
+                return None
+
             def extract_tp_sl(
                 position: dict[str, Any],
                 cached_meta: dict[str, Any] | None,
+                position_side: str | None,
             ) -> tuple[float | None, float | None]:
                 tp_value = _first_price(
                     position.get("tpTriggerPx"),
                     position.get("tpOrdPx"),
                     position.get("takeProfit"),
+                    position.get("tai2_take_profit"),
                 )
                 sl_value = _first_price(
                     position.get("slTriggerPx"),
                     position.get("slOrdPx"),
                     position.get("stopLoss"),
+                    position.get("tai2_stop_loss"),
                 )
+                if cached_meta:
+                    if tp_value is None:
+                        tp_value = _first_price(
+                            cached_meta.get("take_profit"),
+                            cached_meta.get("tp"),
+                            cached_meta.get("tpTriggerPx"),
+                        )
+                    if sl_value is None:
+                        sl_value = _first_price(
+                            cached_meta.get("stop_loss"),
+                            cached_meta.get("sl"),
+                            cached_meta.get("slTriggerPx"),
+                        )
                 close_order_algo = position.get("closeOrderAlgo")
                 if isinstance(close_order_algo, list):
                     for algo in close_order_algo:
@@ -786,10 +967,17 @@ def register_pages(app: FastAPI) -> None:
                             sl_value = trigger_px
                         if tp_value is not None and sl_value is not None:
                             break
+                if tp_value is not None and sl_value is not None:
+                    normalized_side = (position_side or "").upper()
+                    if normalized_side == "LONG" and tp_value < sl_value:
+                        tp_value, sl_value = sl_value, tp_value
+                    elif normalized_side == "SHORT" and tp_value > sl_value:
+                        tp_value, sl_value = sl_value, tp_value
                 return tp_value, sl_value
 
             rows: list[dict[str, Any]] = []
             for symbol, pos in position_lookup.items():
+                lookup_symbol = str(symbol).strip()
                 market_entry_for_symbol = market_data.get(symbol) or {}
                 ticker_info = market_entry_for_symbol.get("ticker") or {}
                 if not ticker_info and symbol == snapshot.get("symbol"):
@@ -861,26 +1049,22 @@ def register_pages(app: FastAPI) -> None:
                 else:
                     pnl_pct_color = "text-slate-900"
 
-                activity_meta = position_activity.get(symbol) or position_activity.get(symbol.upper()) or {}
+                activity_meta = _resolve_dict_entry(position_activity, lookup_symbol) or {}
                 last_trade_label = "--"
-                if isinstance(activity_meta, dict):
+                position_last_trade = pos.get("tai2_last_trade")
+                if position_last_trade:
+                    last_trade_label = format_activity_ts(position_last_trade)
+                elif isinstance(activity_meta, dict):
                     last_trade_label = format_activity_ts(activity_meta.get("last_trade"))
                 elif isinstance(activity_meta, str):
                     last_trade_label = format_activity_ts(activity_meta)
 
-                protection_meta = position_protection.get(symbol) or position_protection.get(symbol.upper())
-                tp_value, sl_value = extract_tp_sl(pos, protection_meta if isinstance(protection_meta, dict) else None)
-                if protection_meta:
-                    if tp_value is None:
-                        tp_value = _first_price(
-                            protection_meta.get("take_profit"),
-                            protection_meta.get("tp"),
-                        )
-                    if sl_value is None:
-                        sl_value = _first_price(
-                            protection_meta.get("stop_loss"),
-                            protection_meta.get("sl"),
-                        )
+                protection_meta = _resolve_dict_entry(position_protection, lookup_symbol)
+                tp_value, sl_value = extract_tp_sl(
+                    pos,
+                    protection_meta if isinstance(protection_meta, dict) else None,
+                    side,
+                )
 
                 row = {
                     "symbol": symbol,
