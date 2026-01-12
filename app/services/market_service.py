@@ -55,6 +55,7 @@ else:  # pragma: no cover - optional dependency
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 PUBLIC_WS_URL = "wss://ws.okx.com:8443/ws/v5/public"
+STABLE_CURRENCIES = {"USD", "USDT", "USDC", "USDK", "DAI"}
 
 
 class MarketService:
@@ -1264,8 +1265,6 @@ class MarketService:
         balances: dict[str, dict[str, float]] = {}
         available_equity_total = 0.0
         available_eq_usd_total = 0.0
-        stable_ccy = {"USD", "USDT", "USDC", "USDK", "DAI"}
-
         def track_balance(record: dict[str, Any]) -> None:
             nonlocal available_equity_total, available_eq_usd_total
             if not isinstance(record, dict):
@@ -1292,7 +1291,7 @@ class MarketService:
             avail_usd_value = MarketService._extract_float(
                 record.get("availEqUsd") or record.get("availUsd")
             )
-            if eq_usd_value is None and eq_value is not None and currency in stable_ccy:
+            if eq_usd_value is None and eq_value is not None and currency in STABLE_CURRENCIES:
                 eq_usd_value = eq_value
             if avail_usd_value is None and avail_eq_value is not None:
                 px = None
@@ -1300,7 +1299,7 @@ class MarketService:
                     px = eq_usd_value / eq_value if eq_value else None
                 if px:
                     avail_usd_value = avail_eq_value * px
-                elif currency in stable_ccy:
+                elif currency in STABLE_CURRENCIES:
                     avail_usd_value = avail_eq_value
             if eq_value is not None:
                 bucket["equity"] += eq_value
@@ -1669,20 +1668,57 @@ class MarketService:
             min_leverage, max_leverage = max_leverage, min_leverage
         available_balances_block = account_block.get("available_balances")
         available_margin_usd = self._extract_float(account_block.get("available_eq_usd"))
+
+        live_account_balances: dict[str, Any] | None = None
+        if self._account_api:
+            try:
+                live_account_balances = await self._fetch_account_balance()
+            except Exception as exc:  # pragma: no cover - network variance
+                self._emit_debug(f"Live balance refresh failed: {exc}")
+
+        if live_account_balances:
+            live_equity = self._extract_float(
+                live_account_balances.get("total_eq_usd")
+                or live_account_balances.get("total_equity")
+                or live_account_balances.get("total_account_value")
+            )
+            if live_equity is not None and live_equity > 0:
+                account_equity = live_equity
+            live_available_margin = self._extract_float(live_account_balances.get("available_eq_usd"))
+            if live_available_margin is not None:
+                available_margin_usd = live_available_margin
+            live_balances_block = live_account_balances.get("available_balances")
+            if isinstance(live_balances_block, dict) and live_balances_block:
+                available_balances_block = live_balances_block
+
         quote_available_usd = None
+        quote_cash_usd = None
         if isinstance(available_balances_block, dict) and quote_currency:
             quote_meta = available_balances_block.get(quote_currency)
             if isinstance(quote_meta, dict):
                 quote_available_usd = self._extract_float(
                     quote_meta.get("available_usd") or quote_meta.get("equity_usd")
                 )
-                if (
-                    quote_available_usd is None
-                    and quote_currency in {"USD", "USDT", "USDC", "USDK", "DAI"}
-                ):
+                if quote_available_usd is None and quote_currency in STABLE_CURRENCIES:
                     quote_available_usd = self._extract_float(quote_meta.get("available"))
-        if quote_available_usd is not None:
+                quote_cash = self._extract_float(quote_meta.get("cash"))
+                if quote_cash is not None:
+                    if quote_currency in STABLE_CURRENCIES:
+                        quote_cash_usd = quote_cash
+                    elif last_price:
+                        quote_cash_usd = quote_cash * last_price
+        if quote_cash_usd is not None:
+            available_margin_usd = quote_cash_usd
+        elif quote_available_usd is not None:
             available_margin_usd = quote_available_usd
+        if available_margin_usd is None and account_equity is not None:
+            available_margin_usd = account_equity
+        if available_margin_usd is None or available_margin_usd <= 0:
+            margin_text = f"{(available_margin_usd or 0.0):.4f}"
+            self._emit_debug(
+                f"Execution skipped for {symbol}: insufficient available margin ({margin_text} USD)"
+            )
+            return False
         confidence_value = self._normalize_confidence(decision.get("confidence"))
         size_hint = self._extract_float(decision.get("position_size"))
         raw_size = self._compute_leverage_adjusted_size(
