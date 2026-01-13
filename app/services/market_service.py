@@ -105,6 +105,14 @@ class MarketService:
     }
     SUPPORTED_TIMEFRAMES = set(_TIMEFRAME_CHOICES.values())
     DEFAULT_TIMEFRAME = "4H"
+    PROTECTION_ERROR_CODES = {
+        "51047",
+        "51048",
+        "51049",
+        "51050",
+        "51051",
+        "51052",
+    }
 
     def __init__(
         self,
@@ -159,6 +167,7 @@ class MarketService:
         self._position_protection: dict[str, dict[str, Any]] = {}
         self._protection_sync_ts: dict[str, float] = {}
         self._execution_feedback: Deque[dict[str, Any]] = deque(maxlen=50)
+        self._latest_execution_limits: dict[str, dict[str, Any]] = {}
         self._subscribed_symbols: set[str] = set()
         self._available_symbols: list[str] = []
         self._instrument_specs: dict[str, dict[str, float]] = {}
@@ -382,6 +391,12 @@ class MarketService:
             "position_protection": position_protection,
             "instrument_specs": instrument_specs,
         }
+        if self._latest_execution_limits:
+            snapshot["execution_limits"] = {
+                key: dict(meta)
+                for key, meta in self._latest_execution_limits.items()
+                if isinstance(meta, dict)
+            }
         snapshot["execution_feedback"] = list(self._execution_feedback)
         return snapshot
 
@@ -740,6 +755,7 @@ class MarketService:
             self._position_activity.pop(symbol, None)
             self._latest_long_short_ratio.pop(symbol, None)
             self._last_long_short_fetch.pop(symbol, None)
+            self._latest_execution_limits.pop(symbol, None)
 
     def get_cached_ticker(self, symbol: str | None) -> dict[str, Any] | None:
         normalized = self._normalize_symbols([symbol]) if symbol else []
@@ -1440,6 +1456,36 @@ class MarketService:
         if mirror_logger:
             logger.debug(text)
 
+    def _record_execution_limits(
+        self,
+        symbol: str,
+        *,
+        available_margin_usd: float | None,
+        account_equity_usd: float | None,
+        quote_currency: str | None,
+        quote_available_usd: float | None,
+        quote_cash_usd: float | None,
+        max_leverage: float | None,
+        max_notional_usd: float | None,
+        source: str = "execution",
+    ) -> None:
+        normalized = self._normalize_symbol_key(symbol)
+        if not normalized:
+            return
+        quote_symbol = self._normalize_symbol_key(quote_currency)
+        payload: dict[str, Any] = {
+            "available_margin_usd": available_margin_usd,
+            "account_equity_usd": account_equity_usd,
+            "quote_currency": quote_symbol,
+            "quote_available_usd": quote_available_usd,
+            "quote_cash_usd": quote_cash_usd,
+            "max_leverage": max_leverage,
+            "max_notional_usd": max_notional_usd,
+            "source": source,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        self._latest_execution_limits[normalized] = payload
+
     def _record_execution_feedback(
         self,
         symbol: str | None,
@@ -1822,13 +1868,18 @@ class MarketService:
                 prefer_up=prefer_up,
             )
 
+        requested_take_profit = take_profit_price
+        requested_stop_loss = stop_loss_price
+
+        guardrail_notional_cap = None
         clipped_by_cap = False
-        if account_equity and max_pct and last_price:
-            notional_cap = max(0.0, account_equity * max_pct)
-            contract_cap = notional_cap / last_price if last_price else None
-            if contract_cap and contract_cap > 0 and raw_size > contract_cap:
-                raw_size = contract_cap
-                clipped_by_cap = True
+        if account_equity and max_pct:
+            guardrail_notional_cap = max(0.0, account_equity * max_leverage * max_pct)
+            if last_price and guardrail_notional_cap > 0:
+                contract_cap = guardrail_notional_cap / last_price
+                if contract_cap and contract_cap > 0 and raw_size > contract_cap:
+                    raw_size = contract_cap
+                    clipped_by_cap = True
 
         if (
             clipped_by_cap
@@ -1843,6 +1894,7 @@ class MarketService:
                     f"{symbol} leverage clipped to {achieved_leverage:.2f}x by max position % limit"
                 )
 
+        max_notional_from_margin = None
         if (
             available_margin_usd is not None
             and available_margin_usd > 0
@@ -1867,6 +1919,17 @@ class MarketService:
                         "max_notional": max_notional_from_margin,
                     },
                 )
+
+        self._record_execution_limits(
+            symbol,
+            available_margin_usd=available_margin_usd,
+            account_equity_usd=account_equity,
+            quote_currency=quote_currency,
+            quote_available_usd=quote_available_usd,
+            quote_cash_usd=quote_cash_usd,
+            max_leverage=max_leverage,
+            max_notional_usd=max_notional_from_margin,
+        )
 
         if raw_size < min_size:
             self._emit_debug(
@@ -1895,21 +1958,76 @@ class MarketService:
             pos_side = "short"
             reduce_only = True
 
+        if (
+            not reduce_only
+            and min_leverage
+            and min_leverage > 0
+            and account_equity
+            and account_equity > 0
+            and last_price
+            and last_price > 0
+        ):
+            achieved_leverage = (raw_size * last_price) / account_equity
+            if achieved_leverage < min_leverage:
+                self._emit_debug(
+                    f"Execution skipped for {symbol}: leverage {achieved_leverage:.2f}x below minimum {min_leverage:.2f}x"
+                )
+                self._record_execution_feedback(
+                    symbol,
+                    "Blocked by minimum leverage guardrail",
+                    level="warning",
+                    meta={
+                        "min_leverage": min_leverage,
+                        "achieved_leverage": achieved_leverage,
+                        "account_equity": account_equity,
+                        "price": last_price,
+                    },
+                )
+                return False
+
         attach_algo_orders: list[dict[str, Any]] | None = None
+        attachments_take_profit = None
+        attachments_stop_loss = None
         if reduce_only:
             await self._cancel_position_protection(symbol)
             take_profit_price = None
             stop_loss_price = None
-        has_protection_targets = bool(take_profit_price or stop_loss_price)
-        if not reduce_only and has_protection_targets:
-            await self._cancel_position_protection(symbol)
-            attach_algo_orders = self._build_attach_algo_orders(
-                take_profit_price=take_profit_price,
-                stop_loss_price=stop_loss_price,
-            )
+            requested_take_profit = None
+            requested_stop_loss = None
+        else:
+            attachments_take_profit = requested_take_profit
+            attachments_stop_loss = requested_stop_loss
+            if attachments_take_profit or attachments_stop_loss:
+                await self._cancel_position_protection(symbol)
+                if last_price and last_price > 0:
+                    attachments_take_profit = self._drop_conflicting_target(
+                        symbol=symbol,
+                        action=action,
+                        target=attachments_take_profit,
+                        reference_price=last_price,
+                        kind="take-profit",
+                        stage="pre-order attachment",
+                    )
+                    attachments_stop_loss = self._drop_conflicting_target(
+                        symbol=symbol,
+                        action=action,
+                        target=attachments_stop_loss,
+                        reference_price=last_price,
+                        kind="stop-loss",
+                        stage="pre-order attachment",
+                    )
+                    if attachments_take_profit or attachments_stop_loss:
+                        attach_algo_orders = self._build_attach_algo_orders(
+                            take_profit_price=attachments_take_profit,
+                            stop_loss_price=attachments_stop_loss,
+                        )
+                else:
+                    self._emit_debug(
+                        f"Skipping attached TP/SL for {symbol}: missing last price for validation"
+                    )
 
         client_order_id = self._generate_client_order_id()
-        order = await self._submit_order(
+        order, attachments_used = await self._submit_order(
             symbol=symbol,
             side=side,
             pos_side=pos_side,
@@ -1938,14 +2056,35 @@ class MarketService:
         if fee_value is not None:
             fee_value = abs(fee_value)
 
-        if not reduce_only and (take_profit_price or stop_loss_price):
+        take_profit_price = requested_take_profit
+        stop_loss_price = requested_stop_loss
+        reference_for_protection = executed_price or last_price
+        take_profit_price = self._drop_conflicting_target(
+            symbol=symbol,
+            action=action,
+            target=take_profit_price,
+            reference_price=reference_for_protection,
+            kind="take-profit",
+            stage="post-fill",
+        )
+        stop_loss_price = self._drop_conflicting_target(
+            symbol=symbol,
+            action=action,
+            target=stop_loss_price,
+            reference_price=reference_for_protection,
+            kind="stop-loss",
+            stage="post-fill",
+        )
+        final_targets_present = bool(take_profit_price or stop_loss_price)
+
+        if not reduce_only and final_targets_present:
             protection_ready = False
-            if attach_algo_orders:
+            if attachments_used and (attachments_take_profit or attachments_stop_loss):
                 protection_ready = await self._confirm_attached_protection(
                     symbol=symbol,
                     order_id=str(order_id),
-                    take_profit_price=take_profit_price,
-                    stop_loss_price=stop_loss_price,
+                    take_profit_price=attachments_take_profit,
+                    stop_loss_price=attachments_stop_loss,
                 )
                 if not protection_ready:
                     self._emit_debug(
@@ -2281,6 +2420,89 @@ class MarketService:
                 return None
         return stop_loss
 
+    def _response_indicates_protection_error(self, response: Any) -> bool:
+        def _match_entry(entry: dict[str, Any]) -> bool:
+            code = str(entry.get("sCode") or entry.get("code") or "").strip()
+            if code and code in self.PROTECTION_ERROR_CODES:
+                return True
+            message = str(entry.get("sMsg") or entry.get("msg") or "").lower()
+            if not message:
+                return False
+            keywords = (
+                "tp price",
+                "stop price",
+                "trigger price",
+                "take profit",
+                "stop loss",
+            )
+            return any(keyword in message for keyword in keywords)
+
+        if isinstance(response, dict):
+            if _match_entry(response):
+                return True
+            data = response.get("data")
+            if isinstance(data, list):
+                return any(_match_entry(entry) for entry in data if isinstance(entry, dict))
+        return False
+
+    @staticmethod
+    def _target_conflicts_with_price(
+        action: str,
+        *,
+        target: float | None,
+        reference_price: float | None,
+        kind: str,
+    ) -> bool:
+        if target is None or reference_price is None or reference_price <= 0:
+            return False
+        if kind == "take-profit":
+            if action == "BUY":
+                return target <= reference_price
+            return target >= reference_price
+        if kind == "stop-loss":
+            if action == "BUY":
+                return target >= reference_price
+            return target <= reference_price
+        return False
+
+    def _drop_conflicting_target(
+        self,
+        *,
+        symbol: str,
+        action: str,
+        target: float | None,
+        reference_price: float | None,
+        kind: str,
+        stage: str,
+    ) -> float | None:
+        if not self._target_conflicts_with_price(
+            action,
+            target=target,
+            reference_price=reference_price,
+            kind=kind,
+        ):
+            return target
+        if target is None or reference_price is None:
+            return None
+        direction = "above" if (action == "BUY" and kind == "take-profit") or (action == "SELL" and kind == "stop-loss") else "below"
+        message = (
+            f"{symbol} {kind} {target:.6f} invalid {stage}: must be {direction} entry price {reference_price:.6f}"
+        )
+        self._emit_debug(message)
+        self._record_execution_feedback(
+            symbol,
+            message,
+            level="warning",
+            meta={
+                "stage": stage,
+                "kind": kind,
+                "target": target,
+                "reference_price": reference_price,
+                "action": action,
+            },
+        )
+        return None
+
     async def _submit_order(
         self,
         *,
@@ -2293,11 +2515,12 @@ class MarketService:
         reduce_only: bool,
         client_order_id: str,
         attach_algo_orders: list[dict[str, Any]] | None,
-    ) -> dict[str, Any] | None:
+    ) -> tuple[dict[str, Any] | None, bool]:
         if not self._trade_api:
             self._emit_debug("Trade API unavailable; cannot place order")
             return None
         include_pos_side = pos_side
+        attachments_to_use = attach_algo_orders
         attempt = 0
         while True:
             payload = {
@@ -2312,8 +2535,8 @@ class MarketService:
                 payload["posSide"] = include_pos_side
             if reduce_only:
                 payload["reduceOnly"] = "true"
-            if attach_algo_orders:
-                payload["attachAlgoOrds"] = attach_algo_orders
+            if attachments_to_use:
+                payload["attachAlgoOrds"] = attachments_to_use
             if self._sub_account and self._sub_account_use_master:
                 payload["subAcct"] = self._sub_account
 
@@ -2337,15 +2560,26 @@ class MarketService:
                 response = await asyncio.to_thread(_place)
             except Exception as exc:  # pragma: no cover - network dependency
                 self._emit_debug(f"OKX place_order exception: {exc}")
-                return None
+                return None, False
             self._emit_debug(f"OKX order response raw: {response}")
             normalized = self._normalize_order_response(response)
             if normalized:
-                return normalized
+                return normalized, bool(attachments_to_use)
             if include_pos_side and self._response_indicates_pos_side_error(response):
                 self._emit_debug("Retrying OKX order without posSide for net-mode account")
                 include_pos_side = None
                 attempt += 1
+                continue
+            if attachments_to_use and self._response_indicates_protection_error(response):
+                self._emit_debug(
+                    f"OKX rejected TP/SL attachment for {symbol}; retrying order without protection"
+                )
+                self._record_execution_feedback(
+                    symbol,
+                    "OKX rejected TP/SL attachment; order retried without protection",
+                    level="warning",
+                )
+                attachments_to_use = None
                 continue
             error_message, error_meta = self._extract_order_error(response)
             self._record_execution_feedback(
@@ -2354,7 +2588,7 @@ class MarketService:
                 level="error",
                 meta=error_meta or None,
             )
-            return None
+            return None, False
 
     async def _record_trade_execution(
         self,

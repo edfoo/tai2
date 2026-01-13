@@ -169,6 +169,40 @@ def test_prompt_builder_compiles_structured_payload() -> None:
     assert prompt["model"] is None
 
 
+def test_prompt_builder_respects_live_execution_limits() -> None:
+    snapshot = _sample_snapshot()
+    updated_at = _iso_timestamp(datetime.now(timezone.utc))
+    snapshot["execution_limits"] = {
+        "BTC-USDT-SWAP": {
+            "available_margin_usd": 1234.5,
+            "account_equity_usd": 5678.9,
+            "max_notional_usd": 9876.5,
+            "max_leverage": 4.5,
+            "quote_currency": "USDT",
+            "quote_available_usd": 1100.0,
+            "quote_cash_usd": 1000.0,
+            "updated_at": updated_at,
+            "source": "execution",
+        }
+    }
+    metadata = {"guardrails": {"max_position_pct": 0.2}}
+    builder = PromptBuilder(snapshot, metadata=metadata, max_candles=1)
+
+    payload = builder.build(symbol="BTC-USDT-SWAP", timeframe="1H")
+    execution_block = payload["context"]["execution"]
+    expected_guardrail_cap = 5678.9 * 0.2 * 4.5
+
+    assert execution_block["available_margin_usd"] == pytest.approx(1234.5)
+    assert execution_block["account_equity_usd"] == pytest.approx(5678.9)
+    assert execution_block["max_position_value_usd"] == pytest.approx(expected_guardrail_cap)
+    assert execution_block["margin_max_position_value_usd"] == pytest.approx(9876.5)
+    assert execution_block["effective_max_position_value_usd"] == pytest.approx(expected_guardrail_cap)
+    assert execution_block["max_leverage"] == pytest.approx(4.5)
+    assert execution_block["live_margin_snapshot"]["updated_at"] == updated_at
+    assert execution_block["live_margin_snapshot"]["quote_currency"] == "USDT"
+    assert execution_block["live_margin_snapshot"]["quote_available_usd"] == pytest.approx(1100.0)
+    assert execution_block["live_margin_snapshot"]["quote_cash_usd"] == pytest.approx(1000.0)
+
 def test_llm_prompt_endpoint_uses_builder(monkeypatch) -> None:
     snapshot = _sample_snapshot()
     app = create_app(enable_background_services=False)

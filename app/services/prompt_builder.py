@@ -121,6 +121,7 @@ class PromptBuilder:
         indicator_section = self._build_indicator_section(indicators)
         positions_section = self._build_positions_section(snapshot.get("positions") or [])
         account_section = self._build_account_section(snapshot, resolved_symbol)
+        execution_limits = self._resolve_execution_limits(snapshot, resolved_symbol)
         exposure_section = self._build_exposure_summary(
             positions_section,
             snapshot,
@@ -151,6 +152,19 @@ class PromptBuilder:
             _to_float(account_section.get("available_eq_usd"))
             or _to_float(account_section.get("quote_available_usd"))
         )
+        live_account_equity = _to_float(execution_limits.get("account_equity_usd"))
+        live_available_margin = _to_float(execution_limits.get("available_margin_usd"))
+        margin_cap_usd = _to_float(
+            execution_limits.get("max_notional_usd")
+            or execution_limits.get("max_notional_from_margin")
+        )
+        live_max_leverage = _to_float(execution_limits.get("max_leverage"))
+        quote_available_override = _to_float(execution_limits.get("quote_available_usd"))
+        quote_cash_override = _to_float(execution_limits.get("quote_cash_usd"))
+        if live_account_equity is not None:
+            account_equity_usd = live_account_equity
+        if live_available_margin is not None:
+            available_margin_usd = live_available_margin
         if available_margin_usd is None and price_hint and price_hint > 0:
             quote_available = _to_float(account_section.get("quote_available"))
             if quote_available is not None:
@@ -159,14 +173,54 @@ class PromptBuilder:
             execution_settings["available_margin_usd"] = available_margin_usd
         if account_equity_usd is not None:
             execution_settings["account_equity_usd"] = account_equity_usd
+        guardrail_max_leverage = live_max_leverage
+        if guardrail_max_leverage is None:
+            guardrail_max_leverage = _to_float(guardrails.get("max_leverage"))
+        leverage_for_cap = guardrail_max_leverage if guardrail_max_leverage and guardrail_max_leverage > 0 else 1.0
         max_position_pct = _to_float(guardrails.get("max_position_pct"))
+        guardrail_cap = None
         if account_equity_usd is not None and max_position_pct:
-            max_notional = account_equity_usd * max_position_pct
-            execution_settings["max_position_value_usd"] = max_notional
+            guardrail_cap = account_equity_usd * leverage_for_cap * max_position_pct
+            execution_settings["max_position_value_usd"] = guardrail_cap
             if price_hint:
-                execution_settings["max_position_contracts"] = max_notional / price_hint
+                execution_settings["max_position_contracts"] = guardrail_cap / price_hint
         if max_position_pct is not None:
             execution_settings["max_position_pct"] = max_position_pct
+        if margin_cap_usd is not None:
+            execution_settings["margin_max_position_value_usd"] = margin_cap_usd
+            if price_hint:
+                execution_settings["margin_max_position_contracts"] = margin_cap_usd / price_hint
+        effective_candidates = [value for value in (guardrail_cap, margin_cap_usd) if value and value > 0]
+        if effective_candidates:
+            effective_cap = min(effective_candidates)
+            execution_settings["effective_max_position_value_usd"] = effective_cap
+            if price_hint:
+                execution_settings["effective_max_position_contracts"] = effective_cap / price_hint
+        effective_max_leverage = guardrail_max_leverage if guardrail_max_leverage and guardrail_max_leverage > 0 else None
+        if effective_max_leverage is not None:
+            execution_settings["max_leverage"] = effective_max_leverage
+        live_snapshot: dict[str, Any] = {}
+        if live_available_margin is not None:
+            live_snapshot["available_margin_usd"] = live_available_margin
+        if live_account_equity is not None:
+            live_snapshot["account_equity_usd"] = live_account_equity
+        if live_max_leverage is not None:
+            live_snapshot["max_leverage"] = live_max_leverage
+        if margin_cap_usd is not None:
+            live_snapshot["max_notional_usd"] = margin_cap_usd
+        if quote_available_override is not None:
+            live_snapshot["quote_available_usd"] = quote_available_override
+        if quote_cash_override is not None:
+            live_snapshot["quote_cash_usd"] = quote_cash_override
+        quote_currency_override = execution_limits.get("quote_currency")
+        if quote_currency_override:
+            live_snapshot["quote_currency"] = quote_currency_override
+        for key in ("source", "updated_at"):
+            value = execution_limits.get(key)
+            if value:
+                live_snapshot[key] = value
+        if live_snapshot:
+            execution_settings["live_margin_snapshot"] = live_snapshot
         schema_overrides = runtime_meta.get("llm_response_schemas") or {}
         timeframe_value = timeframe or runtime_meta.get("ta_timeframe") or snapshot.get("timeframe") or "4H"
         trend_section = self._build_trend_confirmation(indicators, ticker, timeframe_value)
@@ -636,6 +690,20 @@ class PromptBuilder:
             "quote_available": _to_float(quote_stats.get("available")) if quote_stats else None,
             "quote_available_usd": _to_float(quote_stats.get("available_usd")) if quote_stats else None,
         }
+
+    def _resolve_execution_limits(self, snapshot: dict[str, Any], symbol: str | None) -> dict[str, Any]:
+        if not isinstance(snapshot, dict):
+            return {}
+        limits = snapshot.get("execution_limits")
+        if not isinstance(limits, dict):
+            return {}
+        symbol_key = (symbol or snapshot.get("symbol") or "").strip().upper()
+        if not symbol_key:
+            return {}
+        entry = limits.get(symbol_key)
+        if isinstance(entry, dict):
+            return entry
+        return {}
 
     def _build_snapshot_health(self, snapshot: dict[str, Any], runtime_meta: dict[str, Any]) -> dict[str, Any]:
         timestamp = snapshot.get("generated_at")

@@ -142,3 +142,53 @@ def test_handle_llm_decision_blocks_without_positions(monkeypatch: pytest.Monkey
     calls, messages = asyncio.run(scenario())
     assert calls == 1
     assert any("Execution disabled" in message for message in messages)
+
+
+def test_handle_llm_decision_enforces_min_leverage(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def scenario() -> tuple[bool, bool]:
+        state = DummySnapshotStore()
+        service = MarketService(
+            state_service=state,
+            enable_websocket=False,
+            account_api=None,
+            market_api=None,
+            public_api=None,
+            trade_api=object(),
+        )
+
+        submit_called = {"value": False}
+
+        async def fake_submit_order(*args, **kwargs):
+            submit_called["value"] = True
+            return {"ordId": "1"}, False
+
+        monkeypatch.setattr(service, "_submit_order", fake_submit_order)
+
+        context = {
+            "symbol": service.symbol,
+            "guardrails": {
+                "min_leverage": 5,
+                "max_leverage": 5,
+                "max_position_pct": 0.01,
+            },
+            "market": {"last_price": 100},
+            "account": {
+                "account_equity": 1000,
+                "available_eq_usd": 1000,
+                "available_balances": {},
+            },
+            "execution": {
+                "enabled": True,
+                "trade_mode": "cross",
+                "order_type": "market",
+                "min_size": 0.001,
+            },
+            "positions": [],
+        }
+        decision = {"action": "BUY", "confidence": 0.9}
+        executed = await service.handle_llm_decision(decision, context)
+        return executed, submit_called["value"]
+
+    executed, submit_called = asyncio.run(scenario())
+    assert executed is False
+    assert submit_called is False
