@@ -5,6 +5,7 @@ import json
 import time
 from datetime import datetime, timezone
 from typing import Any, Callable
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
 
 from fastapi import FastAPI
 from nicegui import ui
@@ -24,6 +25,7 @@ from app.db.postgres import (
     save_llm_model,
     save_okx_sub_account,
     save_ta_timeframe,
+    save_frontend_timezone,
     set_enabled_trading_pairs,
 )
 from app.services.prompt_builder import (
@@ -50,8 +52,104 @@ NAV_LINKS = [
 
 TA_TIMEFRAME_OPTIONS = ["15m", "1H", "4H", "1D"]
 
+DEFAULT_FRONTEND_TIMEZONE = "UTC"
+try:
+    TIMEZONE_OPTIONS = sorted(tz for tz in available_timezones() if tz)
+except Exception:  # pragma: no cover - fallback when tzdata unavailable
+    TIMEZONE_OPTIONS = [
+        "UTC",
+        "US/Eastern",
+        "US/Central",
+        "US/Mountain",
+        "US/Pacific",
+        "Europe/London",
+        "Europe/Berlin",
+        "Europe/Paris",
+        "Asia/Singapore",
+        "Asia/Tokyo",
+        "Asia/Hong_Kong",
+        "Australia/Sydney",
+    ]
+if DEFAULT_FRONTEND_TIMEZONE not in TIMEZONE_OPTIONS:
+    TIMEZONE_OPTIONS.insert(0, DEFAULT_FRONTEND_TIMEZONE)
+
 def register_pages(app: FastAPI) -> None:
     settings = get_settings()
+    try:
+        default_zone = ZoneInfo(DEFAULT_FRONTEND_TIMEZONE)
+    except ZoneInfoNotFoundError:
+        default_zone = timezone.utc
+    timezone_cache: dict[str, Any] = {"name": DEFAULT_FRONTEND_TIMEZONE, "zone": default_zone}
+
+    def get_frontend_timezone_name() -> str:
+        config = getattr(app.state, "runtime_config", {}) or {}
+        value = str(config.get("frontend_timezone") or DEFAULT_FRONTEND_TIMEZONE).strip()
+        return value or DEFAULT_FRONTEND_TIMEZONE
+
+    def get_frontend_zone() -> ZoneInfo:
+        tz_name = get_frontend_timezone_name()
+        cached_name = timezone_cache.get("name")
+        cached_zone = timezone_cache.get("zone")
+        if cached_name != tz_name or cached_zone is None:
+            try:
+                cached_zone = ZoneInfo(tz_name)
+            except ZoneInfoNotFoundError:
+                cached_zone = default_zone
+                tz_name = DEFAULT_FRONTEND_TIMEZONE
+            timezone_cache["zone"] = cached_zone
+            timezone_cache["name"] = tz_name
+        return cached_zone  # type: ignore[return-value]
+
+    def _ensure_aware(value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value
+
+    def format_display_datetime(
+        value: datetime | None,
+        *,
+        fmt: str = "%H:%M:%S %Z",
+        fallback: str = "--",
+    ) -> str:
+        aware = _ensure_aware(value)
+        if aware is None:
+            return fallback
+        try:
+            zone = get_frontend_zone()
+            return aware.astimezone(zone).strftime(fmt)
+        except Exception:
+            return fallback
+
+    def format_iso_timestamp(
+        raw: Any,
+        *,
+        fmt: str = "%H:%M:%S %Z",
+        fallback: str = "--",
+        passthrough_on_error: bool = True,
+    ) -> str:
+        if raw in (None, ""):
+            return fallback
+        if isinstance(raw, datetime):
+            return format_display_datetime(raw, fmt=fmt, fallback=fallback)
+        text = str(raw)
+        try:
+            candidate = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            return text if passthrough_on_error else fallback
+        return format_display_datetime(candidate, fmt=fmt, fallback=fallback)
+
+    def format_epoch_ms(raw: Any, *, fmt: str = "%H:%M", fallback: str = "--") -> str:
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            return fallback
+        dt = datetime.fromtimestamp(value / 1000.0, timezone.utc)
+        return format_display_datetime(dt, fmt=fmt, fallback=fallback)
+
+    def format_now(fmt: str = "%H:%M:%S %Z") -> str:
+        return format_display_datetime(datetime.now(timezone.utc), fmt=fmt)
 
     def get_refresh_interval() -> float:
         config = getattr(app.state, "runtime_config", {}) or {}
@@ -135,7 +233,7 @@ def register_pages(app: FastAPI) -> None:
                         if label == active:
                             link.classes("bg-white/10 text-white font-semibold")
                         nav_refs[label] = link
-                ui.label(datetime.now(timezone.utc).strftime("%H:%M UTC")).classes(
+                ui.label(format_now("%H:%M %Z")).classes(
                     "text-xs text-white/70"
                 )
         return nav_refs
@@ -497,10 +595,8 @@ def register_pages(app: FastAPI) -> None:
                             ts_value = candle.get("ts")
                             label = "--"
                             if ts_value is not None:
-                                try:
-                                    label = datetime.fromtimestamp(float(ts_value) / 1000, timezone.utc).strftime("%H:%M")
-                                except (TypeError, ValueError, OSError, OverflowError):
-                                    label = str(ts_value)
+                                label_candidate = format_epoch_ms(ts_value, fmt="%H:%M")
+                                label = label_candidate if label_candidate != "--" else str(ts_value)
                             open_px = _to_float(candle.get("open"))
                             close_px = _to_float(candle.get("close"))
                             low_px = _to_float(candle.get("low"))
@@ -639,13 +735,7 @@ def register_pages(app: FastAPI) -> None:
                         llm_card_container = ui.column().classes("w-full gap-3")
 
         def format_llm_timestamp(raw: str | None) -> str:
-            if not raw:
-                return "--"
-            try:
-                parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-                return parsed.strftime("%H:%M:%S UTC")
-            except ValueError:
-                return raw
+            return format_iso_timestamp(raw, fmt="%H:%M:%S %Z")
 
         def format_decision_value(value: Any) -> str:
             if value is None or value == "":
@@ -749,7 +839,9 @@ def register_pages(app: FastAPI) -> None:
                     parts.append(f"Used {used:,.2f} {currency}")
             resets_at = usage.get("resets_at")
             if resets_at:
-                parts.append(f"Renews {resets_at}")
+                parts.append(
+                    f"Renews {format_iso_timestamp(resets_at, fmt='%Y-%m-%d %H:%M %Z')}"
+                )
             if not parts:
                 return None
             return " · ".join(parts)
@@ -833,7 +925,11 @@ def register_pages(app: FastAPI) -> None:
                 if ts:
                     try:
                         parsed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-                        timestamp_value = parsed.strftime("%Y-%m-%d %H:%M:%S")
+                        timestamp_value = format_display_datetime(
+                            parsed,
+                            fmt="%Y-%m-%d %H:%M:%S",
+                            fallback=ts,
+                        )
                     except ValueError:
                         timestamp_value = ts
                 if not timestamp_value:
@@ -904,7 +1000,7 @@ def register_pages(app: FastAPI) -> None:
             label = refresh_label["widget"]
             if label:
                 if snapshot:
-                    label.set_text(f"Last refresh: {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}")
+                    label.set_text(f"Last refresh: {format_now('%H:%M:%S %Z')}")
                 else:
                     label.set_text("Last refresh: --")
             if not snapshot:
@@ -942,13 +1038,7 @@ def register_pages(app: FastAPI) -> None:
                     return None
 
             def format_activity_ts(value: Any) -> str:
-                if not value:
-                    return "--"
-                try:
-                    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-                    return parsed.strftime("%H:%M:%S UTC")
-                except ValueError:
-                    return str(value)
+                return format_iso_timestamp(value, fmt="%H:%M:%S %Z")
 
             def _first_price(*values: Any) -> float | None:
                 for candidate in values:
@@ -1542,16 +1632,14 @@ def register_pages(app: FastAPI) -> None:
 
             summary = f"{action_text}-{conf_display}-{strategy_signal.get('reason')}"
             if summary != last_logged_signal.get("value") and action_text != "--":
-                timestamp = datetime.now(timezone.utc).strftime("%H:%M:%S")
+                timestamp = format_now("%H:%M:%S %Z")
                 strategy_feed.push(
                     f"{timestamp} | {selected_symbol} | {action_text} ({conf_display.split(': ')[1]})"
                 )
                 last_logged_signal["value"] = summary
 
             ohlcv = indicators.get("ohlcv") or []
-            categories = [
-                datetime.fromtimestamp(entry.get("ts", 0) / 1000).strftime("%H:%M") for entry in ohlcv
-            ]
+            categories = [format_epoch_ms(entry.get("ts"), fmt="%H:%M") for entry in ohlcv]
             candle_data = [
                 [entry.get("open"), entry.get("close"), entry.get("low"), entry.get("high")] for entry in ohlcv
             ]
@@ -1642,7 +1730,7 @@ def register_pages(app: FastAPI) -> None:
                 return
             confidence = signal.get("confidence")
             confidence_pct = f"{confidence * 100:.0f}%" if isinstance(confidence, (int, float)) else "--"
-            timestamp = datetime.now(timezone.utc).strftime("%H:%M:%S")
+            timestamp = format_now("%H:%M:%S %Z")
             entry = f"{timestamp} | {symbol} | {kind}: {action} ({confidence_pct})"
             strategy_feed.push(entry)
             app.state.frontend_events.append(entry)
@@ -1755,7 +1843,7 @@ def register_pages(app: FastAPI) -> None:
                 )
                 ui.chat_message(response, name="engine").classes("bg-emerald-50 text-emerald-900")
             app.state.frontend_events.append(
-                f"User Q at {datetime.now(timezone.utc).isoformat()}"
+                f"User Q at {format_now('%Y-%m-%d %H:%M:%S %Z')}"
             )
 
         send_button.on("click", lambda _: asyncio.create_task(handle_question()))
@@ -1838,7 +1926,15 @@ def register_pages(app: FastAPI) -> None:
                 await push_notification(f"Unable to load trades: {exc}", color="warning")
                 return
             rows = (rows or [])[:max_history_rows]
-            trades_table.rows = rows
+            formatted_rows: list[dict[str, Any]] = []
+            for row in rows:
+                record = dict(row)
+                record["timestamp"] = format_iso_timestamp(
+                    record.get("timestamp"),
+                    fmt="%Y-%m-%d %H:%M:%S %Z",
+                )
+                formatted_rows.append(record)
+            trades_table.rows = formatted_rows
             trades_table.update()
             await push_notification(f"Trades refreshed ({len(rows)})")
 
@@ -1857,7 +1953,10 @@ def register_pages(app: FastAPI) -> None:
                     version_label = str(version_label)
                 formatted.append(
                     {
-                        "created_at": entry.get("created_at"),
+                        "created_at": format_iso_timestamp(
+                            entry.get("created_at"),
+                            fmt="%Y-%m-%d %H:%M:%S %Z",
+                        ),
                         "symbol": entry.get("symbol"),
                         "timeframe": entry.get("timeframe"),
                         "model": entry.get("model_id"),
@@ -1936,23 +2035,17 @@ def register_pages(app: FastAPI) -> None:
         for line in list(getattr(app.state, "websocket_log_buffer", [])):
             websocket_log.push(line)
 
-        def _format_timestamp(raw: str | None) -> str:
-            if not raw:
-                return datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
-            try:
-                parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-                return parsed.strftime("%H:%M:%S UTC")
-            except ValueError:
-                return raw
-
         def _render_entry(entry: Any) -> str:
-            now_label = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
+            now_label = format_now("%H:%M:%S %Z")
             if isinstance(entry, dict):
                 message = entry.get("message") or entry.get("detail")
                 if not message:
                     message = json.dumps(entry, ensure_ascii=False)
                 ts_raw = entry.get("timestamp") or entry.get("ts")
-                label = _format_timestamp(ts_raw) if ts_raw else now_label
+                if ts_raw:
+                    label = format_iso_timestamp(ts_raw, fmt="%H:%M:%S %Z")
+                else:
+                    label = now_label
                 symbol = entry.get("symbol")
                 if symbol:
                     message = f"{symbol}: {message}"
@@ -2033,6 +2126,7 @@ def register_pages(app: FastAPI) -> None:
         config.setdefault("okx_sub_account_use_master", settings.okx_sub_account_use_master)
         config.setdefault("okx_api_flag", str(settings.okx_api_flag or "0") or "0")
         config.setdefault("enable_websocket", True)
+        config.setdefault("frontend_timezone", DEFAULT_FRONTEND_TIMEZONE)
         response_schemas = config.setdefault("llm_response_schemas", {})
         guardrails = config.setdefault("guardrails", PromptBuilder._default_guardrails())
         guardrails.setdefault(
@@ -2254,6 +2348,16 @@ def register_pages(app: FastAPI) -> None:
                     label="Analysis Timeframe",
                     value=timeframe_default,
                 ).classes("w-full md:w-40")
+                timezone_select = (
+                    ui.select(
+                        options=TIMEZONE_OPTIONS,
+                        label="Display Timezone",
+                        value=config.get("frontend_timezone", DEFAULT_FRONTEND_TIMEZONE),
+                        with_input=True,
+                    )
+                    .classes("w-full md:w-60")
+                    .props("use-input fill-input input-debounce='0' clearable")
+                )
                 model_select = ui.select(
                     model_options,
                     label="Model",
@@ -2895,6 +2999,16 @@ def register_pages(app: FastAPI) -> None:
             if timeframe_value not in TA_TIMEFRAME_OPTIONS:
                 timeframe_value = "4H"
             config["ta_timeframe"] = timeframe_value
+            timezone_value = (
+                timezone_select.value
+                or config.get("frontend_timezone")
+                or DEFAULT_FRONTEND_TIMEZONE
+            )
+            config["frontend_timezone"] = timezone_value
+            try:
+                await save_frontend_timezone(timezone_value)
+            except Exception as exc:  # pragma: no cover - optional DB
+                ui.notify(f"Failed to persist timezone: {exc}", color="warning")
             schema_text = response_schema_input.value or ""
             if schema_text.strip():
                 try:

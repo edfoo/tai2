@@ -24,6 +24,7 @@ from app.db.postgres import (
     load_execution_settings,
     load_prompt_interval,
     load_okx_sub_account,
+    load_frontend_timezone,
 )
 from app.services.llm_service import LLMService
 from app.services.market_service import MarketService
@@ -141,6 +142,7 @@ def _create_lifespan(enable_background_services: bool):
             "okx_sub_account_use_master": settings.okx_sub_account_use_master,
             "okx_api_flag": str(settings.okx_api_flag or "0") or "0",
             "wait_for_tp_sl": False,
+            "frontend_timezone": "UTC",
         }
         app.state.runtime_config["wait_for_tp_sl"] = bool(
             app.state.runtime_config["guardrails"].get("wait_for_tp_sl", False)
@@ -255,6 +257,15 @@ def _create_lifespan(enable_background_services: bool):
                 else:
                     if stored_prompt_interval:
                         app.state.runtime_config["auto_prompt_interval"] = int(stored_prompt_interval)
+                try:
+                    stored_timezone = await load_frontend_timezone(
+                        app.state.runtime_config.get("frontend_timezone")
+                    )
+                except Exception as exc:  # pragma: no cover - optional
+                    logger.error("Failed to load frontend timezone: %s", exc)
+                else:
+                    if stored_timezone:
+                        app.state.runtime_config["frontend_timezone"] = stored_timezone
         elif not enable_background_services:
             logger.info("Background DB init disabled; skipping Postgres init")
         else:

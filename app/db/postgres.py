@@ -718,6 +718,47 @@ async def load_execution_settings() -> dict[str, Any]:
     return result
 
 
+async def save_frontend_timezone(timezone_name: str | None) -> None:
+    pool = await get_postgres_pool()
+    normalized = (timezone_name or "UTC").strip() or "UTC"
+    payload = json.dumps({"timezone": normalized})
+    await pool.execute(
+        """
+        INSERT INTO runtime_settings (key, value, updated_at)
+        VALUES ('frontend_timezone', $1::jsonb, NOW())
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+        """,
+        payload,
+    )
+
+
+async def load_frontend_timezone(default: str | None = None) -> str | None:
+    pool = await get_postgres_pool()
+    row = await pool.fetchrow("SELECT value FROM runtime_settings WHERE key = 'frontend_timezone'")
+    if not row:
+        return default
+    value = row["value"]
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            candidate = value.strip()
+            return candidate or default
+    else:
+        parsed = value
+    if isinstance(parsed, dict):
+        candidate = parsed.get("timezone") or parsed.get("value")
+        if isinstance(candidate, str):
+            candidate = candidate.strip()
+            if candidate:
+                return candidate
+    if isinstance(parsed, str):
+        candidate = parsed.strip()
+        if candidate:
+            return candidate
+    return default
+
+
 async def save_ta_timeframe(timeframe: str | None) -> None:
     pool = await get_postgres_pool()
     normalized = (timeframe or "").strip()
@@ -899,4 +940,6 @@ __all__ = [
     "save_guardrails",
     "set_enabled_trading_pairs",
     "save_ta_timeframe",
+    "save_frontend_timezone",
+    "load_frontend_timezone",
 ]
