@@ -133,14 +133,40 @@ class PromptBuilder:
         runtime_min_size = _to_float(runtime_meta.get("execution_min_size"))
         spec_min_size = instrument_spec.get("min_size") if instrument_spec else None
         min_size_value = spec_min_size if spec_min_size is not None else runtime_min_size
+        price_hint = self._resolve_last_price(live_section)
         execution_settings = {
             "enabled": bool(runtime_meta.get("execution_enabled")),
             "trade_mode": runtime_meta.get("execution_trade_mode") or "cross",
             "order_type": runtime_meta.get("execution_order_type") or "market",
             "min_size": min_size_value,
         }
+        if price_hint is not None:
+            execution_settings["price_reference"] = price_hint
         if instrument_spec:
             execution_settings["symbol_rules"] = instrument_spec
+        account_equity_usd = _to_float(account_section.get("account_equity")) or _to_float(
+            account_section.get("total_eq_usd")
+        )
+        available_margin_usd = (
+            _to_float(account_section.get("available_eq_usd"))
+            or _to_float(account_section.get("quote_available_usd"))
+        )
+        if available_margin_usd is None and price_hint and price_hint > 0:
+            quote_available = _to_float(account_section.get("quote_available"))
+            if quote_available is not None:
+                available_margin_usd = quote_available * price_hint
+        if available_margin_usd is not None:
+            execution_settings["available_margin_usd"] = available_margin_usd
+        if account_equity_usd is not None:
+            execution_settings["account_equity_usd"] = account_equity_usd
+        max_position_pct = _to_float(guardrails.get("max_position_pct"))
+        if account_equity_usd is not None and max_position_pct:
+            max_notional = account_equity_usd * max_position_pct
+            execution_settings["max_position_value_usd"] = max_notional
+            if price_hint:
+                execution_settings["max_position_contracts"] = max_notional / price_hint
+        if max_position_pct is not None:
+            execution_settings["max_position_pct"] = max_position_pct
         schema_overrides = runtime_meta.get("llm_response_schemas") or {}
         timeframe_value = timeframe or runtime_meta.get("ta_timeframe") or snapshot.get("timeframe") or "4H"
         trend_section = self._build_trend_confirmation(indicators, ticker, timeframe_value)
@@ -148,6 +174,7 @@ class PromptBuilder:
         derivatives_section = self._build_derivatives_posture(funding, custom_metrics, liquidations)
         fee_window_summary = self._build_fee_window_summary(account_section)
         credit_availability = self._build_credit_availability()
+        execution_feedback = self._format_execution_feedback(snapshot.get("execution_feedback"))
 
         context = {
             "generated_at": snapshot.get("generated_at"),
@@ -175,6 +202,8 @@ class PromptBuilder:
             "fee_availability": fee_window_summary,
             "credit_availability": credit_availability,
         }
+        if execution_feedback:
+            context["execution_feedback"] = execution_feedback
         prompt_block = {
             "system": (runtime_meta.get("llm_system_prompt") or DEFAULT_SYSTEM_PROMPT).strip(),
             "task": (runtime_meta.get("llm_decision_prompt") or DEFAULT_DECISION_PROMPT).strip(),
@@ -725,6 +754,38 @@ class PromptBuilder:
             "currency": usage.get("currency") or "USD",
             "resets_at": usage.get("resets_at"),
         }
+
+    @staticmethod
+    def _resolve_last_price(market_data: dict[str, Any] | None) -> Optional[float]:
+        if not isinstance(market_data, dict):
+            return None
+        price_keys = ("last_price", "mark_px", "mark_price", "mid_price", "last", "px", "ask", "bid")
+        for key in price_keys:
+            price_value = _to_float(market_data.get(key))
+            if price_value:
+                return price_value
+        return None
+
+    def _format_execution_feedback(self, feedback: Any, limit: int = 5) -> list[dict[str, Any]]:
+        if not isinstance(feedback, list) or limit <= 0:
+            return []
+        recent_entries = feedback[-limit:]
+        formatted: list[dict[str, Any]] = []
+        for entry in recent_entries:
+            if not isinstance(entry, dict):
+                continue
+            formatted.append(
+                {
+                    "timestamp": entry.get("timestamp"),
+                    "symbol": entry.get("symbol"),
+                    "side": entry.get("side"),
+                    "size": entry.get("size"),
+                    "message": entry.get("message"),
+                    "level": entry.get("level"),
+                    "meta": entry.get("meta"),
+                }
+            )
+        return formatted
 
     def _build_pending_orders(self, orders: list[dict[str, Any]]) -> dict[str, Any]:
         if not orders:

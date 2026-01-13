@@ -158,6 +158,7 @@ class MarketService:
         self._position_activity: dict[str, float] = {}
         self._position_protection: dict[str, dict[str, Any]] = {}
         self._protection_sync_ts: dict[str, float] = {}
+        self._execution_feedback: Deque[dict[str, Any]] = deque(maxlen=50)
         self._subscribed_symbols: set[str] = set()
         self._available_symbols: list[str] = []
         self._instrument_specs: dict[str, dict[str, float]] = {}
@@ -381,6 +382,7 @@ class MarketService:
             "position_protection": position_protection,
             "instrument_specs": instrument_specs,
         }
+        snapshot["execution_feedback"] = list(self._execution_feedback)
         return snapshot
 
     def _snapshot_position_protection(self) -> dict[str, Any]:
@@ -1438,6 +1440,24 @@ class MarketService:
         if mirror_logger:
             logger.debug(text)
 
+    def _record_execution_feedback(
+        self,
+        symbol: str | None,
+        message: str,
+        *,
+        level: str = "info",
+        meta: dict[str, Any] | None = None,
+    ) -> None:
+        entry: dict[str, Any] = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "symbol": symbol,
+            "message": str(message),
+            "level": level,
+        }
+        if meta:
+            entry["meta"] = meta
+        self._execution_feedback.append(entry)
+
     @staticmethod
     def _prune_trade_history(history: Deque[float], now: float, window: int) -> None:
         cutoff = max(60, window or 3600)
@@ -1754,6 +1774,12 @@ class MarketService:
             self._emit_debug(
                 f"Execution skipped for {symbol}: insufficient available margin ({margin_text} USD)"
             )
+            self._record_execution_feedback(
+                symbol,
+                f"Insufficient available margin ({margin_text} USD)",
+                level="warning",
+                meta={"available_margin_usd": available_margin_usd},
+            )
             return False
         confidence_value = self._normalize_confidence(decision.get("confidence"))
         size_hint = self._extract_float(decision.get("position_size"))
@@ -1830,6 +1856,16 @@ class MarketService:
                 raw_size = max_notional_from_margin / last_price
                 self._emit_debug(
                     f"{symbol} size clipped by available margin ({available_margin_usd:,.4f} USD)"
+                )
+                self._record_execution_feedback(
+                    symbol,
+                    "Size clipped by available margin",
+                    level="info",
+                    meta={
+                        "available_margin_usd": available_margin_usd,
+                        "requested_notional": current_notional,
+                        "max_notional": max_notional_from_margin,
+                    },
                 )
 
         if raw_size < min_size:
@@ -2113,6 +2149,33 @@ class MarketService:
             return entry
         return response
 
+    def _extract_order_error(self, response: Any) -> tuple[str, dict[str, Any]]:
+        if not isinstance(response, dict):
+            return ("OKX rejected the order", {})
+        code = response.get("code")
+        msg = response.get("msg")
+        data = response.get("data")
+        s_code = None
+        s_msg = None
+        if isinstance(data, list) and data:
+            first = data[0]
+            if isinstance(first, dict):
+                s_code = first.get("sCode")
+                s_msg = first.get("sMsg") or first.get("msg")
+        detail = s_msg or msg or "OKX rejected the order"
+        suffix = f" (code={s_code or code})" if (s_code or code) else ""
+        meta = {
+            key: value
+            for key, value in {
+                "code": code,
+                "message": msg,
+                "sCode": s_code,
+                "sMsg": s_msg,
+            }.items()
+            if value
+        }
+        return (f"{detail}{suffix}", meta)
+
     @staticmethod
     def _response_indicates_pos_side_error(response: Any) -> bool:
         def _entry_has_issue(entry: Any) -> bool:
@@ -2284,6 +2347,13 @@ class MarketService:
                 include_pos_side = None
                 attempt += 1
                 continue
+            error_message, error_meta = self._extract_order_error(response)
+            self._record_execution_feedback(
+                symbol,
+                error_message,
+                level="error",
+                meta=error_meta or None,
+            )
             return None
 
     async def _record_trade_execution(
