@@ -159,6 +159,9 @@ class PromptBuilder:
             or execution_limits.get("max_notional_from_margin")
         )
         live_max_leverage = _to_float(execution_limits.get("max_leverage"))
+        tier_cap_usd = _to_float(execution_limits.get("tier_max_notional_usd"))
+        tier_imr = _to_float(execution_limits.get("tier_initial_margin_ratio"))
+        tier_source = execution_limits.get("tier_source")
         quote_available_override = _to_float(execution_limits.get("quote_available_usd"))
         quote_cash_override = _to_float(execution_limits.get("quote_cash_usd"))
         if live_account_equity is not None:
@@ -190,7 +193,15 @@ class PromptBuilder:
             execution_settings["margin_max_position_value_usd"] = margin_cap_usd
             if price_hint:
                 execution_settings["margin_max_position_contracts"] = margin_cap_usd / price_hint
-        effective_candidates = [value for value in (guardrail_cap, margin_cap_usd) if value and value > 0]
+        if tier_cap_usd is not None:
+            execution_settings["tier_max_position_value_usd"] = tier_cap_usd
+            if price_hint:
+                execution_settings["tier_max_position_contracts"] = tier_cap_usd / price_hint
+        effective_candidates = [
+            value
+            for value in (guardrail_cap, margin_cap_usd, tier_cap_usd)
+            if value and value > 0
+        ]
         if effective_candidates:
             effective_cap = min(effective_candidates)
             execution_settings["effective_max_position_value_usd"] = effective_cap
@@ -199,6 +210,10 @@ class PromptBuilder:
         effective_max_leverage = guardrail_max_leverage if guardrail_max_leverage and guardrail_max_leverage > 0 else None
         if effective_max_leverage is not None:
             execution_settings["max_leverage"] = effective_max_leverage
+        if tier_imr is not None:
+            execution_settings["tier_initial_margin_ratio"] = tier_imr
+        if tier_source:
+            execution_settings["tier_source"] = tier_source
         live_snapshot: dict[str, Any] = {}
         if live_available_margin is not None:
             live_snapshot["available_margin_usd"] = live_available_margin
@@ -208,6 +223,12 @@ class PromptBuilder:
             live_snapshot["max_leverage"] = live_max_leverage
         if margin_cap_usd is not None:
             live_snapshot["max_notional_usd"] = margin_cap_usd
+        if tier_cap_usd is not None:
+            live_snapshot["tier_max_notional_usd"] = tier_cap_usd
+        if tier_imr is not None:
+            live_snapshot["tier_initial_margin_ratio"] = tier_imr
+        if tier_source:
+            live_snapshot["tier_source"] = tier_source
         if quote_available_override is not None:
             live_snapshot["quote_available_usd"] = quote_available_override
         if quote_cash_override is not None:

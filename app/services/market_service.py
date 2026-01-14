@@ -113,6 +113,7 @@ class MarketService:
         "51051",
         "51052",
     }
+    TIER_CACHE_TTL_SECONDS = 600
 
     def __init__(
         self,
@@ -168,6 +169,7 @@ class MarketService:
         self._protection_sync_ts: dict[str, float] = {}
         self._execution_feedback: Deque[dict[str, Any]] = deque(maxlen=50)
         self._latest_execution_limits: dict[str, dict[str, Any]] = {}
+        self._position_tiers: dict[str, dict[str, Any]] = {}
         self._subscribed_symbols: set[str] = set()
         self._available_symbols: list[str] = []
         self._instrument_specs: dict[str, dict[str, float]] = {}
@@ -436,6 +438,27 @@ class MarketService:
                     )
             annotated.append(enriched)
         return annotated
+
+    def _position_side_sizes(self, positions: list[dict[str, Any]] | None, symbol: str) -> dict[str, float]:
+        totals = {"long": 0.0, "short": 0.0}
+        if not positions:
+            return totals
+        normalized_symbol = symbol.upper()
+        for entry in positions:
+            if not isinstance(entry, dict):
+                continue
+            entry_symbol = str(entry.get("instId") or entry.get("symbol") or "").upper()
+            if entry_symbol != normalized_symbol:
+                continue
+            size_value = self._extract_float(entry.get("pos") or entry.get("size"))
+            if size_value is None:
+                continue
+            side_value = str(entry.get("posSide") or entry.get("side") or "").lower()
+            if not side_value:
+                side_value = "long" if size_value >= 0 else "short"
+            side_key = "long" if side_value == "long" else "short"
+            totals[side_key] += abs(size_value)
+        return totals
 
     async def _sync_position_protection_entries(self, positions: list[dict[str, Any]] | None) -> None:
         if not positions or not self._trade_api:
@@ -825,6 +848,111 @@ class MarketService:
         if not pairs:
             return list(self.symbols)
         return sorted(set(pairs))
+
+    def _tier_cache_key(self, symbol: str, trade_mode: str) -> str:
+        normalized_symbol = (symbol or "").upper()
+        normalized_mode = (trade_mode or "cross").lower()
+        return f"{normalized_mode}:{normalized_symbol}"
+
+    async def _get_position_tiers(self, symbol: str, trade_mode: str = "cross") -> list[dict[str, Any]]:
+        cache_key = self._tier_cache_key(symbol, trade_mode)
+        cached = self._position_tiers.get(cache_key)
+        now = time.time()
+        if cached and now - cached.get("timestamp", 0.0) < self.TIER_CACHE_TTL_SECONDS:
+            tiers = cached.get("tiers")
+            if isinstance(tiers, list):
+                return tiers
+        tiers = await self._fetch_position_tiers(symbol, trade_mode=trade_mode)
+        if tiers:
+            self._position_tiers[cache_key] = {"tiers": tiers, "timestamp": now}
+        return tiers or []
+
+    async def _fetch_position_tiers(self, symbol: str, trade_mode: str = "cross") -> list[dict[str, Any]]:
+        if not self._public_api:
+            return []
+        try:
+            response = await asyncio.to_thread(
+                self._public_api.get_position_tiers,
+                instType="SWAP",
+                tdMode=trade_mode,
+                instId=symbol,
+            )
+        except Exception as exc:  # pragma: no cover - network dependent
+            self._emit_debug(f"Position tier fetch failed for {symbol}: {exc}")
+            return []
+        return self._safe_data(response)
+
+    def _select_position_tier(
+        self,
+        tiers: list[dict[str, Any]],
+        size: float,
+    ) -> dict[str, Any] | None:
+        if not tiers or size is None:
+            return None
+        target = abs(size)
+        fallback: dict[str, Any] | None = None
+        for tier in tiers:
+            min_size = self._extract_float(tier.get("minSz"))
+            max_size = self._extract_float(tier.get("maxSz"))
+            if min_size is not None and target < min_size:
+                continue
+            if max_size not in (None, 0.0) and target > max_size:
+                fallback = tier
+                continue
+            return tier
+        return fallback or (tiers[-1] if tiers else None)
+
+    async def _apply_tier_margin_guard(
+        self,
+        *,
+        symbol: str,
+        trade_mode: str,
+        pos_side: str,
+        existing_side_size: float,
+        additional_size: float,
+        last_price: float,
+        available_margin_usd: float | None,
+    ) -> dict[str, Any]:
+        tiers = await self._get_position_tiers(symbol, trade_mode)
+        if not tiers or last_price is None or last_price <= 0:
+            return {"size": additional_size}
+        resulting_size = max(0.0, existing_side_size) + max(0.0, additional_size)
+        tier = self._select_position_tier(tiers, resulting_size)
+        if not tier:
+            return {"size": additional_size}
+        imr = self._extract_float(tier.get("imr"))
+        tier_max_leverage = self._extract_float(tier.get("maxLever"))
+        if (imr is None or imr <= 0) and tier_max_leverage:
+            if tier_max_leverage > 0:
+                imr = 1.0 / tier_max_leverage
+        if (tier_max_leverage is None or tier_max_leverage <= 0) and imr and imr > 0:
+            tier_max_leverage = 1.0 / imr
+        if imr is None or imr <= 0 or available_margin_usd is None or available_margin_usd <= 0:
+            return {"size": additional_size, "tier": tier, "tier_max_leverage": tier_max_leverage}
+        proposed_notional = additional_size * last_price
+        required_margin = proposed_notional * imr
+        max_notional_allowed = available_margin_usd / imr if imr > 0 else None
+        final_size = additional_size
+        clipped = False
+        blocked = False
+        if max_notional_allowed is not None and proposed_notional > max_notional_allowed:
+            if max_notional_allowed <= 0:
+                final_size = 0.0
+                blocked = True
+            else:
+                final_size = max_notional_allowed / last_price
+            clipped = True
+        return {
+            "size": final_size,
+            "tier": tier,
+            "tier_max_leverage": tier_max_leverage,
+            "tier_imr": imr,
+            "required_margin": required_margin,
+            "max_notional_allowed": max_notional_allowed,
+            "clipped": clipped,
+            "blocked": blocked,
+            "pos_side": pos_side,
+        }
 
     async def _fetch_positions(self, symbol: str | None = None) -> list[dict[str, Any]]:
         if not self._account_api:
@@ -1468,6 +1596,9 @@ class MarketService:
         max_leverage: float | None,
         max_notional_usd: float | None,
         source: str = "execution",
+        tier_max_notional_usd: float | None = None,
+        tier_initial_margin_ratio: float | None = None,
+        tier_source: str | None = None,
     ) -> None:
         normalized = self._normalize_symbol_key(symbol)
         if not normalized:
@@ -1484,20 +1615,26 @@ class MarketService:
             "source": source,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
+        if tier_max_notional_usd is not None:
+            payload["tier_max_notional_usd"] = tier_max_notional_usd
+        if tier_initial_margin_ratio is not None:
+            payload["tier_initial_margin_ratio"] = tier_initial_margin_ratio
+        if tier_source:
+            payload["tier_source"] = tier_source
         self._latest_execution_limits[normalized] = payload
 
     def _record_execution_feedback(
         self,
-        symbol: str | None,
+        symbol: str,
         message: str,
         *,
         level: str = "info",
         meta: dict[str, Any] | None = None,
     ) -> None:
-        entry: dict[str, Any] = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+        entry = {
             "symbol": symbol,
-            "message": str(message),
+            "message": message,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "level": level,
         }
         if meta:
@@ -1664,6 +1801,7 @@ class MarketService:
             if isinstance(pos.get("posSide"), str):
                 dual_side_mode = True
                 break
+        side_sizes = self._position_side_sizes(positions, symbol)
         now = time.time()
         summary = (
             f"LLM decision {action} size={decision.get('position_size', '--')} "
@@ -1920,6 +2058,73 @@ class MarketService:
                     },
                 )
 
+        side = "buy" if action == "BUY" else "sell"
+        pos_side = "long" if action == "BUY" else "short"
+        reduce_only = False
+        if action == "SELL" and current_side == "LONG":
+            pos_side = "long"
+            reduce_only = True
+        elif action == "BUY" and current_side == "SHORT":
+            pos_side = "short"
+            reduce_only = True
+
+        tier_cap_limit = None
+        tier_max_leverage_used = None
+        tier_initial_margin_ratio = None
+        if (
+            not reduce_only
+            and last_price
+            and last_price > 0
+            and raw_size > 0
+        ):
+            existing_side_size = side_sizes.get(pos_side, 0.0)
+            tier_result = await self._apply_tier_margin_guard(
+                symbol=symbol,
+                trade_mode=trade_mode,
+                pos_side=pos_side,
+                existing_side_size=existing_side_size,
+                additional_size=raw_size,
+                last_price=last_price,
+                available_margin_usd=available_margin_usd,
+            )
+            tier_cap_limit = tier_result.get("max_notional_allowed")
+            tier_max_leverage_used = tier_result.get("tier_max_leverage")
+            tier_initial_margin_ratio = tier_result.get("tier_imr")
+            if tier_result.get("blocked"):
+                self._emit_debug(
+                    f"Execution skipped for {symbol}: insufficient margin at OKX tier requirements"
+                )
+                self._record_execution_feedback(
+                    symbol,
+                    "Insufficient margin at OKX tier",
+                    level="warning",
+                    meta={
+                        "tier_imr": tier_initial_margin_ratio,
+                        "tier_leverage": tier_max_leverage_used,
+                    },
+                )
+                return False
+            adjusted_size = self._extract_float(tier_result.get("size"))
+            if adjusted_size is not None and adjusted_size >= 0:
+                if tier_result.get("clipped") and adjusted_size < raw_size:
+                    self._emit_debug(
+                        f"{symbol} size clipped by OKX tier margin limit"
+                    )
+                    self._record_execution_feedback(
+                        symbol,
+                        "Size clipped by OKX tier margin",
+                        level="info",
+                        meta={
+                            "tier_imr": tier_initial_margin_ratio,
+                            "previous_size": raw_size,
+                            "adjusted_size": adjusted_size,
+                        },
+                    )
+                raw_size = adjusted_size
+        if tier_cap_limit is not None:
+            if max_notional_from_margin is None or tier_cap_limit < max_notional_from_margin:
+                max_notional_from_margin = tier_cap_limit
+
         self._record_execution_limits(
             symbol,
             available_margin_usd=available_margin_usd,
@@ -1927,8 +2132,11 @@ class MarketService:
             quote_currency=quote_currency,
             quote_available_usd=quote_available_usd,
             quote_cash_usd=quote_cash_usd,
-            max_leverage=max_leverage,
+            max_leverage=tier_max_leverage_used or max_leverage,
             max_notional_usd=max_notional_from_margin,
+            tier_max_notional_usd=tier_cap_limit,
+            tier_initial_margin_ratio=tier_initial_margin_ratio,
+            tier_source="position-tiers" if tier_cap_limit is not None else None,
         )
 
         if raw_size < min_size:
@@ -1947,16 +2155,6 @@ class MarketService:
             )
             return False
         raw_size = quantized_size
-
-        side = "buy" if action == "BUY" else "sell"
-        pos_side = "long" if action == "BUY" else "short"
-        reduce_only = False
-        if action == "SELL" and current_side == "LONG":
-            pos_side = "long"
-            reduce_only = True
-        elif action == "BUY" and current_side == "SHORT":
-            pos_side = "short"
-            reduce_only = True
 
         if (
             not reduce_only
