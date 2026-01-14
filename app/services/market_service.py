@@ -854,6 +854,15 @@ class MarketService:
         normalized_mode = (trade_mode or "cross").lower()
         return f"{normalized_mode}:{normalized_symbol}"
 
+    @staticmethod
+    def _instrument_family(symbol: str | None) -> str | None:
+        if not symbol:
+            return None
+        parts = str(symbol).upper().split("-")
+        if len(parts) >= 2:
+            return "-".join(parts[:2])
+        return None
+
     async def _get_position_tiers(self, symbol: str, trade_mode: str = "cross") -> list[dict[str, Any]]:
         cache_key = self._tier_cache_key(symbol, trade_mode)
         cached = self._position_tiers.get(cache_key)
@@ -870,17 +879,30 @@ class MarketService:
     async def _fetch_position_tiers(self, symbol: str, trade_mode: str = "cross") -> list[dict[str, Any]]:
         if not self._public_api:
             return []
+        kwargs: dict[str, Any] = {
+            "instType": "SWAP",
+            "tdMode": trade_mode,
+        }
+        if symbol:
+            kwargs["instId"] = symbol
+            family = self._instrument_family(symbol)
+            if family:
+                kwargs["instFamily"] = family
         try:
             response = await asyncio.to_thread(
                 self._public_api.get_position_tiers,
-                instType="SWAP",
-                tdMode=trade_mode,
-                instId=symbol,
+                **kwargs,
             )
         except Exception as exc:  # pragma: no cover - network dependent
             self._emit_debug(f"Position tier fetch failed for {symbol}: {exc}")
             return []
-        return self._safe_data(response)
+        data = self._safe_data(response)
+        if not data and isinstance(response, dict):
+            code = response.get("code") or response.get("sCode")
+            msg = response.get("msg") or response.get("sMsg")
+            detail = f" code={code} msg={msg}" if (code or msg) else ""
+            self._emit_debug(f"Position tier fetch returned no data for {symbol}{detail}")
+        return data
 
     def _select_position_tier(
         self,
@@ -1948,9 +1970,15 @@ class MarketService:
                     elif last_price:
                         quote_cash_usd = quote_cash * last_price
         if quote_cash_usd is not None:
-            available_margin_usd = quote_cash_usd
-        elif quote_available_usd is not None:
-            available_margin_usd = quote_available_usd
+            if available_margin_usd is None:
+                available_margin_usd = quote_cash_usd
+            else:
+                available_margin_usd = max(available_margin_usd, quote_cash_usd)
+        if quote_available_usd is not None:
+            if available_margin_usd is None:
+                available_margin_usd = quote_available_usd
+            else:
+                available_margin_usd = max(available_margin_usd, quote_available_usd)
         if available_margin_usd is None and account_equity is not None:
             available_margin_usd = account_equity
         if available_margin_usd is None or available_margin_usd <= 0:
