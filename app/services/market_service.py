@@ -1662,6 +1662,16 @@ class MarketService:
         if meta:
             entry["meta"] = meta
         self._execution_feedback.append(entry)
+        if level in {"warning", "error"}:
+            meta_suffix = ""
+            if meta:
+                try:
+                    meta_suffix = f" meta={json.dumps(meta, default=str)}"
+                except Exception:
+                    meta_suffix = f" meta={meta}"
+            self._emit_debug(
+                f"Execution feedback ({level}) {symbol}: {message}{meta_suffix}"
+            )
 
     @staticmethod
     def _prune_trade_history(history: Deque[float], now: float, window: int) -> None:

@@ -203,6 +203,55 @@ def test_prompt_builder_respects_live_execution_limits() -> None:
     assert execution_block["live_margin_snapshot"]["quote_available_usd"] == pytest.approx(1100.0)
     assert execution_block["live_margin_snapshot"]["quote_cash_usd"] == pytest.approx(1000.0)
 
+
+def test_prompt_builder_includes_margin_health_and_feedback_digest() -> None:
+    snapshot = _sample_snapshot()
+    now = datetime.now(timezone.utc)
+    snapshot["execution_limits"] = {
+        "BTC-USDT-SWAP": {
+            "available_margin_usd": 8000,
+            "account_equity_usd": 10000,
+            "max_notional_usd": 15000,
+            "max_leverage": 4,
+            "tier_max_notional_usd": 50000,
+            "updated_at": _iso_timestamp(now),
+            "source": "execution",
+        }
+    }
+    snapshot["execution_feedback"] = [
+        {
+            "timestamp": _iso_timestamp(now - timedelta(minutes=2)),
+            "symbol": "BTC-USDT-SWAP",
+            "side": "BUY",
+            "size": 1.0,
+            "message": "Insufficient available margin",
+            "level": "warning",
+            "meta": {"available_margin_usd": 500},
+        },
+        {
+            "timestamp": _iso_timestamp(now - timedelta(minutes=1)),
+            "symbol": "BTC-USDT-SWAP",
+            "side": "BUY",
+            "size": 0.5,
+            "message": "Submitted test order",
+            "level": "info",
+        },
+    ]
+    metadata = {"guardrails": {"max_position_pct": 0.1, "max_leverage": 2}}
+    builder = PromptBuilder(snapshot, metadata=metadata, max_candles=1)
+
+    payload = builder.build(symbol="BTC-USDT-SWAP", timeframe="1H")
+    context = payload["context"]
+    execution_block = context["execution"]
+    margin_health = execution_block["margin_health"]
+    assert margin_health["limiting_factor"] == "guardrail"
+    assert margin_health["effective_cap_usd"] == pytest.approx(4000.0)
+    feedback_digest = execution_block["feedback_digest"]
+    assert feedback_digest["counts"]["warning"] == 1
+    assert feedback_digest["latest"]["message"] == "Submitted test order"
+    assert context["execution_feedback"][0]["message"] == "Insufficient available margin"
+
+
 def test_llm_prompt_endpoint_uses_builder(monkeypatch) -> None:
     snapshot = _sample_snapshot()
     app = create_app(enable_background_services=False)

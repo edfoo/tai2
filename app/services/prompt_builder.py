@@ -18,9 +18,11 @@ DEFAULT_DECISION_PROMPT = (
     "account/portfolio exposure, any pending orders, and execution guardrails. Before deciding on BUY/SELL/HOLD, confirm: "
     "(1) the snapshot age is within limits, (2) your recommendation complies with leverage, position size, cooldown, and trade "
     "limit guardrails, and (3) you are not duplicating an existing position or pending order. Explicitly cite snapshot freshness "
-    "and guardrail checks in your rationale. When existing stop-loss or take-profit levels are present, reuse or gently tune them "
-    "unless you can justify a safer alternative. Choose HOLD whenever cooldowns, capital constraints, fee/credit depletion, or "
-    "duplicate exposure prevent execution, and describe the blocker. Respond strictly as JSON matching 'response_schema'."
+    "and guardrail checks in your rationale. Inspect 'context.execution.margin_health' for real-time capital caps and treat "
+    "'context.execution_feedback' (and its digest) as hard blockers that must be resolved before sizing up. When existing "
+    "stop-loss or take-profit levels are present, reuse or gently tune them unless you can justify a safer alternative. Choose HOLD "
+    "whenever cooldowns, capital constraints, fee/credit depletion, or duplicate exposure prevent execution, and describe the "
+    "blocker. Respond strictly as JSON matching 'response_schema'."
 )
 
 RESPONSE_SCHEMA = {
@@ -242,6 +244,9 @@ class PromptBuilder:
                 live_snapshot[key] = value
         if live_snapshot:
             execution_settings["live_margin_snapshot"] = live_snapshot
+        margin_health = self._build_margin_health_section(execution_settings)
+        if margin_health:
+            execution_settings["margin_health"] = margin_health
         schema_overrides = runtime_meta.get("llm_response_schemas") or {}
         timeframe_value = timeframe or runtime_meta.get("ta_timeframe") or snapshot.get("timeframe") or "4H"
         trend_section = self._build_trend_confirmation(indicators, ticker, timeframe_value)
@@ -250,6 +255,7 @@ class PromptBuilder:
         fee_window_summary = self._build_fee_window_summary(account_section)
         credit_availability = self._build_credit_availability()
         execution_feedback = self._format_execution_feedback(snapshot.get("execution_feedback"))
+        feedback_digest = self._build_execution_feedback_digest(execution_feedback)
 
         context = {
             "generated_at": snapshot.get("generated_at"),
@@ -279,6 +285,10 @@ class PromptBuilder:
         }
         if execution_feedback:
             context["execution_feedback"] = execution_feedback
+            execution_settings["recent_feedback"] = execution_feedback
+        if feedback_digest:
+            context["execution_feedback_digest"] = feedback_digest
+            execution_settings["feedback_digest"] = feedback_digest
         prompt_block = {
             "system": (runtime_meta.get("llm_system_prompt") or DEFAULT_SYSTEM_PROMPT).strip(),
             "task": (runtime_meta.get("llm_decision_prompt") or DEFAULT_DECISION_PROMPT).strip(),
@@ -844,6 +854,75 @@ class PromptBuilder:
             "resets_at": usage.get("resets_at"),
         }
 
+    def _build_margin_health_section(self, execution_settings: dict[str, Any]) -> dict[str, Any] | None:
+        if not execution_settings:
+            return None
+        available_margin = _to_float(execution_settings.get("available_margin_usd"))
+        account_equity = _to_float(execution_settings.get("account_equity_usd"))
+        guardrail_cap = _to_float(execution_settings.get("max_position_value_usd"))
+        margin_cap = _to_float(execution_settings.get("margin_max_position_value_usd"))
+        tier_cap = _to_float(execution_settings.get("tier_max_position_value_usd"))
+        effective_cap = _to_float(execution_settings.get("effective_max_position_value_usd"))
+        live_snapshot = execution_settings.get("live_margin_snapshot") or {}
+        tier_imr = _to_float(execution_settings.get("tier_initial_margin_ratio"))
+        max_leverage = _to_float(execution_settings.get("max_leverage"))
+        updated_at = live_snapshot.get("updated_at") or execution_settings.get("updated_at")
+        freshness_seconds: Optional[int] = None
+        if updated_at:
+            parsed = self._parse_timestamp(updated_at)
+            if parsed:
+                freshness_seconds = max(0, int((datetime.now(timezone.utc) - parsed).total_seconds()))
+        caps = [
+            ("guardrail", guardrail_cap),
+            ("margin", margin_cap),
+            ("tier", tier_cap),
+        ]
+        limiting_factor: Optional[str] = None
+        limiting_value = effective_cap
+        if limiting_value is None:
+            for label, value in caps:
+                normalized = _to_float(value)
+                if normalized is None or normalized <= 0:
+                    continue
+                if limiting_value is None or normalized < limiting_value:
+                    limiting_value = normalized
+                    limiting_factor = label
+        else:
+            tolerance = max(1.0, abs(limiting_value) * 0.001)
+            for label, value in caps:
+                normalized = _to_float(value)
+                if normalized is None:
+                    continue
+                if abs(normalized - limiting_value) <= tolerance:
+                    limiting_factor = label
+                    break
+        summary_bits: list[str] = []
+        if available_margin is not None:
+            summary_bits.append(f"${available_margin:,.0f} free margin")
+        if limiting_value:
+            label = limiting_factor or "cap"
+            summary_bits.append(f"cap ${limiting_value:,.0f} ({label})")
+        if tier_imr is not None:
+            summary_bits.append(f"tier IMR {tier_imr * 100:.2f}%")
+        if freshness_seconds is not None:
+            summary_bits.append(f"snapshot age {freshness_seconds}s")
+        return {
+            "available_margin_usd": available_margin,
+            "account_equity_usd": account_equity,
+            "effective_cap_usd": limiting_value,
+            "limiting_factor": limiting_factor,
+            "guardrail_cap_usd": guardrail_cap,
+            "margin_cap_usd": margin_cap,
+            "tier_cap_usd": tier_cap,
+            "tier_initial_margin_ratio": tier_imr,
+            "max_leverage": max_leverage,
+            "updated_at": updated_at,
+            "freshness_seconds": freshness_seconds,
+            "stale": bool(freshness_seconds and freshness_seconds > 600),
+            "live_snapshot": live_snapshot or None,
+            "summary": ", ".join(summary_bits) if summary_bits else None,
+        }
+
     @staticmethod
     def _resolve_last_price(market_data: dict[str, Any] | None) -> Optional[float]:
         if not isinstance(market_data, dict):
@@ -875,6 +954,38 @@ class PromptBuilder:
                 }
             )
         return formatted
+
+    def _build_execution_feedback_digest(self, feedback: list[dict[str, Any]] | None) -> dict[str, Any] | None:
+        if not feedback:
+            return None
+        counts: dict[str, int] = {}
+        for entry in feedback:
+            level = str(entry.get("level") or "info").lower()
+            counts[level] = counts.get(level, 0) + 1
+        blockers: list[dict[str, Any]] = []
+        for entry in reversed(feedback):
+            level = str(entry.get("level") or "info").lower()
+            if level in {"warning", "error"}:
+                blockers.append(entry)
+            if len(blockers) >= 3:
+                break
+        summary_bits: list[str] = []
+        if blockers:
+            summary_bits.append(
+                "; ".join(
+                    f"{item.get('level', '').upper()}: {item.get('message')}" for item in blockers if item.get("message")
+                )
+            )
+        latest = feedback[-1]
+        if latest.get("timestamp"):
+            summary_bits.append(f"Latest feedback @ {latest['timestamp']}")
+        summary = " | ".join(part for part in summary_bits if part)
+        return {
+            "counts": counts,
+            "recent_blockers": blockers or None,
+            "latest": latest,
+            "summary": summary or None,
+        }
 
     def _build_pending_orders(self, orders: list[dict[str, Any]]) -> dict[str, Any]:
         if not orders:

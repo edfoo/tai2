@@ -85,7 +85,32 @@ def _create_lifespan(enable_background_services: bool):
         app.state.backend_log_buffer = deque(maxlen=2000)
         app.state.frontend_log_buffer = deque(maxlen=1000)
         app.state.websocket_log_buffer = deque(maxlen=1000)
-        backend_handler = BackendEventHandler(app.state.backend_events.append)
+
+        data_log_markers = (
+            "api/v5/account/balance",
+            "api/v5/market/candles",
+            "api/v5/rubik/stat/contracts/long-short-account-ratio",
+            "api/v5/trade/orders-algo-pending",
+            "openrouter.ai/api/v1/credits",
+        )
+
+        def _route_backend_log(entry: dict[str, Any]) -> None:
+            message = str(entry.get("message") or "")
+            lowered = message.lower()
+            if any(marker in lowered for marker in data_log_markers):
+                frontend_entry = dict(entry)
+                frontend_entry["source"] = "frontend"
+                try:
+                    app.state.frontend_events.append(frontend_entry)
+                except Exception:  # pragma: no cover - defensive
+                    pass
+                return
+            try:
+                app.state.backend_events.append(entry)
+            except Exception:  # pragma: no cover - defensive
+                pass
+
+        backend_handler = BackendEventHandler(_route_backend_log)
         backend_handler.setLevel(logging.DEBUG)
         backend_handler.setFormatter(logging.Formatter("%(levelname)s:%(name)s:%(message)s"))
         logger_levels = {

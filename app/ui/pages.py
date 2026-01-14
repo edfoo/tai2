@@ -359,6 +359,7 @@ def register_pages(app: FastAPI) -> None:
                             {"name": "symbol", "label": "Symbol", "field": "symbol"},
                             {"name": "side", "label": "Side", "field": "side"},
                             {"name": "size", "label": "Size", "field": "size"},
+                            {"name": "size_usd", "label": "Size (USDT)", "field": "size_usd"},
                             {"name": "entry", "label": "Entry", "field": "entry"},
                             {"name": "current", "label": "Current", "field": "current"},
                             {"name": "tp", "label": "TP", "field": "tp"},
@@ -1241,10 +1242,18 @@ def register_pages(app: FastAPI) -> None:
                 )
                 tp_value, sl_value = normalize_tp_sl_for_side(side, tp_value, sl_value)
 
+                size_notional_usd = to_float(
+                    pos.get("notionalUsd")
+                    or pos.get("notional_usd")
+                )
+                if size_notional_usd is None and size_abs is not None and current_price is not None:
+                    size_notional_usd = size_abs * current_price
+
                 row = {
                     "symbol": symbol,
                     "side": side if side != "" else "--",
                     "size": f"{size_abs:,.4f}" if size_abs is not None else "--",
+                    "size_usd": f"{size_notional_usd:,.2f}" if size_notional_usd is not None else "--",
                     "entry": f"{entry_price:,.4f}" if entry_price is not None else "--",
                     "current": f"{current_price:,.4f}" if current_price is not None else "--",
                     "tp": f"{tp_value:,.4f}" if tp_value is not None else "--",
