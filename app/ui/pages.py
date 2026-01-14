@@ -2127,6 +2127,7 @@ def register_pages(app: FastAPI) -> None:
         config.setdefault("okx_api_flag", str(settings.okx_api_flag or "0") or "0")
         config.setdefault("enable_websocket", True)
         config.setdefault("frontend_timezone", DEFAULT_FRONTEND_TIMEZONE)
+        config.setdefault("fallback_orders_enabled", settings.allow_fallback_orders)
         response_schemas = config.setdefault("llm_response_schemas", {})
         guardrails = config.setdefault("guardrails", PromptBuilder._default_guardrails())
         guardrails.setdefault(
@@ -2135,6 +2136,11 @@ def register_pages(app: FastAPI) -> None:
         if "wait_for_tp_sl" not in config:
             config["wait_for_tp_sl"] = bool(guardrails.get("wait_for_tp_sl", False))
         guardrails.setdefault("wait_for_tp_sl", bool(config.get("wait_for_tp_sl")))
+        guardrails.setdefault(
+            "fallback_orders_enabled",
+            bool(config.get("fallback_orders_enabled", settings.allow_fallback_orders)),
+        )
+        config["fallback_orders_enabled"] = bool(guardrails.get("fallback_orders_enabled", True))
         config.setdefault("prompt_version_name", None)
         prompt_versions_cache: dict[str, dict[str, Any]] = {}
         prompt_version_options: dict[str, str] = {}
@@ -2301,6 +2307,12 @@ def register_pages(app: FastAPI) -> None:
                 value=guardrails.get("wait_for_tp_sl", False),
             ).classes("mt-2").props(
                 "hint='When enabled, opposing signals are ignored until the current position\'s TP or SL executes' persistent-hint"
+            )
+            fallback_orders_switch = ui.switch(
+                "Allow Fallback Orders",
+                value=config.get("fallback_orders_enabled", settings.allow_fallback_orders),
+            ).classes("mt-2").props(
+                "hint='Permit heuristic backup trades when LLM calls fail; disable to ignore fallback orders entirely' persistent-hint"
             )
             snapshot_max_age_input = ui.number(
                 label="Snapshot Max Age (sec)",
@@ -2685,6 +2697,7 @@ def register_pages(app: FastAPI) -> None:
                 "risk_model": guardrails.get("risk_model", "ATR based stops x1.5"),
                 "require_position_alignment": bool(require_alignment_switch.value),
                 "wait_for_tp_sl": bool(wait_for_tp_sl_switch.value),
+                "fallback_orders_enabled": bool(fallback_orders_switch.value),
                 "snapshot_max_age_seconds": _safe_int(snapshot_max_age_input.value)
                 or config.get("snapshot_max_age_seconds"),
             }
@@ -2844,6 +2857,7 @@ def register_pages(app: FastAPI) -> None:
                 trade_window_seconds_input,
                 require_alignment_switch,
                 wait_for_tp_sl_switch,
+                fallback_orders_switch,
             ]
             for widget in listeners:
                 widget.on_value_change(lambda _: update_payload_preview())
@@ -2988,6 +3002,7 @@ def register_pages(app: FastAPI) -> None:
             config["auto_prompt_enabled"] = bool(auto_prompt_switch.value)
             config["execution_enabled"] = bool(execution_switch.value)
             config["wait_for_tp_sl"] = bool(wait_for_tp_sl_switch.value)
+            config["fallback_orders_enabled"] = bool(fallback_orders_switch.value)
             config["llm_system_prompt"] = prompt_input.value
             config["llm_decision_prompt"] = decision_prompt_input.value
             config["llm_model_id"] = model_select.value
@@ -3128,6 +3143,7 @@ def register_pages(app: FastAPI) -> None:
                 "risk_model": guardrails.get("risk_model", "ATR based stops x1.5"),
                 "require_position_alignment": bool(require_alignment_switch.value),
                 "wait_for_tp_sl": bool(wait_for_tp_sl_switch.value),
+                "fallback_orders_enabled": bool(fallback_orders_switch.value),
                 "snapshot_max_age_seconds": _coerce(
                     snapshot_max_age_input.value,
                     config.get("snapshot_max_age_seconds", settings.snapshot_max_age_seconds),
@@ -3140,6 +3156,9 @@ def register_pages(app: FastAPI) -> None:
             )
             config["wait_for_tp_sl"] = bool(
                 config["guardrails"].get("wait_for_tp_sl", False)
+            )
+            config["fallback_orders_enabled"] = bool(
+                config["guardrails"].get("fallback_orders_enabled", True)
             )
             version_name = (prompt_version_name_input.value or "").strip()
             created_version_id: str | None = None

@@ -931,6 +931,7 @@ class PromptBuilder:
             "require_position_alignment": True,
             "snapshot_max_age_seconds": 900,
             "wait_for_tp_sl": False,
+            "fallback_orders_enabled": True,
         }
 
     @staticmethod

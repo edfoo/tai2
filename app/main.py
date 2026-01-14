@@ -148,6 +148,12 @@ def _create_lifespan(enable_background_services: bool):
         app.state.runtime_config["wait_for_tp_sl"] = bool(
             app.state.runtime_config["guardrails"].get("wait_for_tp_sl", False)
         )
+        app.state.runtime_config["fallback_orders_enabled"] = bool(
+            app.state.runtime_config["guardrails"].get(
+                "fallback_orders_enabled",
+                app.state.runtime_config.get("fallback_orders_enabled", True),
+            )
+        )
         app.state.llm_service = LLMService(model_id=app.state.runtime_config["llm_model_id"])
 
         if enable_background_services and settings.database_url:
@@ -173,6 +179,12 @@ def _create_lifespan(enable_background_services: bool):
                         app.state.runtime_config["guardrails"] = stored_guardrails
                         app.state.runtime_config["wait_for_tp_sl"] = bool(
                             stored_guardrails.get("wait_for_tp_sl", False)
+                        )
+                        app.state.runtime_config["fallback_orders_enabled"] = bool(
+                            stored_guardrails.get(
+                                "fallback_orders_enabled",
+                                app.state.runtime_config.get("fallback_orders_enabled", True),
+                            )
                         )
                 try:
                     stored_model = await load_llm_model(
