@@ -49,10 +49,16 @@ class LLMService:
         api_key = settings.openrouter_api_key
         if api_key:
             try:
-                return await self._call_openrouter(payload, api_key)
+                decision = await self._call_openrouter(payload, api_key)
+                if isinstance(decision, dict):
+                    decision.setdefault("_decision_origin", "openrouter")
+                return decision
             except Exception as exc:  # pragma: no cover - network/LLM dependency
                 logger.warning("OpenRouter prompt failed; falling back to heuristic: %s", exc)
-        return self._fallback_decision(payload)
+        fallback_decision = self._fallback_decision(payload)
+        if isinstance(fallback_decision, dict):
+            fallback_decision.setdefault("_decision_origin", "fallback")
+        return fallback_decision
 
     async def _call_openrouter(self, payload: dict[str, Any], api_key: str) -> dict[str, Any]:
         model_id = payload.get("prompt", {}).get("model") or self.model_id
@@ -298,7 +304,7 @@ class LLMService:
         rationale = strategy.get("reason") or "Default strategy output"
         tags = ["model:" + (self.model_id or "unknown"), f"guardrails:max_leverage={guardrails.get('max_leverage', '--')}"]
         notes = context.get("notes") or ""
-        return {
+        result = {
             "action": action,
             "confidence": round(confidence, 3),
             "position_size": position_size,
@@ -310,6 +316,8 @@ class LLMService:
             "notes": notes,
             "tags": tags,
         }
+        result["_decision_origin"] = "fallback"
+        return result
 
     @staticmethod
     def _prune_dict(value: Any, drop_fields: set[str]) -> Any:

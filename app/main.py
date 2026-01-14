@@ -137,6 +137,7 @@ def _create_lifespan(enable_background_services: bool):
             "execution_order_type": "market",
             "execution_min_size": 1.0,
             "execution_min_sizes": {},
+            "fallback_orders_enabled": settings.allow_fallback_orders,
             "fee_window_hours": 24.0,
             "okx_sub_account": settings.okx_sub_account,
             "okx_sub_account_use_master": settings.okx_sub_account_use_master,

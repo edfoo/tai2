@@ -167,6 +167,7 @@ async def execute_llm_decision(
     bundle: PromptPayloadBundle,
 ) -> Tuple[dict[str, Any], str | None]:
     runtime_meta = bundle.runtime_meta
+    fallback_orders_enabled = bool(runtime_meta.get("fallback_orders_enabled", True))
     llm_service = getattr(app.state, "llm_service", None)
     if llm_service is None:
         llm_service = LLMService(model_id=runtime_meta.get("llm_model_id"))
@@ -175,7 +176,14 @@ async def execute_llm_decision(
     prompt_id = await persist_prompt_run(app, bundle, decision=decision)
     market_service = getattr(app.state, "market_service", None)
     state_changed = False
-    if market_service:
+    decision_is_fallback = bool((decision or {}).get("_decision_origin") == "fallback")
+    fallback_blocked = decision_is_fallback and not fallback_orders_enabled
+    if fallback_blocked:
+        logger.info(
+            "Fallback decision suppressed by configuration; action=%s",
+            decision.get("action"),
+        )
+    if market_service and not fallback_blocked:
         context_block = bundle.payload.get("context") or {}
         try:
             state_changed = await market_service.handle_llm_decision(decision, context_block)
