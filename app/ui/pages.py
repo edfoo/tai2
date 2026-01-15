@@ -2142,6 +2142,7 @@ def register_pages(app: FastAPI) -> None:
         guardrails.setdefault(
             "snapshot_max_age_seconds", config.get("snapshot_max_age_seconds")
         )
+        guardrails.setdefault("symbol_position_caps", {})
         if "wait_for_tp_sl" not in config:
             config["wait_for_tp_sl"] = bool(guardrails.get("wait_for_tp_sl", False))
         guardrails.setdefault("wait_for_tp_sl", bool(config.get("wait_for_tp_sl")))
@@ -2424,6 +2425,12 @@ def register_pages(app: FastAPI) -> None:
                 override_widgets: dict[str, ui.number] = {}
                 quote_inputs: dict[str, ui.number] = {}
                 price_labels: dict[str, ui.label] = {}
+                symbol_cap_overrides = {
+                    str(symbol).upper(): float(value)
+                    for symbol, value in (guardrails.get("symbol_position_caps", {}) or {}).items()
+                    if isinstance(value, (int, float)) and value > 0
+                }
+                symbol_cap_widgets: dict[str, ui.number] = {}
 
                 def sync_widget(sym_key: str, value: float | None) -> None:
                     widget = override_widgets.get(sym_key)
@@ -2545,6 +2552,65 @@ def register_pages(app: FastAPI) -> None:
                         asyncio.create_task(refresh_price_label(sym_key))
 
                 render_min_size_rows()
+                ui.label("Per-Symbol Position Caps (% of equity)").classes("text-xs text-slate-500")
+                ui.label(
+                    "When these caps trim a trade, the minimum leverage guardrail is temporarily relaxed for that order."
+                ).classes("text-xs text-slate-500 italic")
+                symbol_cap_rows = ui.column().classes("w-full gap-2")
+
+                def render_symbol_cap_rows() -> None:
+                    symbol_cap_rows.clear()
+                    symbol_cap_widgets.clear()
+                    symbols_list = sorted(config.get("trading_pairs", []))
+                    for symbol in symbols_list:
+                        normalized = str(symbol).upper()
+                        with symbol_cap_rows:
+                            with ui.row().classes("w-full items-start gap-2"):
+                                ui.label(symbol).classes("text-sm font-semibold text-slate-600 w-32")
+                                cap_input = ui.number(
+                                    label="Max position %",
+                                    value=symbol_cap_overrides.get(normalized),
+                                    min=0.01,
+                                    max=1.0,
+                                    step=0.01,
+                                    placeholder="Inherit global cap",
+                                ).classes("flex-1").props(
+                                    "outlined dense hint='Fraction of equity allocated to this symbol (e.g., 0.15 = 15%)' persistent-hint"
+                                )
+                                symbol_cap_widgets[normalized] = cap_input
+
+                                def cap_handler(sym_key: str) -> Callable[[Any], None]:
+                                    def _handler(event: Any) -> None:
+                                        try:
+                                            value = event.value
+                                            if value in (None, ""):
+                                                symbol_cap_overrides.pop(sym_key, None)
+                                            else:
+                                                numeric = float(value)
+                                                if numeric <= 0:
+                                                    symbol_cap_overrides.pop(sym_key, None)
+                                                else:
+                                                    symbol_cap_overrides[sym_key] = numeric
+                                        except (TypeError, ValueError):
+                                            symbol_cap_overrides.pop(sym_key, None)
+                                        update_payload_preview()
+                                    return _handler
+
+                                cap_input.on_value_change(cap_handler(normalized))
+
+                                def clear_cap(sym_key: str) -> Callable[[Any], None]:
+                                    def _handler(_: Any) -> None:
+                                        symbol_cap_overrides.pop(sym_key, None)
+                                        widget = symbol_cap_widgets.get(sym_key)
+                                        if widget:
+                                            widget.value = None
+                                            widget.update()
+                                        update_payload_preview()
+                                    return _handler
+
+                                ui.button("Clear", on_click=clear_cap(normalized)).props("flat dense")
+
+                render_symbol_cap_rows()
                 okx_sub_account_input = ui.input(
                     label="OKX Sub-Account",
                     value=config.get("okx_sub_account") or "",
@@ -2694,6 +2760,15 @@ def register_pages(app: FastAPI) -> None:
             except (TypeError, ValueError):
                 return None
 
+        def _clean_symbol_caps() -> dict[str, float]:
+            cleaned: dict[str, float] = {}
+            for symbol, value in symbol_cap_overrides.items():
+                numeric = _safe_float(value)
+                if numeric is None or numeric <= 0:
+                    continue
+                cleaned[symbol] = numeric
+            return cleaned
+
         def build_guardrails_snapshot() -> dict[str, Any]:
             snapshot = {
                 "min_leverage": _safe_float(min_leverage_input.value),
@@ -2710,6 +2785,8 @@ def register_pages(app: FastAPI) -> None:
                 "snapshot_max_age_seconds": _safe_int(snapshot_max_age_input.value)
                 or config.get("snapshot_max_age_seconds"),
             }
+            symbol_caps_preview = _clean_symbol_caps()
+            snapshot["symbol_position_caps"] = symbol_caps_preview or None
             return snapshot
 
         async def hydrate_execution_settings() -> None:
@@ -3158,6 +3235,7 @@ def register_pages(app: FastAPI) -> None:
                     config.get("snapshot_max_age_seconds", settings.snapshot_max_age_seconds),
                     int,
                 ),
+                "symbol_position_caps": _clean_symbol_caps(),
             }
             config["snapshot_max_age_seconds"] = config["guardrails"].get(
                 "snapshot_max_age_seconds",

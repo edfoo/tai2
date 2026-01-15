@@ -185,23 +185,66 @@ def test_prompt_builder_respects_live_execution_limits() -> None:
             "source": "execution",
         }
     }
-    metadata = {"guardrails": {"max_position_pct": 0.2}}
+    symbol_cap_pct = 0.05
+    metadata = {
+        "guardrails": {
+            "max_position_pct": 0.2,
+            "symbol_position_caps": {"BTC-USDT-SWAP": symbol_cap_pct},
+        }
+    }
     builder = PromptBuilder(snapshot, metadata=metadata, max_candles=1)
 
     payload = builder.build(symbol="BTC-USDT-SWAP", timeframe="1H")
     execution_block = payload["context"]["execution"]
     expected_guardrail_cap = 5678.9 * 0.2 * 4.5
+    expected_symbol_cap = 5678.9 * symbol_cap_pct * 4.5
 
     assert execution_block["available_margin_usd"] == pytest.approx(1234.5)
     assert execution_block["account_equity_usd"] == pytest.approx(5678.9)
     assert execution_block["max_position_value_usd"] == pytest.approx(expected_guardrail_cap)
     assert execution_block["margin_max_position_value_usd"] == pytest.approx(9876.5)
-    assert execution_block["effective_max_position_value_usd"] == pytest.approx(expected_guardrail_cap)
+    assert execution_block["symbol_max_position_pct"] == pytest.approx(symbol_cap_pct)
+    assert execution_block["symbol_max_position_value_usd"] == pytest.approx(expected_symbol_cap)
+    assert execution_block["effective_max_position_value_usd"] == pytest.approx(expected_symbol_cap)
     assert execution_block["max_leverage"] == pytest.approx(4.5)
     assert execution_block["live_margin_snapshot"]["updated_at"] == updated_at
     assert execution_block["live_margin_snapshot"]["quote_currency"] == "USDT"
     assert execution_block["live_margin_snapshot"]["quote_available_usd"] == pytest.approx(1100.0)
     assert execution_block["live_margin_snapshot"]["quote_cash_usd"] == pytest.approx(1000.0)
+    assert execution_block["margin_health"]["limiting_factor"] == "symbol"
+    assert execution_block["margin_health"]["symbol_cap_usd"] == pytest.approx(expected_symbol_cap)
+
+
+def test_prompt_builder_applies_caps_per_symbol() -> None:
+    snapshot = _sample_snapshot()
+    snapshot["symbols"].append("ETH-USDT-SWAP")
+    snapshot["market_data"]["ETH-USDT-SWAP"] = snapshot["market_data"]["BTC-USDT-SWAP"]
+    metadata = {
+        "guardrails": {
+            "max_position_pct": 0.5,
+            "max_leverage": 3,
+            "symbol_position_caps": {
+                "BTC-USDT-SWAP": 0.1,
+                "ETH-USDT-SWAP": 0.2,
+            },
+        }
+    }
+    builder = PromptBuilder(snapshot, metadata=metadata, max_candles=1)
+
+    btc_payload = builder.build(symbol="BTC-USDT-SWAP", timeframe="1H")
+    eth_payload = builder.build(symbol="ETH-USDT-SWAP", timeframe="1H")
+
+    btc_execution = btc_payload["context"]["execution"]
+    eth_execution = eth_payload["context"]["execution"]
+    equity = snapshot["account_equity"]
+    leverage = metadata["guardrails"]["max_leverage"]
+
+    assert btc_execution["symbol_max_position_pct"] == pytest.approx(0.1)
+    assert eth_execution["symbol_max_position_pct"] == pytest.approx(0.2)
+    assert btc_execution["symbol_max_position_value_usd"] == pytest.approx(equity * leverage * 0.1)
+    assert eth_execution["symbol_max_position_value_usd"] == pytest.approx(equity * leverage * 0.2)
+    assert btc_execution["effective_max_position_value_usd"] == pytest.approx(equity * leverage * 0.1)
+    assert eth_execution["effective_max_position_value_usd"] == pytest.approx(equity * leverage * 0.2)
 
 
 def test_prompt_builder_includes_margin_health_and_feedback_digest() -> None:

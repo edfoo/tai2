@@ -1929,7 +1929,21 @@ class MarketService:
             or account_block.get("total_account_value")
             or account_block.get("total_eq_usd")
         )
-        max_pct = self._extract_float(guardrails.get("max_position_pct"))
+        base_max_pct = self._extract_float(guardrails.get("max_position_pct"))
+        symbol_cap_pct = None
+        symbol_caps = guardrails.get("symbol_position_caps")
+        if isinstance(symbol_caps, dict):
+            symbol_cap_pct = self._extract_float(
+                symbol_caps.get(symbol)
+                or symbol_caps.get(symbol.upper())
+            )
+        effective_max_pct = None
+        for candidate in (base_max_pct, symbol_cap_pct):
+            if candidate and candidate > 0:
+                effective_max_pct = candidate if effective_max_pct is None else min(effective_max_pct, candidate)
+        if effective_max_pct is None:
+            effective_max_pct = base_max_pct
+        leverage_override_reason: str | None = None
         min_leverage = self._extract_float(guardrails.get("min_leverage"))
         max_leverage = self._extract_float(guardrails.get("max_leverage"))
         if min_leverage is None:
@@ -2049,13 +2063,21 @@ class MarketService:
 
         guardrail_notional_cap = None
         clipped_by_cap = False
-        if account_equity and max_pct:
-            guardrail_notional_cap = max(0.0, account_equity * max_leverage * max_pct)
+        cap_reason: str | None = None
+        if account_equity and effective_max_pct:
+            guardrail_notional_cap = max(0.0, account_equity * max_leverage * effective_max_pct)
             if last_price and guardrail_notional_cap > 0:
                 contract_cap = guardrail_notional_cap / last_price
                 if contract_cap and contract_cap > 0 and raw_size > contract_cap:
                     raw_size = contract_cap
                     clipped_by_cap = True
+                    symbol_limit_active = (
+                        symbol_cap_pct is not None
+                        and effective_max_pct is not None
+                        and abs(effective_max_pct - symbol_cap_pct) < 1e-9
+                        and (base_max_pct is None or symbol_cap_pct <= base_max_pct)
+                    )
+                    cap_reason = "symbol cap" if symbol_limit_active else "max position % limit"
 
         if (
             clipped_by_cap
@@ -2066,9 +2088,11 @@ class MarketService:
         ):
             achieved_leverage = (raw_size * last_price) / account_equity
             if achieved_leverage < min_leverage:
+                label = cap_reason or "max position % limit"
                 self._emit_debug(
-                    f"{symbol} leverage clipped to {achieved_leverage:.2f}x by max position % limit"
+                    f"{symbol} leverage clipped to {achieved_leverage:.2f}x by {label}"
                 )
+                leverage_override_reason = cap_reason or label
 
         max_notional_from_margin = None
         if (
@@ -2205,21 +2229,26 @@ class MarketService:
         ):
             achieved_leverage = (raw_size * last_price) / account_equity
             if achieved_leverage < min_leverage:
-                self._emit_debug(
-                    f"Execution skipped for {symbol}: leverage {achieved_leverage:.2f}x below minimum {min_leverage:.2f}x"
-                )
-                self._record_execution_feedback(
-                    symbol,
-                    "Blocked by minimum leverage guardrail",
-                    level="warning",
-                    meta={
-                        "min_leverage": min_leverage,
-                        "achieved_leverage": achieved_leverage,
-                        "account_equity": account_equity,
-                        "price": last_price,
-                    },
-                )
-                return False
+                if leverage_override_reason:
+                    self._emit_debug(
+                        f"{symbol} leverage {achieved_leverage:.2f}x below minimum {min_leverage:.2f}x but proceeding due to {leverage_override_reason}"
+                    )
+                else:
+                    self._emit_debug(
+                        f"Execution skipped for {symbol}: leverage {achieved_leverage:.2f}x below minimum {min_leverage:.2f}x"
+                    )
+                    self._record_execution_feedback(
+                        symbol,
+                        "Blocked by minimum leverage guardrail",
+                        level="warning",
+                        meta={
+                            "min_leverage": min_leverage,
+                            "achieved_leverage": achieved_leverage,
+                            "account_equity": account_equity,
+                            "price": last_price,
+                        },
+                    )
+                    return False
 
         attach_algo_orders: list[dict[str, Any]] | None = None
         attachments_take_profit = None
