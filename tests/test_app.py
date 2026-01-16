@@ -295,6 +295,36 @@ def test_prompt_builder_includes_margin_health_and_feedback_digest() -> None:
     assert context["execution_feedback"][0]["message"] == "Insufficient available margin"
 
 
+def test_prompt_builder_filters_execution_feedback_per_symbol() -> None:
+    snapshot = _sample_snapshot()
+    other_symbol = "ETH-USDT-SWAP"
+    snapshot["symbols"].append(other_symbol)
+    snapshot["execution_feedback"] = [
+        {
+            "timestamp": "2026-01-16T09:30:00Z",
+            "symbol": other_symbol,
+            "message": "ETH warning",
+            "level": "warning",
+        },
+        {
+            "timestamp": "2026-01-16T09:31:00Z",
+            "symbol": snapshot["symbol"],
+            "message": "BTC info",
+            "level": "info",
+        },
+    ]
+    builder = PromptBuilder(snapshot, metadata={}, max_candles=1)
+
+    btc_payload = builder.build(symbol=snapshot["symbol"], timeframe="1H")
+    eth_payload = builder.build(symbol=other_symbol, timeframe="1H")
+
+    btc_feedback = btc_payload["context"].get("execution_feedback")
+    eth_feedback = eth_payload["context"].get("execution_feedback")
+
+    assert btc_feedback and btc_feedback[0]["message"] == "BTC info"
+    assert eth_feedback and eth_feedback[0]["message"] == "ETH warning"
+
+
 def test_llm_prompt_endpoint_uses_builder(monkeypatch) -> None:
     snapshot = _sample_snapshot()
     app = create_app(enable_background_services=False)
