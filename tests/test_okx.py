@@ -404,3 +404,27 @@ def test_record_execution_limits_preserves_existing_caps() -> None:
     assert limits["max_leverage"] == pytest.approx(3.0)
     assert limits["max_notional_usd"] == pytest.approx(900.0)
     assert limits["quote_currency"] == "USDT"
+
+
+def test_leverage_adjusted_size_respects_hint_upper_bound() -> None:
+    result = MarketService._compute_leverage_adjusted_size(
+        size_hint=0.1,
+        account_equity=1000.0,
+        last_price=70.0,
+        min_leverage=1.0,
+        max_leverage=5.0,
+        confidence=0.5,
+    )
+    assert result == pytest.approx(0.1)
+
+
+def test_leverage_adjusted_size_scales_down_when_excessive() -> None:
+    result = MarketService._compute_leverage_adjusted_size(
+        size_hint=50.0,
+        account_equity=1000.0,
+        last_price=50.0,
+        min_leverage=1.0,
+        max_leverage=2.0,
+        confidence=1.0,
+    )
+    assert result == pytest.approx(40.0)
