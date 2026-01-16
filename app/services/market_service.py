@@ -314,6 +314,7 @@ class MarketService:
         await self._sync_position_protection_entries(positions_raw)
         positions = self._annotate_positions(positions_raw)
         account_payload = await self._fetch_account_balance()
+        self._refresh_execution_limits_from_account(account_payload)
         total_account_value = account_payload.get("total_account_value", 0.0)
         total_equity_value = account_payload.get("total_equity", 0.0)
         total_eq_usd = account_payload.get("total_eq_usd", total_equity_value)
@@ -861,6 +862,15 @@ class MarketService:
         parts = str(symbol).upper().split("-")
         if len(parts) >= 2:
             return "-".join(parts[:2])
+        return None
+
+    @staticmethod
+    def _quote_currency_from_symbol(symbol: str | None) -> str | None:
+        if not symbol:
+            return None
+        parts = str(symbol).upper().split("-")
+        if len(parts) >= 2 and parts[1]:
+            return parts[1]
         return None
 
     async def _get_position_tiers(self, symbol: str, trade_mode: str = "cross") -> list[dict[str, Any]]:
@@ -1625,7 +1635,11 @@ class MarketService:
         normalized = self._normalize_symbol_key(symbol)
         if not normalized:
             return
+        existing = self._latest_execution_limits.get(normalized)
         quote_symbol = self._normalize_symbol_key(quote_currency)
+        if quote_symbol is None and isinstance(existing, dict):
+            quote_symbol = existing.get("quote_currency")
+
         payload: dict[str, Any] = {
             "available_margin_usd": available_margin_usd,
             "account_equity_usd": account_equity_usd,
@@ -1643,6 +1657,23 @@ class MarketService:
             payload["tier_initial_margin_ratio"] = tier_initial_margin_ratio
         if tier_source:
             payload["tier_source"] = tier_source
+        if isinstance(existing, dict):
+            for key in (
+                "max_leverage",
+                "max_notional_usd",
+                "tier_max_notional_usd",
+                "tier_initial_margin_ratio",
+                "tier_source",
+                "quote_currency",
+                "quote_available_usd",
+                "quote_cash_usd",
+                "available_margin_usd",
+                "account_equity_usd",
+            ):
+                if payload.get(key) is None and existing.get(key) is not None:
+                    payload[key] = existing.get(key)
+            if not source and existing.get("source"):
+                payload["source"] = existing.get("source")
         self._latest_execution_limits[normalized] = payload
 
     def _record_execution_feedback(
@@ -1671,6 +1702,76 @@ class MarketService:
                     meta_suffix = f" meta={meta}"
             self._emit_debug(
                 f"Execution feedback ({level}) {symbol}: {message}{meta_suffix}"
+            )
+
+    def _refresh_execution_limits_from_account(self, account_payload: dict[str, Any] | None) -> None:
+        if not isinstance(account_payload, dict):
+            return
+        available_margin_usd = self._extract_float(account_payload.get("available_eq_usd"))
+        account_equity_usd = self._extract_float(
+            account_payload.get("total_eq_usd")
+            or account_payload.get("total_equity")
+            or account_payload.get("total_account_value")
+        )
+        balances = account_payload.get("available_balances")
+        if not isinstance(balances, dict):
+            balances = {}
+        if (
+            available_margin_usd is None
+            and account_equity_usd is None
+            and not balances
+        ):
+            return
+
+        for symbol in self.symbols:
+            quote_currency = self._quote_currency_from_symbol(symbol)
+            quote_available_usd = None
+            quote_cash_usd = None
+            if quote_currency and balances:
+                quote_meta = balances.get(quote_currency)
+                if isinstance(quote_meta, dict):
+                    quote_available_usd = self._extract_float(
+                        quote_meta.get("available_usd")
+                        or quote_meta.get("equity_usd")
+                    )
+                    if quote_available_usd is None and quote_currency in STABLE_CURRENCIES:
+                        quote_available_usd = self._extract_float(quote_meta.get("available"))
+                    quote_cash = self._extract_float(quote_meta.get("cash"))
+                    if quote_cash is not None:
+                        if quote_currency in STABLE_CURRENCIES:
+                            quote_cash_usd = quote_cash
+                        else:
+                            last_px = self._extract_float(
+                                (self._latest_ticker.get(symbol) or {}).get("last")
+                            )
+                            if last_px:
+                                quote_cash_usd = quote_cash * last_px
+
+            effective_margin = available_margin_usd
+            for candidate in (quote_cash_usd, quote_available_usd):
+                if candidate is None:
+                    continue
+                if effective_margin is None or candidate > effective_margin:
+                    effective_margin = candidate
+
+            if (
+                effective_margin is None
+                and account_equity_usd is None
+                and quote_available_usd is None
+                and quote_cash_usd is None
+            ):
+                continue
+
+            self._record_execution_limits(
+                symbol,
+                available_margin_usd=effective_margin,
+                account_equity_usd=account_equity_usd,
+                quote_currency=quote_currency,
+                quote_available_usd=quote_available_usd,
+                quote_cash_usd=quote_cash_usd,
+                max_leverage=None,
+                max_notional_usd=None,
+                source="balance-snapshot",
             )
 
     @staticmethod
@@ -1908,6 +2009,7 @@ class MarketService:
         trade_mode = str(execution_cfg.get("trade_mode") or "cross").lower()
         if trade_mode not in {"cross", "isolated"}:
             trade_mode = "cross"
+        isolated_mode = trade_mode == "isolated"
         order_type = str(execution_cfg.get("order_type") or "market").lower()
         if order_type != "market":
             order_type = "market"
@@ -1976,6 +2078,7 @@ class MarketService:
             live_balances_block = live_account_balances.get("available_balances")
             if isinstance(live_balances_block, dict) and live_balances_block:
                 available_balances_block = live_balances_block
+            self._refresh_execution_limits_from_account(live_account_balances)
 
         quote_available_usd = None
         quote_cash_usd = None
@@ -1993,16 +2096,33 @@ class MarketService:
                         quote_cash_usd = quote_cash
                     elif last_price:
                         quote_cash_usd = quote_cash * last_price
-        if quote_cash_usd is not None:
-            if available_margin_usd is None:
-                available_margin_usd = quote_cash_usd
+        quote_margin_candidates = [
+            value
+            for value in (quote_cash_usd, quote_available_usd)
+            if value is not None and value > 0
+        ]
+        if isolated_mode:
+            if quote_margin_candidates:
+                available_margin_usd = max(quote_margin_candidates)
             else:
-                available_margin_usd = max(available_margin_usd, quote_cash_usd)
-        if quote_available_usd is not None:
-            if available_margin_usd is None:
-                available_margin_usd = quote_available_usd
-            else:
-                available_margin_usd = max(available_margin_usd, quote_available_usd)
+                label = f"{quote_currency} margin" if quote_currency else "quote margin"
+                self._emit_debug(
+                    f"Execution skipped for {symbol}: isolated mode requires {label} but none is available"
+                )
+                self._record_execution_feedback(
+                    symbol,
+                    "Isolated margin unavailable",
+                    level="warning",
+                    meta={
+                        "trade_mode": trade_mode,
+                        "quote_currency": quote_currency,
+                    },
+                )
+                return False
+        else:
+            for candidate in quote_margin_candidates:
+                if available_margin_usd is None or candidate > available_margin_usd:
+                    available_margin_usd = candidate
         if available_margin_usd is None and account_equity is not None:
             available_margin_usd = account_equity
         if available_margin_usd is None or available_margin_usd <= 0:

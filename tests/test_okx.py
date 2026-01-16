@@ -277,3 +277,130 @@ def test_handle_llm_respects_symbol_position_caps(monkeypatch: pytest.MonkeyPatc
     assert executed is True
     assert recorded.get("pre_quantize_size") == pytest.approx(2.0)
     assert recorded.get("size", 0.0) == pytest.approx(2.0)
+
+
+def test_handle_llm_blocks_isolated_when_quote_margin_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def scenario() -> tuple[bool, list[dict[str, Any]]]:
+        state = DummySnapshotStore()
+        service = MarketService(
+            state_service=state,
+            enable_websocket=False,
+            trade_api=object(),
+            account_api=None,
+            market_api=None,
+            public_api=None,
+        )
+        service._account_api = None
+        service._market_api = None
+        service._public_api = None
+
+        monkeypatch.setattr(
+            service,
+            "_compute_leverage_adjusted_size",
+            lambda **kwargs: 5.0,
+        )
+
+        context = {
+            "symbol": service.symbol,
+            "guardrails": {
+                "min_leverage": 1,
+                "max_leverage": 3,
+                "max_position_pct": 0.5,
+            },
+            "market": {"last_price": 100},
+            "account": {
+                "account_equity": 1000,
+                "available_eq_usd": 1000,
+                "available_balances": {},
+            },
+            "execution": {
+                "enabled": True,
+                "trade_mode": "isolated",
+                "order_type": "market",
+                "min_size": 0.001,
+            },
+            "positions": [],
+        }
+
+        executed = await service.handle_llm_decision({"action": "SELL", "confidence": 0.6}, context)
+        return executed, list(service._execution_feedback)
+
+    executed, feedback = asyncio.run(scenario())
+    assert executed is False
+    assert feedback
+    latest = feedback[-1]
+    assert latest["message"] == "Isolated margin unavailable"
+    assert latest["meta"]["trade_mode"] == "isolated"
+
+
+def test_refresh_execution_limits_from_account_populates_snapshot() -> None:
+    state = DummySnapshotStore()
+    service = MarketService(
+        state_service=state,
+        enable_websocket=False,
+        account_api=object(),
+        market_api=object(),
+        public_api=object(),
+    )
+    service._latest_ticker[service.symbol] = {"last": "27000"}
+    account_payload = {
+        "available_eq_usd": 500.0,
+        "total_eq_usd": 1200.0,
+        "available_balances": {
+            "USDT": {
+                "available_usd": 450.0,
+                "cash": 430.0,
+            }
+        },
+    }
+
+    service._refresh_execution_limits_from_account(account_payload)
+
+    limits = service._latest_execution_limits.get(service.symbol)
+    assert limits is not None
+    assert limits["source"] == "balance-snapshot"
+    assert limits["available_margin_usd"] == pytest.approx(500.0)
+    assert limits["account_equity_usd"] == pytest.approx(1200.0)
+    assert limits["quote_currency"] == "USDT"
+    assert limits["quote_available_usd"] == pytest.approx(450.0)
+    assert limits["quote_cash_usd"] == pytest.approx(430.0)
+
+
+def test_record_execution_limits_preserves_existing_caps() -> None:
+    state = DummySnapshotStore()
+    service = MarketService(
+        state_service=state,
+        enable_websocket=False,
+        account_api=object(),
+        market_api=object(),
+        public_api=object(),
+    )
+    symbol = service.symbol
+    service._record_execution_limits(
+        symbol,
+        available_margin_usd=300.0,
+        account_equity_usd=1000.0,
+        quote_currency="USDT",
+        quote_available_usd=250.0,
+        quote_cash_usd=240.0,
+        max_leverage=3.0,
+        max_notional_usd=900.0,
+    )
+
+    service._record_execution_limits(
+        symbol,
+        available_margin_usd=400.0,
+        account_equity_usd=None,
+        quote_currency=None,
+        quote_available_usd=None,
+        quote_cash_usd=None,
+        max_leverage=None,
+        max_notional_usd=None,
+        source="balance-snapshot",
+    )
+
+    limits = service._latest_execution_limits[symbol]
+    assert limits["available_margin_usd"] == pytest.approx(400.0)
+    assert limits["max_leverage"] == pytest.approx(3.0)
+    assert limits["max_notional_usd"] == pytest.approx(900.0)
+    assert limits["quote_currency"] == "USDT"
