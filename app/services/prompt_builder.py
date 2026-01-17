@@ -1083,7 +1083,7 @@ class PromptBuilder:
             "max_leverage": 5,
             "max_position_pct": 0.2,
             "symbol_position_caps": {},
-            "daily_loss_limit_pct": 3,
+            "daily_loss_limit_pct": 0.03,
             "risk_model": "ATR based stops x1.5",
             "min_hold_seconds": 180,
             "max_trades_per_hour": 2,

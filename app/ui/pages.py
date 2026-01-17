@@ -2171,6 +2171,22 @@ def register_pages(app: FastAPI) -> None:
         client = ui.context.client
         price_cache: dict[str, tuple[float, float]] = {}
 
+        def _safe_float(value: Any) -> float | None:
+            try:
+                if value in (None, ""):
+                    return None
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
+        def _safe_int(value: Any) -> int | None:
+            try:
+                if value in (None, ""):
+                    return None
+                return int(value)
+            except (TypeError, ValueError):
+                return None
+
         def _percent_to_fraction(value: Any) -> float | None:
             numeric = _safe_float(value)
             if numeric is None:
@@ -2797,22 +2813,6 @@ def register_pages(app: FastAPI) -> None:
                 execution_min_size_input.disable()
 
         execution_switch.on_value_change(on_execution_toggle)
-
-        def _safe_float(value: Any) -> float | None:
-            try:
-                if value in (None, ""):
-                    return None
-                return float(value)
-            except (TypeError, ValueError):
-                return None
-
-        def _safe_int(value: Any) -> int | None:
-            try:
-                if value in (None, ""):
-                    return None
-                return int(value)
-            except (TypeError, ValueError):
-                return None
 
         def _clean_symbol_caps() -> dict[str, float]:
             cleaned: dict[str, float] = {}
