@@ -2143,6 +2143,7 @@ def register_pages(app: FastAPI) -> None:
             "snapshot_max_age_seconds", config.get("snapshot_max_age_seconds")
         )
         guardrails.setdefault("symbol_position_caps", {})
+        guardrails.setdefault("min_leverage_confidence_gate", 0.5)
         if "wait_for_tp_sl" not in config:
             config["wait_for_tp_sl"] = bool(guardrails.get("wait_for_tp_sl", False))
         guardrails.setdefault("wait_for_tp_sl", bool(config.get("wait_for_tp_sl")))
@@ -3210,6 +3211,17 @@ def register_pages(app: FastAPI) -> None:
             config["guardrails"] = {
                 "min_leverage": _coerce(min_leverage_input.value, guardrails.get("min_leverage", 1), float),
                 "max_leverage": _coerce(max_leverage_input.value, guardrails.get("max_leverage", 5), float),
+                "min_leverage_confidence_gate": max(
+                    0.0,
+                    min(
+                        1.0,
+                        _coerce(
+                            min_leverage_conf_gate_input.value,
+                            guardrails.get("min_leverage_confidence_gate", 0.5),
+                            float,
+                        ),
+                    ),
+                ),
                 "max_position_pct": _coerce(
                     max_position_pct_input.value,
                     guardrails.get("max_position_pct", 0.2),
