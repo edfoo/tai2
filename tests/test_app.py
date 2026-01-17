@@ -375,6 +375,24 @@ def test_llm_prompt_endpoint_blocks_stale_snapshot() -> None:
     assert response.json()["detail"] == "snapshot stale; awaiting refresh"
 
 
+def test_llm_prompt_endpoint_respects_wait_for_tp_sl_guard() -> None:
+    snapshot = _sample_snapshot()
+    app = create_app(enable_background_services=False)
+
+    class _DummyState:
+        async def get_market_snapshot(self) -> dict:
+            return snapshot
+
+    with TestClient(app) as client:
+        app.state.state_service = _DummyState()
+        app.state.runtime_config["guardrails"]["wait_for_tp_sl"] = True
+        app.state.runtime_config["wait_for_tp_sl"] = True
+        response = client.get("/llm/prompt", params={"symbol": snapshot["symbol"]})
+
+    assert response.status_code == 409
+    assert "wait-for-tp-sl" in response.json()["detail"]
+
+
 def test_equity_history_endpoint_returns_items(monkeypatch) -> None:
     app = create_app(enable_background_services=False)
 

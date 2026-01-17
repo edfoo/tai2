@@ -53,6 +53,54 @@ def _snapshot_is_stale(snapshot: dict[str, Any], max_age_seconds: int) -> bool:
     return delta.total_seconds() > max(0, max_age_seconds)
 
 
+def _normalize_symbol(value: Any) -> str | None:
+    if not value:
+        return None
+    try:
+        text = str(value).strip().upper()
+    except Exception:
+        return None
+    return text or None
+
+
+def _symbol_has_open_position(snapshot: dict[str, Any], symbol: str | None) -> bool:
+    if not symbol:
+        return False
+    positions = snapshot.get("positions") or []
+    target = _normalize_symbol(symbol)
+    if not target:
+        return False
+    for entry in positions:
+        if not isinstance(entry, dict):
+            continue
+        entry_symbol = _normalize_symbol(entry.get("instId") or entry.get("symbol"))
+        if entry_symbol != target:
+            continue
+        for key in ("pos", "posQty", "size", "position"):
+            raw = entry.get(key)
+            if raw is None:
+                continue
+            try:
+                size_value = float(raw)
+            except (TypeError, ValueError):
+                continue
+            if abs(size_value) > 0:
+                return True
+    return False
+
+
+def _resolve_requested_symbol(snapshot: dict[str, Any], requested: str | None) -> str | None:
+    if requested:
+        return requested
+    primary = snapshot.get("symbol")
+    if primary:
+        return primary
+    symbols = snapshot.get("symbols") or []
+    if symbols:
+        return symbols[0]
+    return None
+
+
 async def resolve_prompt_metadata(
     runtime_meta: dict[str, Any], requested_version_id: str | None
 ) -> Tuple[dict[str, Any], Optional[JSONResponse]]:
@@ -103,6 +151,19 @@ async def prepare_prompt_payload(
     )
     if _snapshot_is_stale(snapshot, max_age):
         return None, _response("snapshot stale; awaiting refresh", 503)
+    guardrails = runtime_meta.get("guardrails") or {}
+    wait_for_tp_sl = guardrails.get("wait_for_tp_sl")
+    if wait_for_tp_sl is None:
+        wait_for_tp_sl = runtime_meta.get("wait_for_tp_sl", False)
+    wait_for_tp_sl = bool(wait_for_tp_sl)
+    resolved_symbol = _resolve_requested_symbol(snapshot, symbol)
+    if wait_for_tp_sl and _symbol_has_open_position(snapshot, resolved_symbol):
+        detail = (
+            f"wait-for-tp-sl guard active; symbol {resolved_symbol} has an open position"
+            if resolved_symbol
+            else "wait-for-tp-sl guard active"
+        )
+        return None, _response(detail, 409)
     metadata, error_response = await resolve_prompt_metadata(runtime_meta, prompt_version_id)
     if error_response:
         return None, error_response
