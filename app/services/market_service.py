@@ -1853,18 +1853,36 @@ class MarketService:
             max_lev = 1.0
         if min_lev > max_lev:
             min_lev, max_lev = max_lev, min_lev
+        try:
+            normalized_conf = float(confidence)
+        except (TypeError, ValueError):
+            normalized_conf = 0.5
+        if math.isnan(normalized_conf):
+            normalized_conf = 0.5
+        normalized_conf = min(max(normalized_conf, 0.0), 1.0)
+        gate_value: float | None = None
+        if confidence_gate is not None and not math.isnan(confidence_gate):
+            gate_value = min(max(float(confidence_gate), 0.0), 1.0)
+        if gate_value is not None:
+            if gate_value >= 1.0:
+                confidence_factor = 1.0 if normalized_conf >= 1.0 else 0.0
+            elif normalized_conf <= gate_value:
+                confidence_factor = 0.0
+            else:
+                confidence_factor = (normalized_conf - gate_value) / (1.0 - gate_value)
+        else:
+            confidence_factor = normalized_conf
         span = max_lev - min_lev
         if span <= 0:
             target_leverage = max_lev
         else:
-            target_leverage = min_lev + span * confidence
+            target_leverage = min_lev + span * confidence_factor
         target_leverage = max(min_lev, min(max_lev, target_leverage))
         if target_leverage <= 0:
             target_leverage = max(max_lev, 1.0)
         allow_upscale = (
-            confidence_gate is None
-            or math.isnan(confidence_gate)
-            or confidence >= confidence_gate
+            gate_value is None
+            or normalized_conf >= gate_value
         )
         if size_hint_value:
             implied = (size_hint_value * price) / equity
