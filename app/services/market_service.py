@@ -1863,12 +1863,9 @@ class MarketService:
         if size_hint_value:
             implied = (size_hint_value * price) / equity
             if implied > 0:
-                if implied > target_leverage:
-                    adjusted = size_hint_value * (target_leverage / implied)
-                    if adjusted > 0:
-                        return adjusted
-                else:
-                    return size_hint_value
+                adjusted = size_hint_value * (target_leverage / implied)
+                if adjusted > 0:
+                    return adjusted
         notional = equity * target_leverage
         size_from_target = notional / price if price else None
         if size_from_target and size_from_target > 0:

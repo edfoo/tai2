@@ -406,7 +406,7 @@ def test_record_execution_limits_preserves_existing_caps() -> None:
     assert limits["quote_currency"] == "USDT"
 
 
-def test_leverage_adjusted_size_respects_hint_upper_bound() -> None:
+def test_leverage_adjusted_size_scales_up_when_hint_too_small() -> None:
     result = MarketService._compute_leverage_adjusted_size(
         size_hint=0.1,
         account_equity=1000.0,
@@ -415,7 +415,8 @@ def test_leverage_adjusted_size_respects_hint_upper_bound() -> None:
         max_leverage=5.0,
         confidence=0.5,
     )
-    assert result == pytest.approx(0.1)
+    expected_target = (1000.0 * 3.0) / 70.0
+    assert result == pytest.approx(expected_target)
 
 
 def test_leverage_adjusted_size_scales_down_when_excessive() -> None:
