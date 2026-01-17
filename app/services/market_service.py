@@ -1914,6 +1914,27 @@ class MarketService:
         symbol_parts = symbol.split("-")
         quote_currency = symbol_parts[1].upper() if len(symbol_parts) >= 2 else None
         guardrails = context.get("guardrails") or {}
+        risk_locks_block = context.get("risk_locks") or {}
+        daily_loss_state = risk_locks_block.get("daily_loss") if isinstance(risk_locks_block, dict) else None
+        if isinstance(daily_loss_state, dict) and daily_loss_state.get("active"):
+            drop_pct = daily_loss_state.get("change_pct")
+            threshold_pct = daily_loss_state.get("threshold_pct")
+            drop_label = f"{drop_pct * 100:.2f}%" if isinstance(drop_pct, (int, float)) else "configured"
+            limit_label = f"{threshold_pct * 100:.2f}%" if isinstance(threshold_pct, (int, float)) else "limit"
+            self._emit_debug(
+                f"Daily loss guard active; skipping {action} for {symbol} (drop {drop_label} vs {limit_label})"
+            )
+            self._record_execution_feedback(
+                symbol,
+                "Daily loss limit active; execution blocked",
+                level="warning",
+                meta={
+                    "change_pct": drop_pct,
+                    "threshold_pct": threshold_pct,
+                    "window_hours": daily_loss_state.get("window_hours"),
+                },
+            )
+            return False
         cooldown_seconds = int(
             self._extract_float(
                 guardrails.get("min_hold_seconds") or guardrails.get("cooldown_seconds")

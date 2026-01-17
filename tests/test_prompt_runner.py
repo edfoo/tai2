@@ -1,7 +1,13 @@
 import asyncio
 
+import pytest
+
 from app.main import create_app
-from app.services.prompt_runner import PromptPayloadBundle, execute_llm_decision
+from app.services.prompt_runner import (
+    PromptPayloadBundle,
+    compute_daily_loss_guard_state,
+    execute_llm_decision,
+)
 
 
 class _StubLLM:
@@ -54,3 +60,32 @@ def test_execute_llm_decision_skips_fallback_when_disabled(monkeypatch):
     assert prompt_id == "prompt-id"
     assert app.state.market_service.handle_called is False
     assert app.state.market_service.refresh_called is False
+
+
+def test_compute_daily_loss_guard_state_triggers_when_limit_hit():
+    history = [
+        {"observed_at": "2026-01-16T12:00:00Z", "total_eq_usd": 1000.0},
+        {"observed_at": "2026-01-16T18:00:00Z", "total_eq_usd": 980.0},
+    ]
+    state = compute_daily_loss_guard_state(
+        limit_pct=0.05,
+        window_hours=24.0,
+        current_equity=900.0,
+        history=history,
+        current_timestamp="2026-01-17T12:00:00Z",
+    )
+    assert state["active"] is True
+    assert state["reason"] == "daily loss limit reached"
+    assert state["change_pct"] == pytest.approx(0.1)
+
+
+def test_compute_daily_loss_guard_state_handles_missing_history():
+    state = compute_daily_loss_guard_state(
+        limit_pct=0.05,
+        window_hours=24.0,
+        current_equity=900.0,
+        history=[],
+        current_timestamp="2026-01-17T12:00:00Z",
+    )
+    assert state["active"] is False
+    assert state["reason"] == "insufficient equity history"

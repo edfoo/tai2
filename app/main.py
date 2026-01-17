@@ -169,6 +169,7 @@ def _create_lifespan(enable_background_services: bool):
             "okx_api_flag": str(settings.okx_api_flag or "0") or "0",
             "wait_for_tp_sl": False,
             "frontend_timezone": "UTC",
+            "risk_locks": {},
         }
         app.state.runtime_config["wait_for_tp_sl"] = bool(
             app.state.runtime_config["guardrails"].get("wait_for_tp_sl", False)
