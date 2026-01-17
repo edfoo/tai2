@@ -2144,19 +2144,6 @@ def register_pages(app: FastAPI) -> None:
         )
         guardrails.setdefault("symbol_position_caps", {})
         guardrails.setdefault("min_leverage_confidence_gate", 0.5)
-        normalized_max_pct = _normalize_fraction(guardrails.get("max_position_pct"))
-        guardrails["max_position_pct"] = 0.2 if normalized_max_pct is None else normalized_max_pct
-        normalized_daily_limit = _normalize_fraction(guardrails.get("daily_loss_limit_pct"))
-        guardrails["daily_loss_limit_pct"] = (
-            0.03 if normalized_daily_limit is None else normalized_daily_limit
-        )
-        normalized_symbol_caps: dict[str, float] = {}
-        for symbol, value in (guardrails.get("symbol_position_caps") or {}).items():
-            numeric = _normalize_fraction(value)
-            if numeric is None or numeric <= 0:
-                continue
-            normalized_symbol_caps[str(symbol).upper()] = numeric
-        guardrails["symbol_position_caps"] = normalized_symbol_caps
         if "wait_for_tp_sl" not in config:
             config["wait_for_tp_sl"] = bool(guardrails.get("wait_for_tp_sl", False))
         guardrails.setdefault("wait_for_tp_sl", bool(config.get("wait_for_tp_sl")))
@@ -2208,6 +2195,20 @@ def register_pages(app: FastAPI) -> None:
             if numeric > 1.0:
                 numeric = numeric / 100.0
             return min(numeric, 1.0)
+
+        normalized_max_pct = _normalize_fraction(guardrails.get("max_position_pct"))
+        guardrails["max_position_pct"] = 0.2 if normalized_max_pct is None else normalized_max_pct
+        normalized_daily_limit = _normalize_fraction(guardrails.get("daily_loss_limit_pct"))
+        guardrails["daily_loss_limit_pct"] = (
+            0.03 if normalized_daily_limit is None else normalized_daily_limit
+        )
+        normalized_symbol_caps: dict[str, float] = {}
+        for symbol, value in (guardrails.get("symbol_position_caps") or {}).items():
+            numeric = _normalize_fraction(value)
+            if numeric is None or numeric <= 0:
+                continue
+            normalized_symbol_caps[str(symbol).upper()] = numeric
+        guardrails["symbol_position_caps"] = normalized_symbol_caps
 
         async def lookup_symbol_price(symbol: str | None) -> float | None:
             normalized = (symbol or "").strip().upper()
