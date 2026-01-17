@@ -2267,6 +2267,15 @@ def register_pages(app: FastAPI) -> None:
                 ).classes("w-full md:w-48").props(
                     "hint='Confidence-scaling floor applied before execution' persistent-hint"
                 )
+                min_leverage_conf_gate_input = ui.number(
+                    label="Min Leverage Confidence Gate",
+                    value=guardrails.get("min_leverage_confidence_gate", 0.5),
+                    min=0,
+                    max=1,
+                    step=0.05,
+                ).classes("w-full md:w-48").props(
+                    "hint='LLM confidence required before execution upsizes small orders' persistent-hint"
+                )
                 max_position_pct_input = ui.number(
                     label="Max Position % of Equity",
                     value=guardrails.get("max_position_pct", 0.2),

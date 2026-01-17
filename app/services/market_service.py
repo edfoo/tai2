@@ -1840,6 +1840,7 @@ class MarketService:
         min_leverage: float,
         max_leverage: float,
         confidence: float,
+        confidence_gate: float | None = None,
     ) -> float | None:
         size_hint_value = size_hint if size_hint and size_hint > 0 else None
         equity = account_equity if account_equity and account_equity > 0 else None
@@ -1860,10 +1861,17 @@ class MarketService:
         target_leverage = max(min_lev, min(max_lev, target_leverage))
         if target_leverage <= 0:
             target_leverage = max(max_lev, 1.0)
+        allow_upscale = (
+            confidence_gate is None
+            or math.isnan(confidence_gate)
+            or confidence >= confidence_gate
+        )
         if size_hint_value:
             implied = (size_hint_value * price) / equity
             if implied > 0:
                 adjusted = size_hint_value * (target_leverage / implied)
+                if adjusted > size_hint_value and not allow_upscale:
+                    return size_hint_value
                 if adjusted > 0:
                     return adjusted
         notional = equity * target_leverage
@@ -2054,6 +2062,10 @@ class MarketService:
             max_leverage = max(min_leverage or 0.0, 1.0)
         if max_leverage < min_leverage:
             min_leverage, max_leverage = max_leverage, min_leverage
+        confidence_gate = self._extract_float(guardrails.get("min_leverage_confidence_gate"))
+        if confidence_gate is None:
+            confidence_gate = 0.5
+        confidence_gate = min(max(confidence_gate, 0.0), 1.0)
         available_balances_block = account_block.get("available_balances")
         available_margin_usd = self._extract_float(account_block.get("available_eq_usd"))
 
@@ -2146,6 +2158,7 @@ class MarketService:
             min_leverage=min_leverage,
             max_leverage=max_leverage,
             confidence=confidence_value,
+            confidence_gate=confidence_gate,
         ) or 0.0
         if raw_size <= 0:
             self._emit_debug(

@@ -271,10 +271,7 @@ class PromptBuilder:
         derivatives_section = self._build_derivatives_posture(funding, custom_metrics, liquidations)
         fee_window_summary = self._build_fee_window_summary(account_section)
         credit_availability = self._build_credit_availability()
-        execution_feedback = self._format_execution_feedback(
-            snapshot.get("execution_feedback"),
-            symbol=resolved_symbol,
-        )
+        execution_feedback = self._format_execution_feedback(snapshot.get("execution_feedback"))
         feedback_digest = self._build_execution_feedback_digest(execution_feedback)
 
         context = {
@@ -1092,6 +1089,7 @@ class PromptBuilder:
             "snapshot_max_age_seconds": 900,
             "wait_for_tp_sl": False,
             "fallback_orders_enabled": True,
+            "min_leverage_confidence_gate": 0.5,
         }
 
     @staticmethod
