@@ -107,6 +107,7 @@ class PromptBuilder:
     def build(self, *, symbol: str | None = None, timeframe: str | None = None) -> dict[str, Any]:
         snapshot = self.snapshot or {}
         runtime_meta = self.metadata or {}
+        risk_locks = runtime_meta.get("risk_locks") or {}
         resolved_symbol = self._resolve_symbol(symbol)
         market_block = self._select_market(resolved_symbol)
         indicators = market_block.get("indicators") or {}
@@ -305,6 +306,8 @@ class PromptBuilder:
             "fee_availability": fee_window_summary,
             "credit_availability": credit_availability,
         }
+        if risk_locks:
+            context["risk_locks"] = risk_locks
         if execution_feedback:
             context["execution_feedback"] = execution_feedback
             execution_settings["recent_feedback"] = execution_feedback

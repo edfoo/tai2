@@ -10,7 +10,12 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
 from app.core.config import get_settings
-from app.db.postgres import fetch_okx_fees_window, get_prompt_version, insert_prompt_run
+from app.db.postgres import (
+    fetch_equity_window,
+    fetch_okx_fees_window,
+    get_prompt_version,
+    insert_prompt_run,
+)
 from app.services.llm_service import LLMService
 from app.services.prompt_builder import PromptBuilder
 from app.services.openrouter_service import fetch_openrouter_credits
@@ -24,6 +29,128 @@ class PromptPayloadBundle:
     runtime_meta: dict[str, Any]
     metadata: dict[str, Any]
     snapshot: dict[str, Any]
+
+
+DAILY_LOSS_WINDOW_HOURS = 24.0
+
+
+def _to_float(value: Any) -> Optional[float]:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _extract_equity_value(entry: Any) -> Optional[float]:
+    if not isinstance(entry, dict):
+        return None
+    for key in ("total_eq_usd", "account_equity", "total_account_value", "equity"):
+        value = _to_float(entry.get(key))
+        if value is not None and value > 0:
+            return value
+    return None
+
+
+def compute_daily_loss_guard_state(
+    *,
+    limit_pct: float | None,
+    window_hours: float,
+    current_equity: float | None,
+    history: list[dict[str, Any]] | None,
+    current_timestamp: str | None = None,
+) -> dict[str, Any]:
+    threshold = _to_float(limit_pct) if limit_pct is not None else None
+    status: dict[str, Any] = {
+        "active": False,
+        "threshold_pct": threshold,
+        "window_hours": window_hours,
+        "current_equity": current_equity,
+        "reference_equity": None,
+        "change_pct": None,
+        "peak_drop_pct": None,
+        "peak_equity": None,
+        "observed_since": None,
+        "latest_observed_at": current_timestamp,
+        "history_samples": 0,
+        "reason": None,
+    }
+    if threshold is None or threshold <= 0:
+        status["reason"] = "daily loss limit disabled"
+        return status
+    if current_equity is None or current_equity <= 0:
+        status["reason"] = "current equity unavailable"
+        return status
+    series: list[dict[str, Any]] = []
+    for entry in history or []:
+        value = _extract_equity_value(entry)
+        if value is None or value <= 0:
+            continue
+        series.append(
+            {
+                "observed_at": entry.get("observed_at"),
+                "equity": value,
+            }
+        )
+    series.sort(key=lambda item: item.get("observed_at") or "")
+    status["history_samples"] = len(series)
+    if not series:
+        status["reason"] = "insufficient equity history"
+        return status
+    last_entry = series[-1]
+    if abs(last_entry["equity"] - current_equity) > 1e-9:
+        series.append({"observed_at": current_timestamp, "equity": current_equity})
+    reference_entry = series[0]
+    reference_equity = reference_entry["equity"]
+    if reference_equity <= 0:
+        status["reason"] = "reference equity unavailable"
+        return status
+    status["reference_equity"] = reference_equity
+    status["observed_since"] = reference_entry.get("observed_at")
+    status["latest_observed_at"] = series[-1].get("observed_at") or current_timestamp
+    status["history_samples"] = len(series)
+    change_pct = (reference_equity - current_equity) / reference_equity
+    status["change_pct"] = change_pct
+    peak_equity = max(entry["equity"] for entry in series)
+    status["peak_equity"] = peak_equity
+    if peak_equity and peak_equity > 0:
+        status["peak_drop_pct"] = (peak_equity - current_equity) / peak_equity
+    if change_pct is not None and change_pct >= threshold:
+        status["active"] = True
+        status["reason"] = "daily loss limit reached"
+    else:
+        status["reason"] = "within daily loss limit"
+    return status
+
+
+async def _evaluate_daily_loss_guard(app: FastAPI, snapshot: dict[str, Any]) -> dict[str, Any]:
+    runtime_meta = getattr(app.state, "runtime_config", {}) or {}
+    guardrails = runtime_meta.get("guardrails") or {}
+    limit_pct = guardrails.get("daily_loss_limit_pct")
+    current_equity = _extract_equity_value(
+        {
+            "total_eq_usd": snapshot.get("total_eq_usd"),
+            "account_equity": snapshot.get("account_equity"),
+            "total_account_value": snapshot.get("total_account_value"),
+        }
+    )
+    history_rows: list[dict[str, Any]] = []
+    settings = get_settings()
+    if settings.database_url:
+        try:
+            history_rows = await fetch_equity_window(DAILY_LOSS_WINDOW_HOURS)
+        except Exception as exc:  # pragma: no cover - optional dependency
+            logger.debug("Daily loss guard history fetch failed: %s", exc)
+    status = compute_daily_loss_guard_state(
+        limit_pct=limit_pct,
+        window_hours=DAILY_LOSS_WINDOW_HOURS,
+        current_equity=current_equity,
+        history=history_rows,
+        current_timestamp=snapshot.get("generated_at"),
+    )
+    runtime_meta.setdefault("risk_locks", {})["daily_loss"] = status
+    return status
 
 
 def _response(message: str, status_code: int) -> JSONResponse:
@@ -164,6 +291,17 @@ async def prepare_prompt_payload(
             else "wait-for-tp-sl guard active"
         )
         return None, _response(detail, 409)
+    daily_loss_state = await _evaluate_daily_loss_guard(app, snapshot)
+    if daily_loss_state.get("active"):
+        drop_pct = daily_loss_state.get("change_pct")
+        limit_pct = daily_loss_state.get("threshold_pct")
+        drop_label = f"{drop_pct * 100:.2f}%" if drop_pct is not None else "limit"
+        limit_label = f"{limit_pct * 100:.2f}%" if limit_pct is not None else "configured limit"
+        detail = (
+            f"daily loss limit triggered ({drop_label} drop in {int(DAILY_LOSS_WINDOW_HOURS)}h vs {limit_label}); "
+            "execution locked"
+        )
+        return None, _response(detail, 423)
     metadata, error_response = await resolve_prompt_metadata(runtime_meta, prompt_version_id)
     if error_response:
         return None, error_response
@@ -187,6 +325,7 @@ async def prepare_prompt_payload(
     metadata["openrouter_usage"] = openrouter_usage
     metadata["fee_window_hours"] = fee_window_hours
     metadata["okx_fee_window_total"] = okx_fee_total
+    metadata["risk_locks"] = runtime_meta.get("risk_locks")
     builder = PromptBuilder(snapshot, metadata=metadata)
     payload = builder.build(symbol=symbol, timeframe=timeframe)
     return PromptPayloadBundle(payload=payload, runtime_meta=runtime_meta, metadata=metadata, snapshot=snapshot), None
@@ -244,6 +383,15 @@ async def execute_llm_decision(
             "Fallback decision suppressed by configuration; action=%s",
             decision.get("action"),
         )
+    daily_loss_state = (runtime_meta.get("risk_locks") or {}).get("daily_loss") or {}
+    if daily_loss_state.get("active"):
+        logger.warning("Daily loss limit active; skipping execution layer dispatch")
+        backend_events = getattr(app.state, "backend_events", None)
+        if backend_events is not None:
+            backend_events.append(
+                "Daily loss limit active; new decisions blocked until equity recovers"
+            )
+        return decision, prompt_id
     if market_service and not fallback_blocked:
         context_block = bundle.payload.get("context") or {}
         try:
@@ -305,6 +453,7 @@ def _record_llm_interaction(
 
 __all__ = [
     "PromptPayloadBundle",
+    "compute_daily_loss_guard_state",
     "execute_llm_decision",
     "persist_prompt_run",
     "prepare_prompt_payload",
