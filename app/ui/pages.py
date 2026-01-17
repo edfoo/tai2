@@ -2144,6 +2144,19 @@ def register_pages(app: FastAPI) -> None:
         )
         guardrails.setdefault("symbol_position_caps", {})
         guardrails.setdefault("min_leverage_confidence_gate", 0.5)
+        normalized_max_pct = _normalize_fraction(guardrails.get("max_position_pct"))
+        guardrails["max_position_pct"] = 0.2 if normalized_max_pct is None else normalized_max_pct
+        normalized_daily_limit = _normalize_fraction(guardrails.get("daily_loss_limit_pct"))
+        guardrails["daily_loss_limit_pct"] = (
+            0.03 if normalized_daily_limit is None else normalized_daily_limit
+        )
+        normalized_symbol_caps: dict[str, float] = {}
+        for symbol, value in (guardrails.get("symbol_position_caps") or {}).items():
+            numeric = _normalize_fraction(value)
+            if numeric is None or numeric <= 0:
+                continue
+            normalized_symbol_caps[str(symbol).upper()] = numeric
+        guardrails["symbol_position_caps"] = normalized_symbol_caps
         if "wait_for_tp_sl" not in config:
             config["wait_for_tp_sl"] = bool(guardrails.get("wait_for_tp_sl", False))
         guardrails.setdefault("wait_for_tp_sl", bool(config.get("wait_for_tp_sl")))
@@ -2157,6 +2170,28 @@ def register_pages(app: FastAPI) -> None:
         prompt_version_options: dict[str, str] = {}
         client = ui.context.client
         price_cache: dict[str, tuple[float, float]] = {}
+
+        def _percent_to_fraction(value: Any) -> float | None:
+            numeric = _safe_float(value)
+            if numeric is None:
+                return None
+            return numeric / 100.0
+
+        def _fraction_to_percent(value: Any) -> float | None:
+            numeric = _safe_float(value)
+            if numeric is None:
+                return None
+            return numeric * 100.0
+
+        def _normalize_fraction(value: Any) -> float | None:
+            numeric = _safe_float(value)
+            if numeric is None:
+                return None
+            if numeric < 0:
+                return 0.0
+            if numeric > 1.0:
+                numeric = numeric / 100.0
+            return min(numeric, 1.0)
 
         async def lookup_symbol_price(symbol: str | None) -> float | None:
             normalized = (symbol or "").strip().upper()
@@ -2252,6 +2287,12 @@ def register_pages(app: FastAPI) -> None:
             ui.label("Engine Configuration").classes("text-2xl font-bold")
             ui.label("Execution Guardrails").classes("text-xl font-semibold")
             ui.label("Limits enforced before orders are placed").classes("text-sm text-slate-500")
+            max_position_pct_value = _fraction_to_percent(guardrails.get("max_position_pct"))
+            if max_position_pct_value is None:
+                max_position_pct_value = 20.0
+            daily_loss_limit_value = _fraction_to_percent(guardrails.get("daily_loss_limit_pct"))
+            if daily_loss_limit_value is None:
+                daily_loss_limit_value = 3.0
             with ui.row().classes("w-full flex-wrap gap-4"):
                 max_leverage_input = ui.number(
                     label="Max Leverage",
@@ -2279,19 +2320,21 @@ def register_pages(app: FastAPI) -> None:
                 )
                 max_position_pct_input = ui.number(
                     label="Max Position % of Equity",
-                    value=guardrails.get("max_position_pct", 0.2),
-                    step=0.01,
-                    min=0.01,
+                    value=max_position_pct_value,
+                    step=0.1,
+                    min=0.1,
+                    max=100,
                 ).classes("w-full md:w-48").props(
-                    "hint='Upper bound on per-symbol position notional as share of total equity' persistent-hint"
+                    "hint='Percent of equity allowed per symbol (e.g., 15 = 15%)' persistent-hint"
                 )
                 daily_loss_limit_input = ui.number(
                     label="Daily Loss Limit %",
-                    value=guardrails.get("daily_loss_limit_pct", 3),
+                    value=daily_loss_limit_value,
                     step=0.1,
                     min=0.1,
+                    max=100,
                 ).classes("w-full md:w-48").props(
-                    "hint='Soft kill switch when daily drawdown breaches this percentage' persistent-hint"
+                    "hint='Soft kill switch when daily drawdown breaches this percent (enter 3 for 3%)' persistent-hint"
                 )
             with ui.row().classes("w-full flex-wrap gap-4"):
                 min_hold_seconds_input = ui.number(
@@ -2435,11 +2478,12 @@ def register_pages(app: FastAPI) -> None:
                 override_widgets: dict[str, ui.number] = {}
                 quote_inputs: dict[str, ui.number] = {}
                 price_labels: dict[str, ui.label] = {}
-                symbol_cap_overrides = {
-                    str(symbol).upper(): float(value)
-                    for symbol, value in (guardrails.get("symbol_position_caps", {}) or {}).items()
-                    if isinstance(value, (int, float)) and value > 0
-                }
+                symbol_cap_overrides = {}
+                for symbol, value in (guardrails.get("symbol_position_caps", {}) or {}).items():
+                    numeric = _normalize_fraction(value)
+                    if numeric is None or numeric <= 0:
+                        continue
+                    symbol_cap_overrides[str(symbol).upper()] = numeric
                 symbol_cap_widgets: dict[str, ui.number] = {}
 
                 def sync_widget(sym_key: str, value: float | None) -> None:
@@ -2579,13 +2623,13 @@ def register_pages(app: FastAPI) -> None:
                                 ui.label(symbol).classes("text-sm font-semibold text-slate-600 w-32")
                                 cap_input = ui.number(
                                     label="Max position %",
-                                    value=symbol_cap_overrides.get(normalized),
-                                    min=0.01,
-                                    max=1.0,
-                                    step=0.01,
+                                    value=_fraction_to_percent(symbol_cap_overrides.get(normalized)),
+                                    min=0.1,
+                                    max=100.0,
+                                    step=0.1,
                                     placeholder="Inherit global cap",
                                 ).classes("flex-1").props(
-                                    "outlined dense hint='Fraction of equity allocated to this symbol (e.g., 0.15 = 15%)' persistent-hint"
+                                    "outlined dense hint='Percent of equity allocated to this symbol (e.g., 12.5 = 12.5%)' persistent-hint"
                                 )
                                 symbol_cap_widgets[normalized] = cap_input
 
@@ -2600,7 +2644,7 @@ def register_pages(app: FastAPI) -> None:
                                                 if numeric <= 0:
                                                     symbol_cap_overrides.pop(sym_key, None)
                                                 else:
-                                                    symbol_cap_overrides[sym_key] = numeric
+                                                    symbol_cap_overrides[sym_key] = min(numeric / 100.0, 1.0)
                                         except (TypeError, ValueError):
                                             symbol_cap_overrides.pop(sym_key, None)
                                         update_payload_preview()
@@ -2773,18 +2817,24 @@ def register_pages(app: FastAPI) -> None:
         def _clean_symbol_caps() -> dict[str, float]:
             cleaned: dict[str, float] = {}
             for symbol, value in symbol_cap_overrides.items():
-                numeric = _safe_float(value)
+                numeric = _normalize_fraction(value)
                 if numeric is None or numeric <= 0:
                     continue
                 cleaned[symbol] = numeric
             return cleaned
 
         def build_guardrails_snapshot() -> dict[str, Any]:
+            snapshot_max_pct = _percent_to_fraction(max_position_pct_input.value)
+            if snapshot_max_pct is None:
+                snapshot_max_pct = guardrails.get("max_position_pct")
+            snapshot_daily_limit = _percent_to_fraction(daily_loss_limit_input.value)
+            if snapshot_daily_limit is None:
+                snapshot_daily_limit = guardrails.get("daily_loss_limit_pct")
             snapshot = {
                 "min_leverage": _safe_float(min_leverage_input.value),
                 "max_leverage": _safe_float(max_leverage_input.value),
-                "max_position_pct": _safe_float(max_position_pct_input.value),
-                "daily_loss_limit_pct": _safe_float(daily_loss_limit_input.value),
+                "max_position_pct": snapshot_max_pct,
+                "daily_loss_limit_pct": snapshot_daily_limit,
                 "min_hold_seconds": _safe_int(min_hold_seconds_input.value),
                 "max_trades_per_hour": _safe_int(max_trades_per_hour_input.value),
                 "trade_window_seconds": _safe_int(trade_window_seconds_input.value),
@@ -3208,6 +3258,17 @@ def register_pages(app: FastAPI) -> None:
             except Exception as exc:  # pragma: no cover - db optional
                 ui.notify(f"Failed to persist OKX sub-account: {exc}", color="warning")
 
+            new_max_pct = _percent_to_fraction(max_position_pct_input.value)
+            if new_max_pct is None:
+                new_max_pct = guardrails.get("max_position_pct", 0.2)
+            else:
+                new_max_pct = max(0.0, min(1.0, new_max_pct))
+            new_daily_loss_limit = _percent_to_fraction(daily_loss_limit_input.value)
+            if new_daily_loss_limit is None:
+                new_daily_loss_limit = guardrails.get("daily_loss_limit_pct", 0.03)
+            else:
+                new_daily_loss_limit = max(0.0, min(1.0, new_daily_loss_limit))
+
             config["guardrails"] = {
                 "min_leverage": _coerce(min_leverage_input.value, guardrails.get("min_leverage", 1), float),
                 "max_leverage": _coerce(max_leverage_input.value, guardrails.get("max_leverage", 5), float),
@@ -3222,16 +3283,8 @@ def register_pages(app: FastAPI) -> None:
                         ),
                     ),
                 ),
-                "max_position_pct": _coerce(
-                    max_position_pct_input.value,
-                    guardrails.get("max_position_pct", 0.2),
-                    float,
-                ),
-                "daily_loss_limit_pct": _coerce(
-                    daily_loss_limit_input.value,
-                    guardrails.get("daily_loss_limit_pct", 3),
-                    float,
-                ),
+                "max_position_pct": new_max_pct,
+                "daily_loss_limit_pct": new_daily_loss_limit,
                 "min_hold_seconds": _coerce(
                     min_hold_seconds_input.value,
                     guardrails.get("min_hold_seconds", 180),
