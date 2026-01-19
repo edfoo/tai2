@@ -105,6 +105,15 @@ FETCH_EQUITY_SQL = (
     """
 )
 
+FETCH_EQUITY_WINDOW_SQL = (
+    """
+    SELECT observed_at, account_equity, total_account_value, total_eq_usd
+    FROM equity_history
+    WHERE observed_at >= NOW() - ($1::double precision * INTERVAL '1 hour')
+    ORDER BY observed_at ASC
+    """
+)
+
 FETCH_PAIRS_SQL = (
     "SELECT symbol, display_name, enabled, source "
     "FROM trading_pairs {where_clause} ORDER BY symbol"
@@ -357,6 +366,24 @@ async def insert_equity_point(
         _coerce_numeric(total_account_value),
         _coerce_numeric(total_eq_usd),
     )
+
+
+async def fetch_equity_window(hours: float = 24.0) -> list[dict[str, Any]]:
+    pool = await get_postgres_pool()
+    window = max(1.0, float(hours or 0.0))
+    records = await pool.fetch(FETCH_EQUITY_WINDOW_SQL, window)
+    items: list[dict[str, Any]] = []
+    for row in records:
+        observed = row["observed_at"]
+        items.append(
+            {
+                "observed_at": observed.isoformat() if observed else None,
+                "account_equity": float(row["account_equity"]) if row["account_equity"] is not None else None,
+                "total_account_value": float(row["total_account_value"]) if row["total_account_value"] is not None else None,
+                "total_eq_usd": float(row["total_eq_usd"]) if row["total_eq_usd"] is not None else None,
+            }
+        )
+    return items
 
 
 async def fetch_equity_history(limit: int = 200) -> list[dict[str, Any]]:
@@ -920,6 +947,7 @@ __all__ = [
     "fetch_prompt_runs",
     "fetch_prompt_versions",
     "fetch_equity_history",
+    "fetch_equity_window",
     "fetch_total_okx_fees",
     "fetch_okx_fees_window",
     "fetch_recent_trades",

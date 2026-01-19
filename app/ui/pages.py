@@ -358,6 +358,7 @@ def register_pages(app: FastAPI) -> None:
                         columns=[
                             {"name": "symbol", "label": "Symbol", "field": "symbol"},
                             {"name": "side", "label": "Side", "field": "side"},
+                            {"name": "mode", "label": "Mode", "field": "mode"},
                             {"name": "size", "label": "Size", "field": "size"},
                             {"name": "size_usd", "label": "Size (USDT)", "field": "size_usd"},
                             {"name": "entry", "label": "Entry", "field": "entry"},
@@ -1039,7 +1040,7 @@ def register_pages(app: FastAPI) -> None:
                     return None
 
             def format_activity_ts(value: Any) -> str:
-                return format_iso_timestamp(value, fmt="%H:%M:%S %Z")
+                return format_iso_timestamp(value, fmt="%Y-%m-%d %H:%M:%S %Z")
 
             def _first_price(*values: Any) -> float | None:
                 for candidate in values:
@@ -1180,6 +1181,21 @@ def register_pages(app: FastAPI) -> None:
                 leverage_display = str(leverage_raw) if leverage_raw not in (None, "") else "--"
                 leverage_value = to_float(leverage_raw)
 
+                margin_mode_raw = (
+                    pos.get("mgnMode")
+                    or pos.get("marginMode")
+                    or pos.get("tdMode")
+                    or pos.get("tradeMode")
+                )
+                if margin_mode_raw is None:
+                    mode_display = "--"
+                else:
+                    normalized_mode = str(margin_mode_raw).strip().lower()
+                    if normalized_mode in {"cross", "isolated"}:
+                        mode_display = normalized_mode.capitalize()
+                    else:
+                        mode_display = normalized_mode.upper() if normalized_mode else "--"
+
                 upl_value = to_float(pos.get("upl"))
                 upl_ratio = to_float(pos.get("uplRatio"))
 
@@ -1264,6 +1280,7 @@ def register_pages(app: FastAPI) -> None:
                     "pnl_pct": f"{pnl_pct:,.2f}%" if pnl_pct is not None else "--",
                     "pnl_pct_cls": pnl_pct_color,
                     "leverage": leverage_display,
+                    "mode": mode_display,
                 }
                 rows.append(row)
 
