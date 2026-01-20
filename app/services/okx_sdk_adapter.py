@@ -8,7 +8,16 @@ try:  # pragma: no cover - optional dependency wiring
     import okx.Account as OkxAccount
     import okx.Trade as OkxTrade
     import okx.utils as OkxUtils
-    from okx.consts import ACCOUNT_INFO, GET, PLACR_ORDER, POSITION_INFO, PLACE_ALGO_ORDER, CANCEL_ALGOS, POST
+    from okx.consts import (
+        ACCOUNT_INFO,
+        ADJUSTMENT_MARGIN,
+        GET,
+        PLACR_ORDER,
+        POSITION_INFO,
+        PLACE_ALGO_ORDER,
+        CANCEL_ALGOS,
+        POST,
+    )
 except ImportError:  # pragma: no cover - runtime fallback
     OkxAccount = None
     OkxTrade = None
@@ -112,6 +121,31 @@ class OkxAccountAdapter:
             params = {"ccy": ccy, "subAcct": subAcct}
             return self._api._request_with_params(GET, ACCOUNT_INFO, params)
         return self._api.get_account_balance(ccy=ccy)
+
+    def adjust_isolated_margin(
+        self,
+        instId: str,
+        posSide: str,
+        amt: str | float,
+        *,
+        type: str = "add",
+        loanTrans: str = "",
+        subAcct: str | None = None,
+    ) -> Any:
+        if not self._api:
+            raise RuntimeError("Account API unavailable")
+        params = {
+            "instId": instId,
+            "posSide": posSide,
+            "type": type,
+            "amt": amt,
+            "loanTrans": loanTrans,
+        }
+        if subAcct:
+            params["subAcct"] = subAcct
+        if subAcct and hasattr(self._api, "_request_with_params") and ADJUSTMENT_MARGIN and POST:
+            return self._api._request_with_params(POST, ADJUSTMENT_MARGIN, params)
+        return self._api.adjustment_margin(instId, posSide, type, amt, loanTrans=loanTrans)
 
 
 class OkxTradeAdapter:

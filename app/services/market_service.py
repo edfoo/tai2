@@ -1704,6 +1704,106 @@ class MarketService:
                 f"Execution feedback ({level}) {symbol}: {message}{meta_suffix}"
             )
 
+    @staticmethod
+    def _response_success(response: Any) -> bool:
+        def _entry_ok(entry: dict[str, Any]) -> bool:
+            code = str(entry.get("sCode") or entry.get("code") or "").strip()
+            return (not code) or code == "0"
+
+        if isinstance(response, dict):
+            if not _entry_ok(response):
+                return False
+            data = response.get("data")
+            if isinstance(data, list):
+                return all(
+                    _entry_ok(item)
+                    for item in data
+                    if isinstance(item, dict)
+                )
+        return True
+
+    def _estimate_isolated_margin_requirement(
+        self,
+        *,
+        size: float | None,
+        price: float | None,
+        min_leverage: float | None,
+    ) -> float | None:
+        size_value = self._extract_float(size)
+        price_value = self._extract_float(price)
+        if not size_value or size_value <= 0 or not price_value or price_value <= 0:
+            return None
+        leverage_floor = self._extract_float(min_leverage)
+        if not leverage_floor or leverage_floor < 1.0:
+            leverage_floor = 1.0
+        margin = (size_value * price_value) / leverage_floor
+        buffer = max(price_value * 0.01, margin * 0.05, 10.0)
+        return margin + buffer
+
+    async def _ensure_isolated_margin_buffer(
+        self,
+        *,
+        symbol: str,
+        action: str,
+        dual_side_mode: bool,
+        min_leverage: float | None,
+        size: float | None,
+        last_price: float | None,
+        quote_currency: str | None,
+    ) -> dict[str, Any] | None:
+        if not self._account_api:
+            return None
+        amount = self._estimate_isolated_margin_requirement(
+            size=size,
+            price=last_price,
+            min_leverage=min_leverage,
+        )
+        if not amount or amount <= 0:
+            return None
+        pos_side = "long" if action == "BUY" else "short"
+        if not dual_side_mode:
+            pos_side = "net"
+        formatted_amount = self._format_price(amount)
+        sub_account = self._sub_account if self._sub_account_use_master else None
+        try:
+            response = await asyncio.to_thread(
+                self._account_api.adjust_isolated_margin,
+                symbol,
+                pos_side,
+                formatted_amount,
+                type="add",
+                subAcct=sub_account,
+            )
+        except Exception as exc:  # pragma: no cover - network dependency
+            self._emit_debug(f"Isolated margin top-up failed for {symbol}: {exc}")
+            self._record_execution_feedback(
+                symbol,
+                "Failed to add isolated margin",
+                level="error",
+                meta={"error": str(exc)},
+            )
+            return None
+        if not self._response_success(response):
+            self._emit_debug(f"Isolated margin top-up rejected for {symbol}: {response}")
+            self._record_execution_feedback(
+                symbol,
+                "Isolated margin top-up rejected",
+                level="error",
+                meta={"response": response},
+            )
+            return None
+        label = quote_currency or "margin"
+        self._record_execution_feedback(
+            symbol,
+            f"Allocated {formatted_amount} {label} to isolated wallet",
+            level="info",
+            meta={"amount": formatted_amount, "pos_side": pos_side},
+        )
+        refreshed = await self._fetch_account_balance()
+        if refreshed:
+            self._refresh_execution_limits_from_account(refreshed)
+        return refreshed
+
     def _refresh_execution_limits_from_account(self, account_payload: dict[str, Any] | None) -> None:
         if not isinstance(account_payload, dict):
             return
@@ -2131,27 +2231,82 @@ class MarketService:
                 available_balances_block = live_balances_block
             self._refresh_execution_limits_from_account(live_account_balances)
 
-        quote_available_usd = None
-        quote_cash_usd = None
-        if isinstance(available_balances_block, dict) and quote_currency:
-            quote_meta = available_balances_block.get(quote_currency)
-            if isinstance(quote_meta, dict):
-                quote_available_usd = self._extract_float(
-                    quote_meta.get("available_usd") or quote_meta.get("equity_usd")
-                )
-                if quote_available_usd is None and quote_currency in STABLE_CURRENCIES:
-                    quote_available_usd = self._extract_float(quote_meta.get("available"))
-                quote_cash = self._extract_float(quote_meta.get("cash"))
-                if quote_cash is not None:
-                    if quote_currency in STABLE_CURRENCIES:
-                        quote_cash_usd = quote_cash
-                    elif last_price:
-                        quote_cash_usd = quote_cash * last_price
+        confidence_value = self._normalize_confidence(decision.get("confidence"))
+        size_hint = self._extract_float(decision.get("position_size"))
+        raw_size = self._compute_leverage_adjusted_size(
+            size_hint=size_hint,
+            account_equity=account_equity,
+            last_price=last_price,
+            min_leverage=min_leverage,
+            max_leverage=max_leverage,
+            confidence=confidence_value,
+            confidence_gate=confidence_gate,
+        ) or 0.0
+        if raw_size <= 0:
+            self._emit_debug(
+                f"Execution skipped for {symbol}: unable to derive valid position size"
+            )
+            return False
+
+        def _extract_quote_balances(
+            balances: dict[str, Any] | None,
+        ) -> tuple[float | None, float | None]:
+            if not isinstance(balances, dict) or not quote_currency:
+                return None, None
+            quote_meta = balances.get(quote_currency)
+            if not isinstance(quote_meta, dict):
+                return None, None
+            available_usd = self._extract_float(
+                quote_meta.get("available_usd")
+                or quote_meta.get("equity_usd")
+            )
+            if available_usd is None and quote_currency in STABLE_CURRENCIES:
+                available_usd = self._extract_float(quote_meta.get("available"))
+            quote_cash = self._extract_float(quote_meta.get("cash"))
+            cash_usd = None
+            if quote_cash is not None:
+                if quote_currency in STABLE_CURRENCIES:
+                    cash_usd = quote_cash
+                elif last_price:
+                    cash_usd = quote_cash * last_price
+            return available_usd, cash_usd
+
+        quote_available_usd, quote_cash_usd = _extract_quote_balances(available_balances_block)
         quote_margin_candidates = [
             value
             for value in (quote_cash_usd, quote_available_usd)
             if value is not None and value > 0
         ]
+        if isolated_mode and not quote_margin_candidates:
+            refreshed_balances = await self._ensure_isolated_margin_buffer(
+                symbol=symbol,
+                action=action,
+                dual_side_mode=dual_side_mode,
+                min_leverage=min_leverage,
+                size=raw_size,
+                last_price=last_price,
+                quote_currency=quote_currency,
+            )
+            if refreshed_balances:
+                balances_block = refreshed_balances.get("available_balances")
+                if isinstance(balances_block, dict):
+                    available_balances_block = balances_block
+                quote_available_usd, quote_cash_usd = _extract_quote_balances(available_balances_block)
+                quote_margin_candidates = [
+                    value
+                    for value in (quote_cash_usd, quote_available_usd)
+                    if value is not None and value > 0
+                ]
+                refreshed_available = self._extract_float(refreshed_balances.get("available_eq_usd"))
+                if refreshed_available is not None:
+                    available_margin_usd = refreshed_available
+                refreshed_equity = self._extract_float(
+                    refreshed_balances.get("total_eq_usd")
+                    or refreshed_balances.get("total_equity")
+                    or refreshed_balances.get("total_account_value")
+                )
+                if refreshed_equity is not None and refreshed_equity > 0:
+                    account_equity = refreshed_equity
         if isolated_mode:
             if quote_margin_candidates:
                 available_margin_usd = max(quote_margin_candidates)
@@ -2188,23 +2343,6 @@ class MarketService:
                 meta={"available_margin_usd": available_margin_usd},
             )
             return False
-        confidence_value = self._normalize_confidence(decision.get("confidence"))
-        size_hint = self._extract_float(decision.get("position_size"))
-        raw_size = self._compute_leverage_adjusted_size(
-            size_hint=size_hint,
-            account_equity=account_equity,
-            last_price=last_price,
-            min_leverage=min_leverage,
-            max_leverage=max_leverage,
-            confidence=confidence_value,
-            confidence_gate=confidence_gate,
-        ) or 0.0
-        if raw_size <= 0:
-            self._emit_debug(
-                f"Execution skipped for {symbol}: unable to derive valid position size"
-            )
-            return False
-
         take_profit_price = self._normalize_take_profit(
             action,
             self._extract_float(decision.get("take_profit")),
