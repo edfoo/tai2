@@ -2475,13 +2475,104 @@ def register_pages(app: FastAPI) -> None:
                 model_cost_label = ui.label("Pricing unavailable").classes(
                     "text-xs text-slate-500"
                 )
-                trading_pairs_select = ui.select(
-                    options=[],
-                    value=config.get("trading_pairs", ["BTC-USDT-SWAP"]),
-                    multiple=True,
-                    label="Trading Pairs",
-                ).classes("w-full flex-1")
-                trading_pairs_select.disable()
+                raw_pairs = config.get("trading_pairs", ["BTC-USDT-SWAP"])
+                selected_trading_pairs: list[str] = []
+                for symbol in raw_pairs or []:
+                    normalized = str(symbol).strip().upper()
+                    if not normalized or normalized in selected_trading_pairs:
+                        continue
+                    selected_trading_pairs.append(normalized)
+                if not selected_trading_pairs:
+                    selected_trading_pairs.append("BTC-USDT-SWAP")
+                config["trading_pairs"] = selected_trading_pairs.copy()
+                trading_pair_checkboxes: dict[str, ui.checkbox] = {}
+                with ui.column().classes("w-full flex-1 gap-2"):
+                    ui.label("Enabled Trading Pairs").classes("text-xs text-slate-500")
+                    trading_pairs_select = (
+                        ui.select(
+                            options=[],
+                            label="Add trading pair",
+                            with_input=True,
+                        )
+                        .classes("w-full")
+                        .props("use-input fill-input input-debounce='0' clearable")
+                    )
+                    trading_pairs_select.disable()
+                    trading_pairs_list = ui.column().classes(
+                        "w-full gap-2 rounded-xl border border-slate-200 bg-slate-50/70 p-3"
+                    )
+
+            def _normalize_trading_pair(symbol: Any) -> str | None:
+                if symbol is None:
+                    return None
+                normalized = str(symbol).strip().upper()
+                return normalized or None
+
+            def render_trading_pair_rows() -> None:
+                trading_pairs_list.clear()
+                trading_pair_checkboxes.clear()
+                if not selected_trading_pairs:
+                    selected_trading_pairs.append("BTC-USDT-SWAP")
+                config["trading_pairs"] = selected_trading_pairs.copy()
+                with trading_pairs_list:
+                    grid_container = ui.element("div").classes(
+                        "grid gap-2 w-full grid-cols-1 sm:grid-cols-2 xl:grid-cols-3"
+                    )
+                    for symbol in selected_trading_pairs:
+                        with grid_container:
+                            with ui.row().classes(
+                                "w-full items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-1"
+                            ):
+                                checkbox = ui.checkbox(symbol, value=True).classes(
+                                    "flex-1 font-mono text-sm"
+                                )
+                                trading_pair_checkboxes[symbol] = checkbox
+
+                                def _handler_factory(sym_key: str) -> Callable[[Any], None]:
+                                    def _handler(event: Any) -> None:
+                                        if event.value:
+                                            return
+                                        if len(selected_trading_pairs) <= 1:
+                                            checkbox = trading_pair_checkboxes.get(sym_key)
+                                            if checkbox:
+                                                checkbox.value = True
+                                                checkbox.update()
+                                            ui.notify("At least one trading pair required", color="warning")
+                                            return
+                                        selected_trading_pairs[:] = [
+                                            sym for sym in selected_trading_pairs if sym != sym_key
+                                        ]
+                                        min_size_overrides.pop(sym_key, None)
+                                        symbol_cap_overrides.pop(sym_key, None)
+                                        config["trading_pairs"] = selected_trading_pairs.copy()
+                                        render_trading_pair_rows()
+                                        render_min_size_rows()
+                                        render_symbol_cap_rows()
+
+                                    return _handler
+
+                                checkbox.on_value_change(_handler_factory(symbol))
+
+            def add_trading_pair(symbol: Any) -> None:
+                normalized = _normalize_trading_pair(symbol)
+                if not normalized:
+                    return
+                if normalized in selected_trading_pairs:
+                    ui.notify(f"{normalized} already enabled", color="info")
+                    return
+                selected_trading_pairs.append(normalized)
+                config["trading_pairs"] = selected_trading_pairs.copy()
+                render_trading_pair_rows()
+                render_min_size_rows()
+                render_symbol_cap_rows()
+
+            def on_trading_pair_select(event: Any) -> None:
+                add_trading_pair(getattr(event, "value", None))
+                trading_pairs_select.value = None
+                trading_pairs_select.update()
+
+            trading_pairs_select.on_value_change(on_trading_pair_select)
+            render_trading_pair_rows()
             ui.label("Live Execution").classes("text-sm font-semibold text-rose-600 mt-2")
             with ui.row().classes("w-full flex-wrap gap-4"):
                 execution_switch = ui.switch(
@@ -3041,13 +3132,8 @@ def register_pages(app: FastAPI) -> None:
                     ui.notify(f"Failed to load pairs: {exc}", color="warning")
             trading_pairs_select.options = pairs
             trading_pairs_select.enable()
-            current = trading_pairs_select.value or []
-            if isinstance(current, str):
-                current = [current]
-            current = [item for item in current if item in pairs]
-            if not current:
-                current = pairs[:1] if pairs else []
-            trading_pairs_select.value = current
+            trading_pairs_select.value = None
+            trading_pairs_select.update()
 
         async def hydrate_model_select() -> None:
             try:
@@ -3371,12 +3457,15 @@ def register_pages(app: FastAPI) -> None:
                 selected_record = prompt_versions_cache.get(selected_version_id)
                 if selected_record:
                     config["prompt_version_name"] = selected_record.get("name")
-            selected_pairs = trading_pairs_select.value or []
-            if isinstance(selected_pairs, str):
-                selected_pairs = [selected_pairs]
-            symbols = [str(item).strip().upper() for item in selected_pairs if str(item).strip()]
+            symbols: list[str] = []
+            for item in selected_trading_pairs:
+                normalized = str(item).strip().upper()
+                if not normalized or normalized in symbols:
+                    continue
+                symbols.append(normalized)
             if not symbols:
                 symbols = ["BTC-USDT-SWAP"]
+            selected_trading_pairs[:] = symbols
             config["trading_pairs"] = symbols
             try:
                 await set_enabled_trading_pairs(symbols)
