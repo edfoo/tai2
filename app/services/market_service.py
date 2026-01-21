@@ -1477,8 +1477,8 @@ class MarketService:
         total_account_value = 0.0
         total_eq_usd = 0.0
         balances: dict[str, dict[str, float]] = {}
-        available_equity_total = 0.0
-        available_eq_usd_total = 0.0
+        available_equity_total: float | None = None
+        available_eq_usd_total: float | None = None
         def track_balance(record: dict[str, Any]) -> None:
             nonlocal available_equity_total, available_eq_usd_total
             if not isinstance(record, dict):
@@ -1521,10 +1521,18 @@ class MarketService:
                 bucket["equity_usd"] += eq_usd_value
             if avail_eq_value is not None:
                 bucket["available"] += avail_eq_value
-                available_equity_total += avail_eq_value
+                available_equity_total = (
+                    avail_eq_value
+                    if available_equity_total is None
+                    else available_equity_total + avail_eq_value
+                )
             if avail_usd_value is not None:
                 bucket["available_usd"] += avail_usd_value
-                available_eq_usd_total += avail_usd_value
+                available_eq_usd_total = (
+                    avail_usd_value
+                    if available_eq_usd_total is None
+                    else available_eq_usd_total + avail_usd_value
+                )
             if avail_bal_value is not None:
                 bucket["cash"] += avail_bal_value
 
@@ -1581,8 +1589,8 @@ class MarketService:
             "total_equity": total_equity,
             "total_account_value": total_account_value or total_equity,
             "total_eq_usd": total_eq_usd or total_equity,
-            "available_equity": available_equity_total or 0.0,
-            "available_eq_usd": available_eq_usd_total or 0.0,
+            "available_equity": available_equity_total,
+            "available_eq_usd": available_eq_usd_total,
             "available_balances": cleaned_balances,
         }
 
@@ -1728,6 +1736,10 @@ class MarketService:
         size: float | None,
         price: float | None,
         min_leverage: float | None,
+        account_equity: float | None,
+        max_position_pct: float | None,
+        symbol_cap_pct: float | None,
+        max_notional_usd: float | None,
     ) -> float | None:
         size_value = self._extract_float(size)
         price_value = self._extract_float(price)
@@ -1736,7 +1748,22 @@ class MarketService:
         leverage_floor = self._extract_float(min_leverage)
         if not leverage_floor or leverage_floor < 1.0:
             leverage_floor = 1.0
-        margin = (size_value * price_value) / leverage_floor
+        requested_notional = size_value * price_value
+
+        notional_caps: list[float] = []
+        equity_value = self._extract_float(account_equity)
+        if equity_value and equity_value > 0:
+            for pct in (max_position_pct, symbol_cap_pct):
+                pct_value = self._extract_float(pct)
+                if pct_value and pct_value > 0:
+                    notional_caps.append(equity_value * pct_value)
+        if max_notional_usd:
+            cap_value = self._extract_float(max_notional_usd)
+            if cap_value:
+                notional_caps.append(cap_value)
+        if notional_caps:
+            requested_notional = min(requested_notional, max(notional_caps))
+        margin = requested_notional / leverage_floor
         buffer = max(price_value * 0.01, margin * 0.05, 10.0)
         return margin + buffer
 
@@ -1750,6 +1777,11 @@ class MarketService:
         size: float | None,
         last_price: float | None,
         quote_currency: str | None,
+        available_margin_usd: float | None,
+        account_equity: float | None,
+        max_position_pct: float | None,
+        symbol_cap_pct: float | None,
+        max_notional_usd: float | None,
     ) -> dict[str, Any] | None:
         if not self._account_api:
             return None
@@ -1757,13 +1789,21 @@ class MarketService:
             size=size,
             price=last_price,
             min_leverage=min_leverage,
+            account_equity=account_equity,
+            max_position_pct=max_position_pct,
+            symbol_cap_pct=symbol_cap_pct,
+            max_notional_usd=max_notional_usd,
         )
         if not amount or amount <= 0:
+            return None
+        current_margin = self._extract_float(available_margin_usd) or 0.0
+        required_gap = amount - current_margin
+        if required_gap <= 0:
             return None
         pos_side = "long" if action == "BUY" else "short"
         if not dual_side_mode:
             pos_side = "net"
-        formatted_amount = self._format_price(amount)
+        formatted_amount = self._format_price(required_gap)
         sub_account = self._sub_account if self._sub_account_use_master else None
         try:
             response = await asyncio.to_thread(
@@ -2192,6 +2232,7 @@ class MarketService:
                 effective_max_pct = candidate if effective_max_pct is None else min(effective_max_pct, candidate)
         if effective_max_pct is None:
             effective_max_pct = base_max_pct
+        guardrail_notional_cap = None
         leverage_override_reason: str | None = None
         min_leverage = self._extract_float(guardrails.get("min_leverage"))
         max_leverage = self._extract_float(guardrails.get("max_leverage"))
@@ -2230,6 +2271,14 @@ class MarketService:
             if isinstance(live_balances_block, dict) and live_balances_block:
                 available_balances_block = live_balances_block
             self._refresh_execution_limits_from_account(live_account_balances)
+
+        if (
+            account_equity is not None
+            and account_equity > 0
+            and effective_max_pct
+            and max_leverage
+        ):
+            guardrail_notional_cap = max(0.0, account_equity * max_leverage * effective_max_pct)
 
         confidence_value = self._normalize_confidence(decision.get("confidence"))
         size_hint = self._extract_float(decision.get("position_size"))
@@ -2271,45 +2320,75 @@ class MarketService:
                     cash_usd = quote_cash * last_price
             return available_usd, cash_usd
 
+        async def _refresh_margin_snapshot() -> dict[str, Any] | None:
+            if not self._account_api:
+                return None
+            try:
+                refreshed_snapshot = await self._fetch_account_balance()
+            except Exception as exc:  # pragma: no cover - network variance
+                self._emit_debug(f"Margin availability refresh failed: {exc}")
+                return None
+            self._refresh_execution_limits_from_account(refreshed_snapshot)
+            return refreshed_snapshot
+
         quote_available_usd, quote_cash_usd = _extract_quote_balances(available_balances_block)
         quote_margin_candidates = [
             value
             for value in (quote_cash_usd, quote_available_usd)
             if value is not None and value > 0
         ]
-        if isolated_mode and not quote_margin_candidates:
-            refreshed_balances = await self._ensure_isolated_margin_buffer(
-                symbol=symbol,
-                action=action,
-                dual_side_mode=dual_side_mode,
-                min_leverage=min_leverage,
-                size=raw_size,
-                last_price=last_price,
-                quote_currency=quote_currency,
-            )
-            if refreshed_balances:
-                balances_block = refreshed_balances.get("available_balances")
-                if isinstance(balances_block, dict):
-                    available_balances_block = balances_block
-                quote_available_usd, quote_cash_usd = _extract_quote_balances(available_balances_block)
-                quote_margin_candidates = [
-                    value
-                    for value in (quote_cash_usd, quote_available_usd)
-                    if value is not None and value > 0
-                ]
-                refreshed_available = self._extract_float(refreshed_balances.get("available_eq_usd"))
-                if refreshed_available is not None:
-                    available_margin_usd = refreshed_available
-                refreshed_equity = self._extract_float(
-                    refreshed_balances.get("total_eq_usd")
-                    or refreshed_balances.get("total_equity")
-                    or refreshed_balances.get("total_account_value")
-                )
-                if refreshed_equity is not None and refreshed_equity > 0:
-                    account_equity = refreshed_equity
+        isolated_margin_available = max(quote_margin_candidates) if quote_margin_candidates else None
         if isolated_mode:
-            if quote_margin_candidates:
-                available_margin_usd = max(quote_margin_candidates)
+            required_isolated_margin = self._estimate_isolated_margin_requirement(
+                size=raw_size,
+                price=last_price,
+                min_leverage=min_leverage,
+                account_equity=account_equity,
+                max_position_pct=base_max_pct,
+                symbol_cap_pct=symbol_cap_pct,
+                max_notional_usd=guardrail_notional_cap,
+            )
+            if required_isolated_margin and (
+                isolated_margin_available is None
+                or isolated_margin_available < required_isolated_margin
+            ):
+                refreshed_balances = await self._ensure_isolated_margin_buffer(
+                    symbol=symbol,
+                    action=action,
+                    dual_side_mode=dual_side_mode,
+                    min_leverage=min_leverage,
+                    size=raw_size,
+                    last_price=last_price,
+                    quote_currency=quote_currency,
+                    available_margin_usd=isolated_margin_available,
+                    account_equity=account_equity,
+                    max_position_pct=base_max_pct,
+                    symbol_cap_pct=symbol_cap_pct,
+                    max_notional_usd=guardrail_notional_cap,
+                )
+                if refreshed_balances:
+                    balances_block = refreshed_balances.get("available_balances")
+                    if isinstance(balances_block, dict):
+                        available_balances_block = balances_block
+                    quote_available_usd, quote_cash_usd = _extract_quote_balances(available_balances_block)
+                    quote_margin_candidates = [
+                        value
+                        for value in (quote_cash_usd, quote_available_usd)
+                        if value is not None and value > 0
+                    ]
+                    isolated_margin_available = max(quote_margin_candidates) if quote_margin_candidates else None
+                    refreshed_available = self._extract_float(refreshed_balances.get("available_eq_usd"))
+                    if refreshed_available is not None:
+                        available_margin_usd = refreshed_available
+                    refreshed_equity = self._extract_float(
+                        refreshed_balances.get("total_eq_usd")
+                        or refreshed_balances.get("total_equity")
+                        or refreshed_balances.get("total_account_value")
+                    )
+                    if refreshed_equity is not None and refreshed_equity > 0:
+                        account_equity = refreshed_equity
+            if isolated_margin_available:
+                available_margin_usd = isolated_margin_available
             else:
                 label = f"{quote_currency} margin" if quote_currency else "quote margin"
                 self._emit_debug(
@@ -2329,9 +2408,51 @@ class MarketService:
             for candidate in quote_margin_candidates:
                 if available_margin_usd is None or candidate > available_margin_usd:
                     available_margin_usd = candidate
-        if available_margin_usd is None and account_equity is not None:
-            available_margin_usd = account_equity
-        if available_margin_usd is None or available_margin_usd <= 0:
+        if available_margin_usd is None:
+            refreshed_margin_snapshot = await _refresh_margin_snapshot()
+            if refreshed_margin_snapshot:
+                refreshed_balances = refreshed_margin_snapshot.get("available_balances")
+                if isinstance(refreshed_balances, dict) and refreshed_balances:
+                    available_balances_block = refreshed_balances
+                    quote_available_usd, quote_cash_usd = _extract_quote_balances(available_balances_block)
+                    quote_margin_candidates = [
+                        value
+                        for value in (quote_cash_usd, quote_available_usd)
+                        if value is not None and value > 0
+                    ]
+                    if not isolated_mode and quote_margin_candidates:
+                        refreshed_candidate = max(quote_margin_candidates)
+                        if refreshed_candidate is not None and (
+                            available_margin_usd is None or refreshed_candidate > available_margin_usd
+                        ):
+                            available_margin_usd = refreshed_candidate
+                refreshed_available = self._extract_float(refreshed_margin_snapshot.get("available_eq_usd"))
+                if refreshed_available is not None and (
+                    available_margin_usd is None or refreshed_available > available_margin_usd
+                ):
+                    available_margin_usd = refreshed_available
+                refreshed_equity = self._extract_float(
+                    refreshed_margin_snapshot.get("total_eq_usd")
+                    or refreshed_margin_snapshot.get("total_equity")
+                    or refreshed_margin_snapshot.get("total_account_value")
+                )
+                if refreshed_equity is not None and refreshed_equity > 0:
+                    account_equity = refreshed_equity
+        if available_margin_usd is None:
+            self._emit_debug(
+                f"Execution skipped for {symbol}: unable to determine available margin"
+            )
+            self._record_execution_feedback(
+                symbol,
+                "Available margin unknown; execution paused",
+                level="warning",
+                meta={
+                    "trade_mode": trade_mode,
+                    "quote_currency": quote_currency,
+                },
+            )
+            return False
+        if available_margin_usd <= 0:
             margin_text = f"{(available_margin_usd or 0.0):.4f}"
             self._emit_debug(
                 f"Execution skipped for {symbol}: insufficient available margin ({margin_text} USD)"
@@ -2371,23 +2492,20 @@ class MarketService:
         requested_take_profit = take_profit_price
         requested_stop_loss = stop_loss_price
 
-        guardrail_notional_cap = None
         clipped_by_cap = False
         cap_reason: str | None = None
-        if account_equity and effective_max_pct:
-            guardrail_notional_cap = max(0.0, account_equity * max_leverage * effective_max_pct)
-            if last_price and guardrail_notional_cap > 0:
-                contract_cap = guardrail_notional_cap / last_price
-                if contract_cap and contract_cap > 0 and raw_size > contract_cap:
-                    raw_size = contract_cap
-                    clipped_by_cap = True
-                    symbol_limit_active = (
-                        symbol_cap_pct is not None
-                        and effective_max_pct is not None
-                        and abs(effective_max_pct - symbol_cap_pct) < 1e-9
-                        and (base_max_pct is None or symbol_cap_pct <= base_max_pct)
-                    )
-                    cap_reason = "symbol cap" if symbol_limit_active else "max position % limit"
+        if guardrail_notional_cap and guardrail_notional_cap > 0 and last_price:
+            contract_cap = guardrail_notional_cap / last_price
+            if contract_cap and contract_cap > 0 and raw_size > contract_cap:
+                raw_size = contract_cap
+                clipped_by_cap = True
+                symbol_limit_active = (
+                    symbol_cap_pct is not None
+                    and effective_max_pct is not None
+                    and abs(effective_max_pct - symbol_cap_pct) < 1e-9
+                    and (base_max_pct is None or symbol_cap_pct <= base_max_pct)
+                )
+                cap_reason = "symbol cap" if symbol_limit_active else "max position % limit"
 
         if (
             clipped_by_cap
