@@ -27,7 +27,7 @@ DEFAULT_DECISION_PROMPT = (
     "'response_schema'."
 )
 
-EXECUTION_FEEDBACK_TTL_SECONDS = 600
+DEFAULT_EXECUTION_FEEDBACK_TTL_SECONDS = 600
 
 RESPONSE_SCHEMA = {
     "type": "object",
@@ -975,6 +975,27 @@ class PromptBuilder:
                 return price_value
         return None
 
+    def _resolve_feedback_ttl_seconds(self) -> int:
+        guardrails: dict[str, Any] | None = None
+        if isinstance(self.metadata, dict):
+            candidate = self.metadata.get("guardrails")
+            if isinstance(candidate, dict):
+                guardrails = candidate
+        if guardrails is None and isinstance(self.snapshot, dict):
+            candidate = self.snapshot.get("guardrails")
+            if isinstance(candidate, dict):
+                guardrails = candidate
+        ttl_value: Any | None = None
+        if guardrails:
+            ttl_value = guardrails.get("execution_feedback_ttl_seconds")
+        if ttl_value is None:
+            return DEFAULT_EXECUTION_FEEDBACK_TTL_SECONDS
+        try:
+            numeric = int(float(ttl_value))
+        except (TypeError, ValueError):
+            return DEFAULT_EXECUTION_FEEDBACK_TTL_SECONDS
+        return max(0, numeric)
+
     def _format_execution_feedback(
         self,
         feedback: Any,
@@ -985,9 +1006,10 @@ class PromptBuilder:
         if not isinstance(feedback, list) or limit <= 0:
             return []
         normalized_symbol = symbol.upper() if symbol else None
+        ttl_seconds = self._resolve_feedback_ttl_seconds()
         cutoff: datetime | None = None
-        if EXECUTION_FEEDBACK_TTL_SECONDS > 0:
-            cutoff = datetime.now(timezone.utc) - timedelta(seconds=EXECUTION_FEEDBACK_TTL_SECONDS)
+        if ttl_seconds > 0:
+            cutoff = datetime.now(timezone.utc) - timedelta(seconds=ttl_seconds)
         selected: list[dict[str, Any]] = []
         for entry in reversed(feedback):
             if not isinstance(entry, dict):
@@ -1108,6 +1130,7 @@ class PromptBuilder:
             "wait_for_tp_sl": False,
             "fallback_orders_enabled": True,
             "min_leverage_confidence_gate": 0.5,
+            "execution_feedback_ttl_seconds": DEFAULT_EXECUTION_FEEDBACK_TTL_SECONDS,
         }
 
     @staticmethod

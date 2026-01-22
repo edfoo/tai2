@@ -2469,6 +2469,13 @@ def register_pages(app: FastAPI) -> None:
             ).classes("w-full md:w-48").props(
                 "hint='Blocks LLM prompts whenever Redis snapshot is older than this' persistent-hint"
             )
+            execution_feedback_ttl_input = ui.number(
+                label="Execution Feedback TTL (sec)",
+                value=guardrails.get("execution_feedback_ttl_seconds", 600),
+                min=0,
+            ).classes("w-full md:w-48").props(
+                "hint='How long warnings/errors stay in prompts before auto-expiring; set 0 to disable' persistent-hint"
+            )
             ui.separator().classes("w-full my-4")
             ui.label("Model, cadence, and prompt controls").classes("text-sm text-slate-500")
             with ui.row().classes("w-full flex-wrap gap-4"):
@@ -3460,6 +3467,14 @@ def register_pages(app: FastAPI) -> None:
                     snapshot_max_age_input.value,
                     config.get("snapshot_max_age_seconds", settings.snapshot_max_age_seconds),
                     int,
+                ),
+                "execution_feedback_ttl_seconds": max(
+                    0,
+                    _coerce(
+                        execution_feedback_ttl_input.value,
+                        guardrails.get("execution_feedback_ttl_seconds", 600),
+                        int,
+                    ),
                 ),
                 "symbol_position_caps": _clean_symbol_caps(),
             }
