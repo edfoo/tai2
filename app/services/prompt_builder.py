@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any, Optional
 
 
@@ -26,6 +26,8 @@ DEFAULT_DECISION_PROMPT = (
     "constraints, fee/credit depletion, or duplicate exposure prevent execution, and describe the blocker. Respond strictly as JSON matching "
     "'response_schema'."
 )
+
+EXECUTION_FEEDBACK_TTL_SECONDS = 600
 
 RESPONSE_SCHEMA = {
     "type": "object",
@@ -983,10 +985,18 @@ class PromptBuilder:
         if not isinstance(feedback, list) or limit <= 0:
             return []
         normalized_symbol = symbol.upper() if symbol else None
+        cutoff: datetime | None = None
+        if EXECUTION_FEEDBACK_TTL_SECONDS > 0:
+            cutoff = datetime.now(timezone.utc) - timedelta(seconds=EXECUTION_FEEDBACK_TTL_SECONDS)
         selected: list[dict[str, Any]] = []
         for entry in reversed(feedback):
             if not isinstance(entry, dict):
                 continue
+            if cutoff is not None:
+                timestamp = entry.get("timestamp")
+                parsed_ts = self._parse_timestamp(timestamp)
+                if parsed_ts and parsed_ts < cutoff:
+                    continue
             entry_symbol = str(entry.get("symbol") or "").upper()
             if normalized_symbol and entry_symbol and entry_symbol != normalized_symbol:
                 continue

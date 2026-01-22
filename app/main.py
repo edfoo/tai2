@@ -460,6 +460,14 @@ def create_app(enable_background_services: bool | None = None) -> FastAPI:
             pairs = fallback or settings.trading_pairs
         return JSONResponse({"pairs": pairs}, status_code=200)
 
+    @app.post("/execution/feedback/clear")
+    async def clear_execution_feedback(symbol: str | None = None) -> JSONResponse:
+        market_service: MarketService | None = app.state.market_service
+        if not market_service:
+            return JSONResponse({"detail": "market service unavailable"}, status_code=503)
+        removed = market_service.clear_execution_feedback(symbol=symbol)
+        return JSONResponse({"removed": removed}, status_code=200)
+
     def _record_websocket_event(message: str, snapshot: dict[str, Any] | None = None) -> None:
         events = getattr(app.state, "websocket_events", None)
         if events is None:

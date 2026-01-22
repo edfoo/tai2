@@ -251,6 +251,8 @@ def register_pages(app: FastAPI) -> None:
         stale_indicator: dict[str, ui.element | None] = {"widget": None}
         manual_refresh_button: dict[str, ui.button | None] = {"widget": None}
         manual_refresh_state = {"busy": False}
+        clear_feedback_button: dict[str, ui.button | None] = {"widget": None}
+        clear_feedback_state = {"busy": False}
         selected_position_symbol = {"value": None}
         page_client = ui.context.client
 
@@ -285,11 +287,21 @@ def register_pages(app: FastAPI) -> None:
                             )
                             notice.set_visibility(False)
                             stale_indicator["widget"] = notice
-                            refresh_btn = ui.button("Refresh Snapshot", icon="refresh")
-                            refresh_btn.classes(
-                                "text-xs bg-slate-900 text-white px-3 py-1 rounded-lg hover:bg-slate-800"
-                            )
-                            manual_refresh_button["widget"] = refresh_btn
+                            action_row = ui.row().classes("gap-2 flex-wrap justify-end")
+                            with action_row:
+                                refresh_btn = ui.button("Refresh Snapshot", icon="refresh")
+                                refresh_btn.classes(
+                                    "text-xs bg-slate-900 text-white px-3 py-1 rounded-lg hover:bg-slate-800"
+                                )
+                                manual_refresh_button["widget"] = refresh_btn
+                                clear_btn = ui.button(
+                                    "Clear Execution Feedback",
+                                    icon="cleaning_services",
+                                )
+                                clear_btn.classes(
+                                    "text-xs bg-amber-600 text-white px-3 py-1 rounded-lg hover:bg-amber-500"
+                                )
+                                clear_feedback_button["widget"] = clear_btn
 
                     with ui.row().classes("w-full gap-4"):
                         balance_card = badge_stat("Account Equity", "--")
@@ -976,11 +988,47 @@ def register_pages(app: FastAPI) -> None:
                     if button:
                         button.enable()
 
+        async def trigger_clear_feedback() -> None:
+            if clear_feedback_state["busy"]:
+                return
+            clear_feedback_state["busy"] = True
+            button = clear_feedback_button.get("widget")
+            with page_client:
+                if button:
+                    button.disable()
+            try:
+                market_service = getattr(app.state, "market_service", None)
+                if not market_service:
+                    with page_client:
+                        ui.notify("Market service unavailable", color="warning")
+                    return
+                removed = market_service.clear_execution_feedback()
+                with page_client:
+                    if removed:
+                        ui.notify(f"Cleared {removed} feedback entries", color="positive")
+                    else:
+                        ui.notify("No execution feedback to clear", color="info")
+            except Exception as exc:  # pragma: no cover - UI feedback
+                with page_client:
+                    ui.notify(f"Feedback clear failed: {exc}", color="negative")
+            finally:
+                clear_feedback_state["busy"] = False
+                with page_client:
+                    if button:
+                        button.enable()
+
         refresh_btn_widget = manual_refresh_button.get("widget")
         if refresh_btn_widget:
             refresh_btn_widget.on(
                 "click",
                 lambda _: asyncio.create_task(trigger_manual_refresh()),
+            )
+
+        clear_btn_widget = clear_feedback_button.get("widget")
+        if clear_btn_widget:
+            clear_btn_widget.on(
+                "click",
+                lambda _: asyncio.create_task(trigger_clear_feedback()),
             )
 
         def update_snapshot_health(snapshot: dict[str, Any] | None) -> None:

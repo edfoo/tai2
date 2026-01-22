@@ -299,15 +299,16 @@ def test_prompt_builder_filters_execution_feedback_per_symbol() -> None:
     snapshot = _sample_snapshot()
     other_symbol = "ETH-USDT-SWAP"
     snapshot["symbols"].append(other_symbol)
+    now = datetime.now(timezone.utc)
     snapshot["execution_feedback"] = [
         {
-            "timestamp": "2026-01-16T09:30:00Z",
+            "timestamp": (now - timedelta(minutes=4)).isoformat(),
             "symbol": other_symbol,
             "message": "ETH warning",
             "level": "warning",
         },
         {
-            "timestamp": "2026-01-16T09:31:00Z",
+            "timestamp": (now - timedelta(minutes=3, seconds=30)).isoformat(),
             "symbol": snapshot["symbol"],
             "message": "BTC info",
             "level": "info",

@@ -1712,6 +1712,25 @@ class MarketService:
                 f"Execution feedback ({level}) {symbol}: {message}{meta_suffix}"
             )
 
+    def clear_execution_feedback(self, symbol: str | None = None) -> int:
+        if not self._execution_feedback:
+            return 0
+        normalized = self._normalize_symbol_key(symbol) if symbol else None
+        if not normalized:
+            removed = len(self._execution_feedback)
+            self._execution_feedback.clear()
+            return removed
+        kept: list[dict[str, Any]] = []
+        for entry in self._execution_feedback:
+            entry_symbol = self._normalize_symbol_key(entry.get("symbol")) if isinstance(entry, dict) else None
+            if entry_symbol == normalized:
+                continue
+            kept.append(entry)
+        removed = len(self._execution_feedback) - len(kept)
+        self._execution_feedback.clear()
+        self._execution_feedback.extend(kept)
+        return removed
+
     @staticmethod
     def _response_success(response: Any) -> bool:
         def _entry_ok(entry: dict[str, Any]) -> bool:
@@ -2329,6 +2348,13 @@ class MarketService:
                 self._emit_debug(f"Margin availability refresh failed: {exc}")
                 return None
             self._refresh_execution_limits_from_account(refreshed_snapshot)
+            if refreshed_snapshot:
+                self._record_execution_feedback(
+                    symbol,
+                    "Account balances refreshed",
+                    level="info",
+                    meta={"source": "okx"},
+                )
             return refreshed_snapshot
 
         quote_available_usd, quote_cash_usd = _extract_quote_balances(available_balances_block)
@@ -2738,6 +2764,17 @@ class MarketService:
         order_id = order.get("ordId") or order.get("orderId") or client_order_id
         self._emit_debug(
             f"OKX order submitted {side.upper()} {raw_size:.4f} {symbol} ({order_id})"
+        )
+        self._record_execution_feedback(
+            symbol,
+            "Order submitted",
+            level="info",
+            meta={
+                "order_id": order_id,
+                "side": side.upper(),
+                "size": round(raw_size, 6),
+                "trade_mode": trade_mode,
+            },
         )
 
         executed_size = self._extract_float(order.get("fillSz") or order.get("sz")) or raw_size
