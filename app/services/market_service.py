@@ -113,6 +113,7 @@ class MarketService:
         "51051",
         "51052",
     }
+    PROTECTION_MIN_OFFSET_RATIO = 0.001  # 0.1% of entry price
     TIER_CACHE_TTL_SECONDS = 600
 
     def __init__(
@@ -3195,6 +3196,19 @@ class MarketService:
             return target <= reference_price
         return False
 
+    def _compute_min_protection_offset(
+        self,
+        symbol: str,
+        reference_price: float | None,
+    ) -> float:
+        if reference_price is None or reference_price <= 0:
+            return 0.0
+        spec = self._instrument_specs.get(symbol) or {}
+        tick = spec.get("tick_size") or 0.0
+        reference_component = reference_price * self.PROTECTION_MIN_OFFSET_RATIO
+        offsets = [value for value in (tick, reference_component) if value and value > 0]
+        return max(offsets) if offsets else 0.0
+
     def _drop_conflicting_target(
         self,
         *,
@@ -3214,7 +3228,45 @@ class MarketService:
             return target
         if target is None or reference_price is None:
             return None
-        direction = "above" if (action == "BUY" and kind == "take-profit") or (action == "SELL" and kind == "stop-loss") else "below"
+        prefer_up = (kind == "take-profit" and action == "BUY") or (
+            kind == "stop-loss" and action == "SELL"
+        )
+        adjusted_target = None
+        offset = self._compute_min_protection_offset(symbol, reference_price)
+        if offset > 0:
+            candidate = reference_price + offset if prefer_up else reference_price - offset
+            if candidate and candidate > 0:
+                adjusted_target = self._quantize_price(
+                    symbol,
+                    candidate,
+                    prefer_up=prefer_up,
+                )
+        if adjusted_target and not self._target_conflicts_with_price(
+            action,
+            target=adjusted_target,
+            reference_price=reference_price,
+            kind=kind,
+        ):
+            direction = "above" if prefer_up else "below"
+            message = (
+                f"{symbol} {kind} adjusted from {target:.6f} to {adjusted_target:.6f} {stage}: nudged {direction} entry price {reference_price:.6f}"
+            )
+            self._emit_debug(message)
+            self._record_execution_feedback(
+                symbol,
+                message,
+                level="info",
+                meta={
+                    "stage": stage,
+                    "kind": kind,
+                    "target": target,
+                    "adjusted_target": adjusted_target,
+                    "reference_price": reference_price,
+                    "action": action,
+                },
+            )
+            return adjusted_target
+        direction = "above" if prefer_up else "below"
         message = (
             f"{symbol} {kind} {target:.6f} invalid {stage}: must be {direction} entry price {reference_price:.6f}"
         )
