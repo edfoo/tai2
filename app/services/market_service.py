@@ -97,6 +97,7 @@ STABLE_CURRENCIES = {"USD", "USDT", "USDC", "USDK", "DAI"}
 FUNDING_ACCOUNT_TYPE = "6"
 TRADING_ACCOUNT_TYPE = "18"
 INSUFFICIENT_MARGIN_CODES = {"59300"}
+ORDER_INSUFFICIENT_MARGIN_CODES = {"51008"}
 
 
 class MarketService:
@@ -177,6 +178,7 @@ class MarketService:
         self._protection_sync_ts: dict[str, float] = {}
         self._execution_feedback: Deque[dict[str, Any]] = deque(maxlen=50)
         self._latest_execution_limits: dict[str, dict[str, Any]] = {}
+        self._last_margin_guidance: dict[str, dict[str, Any]] = {}
         self._position_tiers: dict[str, dict[str, Any]] = {}
         self._subscribed_symbols: set[str] = set()
         self._available_symbols: list[str] = []
@@ -1703,6 +1705,7 @@ class MarketService:
         *,
         level: str = "info",
         meta: dict[str, Any] | None = None,
+        recommendation: dict[str, Any] | None = None,
     ) -> None:
         entry = {
             "symbol": symbol,
@@ -1712,6 +1715,8 @@ class MarketService:
         }
         if meta:
             entry["meta"] = meta
+        if recommendation:
+            entry["recommendation"] = recommendation
         self._execution_feedback.append(entry)
         if level in {"warning", "error"}:
             meta_suffix = ""
@@ -1723,6 +1728,124 @@ class MarketService:
             self._emit_debug(
                 f"Execution feedback ({level}) {symbol}: {message}{meta_suffix}"
             )
+
+    def _set_margin_guidance(self, symbol: str, payload: dict[str, Any] | None) -> None:
+        key = self._normalize_symbol_key(symbol)
+        if not key:
+            return
+        if payload:
+            self._last_margin_guidance[key] = payload
+        else:
+            self._last_margin_guidance.pop(key, None)
+
+    def _get_margin_guidance(self, symbol: str) -> dict[str, Any] | None:
+        key = self._normalize_symbol_key(symbol)
+        if not key:
+            return None
+        return self._last_margin_guidance.get(key)
+
+    def _should_attach_margin_recommendation(
+        self,
+        error_meta: dict[str, Any] | None,
+        error_message: str | None,
+    ) -> bool:
+        codes: set[str] = set()
+        if error_meta:
+            for key in ("sCode", "code"):
+                value = error_meta.get(key)
+                if value in (None, ""):
+                    continue
+                codes.add(str(value))
+        for code in codes:
+            if code in ORDER_INSUFFICIENT_MARGIN_CODES:
+                return True
+        text_blocks = []
+        if error_message:
+            text_blocks.append(str(error_message))
+        if error_meta:
+            text_blocks.append(json.dumps(error_meta, default=str))
+        combined = " ".join(text_blocks).lower()
+        if "insufficient" in combined and "margin" in combined:
+            return True
+        return False
+
+    def _build_margin_recommendation(self, symbol: str) -> dict[str, Any] | None:
+        context = self._get_margin_guidance(symbol)
+        if not context:
+            return None
+        needed = self._extract_float(context.get("required_gap"))
+        if not needed or needed <= 0:
+            return None
+        quote_currency = str(context.get("quote_currency") or "USDT").upper()
+        limit = self._extract_float(context.get("seed_limit"))
+        funding_available = self._extract_float(context.get("funding_available"))
+        attempted = bool(context.get("auto_seed_attempted"))
+        success = bool(context.get("auto_seed_success"))
+        blocked_reason = context.get("blocked_reason")
+        configured = bool(context.get("auto_seed_configured")) or bool(limit and limit > 0)
+        message: str
+        if not attempted:
+            if not configured:
+                message = (
+                    f"Configure isolated-margin auto-seed for {symbol} to cover ~{needed:.2f} {quote_currency} by "
+                    "setting 'isolated_margin_seed_usd' or a symbol override."
+                )
+            else:
+                cap_text = f"{limit:.2f} {quote_currency}" if limit else "the current limit"
+                message = (
+                    f"Auto-seed cap {cap_text} was not triggered; raise the limit or reduce request so at least {needed:.2f} {quote_currency} can move into isolated margin."
+                )
+        elif not success:
+            if blocked_reason == "limit_exceeded":
+                if limit and limit > 0:
+                    message = (
+                        f"Increase isolated seed cap for {symbol} above {needed:.2f} {quote_currency} "
+                        f"(current cap {limit:.2f})."
+                    )
+                else:
+                    message = (
+                        f"Increase isolated seed cap to at least {needed:.2f} {quote_currency}."
+                    )
+            elif blocked_reason == "funding_insufficient":
+                available = funding_available if funding_available is not None else 0.0
+                message = (
+                    f"Funding wallet only has {available:.2f} {quote_currency}; deposit or transfer ≥{needed:.2f} to enable auto-seed."
+                )
+            elif blocked_reason == "transfer_error":
+                message = (
+                    "Funding transfer failed; verify Funding API permissions and account status."
+                )
+            elif blocked_reason == "funding_api_unavailable":
+                message = (
+                    "Enable Funding API credentials so the engine can transfer collateral automatically."
+                )
+            elif blocked_reason == "transfer_rejected":
+                message = (
+                    "OKX rejected the funding transfer; confirm sub-account permissions and daily transfer caps."
+                )
+            elif blocked_reason == "no_limit_configured":
+                message = (
+                    f"Set 'isolated_margin_seed_usd' or add a {symbol} override so the engine can move {needed:.2f} {quote_currency}."
+                )
+            else:
+                message = (
+                    f"Auto-seed blocked ({blocked_reason or 'unknown reason'}); ensure guardrail limits cover {needed:.2f} {quote_currency}."
+                )
+        else:
+            message = (
+                f"OKX still reported insufficient margin after transferring {needed:.2f} {quote_currency}. Increase guardrail limits or reduce position size."
+            )
+        recommendation = dict(context)
+        recommendation.update(
+            {
+                "message": message,
+                "needed": needed,
+                "quote_currency": quote_currency,
+                "seed_limit": limit,
+                "funding_available": funding_available,
+            }
+        )
+        return recommendation
 
     def clear_execution_feedback(self, symbol: str | None = None) -> int:
         if not self._execution_feedback:
@@ -1891,13 +2014,31 @@ class MarketService:
         quote_currency: str | None,
         required_gap: float,
         guardrails: dict[str, Any] | None,
-    ) -> bool:
-        if not self._funding_api or not quote_currency or required_gap <= 0:
-            return False
-        limit = self._resolve_isolated_seed_limit(guardrails, symbol)
+        seed_limit: float | None = None,
+    ) -> dict[str, Any]:
+        seed_result = {
+            "success": False,
+            "needed": required_gap,
+            "limit": seed_limit,
+            "funding_available": None,
+            "blocked_reason": None,
+            "currency": (quote_currency or "").upper() if quote_currency else None,
+        }
+        if not self._funding_api:
+            seed_result["blocked_reason"] = "funding_api_unavailable"
+            return seed_result
+        if not quote_currency or required_gap <= 0:
+            seed_result["blocked_reason"] = "no_gap"
+            return seed_result
+        limit = seed_limit
         if limit is None:
-            return False
+            limit = self._resolve_isolated_seed_limit(guardrails, symbol)
+        seed_result["limit"] = limit
+        if limit is None or limit <= 0:
+            seed_result["blocked_reason"] = "no_limit_configured"
+            return seed_result
         if required_gap - limit > 1e-6:
+            seed_result["blocked_reason"] = "limit_exceeded"
             self._record_execution_feedback(
                 symbol,
                 "Auto-seed skipped: required transfer exceeds configured limit",
@@ -1910,10 +2051,12 @@ class MarketService:
             self._emit_debug(
                 f"Isolated auto-seed blocked for {symbol}: needed {required_gap:.4f} exceeds limit {limit:.4f}"
             )
-            return False
+            return seed_result
         currency = quote_currency.upper()
         funding_available = await self._fetch_funding_balance(currency)
+        seed_result["funding_available"] = funding_available
         if funding_available is not None and funding_available + 1e-6 < required_gap:
+            seed_result["blocked_reason"] = "funding_insufficient"
             self._record_execution_feedback(
                 symbol,
                 "Auto-seed skipped: funding balance insufficient",
@@ -1926,7 +2069,7 @@ class MarketService:
             self._emit_debug(
                 f"Funding balance insufficient for {symbol}: need {required_gap:.4f} {currency}, have {funding_available:.4f}"
             )
-            return False
+            return seed_result
         formatted_amount = self._format_price(required_gap)
         sub_account = self._sub_account if self._sub_account_use_master else None
         try:
@@ -1940,6 +2083,7 @@ class MarketService:
                 subAcct=sub_account or "",
             )
         except Exception as exc:  # pragma: no cover - network dependency
+            seed_result["blocked_reason"] = "transfer_error"
             self._emit_debug(f"Funding transfer failed for {symbol}: {exc}")
             self._record_execution_feedback(
                 symbol,
@@ -1947,8 +2091,9 @@ class MarketService:
                 level="error",
                 meta={"error": str(exc)},
             )
-            return False
+            return seed_result
         if not self._response_success(response):
+            seed_result["blocked_reason"] = "transfer_rejected"
             code, sub_code, message = self._extract_response_codes(response)
             self._record_execution_feedback(
                 symbol,
@@ -1963,7 +2108,7 @@ class MarketService:
             self._emit_debug(
                 f"Auto-seed transfer rejected for {symbol}: code={code} sCode={sub_code} detail={message or response}"
             )
-            return False
+            return seed_result
         self._emit_debug(
             f"Auto-seeded {formatted_amount} {currency} from funding to trading for {symbol}"
         )
@@ -1973,7 +2118,8 @@ class MarketService:
             level="info",
             meta={"currency": currency, "amount": formatted_amount},
         )
-        return True
+        seed_result["success"] = True
+        return seed_result
 
     async def _ensure_isolated_margin_buffer(
         self,
@@ -2009,6 +2155,15 @@ class MarketService:
         required_gap = amount - current_margin
         if required_gap <= 0:
             return None
+        seed_limit = self._resolve_isolated_seed_limit(guardrails, symbol) if guardrails else None
+        margin_guidance_payload = {
+            "quote_currency": quote_currency,
+            "required_gap": required_gap,
+            "seed_limit": seed_limit,
+            "auto_seed_attempted": False,
+            "auto_seed_configured": bool(seed_limit and seed_limit > 0),
+        }
+        self._set_margin_guidance(symbol, margin_guidance_payload)
         pos_side = "long" if action == "BUY" else "short"
         if not dual_side_mode:
             pos_side = "net"
@@ -2039,13 +2194,25 @@ class MarketService:
             return None
         if not self._response_success(response):
             if guardrails and self._response_indicates_insufficient_margin(response):
-                seeded = await self._seed_isolated_margin_from_funding(
+                seed_result = await self._seed_isolated_margin_from_funding(
                     symbol=symbol,
                     quote_currency=quote_currency,
                     required_gap=required_gap,
                     guardrails=guardrails,
+                    seed_limit=seed_limit,
                 )
-                if seeded:
+                updated_guidance = dict(margin_guidance_payload)
+                updated_guidance.update(
+                    {
+                        "auto_seed_attempted": True,
+                        "auto_seed_success": bool(seed_result.get("success")),
+                        "funding_available": seed_result.get("funding_available"),
+                        "blocked_reason": seed_result.get("blocked_reason"),
+                        "seed_limit": seed_result.get("limit", seed_limit),
+                    }
+                )
+                self._set_margin_guidance(symbol, updated_guidance)
+                if seed_result.get("success"):
                     response = await _call_adjustment()
                     if response is None:
                         return None
@@ -3641,11 +3808,15 @@ class MarketService:
                 attachments_to_use = None
                 continue
             error_message, error_meta = self._extract_order_error(response)
+            recommendation: dict[str, Any] | None = None
+            if self._should_attach_margin_recommendation(error_meta, error_message):
+                recommendation = self._build_margin_recommendation(symbol)
             self._record_execution_feedback(
                 symbol,
                 error_message,
                 level="error",
                 meta=error_meta or None,
+                recommendation=recommendation,
             )
             return None, False
 

@@ -1036,6 +1036,7 @@ class PromptBuilder:
                     "message": entry.get("message"),
                     "level": entry.get("level"),
                     "meta": entry.get("meta"),
+                    "recommendation": entry.get("recommendation"),
                 }
             )
         return formatted

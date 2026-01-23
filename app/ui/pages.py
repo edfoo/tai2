@@ -254,6 +254,7 @@ def register_pages(app: FastAPI) -> None:
         clear_feedback_button: dict[str, ui.button | None] = {"widget": None}
         clear_feedback_state = {"busy": False}
         selected_position_symbol = {"value": None}
+        execution_feed_refs: dict[str, Any] = {"container": None, "empty": None}
         page_client = ui.context.client
 
         def set_ws_status(active: bool) -> None:
@@ -748,7 +749,25 @@ def register_pages(app: FastAPI) -> None:
                         )
                         llm_card_container = ui.column().classes("w-full gap-3")
 
+                    with ui.card().classes(
+                        "w-full p-4 gap-3 bg-white border border-slate-200 rounded-2xl shadow-[0_18px_40px_rgba(15,23,42,0.08)]"
+                    ):
+                        ui.label("Execution Alerts").classes("text-xl font-semibold text-slate-900")
+                        ui.label(
+                            "Guardrail warnings, OKX errors, and margin tips"
+                        ).classes("text-sm text-slate-500")
+                        execution_empty_state = ui.label(
+                            "No execution feedback in the last window."
+                        ).classes("text-sm text-slate-400")
+                        execution_feed_refs["empty"] = execution_empty_state
+                        execution_feed_refs["container"] = ui.column().classes(
+                            "w-full gap-3"
+                        )
+
         def format_llm_timestamp(raw: str | None) -> str:
+            return format_iso_timestamp(raw, fmt="%H:%M:%S %Z")
+
+        def format_feedback_timestamp(raw: str | None) -> str:
             return format_iso_timestamp(raw, fmt="%H:%M:%S %Z")
 
         def format_decision_value(value: Any) -> str:
@@ -815,7 +834,106 @@ def register_pages(app: FastAPI) -> None:
                                     if desc:
                                         ui.label(desc).classes("text-[11px] text-slate-400")
 
+        def render_execution_feedback(snapshot: dict[str, Any] | None) -> None:
+            container = execution_feed_refs.get("container")
+            empty_state = execution_feed_refs.get("empty")
+            if container is None or empty_state is None:
+                return
+            entries: list[dict[str, Any]] = []
+            if snapshot:
+                payload = snapshot.get("execution_feedback")
+                if isinstance(payload, list):
+                    entries = payload
+            container.clear()
+            if not entries:
+                empty_state.set_visibility(True)
+                return
+            empty_state.set_visibility(False)
+            recent = list(entries)[-8:]
+            recent.reverse()
+
+            def _level_classes(level_value: str) -> tuple[str, str]:
+                mapping = {
+                    "error": ("border-rose-200 bg-rose-50", "text-rose-700"),
+                    "warning": ("border-amber-200 bg-amber-50", "text-amber-700"),
+                    "info": ("border-sky-200 bg-sky-50", "text-sky-700"),
+                }
+                return mapping.get(level_value, ("border-slate-200 bg-slate-50", "text-slate-600"))
+
+            def _to_float(value: Any) -> float | None:
+                try:
+                    return float(value)
+                except (TypeError, ValueError):
+                    return None
+
+            with container:
+                for entry in recent:
+                    level = str(entry.get("level") or "info").lower()
+                    card_class, pill_text_class = _level_classes(level)
+                    symbol = entry.get("symbol") or "--"
+                    timestamp = format_feedback_timestamp(entry.get("timestamp"))
+                    message = entry.get("message") or "--"
+                    recommendation = entry.get("recommendation")
+                    recommendation = recommendation if isinstance(recommendation, dict) else None
+                    meta = entry.get("meta") if isinstance(entry.get("meta"), dict) else None
+                    with ui.column().classes(
+                        f"w-full p-3 rounded-2xl border {card_class} shadow-sm gap-2"
+                    ):
+                        with ui.row().classes("w-full items-center justify-between gap-2"):
+                            ui.label(symbol).classes("text-sm font-semibold text-slate-900")
+                            with ui.row().classes("items-center gap-2"):
+                                ui.label(level.upper()).classes(
+                                    f"text-[11px] font-semibold tracking-wide px-2 py-1 rounded-full bg-white/70 {pill_text_class}"
+                                )
+                                ui.label(timestamp).classes("text-xs text-slate-500")
+                        ui.label(message).classes("text-sm text-slate-700")
+                        if recommendation:
+                            currency = str(recommendation.get("quote_currency") or "").upper()
+                            needed = _to_float(recommendation.get("needed"))
+                            seed_limit = _to_float(recommendation.get("seed_limit"))
+                            funding_available = _to_float(recommendation.get("funding_available"))
+                            with ui.column().classes(
+                                "w-full rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 gap-1"
+                            ):
+                                ui.label("Recommendation").classes(
+                                    "text-[11px] font-semibold text-amber-700 uppercase tracking-wide"
+                                )
+                                ui.label(recommendation.get("message") or "").classes(
+                                    "text-sm text-amber-900 font-medium"
+                                )
+                                detail_bits: list[str] = []
+                                if needed is not None:
+                                    need_label = f"Need ≈{needed:,.2f}"
+                                    if currency:
+                                        need_label = f"{need_label} {currency}"
+                                    detail_bits.append(need_label)
+                                if seed_limit is not None:
+                                    limit_label = f"Cap {seed_limit:,.2f}"
+                                    if currency:
+                                        limit_label = f"{limit_label} {currency}"
+                                    detail_bits.append(limit_label)
+                                if funding_available is not None:
+                                    funding_label = f"Funding {funding_available:,.2f}"
+                                    if currency:
+                                        funding_label = f"{funding_label} {currency}"
+                                    detail_bits.append(funding_label)
+                                if detail_bits:
+                                    ui.label(" · ".join(detail_bits)).classes("text-xs text-amber-700")
+                        chips: list[str] = []
+                        if meta:
+                            for key in ("code", "sCode"):
+                                value = meta.get(key)
+                                if value:
+                                    chips.append(f"{key}: {value}")
+                        if chips:
+                            with ui.row().classes("flex-wrap gap-2"):
+                                for chip in chips:
+                                    ui.label(chip).classes(
+                                        "text-[11px] px-2 py-1 rounded-full bg-white/70 text-slate-600 font-medium"
+                                    )
+
         refresh_llm_cards()
+        render_execution_feedback(last_snapshot["value"])
         ui.timer(15, refresh_llm_cards)
 
         def _format_credit_amount(usage: dict[str, Any] | None) -> str:
@@ -1004,6 +1122,9 @@ def register_pages(app: FastAPI) -> None:
                     return
                 removed = market_service.clear_execution_feedback()
                 with page_client:
+                    if removed and last_snapshot["value"] is not None:
+                        last_snapshot["value"]["execution_feedback"] = []
+                        render_execution_feedback(last_snapshot["value"])
                     if removed:
                         ui.notify(f"Cleared {removed} feedback entries", color="positive")
                     else:
@@ -1343,6 +1464,7 @@ def register_pages(app: FastAPI) -> None:
                         normalized_symbol = candidate
                         break
             update_position_chart(normalized_symbol)
+            render_execution_feedback(snapshot)
 
             now = time.monotonic()
             if now - equity_refresh["last"] > 30:
