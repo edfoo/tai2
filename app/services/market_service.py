@@ -1847,6 +1847,16 @@ class MarketService:
         )
         return recommendation
 
+    def _fallback_margin_recommendation(self, symbol: str) -> dict[str, Any]:
+        quote_currency = self._quote_currency_from_symbol(symbol) or "USDT"
+        return {
+            "message": (
+                f"Transfer additional {quote_currency} collateral into the trading account "
+                f"or raise the isolated margin seed guardrail for {symbol}."
+            ),
+            "quote_currency": quote_currency,
+        }
+
     def clear_execution_feedback(self, symbol: str | None = None) -> int:
         if not self._execution_feedback:
             return 0
@@ -3811,6 +3821,8 @@ class MarketService:
             recommendation: dict[str, Any] | None = None
             if self._should_attach_margin_recommendation(error_meta, error_message):
                 recommendation = self._build_margin_recommendation(symbol)
+                if recommendation is None:
+                    recommendation = self._fallback_margin_recommendation(symbol)
             self._record_execution_feedback(
                 symbol,
                 error_message,

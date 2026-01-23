@@ -6,6 +6,7 @@
 - Introduced `test_handle_llm_auto_seeds_isolated_margin` to cover the new funding transfer flow.
 - Attached structured margin recommendations to execution-feedback entries when OKX rejects orders for insufficient isolated collateral, plus regression coverage for the new path.
 - Surfaced a real-time Execution Alerts panel on the LIVE page so operators immediately see guardrail warnings and recommended configuration tweaks.
+- Added a fallback margin recommendation for OKX 51008 errors so Execution Alerts always show an actionable hint, and captured the scenario in `test_submit_order_attaches_fallback_recommendation_without_guidance`.
 
 ## 2026-01-22
 - Updated `_normalize_account_balances()` so OKX snapshots preserve `None` for unknown margin fields instead of defaulting to zero.

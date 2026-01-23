@@ -943,3 +943,51 @@ def test_submit_order_records_margin_recommendation() -> None:
     assert recommendation
     assert "Funding wallet" in recommendation.get("message", "")
     assert recommendation.get("quote_currency") == "USDT"
+
+
+def test_submit_order_attaches_fallback_recommendation_without_guidance() -> None:
+    class RejectingTradeApi:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def place_order(self, **payload: Any) -> dict[str, Any]:
+            self.calls += 1
+            return {
+                "code": "1",
+                "msg": "Insufficient margin",
+                "data": [
+                    {
+                        "sCode": "51008",
+                        "sMsg": "Insufficient isolated margin",
+                    }
+                ],
+            }
+
+    async def scenario() -> dict[str, Any]:
+        state = DummySnapshotStore()
+        trade_api = RejectingTradeApi()
+        service = MarketService(
+            state_service=state,
+            enable_websocket=False,
+            trade_api=trade_api,
+            account_api=object(),
+            market_api=object(),
+            public_api=object(),
+        )
+        await service._submit_order(
+            symbol=service.symbol,
+            side="BUY",
+            pos_side=None,
+            size=1.0,
+            trade_mode="isolated",
+            order_type="market",
+            reduce_only=False,
+            client_order_id="fallback",
+            attach_algo_orders=None,
+        )
+        return service._execution_feedback[-1]
+
+    latest = asyncio.run(scenario())
+    recommendation = latest.get("recommendation")
+    assert recommendation
+    assert "Transfer additional" in recommendation.get("message", "")
