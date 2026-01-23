@@ -842,10 +842,14 @@ class MarketService:
                 lot_size = self._extract_float(entry.get("lotSz"))
                 min_size = self._extract_float(entry.get("minSz"))
                 tick_size = self._extract_float(entry.get("tickSz"))
+                max_market_size = self._extract_float(entry.get("maxMktSz"))
+                max_limit_size = self._extract_float(entry.get("maxLmtSz"))
                 self._instrument_specs[symbol] = {
                     "lot_size": lot_size or 0.0,
                     "min_size": min_size or 0.0,
                     "tick_size": tick_size or 0.0,
+                    "max_market_size": max_market_size or 0.0,
+                    "max_limit_size": max_limit_size or 0.0,
                 }
         if not pairs:
             return list(self.symbols)
@@ -2655,6 +2659,29 @@ class MarketService:
             tier_initial_margin_ratio=tier_initial_margin_ratio,
             tier_source="position-tiers" if tier_cap_limit is not None else None,
         )
+
+        spec = self._instrument_specs.get(symbol) or {}
+        per_order_limit = None
+        if order_type == "market":
+            per_order_limit = spec.get("max_market_size") or spec.get("max_limit_size")
+        else:
+            per_order_limit = spec.get("max_limit_size") or spec.get("max_market_size")
+        if per_order_limit and per_order_limit > 0 and raw_size > per_order_limit:
+            previous_size = raw_size
+            raw_size = per_order_limit
+            self._emit_debug(
+                f"{symbol} size clipped to {per_order_limit:.6f} by OKX per-order limit"
+            )
+            self._record_execution_feedback(
+                symbol,
+                "Size clipped by OKX per-order limit",
+                level="info",
+                meta={
+                    "order_type": order_type,
+                    "previous_size": previous_size,
+                    "per_order_limit": per_order_limit,
+                },
+            )
 
         if raw_size < min_size:
             self._emit_debug(

@@ -81,6 +81,7 @@ Available Margin from OKX
 - If OKX returns errors like `51008`, the feedback is cached and the LLM is instructed to HOLD until the operator tops up margin or reduces other positions.
 - **Execution Feedback TTL** controls how long those warnings stay sticky; lower the value (or set to 0) when you want blockers to auto-expire quickly once conditions improve.
 - TP/SL guardrails now nudge invalid targets instead of dropping them; protections are shifted by at least `max(tick_size, 0.1% of entry)` so they stay on the correct side while the adjustment is logged for visibility.
+- Venue-specific order caps are enforced automatically: if a market/limit instruction exceeds OKX `maxMktSz`/`maxLmtSz`, the size is clipped to the allowed maximum and logged before the order is sent.
 
 ---
 
