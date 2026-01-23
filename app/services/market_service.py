@@ -63,6 +63,7 @@ try:  # pragma: no cover - import guarded for optional dependency
     import okx.MarketData as OkxMarket
     import okx.PublicData as OkxPublic
     import okx.TradingData as OkxTrading
+    import okx.Funding as OkxFunding
     from okx.websocket.WsPublicAsync import WsPublicAsync
 except ImportError:  # pragma: no cover
     OkxAccount = None
@@ -70,6 +71,7 @@ except ImportError:  # pragma: no cover
     OkxMarket = None
     OkxPublic = None
     OkxTrading = None
+    OkxFunding = None
     WsPublicAsync = None
 
 if WsPublicAsync is not None:  # pragma: no cover - exercised only when dependency installed
@@ -92,6 +94,9 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 PUBLIC_WS_URL = "wss://ws.okx.com:8443/ws/v5/public"
 STABLE_CURRENCIES = {"USD", "USDT", "USDC", "USDK", "DAI"}
+FUNDING_ACCOUNT_TYPE = "6"
+TRADING_ACCOUNT_TYPE = "18"
+INSUFFICIENT_MARGIN_CODES = {"59300"}
 
 
 class MarketService:
@@ -130,6 +135,7 @@ class MarketService:
         public_api: Any | None = None,
         trading_api: Any | None = None,
         trade_api: Any | None = None,
+        funding_api: Any | None = None,
         websocket_factory: Callable[[str], WsPublicAsync] | None = None,
         enable_websocket: bool = True,
         log_sink: Callable[[str], None] | None = None,
@@ -147,6 +153,7 @@ class MarketService:
         self._public_api = public_api or self._build_public_api()
         self._trading_api = trading_api or self._build_trading_api()
         self._trade_api = trade_api or self._build_trade_api()
+        self._funding_api = funding_api or self._build_funding_api()
         default_ws_class = SafeWsPublicAsync or WsPublicAsync
         self._websocket_factory = websocket_factory or default_ws_class
         self._enable_websocket = enable_websocket
@@ -1754,6 +1761,35 @@ class MarketService:
                 )
         return True
 
+    @staticmethod
+    def _extract_response_codes(response: Any) -> tuple[str | None, str | None, str | None]:
+        code: str | None = None
+        sub_code: str | None = None
+        message: str | None = None
+        if isinstance(response, dict):
+            raw_code = response.get("code")
+            code = str(raw_code).strip() if raw_code not in (None, "") else None
+            message = response.get("msg")
+            data_block = response.get("data")
+            if isinstance(data_block, list) and data_block:
+                first = data_block[0]
+                if isinstance(first, dict):
+                    raw_sub_code = first.get("sCode") or first.get("code")
+                    sub_code = (
+                        str(raw_sub_code).strip()
+                        if raw_sub_code not in (None, "")
+                        else None
+                    )
+                    message = first.get("sMsg") or first.get("msg") or message
+        return code, sub_code, message
+
+    def _response_indicates_insufficient_margin(self, response: Any) -> bool:
+        code, sub_code, _ = self._extract_response_codes(response)
+        for candidate in (code, sub_code):
+            if candidate and candidate in INSUFFICIENT_MARGIN_CODES:
+                return True
+        return False
+
     def _estimate_isolated_margin_requirement(
         self,
         *,
@@ -1791,6 +1827,154 @@ class MarketService:
         buffer = max(price_value * 0.01, margin * 0.05, 10.0)
         return margin + buffer
 
+    def _resolve_isolated_seed_limit(
+        self,
+        guardrails: dict[str, Any] | None,
+        symbol: str,
+    ) -> float | None:
+        if not isinstance(guardrails, dict):
+            return None
+        symbol_key = self._normalize_symbol_key(symbol) or symbol
+        overrides = guardrails.get("isolated_margin_symbol_seeds_usd")
+        limit = None
+        if isinstance(overrides, dict) and symbol_key:
+            for candidate_key in {symbol_key, symbol}:
+                if not candidate_key:
+                    continue
+                value = overrides.get(candidate_key)
+                parsed = self._extract_float(value)
+                if parsed and parsed > 0:
+                    limit = parsed
+                    break
+        if limit is None:
+            limit = self._extract_float(guardrails.get("isolated_margin_seed_usd"))
+        global_cap = self._extract_float(guardrails.get("isolated_margin_max_transfer_usd"))
+        if limit is None:
+            limit = global_cap
+        elif global_cap and global_cap > 0:
+            limit = min(limit, global_cap)
+        if limit is None or limit <= 0:
+            return None
+        return limit
+
+    async def _fetch_funding_balance(self, currency: str) -> float | None:
+        if not self._funding_api:
+            return None
+        try:
+            response = await asyncio.to_thread(
+                self._funding_api.get_balances,
+                currency,
+            )
+        except Exception as exc:  # pragma: no cover - network dependency
+            self._emit_debug(f"Funding balance fetch failed for {currency}: {exc}")
+            return None
+        entries = self._safe_data(response)
+        if not entries:
+            return None
+        target = (currency or "").upper()
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            entry_currency = str(entry.get("ccy") or "").upper()
+            if entry_currency != target:
+                continue
+            for key in ("availBal", "availEq", "cashBal", "bal", "available"):
+                value = self._extract_float(entry.get(key))
+                if value is not None:
+                    return value
+        return None
+
+    async def _seed_isolated_margin_from_funding(
+        self,
+        *,
+        symbol: str,
+        quote_currency: str | None,
+        required_gap: float,
+        guardrails: dict[str, Any] | None,
+    ) -> bool:
+        if not self._funding_api or not quote_currency or required_gap <= 0:
+            return False
+        limit = self._resolve_isolated_seed_limit(guardrails, symbol)
+        if limit is None:
+            return False
+        if required_gap - limit > 1e-6:
+            self._record_execution_feedback(
+                symbol,
+                "Auto-seed skipped: required transfer exceeds configured limit",
+                level="warning",
+                meta={
+                    "needed_usd": required_gap,
+                    "limit_usd": limit,
+                },
+            )
+            self._emit_debug(
+                f"Isolated auto-seed blocked for {symbol}: needed {required_gap:.4f} exceeds limit {limit:.4f}"
+            )
+            return False
+        currency = quote_currency.upper()
+        funding_available = await self._fetch_funding_balance(currency)
+        if funding_available is not None and funding_available + 1e-6 < required_gap:
+            self._record_execution_feedback(
+                symbol,
+                "Auto-seed skipped: funding balance insufficient",
+                level="warning",
+                meta={
+                    "needed_usd": required_gap,
+                    "available_funding": funding_available,
+                },
+            )
+            self._emit_debug(
+                f"Funding balance insufficient for {symbol}: need {required_gap:.4f} {currency}, have {funding_available:.4f}"
+            )
+            return False
+        formatted_amount = self._format_price(required_gap)
+        sub_account = self._sub_account if self._sub_account_use_master else None
+        try:
+            response = await asyncio.to_thread(
+                self._funding_api.funds_transfer,
+                ccy=currency,
+                amt=formatted_amount,
+                from_=FUNDING_ACCOUNT_TYPE,
+                to=TRADING_ACCOUNT_TYPE,
+                type="0",
+                subAcct=sub_account or "",
+            )
+        except Exception as exc:  # pragma: no cover - network dependency
+            self._emit_debug(f"Funding transfer failed for {symbol}: {exc}")
+            self._record_execution_feedback(
+                symbol,
+                "Auto-seed transfer failed",
+                level="error",
+                meta={"error": str(exc)},
+            )
+            return False
+        if not self._response_success(response):
+            code, sub_code, message = self._extract_response_codes(response)
+            self._record_execution_feedback(
+                symbol,
+                "Auto-seed transfer rejected",
+                level="error",
+                meta={
+                    "code": code,
+                    "sCode": sub_code,
+                    "message": message,
+                },
+            )
+            self._emit_debug(
+                f"Auto-seed transfer rejected for {symbol}: code={code} sCode={sub_code} detail={message or response}"
+            )
+            return False
+        self._emit_debug(
+            f"Auto-seeded {formatted_amount} {currency} from funding to trading for {symbol}"
+        )
+        self._record_execution_feedback(
+            symbol,
+            f"Auto-seeded {formatted_amount} {currency} to restore isolated margin",
+            level="info",
+            meta={"currency": currency, "amount": formatted_amount},
+        )
+        return True
+
     async def _ensure_isolated_margin_buffer(
         self,
         *,
@@ -1806,6 +1990,7 @@ class MarketService:
         max_position_pct: float | None,
         symbol_cap_pct: float | None,
         max_notional_usd: float | None,
+        guardrails: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         if not self._account_api:
             return None
@@ -1829,33 +2014,72 @@ class MarketService:
             pos_side = "net"
         formatted_amount = self._format_price(required_gap)
         sub_account = self._sub_account if self._sub_account_use_master else None
-        try:
-            response = await asyncio.to_thread(
-                self._account_api.adjust_isolated_margin,
-                symbol,
-                pos_side,
-                formatted_amount,
-                type="add",
-                subAcct=sub_account,
-            )
-        except Exception as exc:  # pragma: no cover - network dependency
-            self._emit_debug(f"Isolated margin top-up failed for {symbol}: {exc}")
-            self._record_execution_feedback(
-                symbol,
-                "Failed to add isolated margin",
-                level="error",
-                meta={"error": str(exc)},
-            )
+        async def _call_adjustment() -> Any | None:
+            try:
+                return await asyncio.to_thread(
+                    self._account_api.adjust_isolated_margin,
+                    symbol,
+                    pos_side,
+                    formatted_amount,
+                    type="add",
+                    subAcct=sub_account,
+                )
+            except Exception as exc:  # pragma: no cover - network dependency
+                self._emit_debug(f"Isolated margin top-up failed for {symbol}: {exc}")
+                self._record_execution_feedback(
+                    symbol,
+                    "Failed to add isolated margin",
+                    level="error",
+                    meta={"error": str(exc)},
+                )
+                return None
+
+        response = await _call_adjustment()
+        if response is None:
             return None
         if not self._response_success(response):
-            self._emit_debug(f"Isolated margin top-up rejected for {symbol}: {response}")
-            self._record_execution_feedback(
-                symbol,
-                "Isolated margin top-up rejected",
-                level="error",
-                meta={"response": response},
-            )
-            return None
+            if guardrails and self._response_indicates_insufficient_margin(response):
+                seeded = await self._seed_isolated_margin_from_funding(
+                    symbol=symbol,
+                    quote_currency=quote_currency,
+                    required_gap=required_gap,
+                    guardrails=guardrails,
+                )
+                if seeded:
+                    response = await _call_adjustment()
+                    if response is None:
+                        return None
+                    if not self._response_success(response):
+                        self._emit_debug(
+                            f"Isolated margin retry rejected for {symbol} after auto-seed: {response}"
+                        )
+                        self._record_execution_feedback(
+                            symbol,
+                            "Isolated margin top-up rejected",
+                            level="error",
+                            meta={"response": response},
+                        )
+                        return None
+                else:
+                    self._emit_debug(
+                        f"Isolated margin top-up rejected for {symbol}: {response}"
+                    )
+                    self._record_execution_feedback(
+                        symbol,
+                        "Isolated margin top-up rejected",
+                        level="error",
+                        meta={"response": response},
+                    )
+                    return None
+            else:
+                self._emit_debug(f"Isolated margin top-up rejected for {symbol}: {response}")
+                self._record_execution_feedback(
+                    symbol,
+                    "Isolated margin top-up rejected",
+                    level="error",
+                    meta={"response": response},
+                )
+                return None
         label = quote_currency or "margin"
         self._record_execution_feedback(
             symbol,
@@ -2216,35 +2440,45 @@ class MarketService:
         if not self._trade_api:
             self._emit_debug("Trade API unavailable; cannot execute decision")
             return False
-
-        trade_mode = str(execution_cfg.get("trade_mode") or "cross").lower()
-        if trade_mode not in {"cross", "isolated"}:
+        instrument_spec = self._instrument_specs.get(symbol) or {}
+        market_block = context.get("market") or {}
+        last_price = self._extract_float(
+            market_block.get("last_price")
+            or market_block.get("last")
+            or market_block.get("price")
+        )
+        if last_price is None:
+            last_price = self._extract_float(decision.get("last_price"))
+        if last_price is None:
+            last_price = self._extract_float(
+                (self._latest_ticker.get(symbol) or {}).get("last")
+            )
+        execution_trade_mode = execution_cfg.get("trade_mode") or "cross"
+        trade_mode = str(execution_trade_mode).lower()
+        if trade_mode not in {"isolated", "cross"}:
             trade_mode = "cross"
         isolated_mode = trade_mode == "isolated"
         order_type = str(execution_cfg.get("order_type") or "market").lower()
-        if order_type != "market":
-            order_type = "market"
-        min_size = self._extract_float(execution_cfg.get("min_size")) or 0.001
-
-        market_block = context.get("market") or {}
-        last_price = (
-            self._extract_float(market_block.get("last_price"))
-            or self._extract_float(market_block.get("bid"))
-            or self._extract_float(market_block.get("ask"))
-        )
-        if last_price is None:
-            ticker_snapshot = self._latest_ticker.get(symbol, {})
-            last_price = self._extract_float(ticker_snapshot.get("last"))
-
+        min_size = self._extract_float(execution_cfg.get("min_size"))
+        if min_size is None:
+            min_size = self._extract_float(
+                instrument_spec.get("min_size")
+                or instrument_spec.get("lot_size")
+            )
+        if min_size is None:
+            min_size = 0.0
         account_block = context.get("account") or {}
         account_equity = self._extract_float(
             account_block.get("account_equity")
-            or account_block.get("total_account_value")
             or account_block.get("total_eq_usd")
+            or account_block.get("total_equity")
+            or account_block.get("total_account_value")
         )
         base_max_pct = self._extract_float(guardrails.get("max_position_pct"))
-        symbol_cap_pct = None
         symbol_caps = guardrails.get("symbol_position_caps")
+        if not isinstance(symbol_caps, dict):
+            symbol_caps = {}
+        symbol_cap_pct: float | None = None
         if isinstance(symbol_caps, dict):
             symbol_cap_pct = self._extract_float(
                 symbol_caps.get(symbol)
@@ -2396,6 +2630,7 @@ class MarketService:
                     max_position_pct=base_max_pct,
                     symbol_cap_pct=symbol_cap_pct,
                     max_notional_usd=guardrail_notional_cap,
+                    guardrails=guardrails,
                 )
                 if refreshed_balances:
                     balances_block = refreshed_balances.get("available_balances")
@@ -3002,12 +3237,27 @@ class MarketService:
         )
         return OkxTradeAdapter(raw_api)
 
+    def _build_funding_api(self) -> Any | None:
+        if OkxFunding is None:
+            logger.warning("python-okx not installed; FundingAPI unavailable")
+            return None
+        if not (self.settings.okx_api_key and self.settings.okx_secret_key and self.settings.okx_passphrase):
+            logger.warning("OKX credentials missing; FundingAPI disabled")
+            return None
+        return OkxFunding.FundingAPI(
+            api_key=self.settings.okx_api_key,
+            api_secret_key=self.settings.okx_secret_key,
+            passphrase=self.settings.okx_passphrase,
+            flag=self._okx_flag,
+        )
+
     def _rebuild_okx_clients(self) -> None:
         self._account_api = self._build_account_api()
         self._market_api = self._build_market_api()
         self._public_api = self._build_public_api()
         self._trading_api = self._build_trading_api()
         self._trade_api = self._build_trade_api()
+        self._funding_api = self._build_funding_api()
 
     @staticmethod
     def _format_size(value: float) -> str:

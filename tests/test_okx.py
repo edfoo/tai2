@@ -610,6 +610,146 @@ def test_handle_llm_top_up_when_margin_partially_funded(monkeypatch: pytest.Monk
     assert trade_api.payloads, "order should proceed after top-up"
 
 
+def test_handle_llm_auto_seeds_isolated_margin(monkeypatch: pytest.MonkeyPatch) -> None:
+    class DummyTradeApi:
+        def __init__(self) -> None:
+            self.payloads: list[dict[str, Any]] = []
+
+        def place_order(self, **payload: Any) -> dict[str, Any]:
+            self.payloads.append(payload)
+            return {"code": "0", "data": [{"sCode": "0", "ordId": "1"}]}
+
+    class DummyAccountApi:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+            self.fail_once = True
+
+        def adjust_isolated_margin(
+            self,
+            instId: str,
+            posSide: str,
+            amt: str,
+            *,
+            type: str = "add",
+            loanTrans: str = "",
+            subAcct: str | None = None,
+        ) -> dict[str, Any]:
+            self.calls.append(
+                {
+                    "instId": instId,
+                    "posSide": posSide,
+                    "amt": amt,
+                    "type": type,
+                    "subAcct": subAcct,
+                }
+            )
+            if self.fail_once:
+                self.fail_once = False
+                return {"code": "59300", "msg": "insufficient balance"}
+            return {"code": "0", "data": [{"sCode": "0"}]}
+
+    class DummyFundingApi:
+        def __init__(self) -> None:
+            self.transfers: list[dict[str, Any]] = []
+
+        def funds_transfer(self, **params: Any) -> dict[str, Any]:
+            self.transfers.append(params)
+            return {"code": "0", "data": [{"sCode": "0"}]}
+
+        def get_balances(self, ccy: str) -> list[dict[str, Any]]:
+            return [{"ccy": ccy, "availBal": "500"}]
+
+    class BalanceResponder:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def __call__(self) -> dict[str, Any]:
+            self.calls += 1
+            if self.calls == 1:
+                return {
+                    "available_balances": {},
+                    "available_eq_usd": 0.0,
+                    "total_eq_usd": 150.0,
+                }
+            return {
+                "available_balances": {
+                    "USDT": {
+                        "currency": "USDT",
+                        "available": 200.0,
+                        "available_usd": 200.0,
+                        "cash": 200.0,
+                    }
+                },
+                "available_eq_usd": 200.0,
+                "total_eq_usd": 310.0,
+            }
+
+    async def scenario() -> tuple[DummyAccountApi, DummyFundingApi, DummyTradeApi, bool]:
+        state = DummySnapshotStore()
+        account_api = DummyAccountApi()
+        funding_api = DummyFundingApi()
+        trade_api = DummyTradeApi()
+        service = MarketService(
+            state_service=state,
+            enable_websocket=False,
+            trade_api=trade_api,
+            account_api=account_api,
+            funding_api=funding_api,
+            market_api=None,
+            public_api=None,
+        )
+
+        balance_responder = BalanceResponder()
+
+        async def fake_fetch_account_balance(_self: MarketService) -> dict[str, Any]:
+            return await balance_responder()
+
+        service._fetch_account_balance = MethodType(fake_fetch_account_balance, service)
+
+        async def fake_fetch_positions(*args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+            return []
+
+        monkeypatch.setattr(service, "_fetch_positions", fake_fetch_positions)
+        monkeypatch.setattr(
+            service,
+            "_compute_leverage_adjusted_size",
+            lambda **kwargs: 1.5,
+        )
+
+        context = {
+            "symbol": service.symbol,
+            "guardrails": {
+                    "min_leverage": 0.1,
+                "max_leverage": 3,
+                "max_position_pct": 0.5,
+                "isolated_margin_seed_usd": 250.0,
+                "isolated_margin_max_transfer_usd": 400.0,
+            },
+            "market": {"last_price": 100},
+            "account": {
+                "account_equity": 150,
+                "available_eq_usd": 0.0,
+                "available_balances": {},
+            },
+            "execution": {
+                "enabled": True,
+                "trade_mode": "isolated",
+                "order_type": "market",
+                "min_size": 0.001,
+            },
+            "positions": [],
+        }
+        decision = {"action": "BUY", "confidence": 0.9, "position_size": 1.5}
+        executed = await service.handle_llm_decision(decision, context)
+        return account_api, funding_api, trade_api, executed
+
+    account_api, funding_api, trade_api, executed = asyncio.run(scenario())
+    assert executed is True
+    assert len(account_api.calls) >= 2, "margin adjustment should retry after transfer"
+    assert funding_api.transfers, "expected funding transfer before retry"
+    assert trade_api.payloads, "order should be placed after auto-seed"
+
+
 def test_handle_llm_blocks_when_margin_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
     class DummyTradeApi:
         def place_order(self, **payload: Any) -> dict[str, Any]:  # pragma: no cover - should not run

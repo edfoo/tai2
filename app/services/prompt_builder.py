@@ -1131,6 +1131,9 @@ class PromptBuilder:
             "fallback_orders_enabled": True,
             "min_leverage_confidence_gate": 0.5,
             "execution_feedback_ttl_seconds": DEFAULT_EXECUTION_FEEDBACK_TTL_SECONDS,
+            "isolated_margin_seed_usd": None,
+            "isolated_margin_symbol_seeds_usd": {},
+            "isolated_margin_max_transfer_usd": None,
         }
 
     @staticmethod

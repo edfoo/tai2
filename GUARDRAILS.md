@@ -83,6 +83,15 @@ Available Margin from OKX
 - TP/SL guardrails now nudge invalid targets instead of dropping them; protections are shifted by at least `max(tick_size, 0.1% of entry)` so they stay on the correct side while the adjustment is logged for visibility.
 - Venue-specific order caps are enforced automatically: if a market/limit instruction exceeds OKX `maxMktSz`/`maxLmtSz`, the size is clipped to the allowed maximum and logged before the order is sent.
 
+### Auto-Seeding Isolated Margin
+
+- When OKX rejects an isolated top-up with `59300` (insufficient balance), the engine now attempts a one-shot transfer from **Funding → Trading** before retrying the adjustment.
+- Two guardrail knobs control this behavior:
+    - `isolated_margin_seed_usd` / per-symbol overrides define the maximum USDT that may be moved for each symbol.
+    - `isolated_margin_max_transfer_usd` caps every transfer regardless of symbol.
+- Transfers only trigger in isolated mode, require a configured quote currency (e.g., USDT), and respect Funding balances—if the wallet is empty or limits are too low, the trade is blocked and a warning is recorded.
+- Configure these values in **CFG → Execution Guardrails → Isolated Margin Auto-Seed** to keep isolated buckets topped off without logging into OKX.
+
 ---
 
 ## 6. Risk Locks Recap

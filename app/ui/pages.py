@@ -2209,6 +2209,9 @@ def register_pages(app: FastAPI) -> None:
         )
         guardrails.setdefault("symbol_position_caps", {})
         guardrails.setdefault("min_leverage_confidence_gate", 0.5)
+        guardrails.setdefault("isolated_margin_seed_usd", None)
+        guardrails.setdefault("isolated_margin_max_transfer_usd", None)
+        guardrails.setdefault("isolated_margin_symbol_seeds_usd", {})
         if "wait_for_tp_sl" not in config:
             config["wait_for_tp_sl"] = bool(guardrails.get("wait_for_tp_sl", False))
         guardrails.setdefault("wait_for_tp_sl", bool(config.get("wait_for_tp_sl")))
@@ -2476,6 +2479,28 @@ def register_pages(app: FastAPI) -> None:
             ).classes("w-full md:w-48").props(
                 "hint='How long warnings/errors stay in prompts before auto-expiring; set 0 to disable' persistent-hint"
             )
+            ui.separator().classes("w-full my-3")
+            ui.label("Isolated Margin Auto-Seed").classes("text-sm font-semibold text-slate-600")
+            ui.label(
+                "Transfers USDT from funding into trading before retrying isolated margin top-ups when code 59300 appears."
+            ).classes("text-xs text-slate-500")
+            with ui.row().classes("w-full flex-wrap gap-4"):
+                isolated_seed_default_input = ui.number(
+                    label="Default Funding Transfer (USDT)",
+                    value=guardrails.get("isolated_margin_seed_usd"),
+                    min=0,
+                    step=1,
+                ).classes("w-full md:w-56").props(
+                    "hint='Maximum USDT auto-moved per symbol before retrial; leave blank to disable' persistent-hint"
+                )
+                isolated_seed_max_input = ui.number(
+                    label="Global Transfer Cap (USDT)",
+                    value=guardrails.get("isolated_margin_max_transfer_usd"),
+                    min=0,
+                    step=1,
+                ).classes("w-full md:w-56").props(
+                    "hint='Absolute ceiling for any auto-seed attempt; blank means no extra cap' persistent-hint"
+                )
             ui.separator().classes("w-full my-4")
             ui.label("Model, cadence, and prompt controls").classes("text-sm text-slate-500")
             with ui.row().classes("w-full flex-wrap gap-4"):
@@ -2599,10 +2624,12 @@ def register_pages(app: FastAPI) -> None:
                                         ]
                                         min_size_overrides.pop(sym_key, None)
                                         symbol_cap_overrides.pop(sym_key, None)
+                                        isolated_seed_overrides.pop(sym_key, None)
                                         config["trading_pairs"] = selected_trading_pairs.copy()
                                         render_trading_pair_rows()
                                         render_min_size_rows()
                                         render_symbol_cap_rows()
+                                        render_isolated_seed_rows()
 
                                     return _handler
 
@@ -2620,6 +2647,7 @@ def register_pages(app: FastAPI) -> None:
                 render_trading_pair_rows()
                 render_min_size_rows()
                 render_symbol_cap_rows()
+                render_isolated_seed_rows()
 
             def on_trading_pair_select(event: Any) -> None:
                 add_trading_pair(getattr(event, "value", None))
@@ -2665,6 +2693,13 @@ def register_pages(app: FastAPI) -> None:
                         continue
                     symbol_cap_overrides[str(symbol).upper()] = numeric
                 symbol_cap_widgets: dict[str, ui.number] = {}
+                isolated_seed_overrides: dict[str, float] = {}
+                for symbol, value in (guardrails.get("isolated_margin_symbol_seeds_usd", {}) or {}).items():
+                    numeric = _safe_float(value)
+                    if numeric is None or numeric <= 0:
+                        continue
+                    isolated_seed_overrides[str(symbol).upper()] = numeric
+                isolated_seed_widgets: dict[str, ui.number] = {}
 
                 def sync_widget(sym_key: str, value: float | None) -> None:
                     widget = override_widgets.get(sym_key)
@@ -2845,6 +2880,64 @@ def register_pages(app: FastAPI) -> None:
                                 ui.button("Clear", on_click=clear_cap(normalized)).props("flat dense")
 
                 render_symbol_cap_rows()
+                ui.label("Per-Symbol Auto-Seed (USDT)").classes("text-xs text-slate-500")
+                ui.label(
+                    "Limits how much USDT each symbol may borrow from the funding account during auto-seed retries."
+                ).classes("text-xs text-slate-500 italic")
+                isolated_seed_rows = ui.column().classes("w-full gap-2")
+
+                def render_isolated_seed_rows() -> None:
+                    isolated_seed_rows.clear()
+                    isolated_seed_widgets.clear()
+                    symbols_list = sorted(config.get("trading_pairs", []))
+                    for symbol in symbols_list:
+                        normalized = str(symbol).upper()
+                        with isolated_seed_rows:
+                            with ui.row().classes("w-full items-start gap-2"):
+                                ui.label(symbol).classes("text-sm font-semibold text-slate-600 w-32")
+                                seed_input = ui.number(
+                                    label="Transfer cap (USDT)",
+                                    value=isolated_seed_overrides.get(normalized),
+                                    min=0,
+                                    step=1,
+                                    placeholder="Follow default",
+                                ).classes("flex-1").props(
+                                    "outlined dense hint='Max USDT auto-moved for this symbol when isolated margin is empty' persistent-hint"
+                                )
+                                isolated_seed_widgets[normalized] = seed_input
+
+                                def seed_handler(sym_key: str) -> Callable[[Any], None]:
+                                    def _handler(event: Any) -> None:
+                                        try:
+                                            value = event.value
+                                            if value in (None, ""):
+                                                isolated_seed_overrides.pop(sym_key, None)
+                                            else:
+                                                numeric = float(value)
+                                                if numeric <= 0:
+                                                    isolated_seed_overrides.pop(sym_key, None)
+                                                else:
+                                                    isolated_seed_overrides[sym_key] = numeric
+                                        except (TypeError, ValueError):
+                                            isolated_seed_overrides.pop(sym_key, None)
+                                        update_payload_preview()
+                                    return _handler
+
+                                seed_input.on_value_change(seed_handler(normalized))
+
+                                def clear_seed(sym_key: str) -> Callable[[Any], None]:
+                                    def _handler(_: Any) -> None:
+                                        isolated_seed_overrides.pop(sym_key, None)
+                                        widget = isolated_seed_widgets.get(sym_key)
+                                        if widget:
+                                            widget.value = None
+                                            widget.update()
+                                        update_payload_preview()
+                                    return _handler
+
+                                ui.button("Clear", on_click=clear_seed(normalized)).props("flat dense")
+
+                render_isolated_seed_rows()
                 okx_sub_account_input = ui.input(
                     label="OKX Sub-Account",
                     value=config.get("okx_sub_account") or "",
@@ -2987,6 +3080,15 @@ def register_pages(app: FastAPI) -> None:
                 cleaned[symbol] = numeric
             return cleaned
 
+        def _clean_isolated_seed_overrides() -> dict[str, float]:
+            cleaned: dict[str, float] = {}
+            for symbol, value in isolated_seed_overrides.items():
+                numeric = _safe_float(value)
+                if numeric is None or numeric <= 0:
+                    continue
+                cleaned[symbol] = numeric
+            return cleaned
+
         def build_guardrails_snapshot() -> dict[str, Any]:
             snapshot_max_pct = _percent_to_fraction(max_position_pct_input.value)
             if snapshot_max_pct is None:
@@ -3011,6 +3113,10 @@ def register_pages(app: FastAPI) -> None:
             }
             symbol_caps_preview = _clean_symbol_caps()
             snapshot["symbol_position_caps"] = symbol_caps_preview or None
+            snapshot["isolated_margin_seed_usd"] = _safe_float(isolated_seed_default_input.value)
+            snapshot["isolated_margin_max_transfer_usd"] = _safe_float(isolated_seed_max_input.value)
+            seed_overrides_preview = _clean_isolated_seed_overrides()
+            snapshot["isolated_margin_symbol_seeds_usd"] = seed_overrides_preview or None
             return snapshot
 
         async def hydrate_execution_settings() -> None:
@@ -3168,6 +3274,8 @@ def register_pages(app: FastAPI) -> None:
                 require_alignment_switch,
                 wait_for_tp_sl_switch,
                 fallback_orders_switch,
+                isolated_seed_default_input,
+                isolated_seed_max_input,
             ]
             for widget in listeners:
                 widget.on_value_change(lambda _: update_payload_preview())
@@ -3477,6 +3585,9 @@ def register_pages(app: FastAPI) -> None:
                     ),
                 ),
                 "symbol_position_caps": _clean_symbol_caps(),
+                "isolated_margin_seed_usd": _safe_float(isolated_seed_default_input.value),
+                "isolated_margin_max_transfer_usd": _safe_float(isolated_seed_max_input.value),
+                "isolated_margin_symbol_seeds_usd": _clean_isolated_seed_overrides(),
             }
             config["snapshot_max_age_seconds"] = config["guardrails"].get(
                 "snapshot_max_age_seconds",
