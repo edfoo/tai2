@@ -866,6 +866,15 @@ def register_pages(app: FastAPI) -> None:
                 except (TypeError, ValueError):
                     return None
 
+            def _format_bool_flag(value: Any) -> str | None:
+                if isinstance(value, bool):
+                    return "yes" if value else "no"
+                if isinstance(value, (int, float)):
+                    return "yes" if value else "no"
+                if value in (None, ""):
+                    return None
+                return str(value)
+
             with container:
                 for entry in recent:
                     level = str(entry.get("level") or "info").lower()
@@ -919,6 +928,40 @@ def register_pages(app: FastAPI) -> None:
                                     detail_bits.append(funding_label)
                                 if detail_bits:
                                     ui.label(" · ".join(detail_bits)).classes("text-xs text-amber-700")
+                                guidance_rows: list[tuple[str, str]] = []
+                                required_gap = _to_float(recommendation.get("required_gap"))
+                                if required_gap is not None and (needed is None or abs(required_gap - needed) > 1e-6):
+                                    gap_label = f"{required_gap:,.2f}"
+                                    if currency:
+                                        gap_label = f"{gap_label} {currency}"
+                                    guidance_rows.append(("Guardrail gap", gap_label))
+                                for label, key in (
+                                    ("Auto-seed configured", "auto_seed_configured"),
+                                    ("Auto-seed attempted", "auto_seed_attempted"),
+                                    ("Auto-seed success", "auto_seed_success"),
+                                ):
+                                    formatted = _format_bool_flag(recommendation.get(key))
+                                    if formatted:
+                                        guidance_rows.append((label, formatted))
+                                blocked_reason = recommendation.get("blocked_reason")
+                                if blocked_reason:
+                                    guidance_rows.append(("Blocked reason", str(blocked_reason)))
+                                updated_at = recommendation.get("updated_at")
+                                if updated_at:
+                                    guidance_rows.append(("Updated at", str(updated_at)))
+                                if guidance_rows:
+                                    with ui.column().classes(
+                                        "w-full rounded-xl border border-amber-100 bg-white/70 px-3 py-2 gap-1"
+                                    ):
+                                        ui.label("Guidance snapshot").classes(
+                                            "text-[10px] font-semibold uppercase tracking-wide text-amber-600"
+                                        )
+                                        for label, value in guidance_rows:
+                                            with ui.row().classes(
+                                                "w-full justify-between text-[11px] text-amber-800 gap-2"
+                                            ):
+                                                ui.label(label).classes("font-medium text-amber-700")
+                                                ui.label(value).classes("text-amber-900")
                         chips: list[str] = []
                         if meta:
                             for key in ("code", "sCode"):

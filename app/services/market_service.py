@@ -1849,13 +1849,32 @@ class MarketService:
 
     def _fallback_margin_recommendation(self, symbol: str) -> dict[str, Any]:
         quote_currency = self._quote_currency_from_symbol(symbol) or "USDT"
-        return {
-            "message": (
-                f"Transfer additional {quote_currency} collateral into the trading account "
-                f"or raise the isolated margin seed guardrail for {symbol}."
-            ),
-            "quote_currency": quote_currency,
-        }
+        guidance = self._get_margin_guidance(symbol)
+        payload: dict[str, Any] = {}
+        if isinstance(guidance, dict):
+            payload.update(guidance)
+        payload.update(
+            {
+                "message": (
+                    f"Transfer additional {quote_currency} collateral into the trading account "
+                    f"or raise the isolated margin seed guardrail for {symbol}."
+                ),
+                "quote_currency": quote_currency,
+            }
+        )
+        if "needed" not in payload:
+            required_gap = self._extract_float(payload.get("required_gap"))
+            if required_gap is not None:
+                payload["needed"] = required_gap
+        if "seed_limit" not in payload and guidance:
+            seed_limit = self._extract_float(guidance.get("seed_limit"))
+            if seed_limit is not None:
+                payload["seed_limit"] = seed_limit
+        if "funding_available" not in payload and guidance:
+            funding_available = self._extract_float(guidance.get("funding_available"))
+            if funding_available is not None:
+                payload["funding_available"] = funding_available
+        return payload
 
     def clear_execution_feedback(self, symbol: str | None = None) -> int:
         if not self._execution_feedback:
@@ -2147,38 +2166,154 @@ class MarketService:
         symbol_cap_pct: float | None,
         max_notional_usd: float | None,
         guardrails: dict[str, Any] | None = None,
-    ) -> dict[str, Any] | None:
+        min_size: float | None = None,
+    ) -> tuple[dict[str, Any] | None, float | None]:
         if not self._account_api:
-            return None
-        amount = self._estimate_isolated_margin_requirement(
-            size=size,
-            price=last_price,
-            min_leverage=min_leverage,
-            account_equity=account_equity,
-            max_position_pct=max_position_pct,
-            symbol_cap_pct=symbol_cap_pct,
-            max_notional_usd=max_notional_usd,
-        )
-        if not amount or amount <= 0:
-            return None
+            return None, None
+
+        adjusted_size: float | None = None
+        current_size = size
         current_margin = self._extract_float(available_margin_usd) or 0.0
-        required_gap = amount - current_margin
-        if required_gap <= 0:
-            return None
-        seed_limit = self._resolve_isolated_seed_limit(guardrails, symbol) if guardrails else None
-        margin_guidance_payload = {
-            "quote_currency": quote_currency,
-            "required_gap": required_gap,
-            "seed_limit": seed_limit,
-            "auto_seed_attempted": False,
-            "auto_seed_configured": bool(seed_limit and seed_limit > 0),
-        }
-        self._set_margin_guidance(symbol, margin_guidance_payload)
+        iteration = 0
+        final_required_gap: float | None = None
+        final_seed_limit: float | None = None
+        final_guidance: dict[str, Any] | None = None
+
+        while True:
+            iteration += 1
+            amount = self._estimate_isolated_margin_requirement(
+                size=current_size,
+                price=last_price,
+                min_leverage=min_leverage,
+                account_equity=account_equity,
+                max_position_pct=max_position_pct,
+                symbol_cap_pct=symbol_cap_pct,
+                max_notional_usd=max_notional_usd,
+            )
+            if not amount or amount <= 0:
+                return None, adjusted_size
+            required_gap = amount - current_margin
+            if required_gap <= 0:
+                return None, adjusted_size
+            seed_limit = self._resolve_isolated_seed_limit(guardrails, symbol) if guardrails else None
+            margin_guidance_payload = {
+                "quote_currency": quote_currency,
+                "required_gap": required_gap,
+                "seed_limit": seed_limit,
+                "auto_seed_attempted": False,
+                "auto_seed_configured": bool(seed_limit and seed_limit > 0),
+            }
+            self._set_margin_guidance(symbol, margin_guidance_payload)
+
+            if (
+                seed_limit is not None
+                and seed_limit > 0
+                and required_gap - seed_limit > 1e-6
+            ):
+                if not current_size or current_size <= 0:
+                    self._record_execution_feedback(
+                        symbol,
+                        "Auto-seed skipped: required transfer exceeds configured limit",
+                        level="warning",
+                        meta={
+                            "needed_usd": required_gap,
+                            "limit_usd": seed_limit,
+                        },
+                    )
+                    self._emit_debug(
+                        f"Isolated auto-seed blocked for {symbol}: needed {required_gap:.4f} exceeds limit {seed_limit:.4f}"
+                    )
+                    return None, adjusted_size
+                scale = max(min(seed_limit / required_gap, 1.0), 0.0)
+                clipped_size = current_size * scale
+                quantized = self._quantize_order_size(symbol, clipped_size) if clipped_size > 0 else None
+                if quantized is None or quantized <= 0:
+                    margin_guidance_payload.update({"blocked_reason": "limit_exceeded"})
+                    self._set_margin_guidance(symbol, margin_guidance_payload)
+                    self._record_execution_feedback(
+                        symbol,
+                        "Auto-seed skipped: required transfer exceeds configured limit",
+                        level="warning",
+                        meta={
+                            "needed_usd": required_gap,
+                            "limit_usd": seed_limit,
+                            "auto_downsize_failed": True,
+                        },
+                    )
+                    self._emit_debug(
+                        f"Isolated auto-seed blocked for {symbol}: unable to downsize below lot size"
+                    )
+                    return None, adjusted_size
+                if min_size and quantized < min_size:
+                    margin_guidance_payload.update(
+                        {
+                            "blocked_reason": "limit_exceeded",
+                            "auto_downsize_blocked": "min_size",
+                        }
+                    )
+                    self._set_margin_guidance(symbol, margin_guidance_payload)
+                    self._record_execution_feedback(
+                        symbol,
+                        "Auto-downsize blocked by instrument minimum size",
+                        level="warning",
+                        meta={
+                            "min_size": min_size,
+                            "target_size": quantized,
+                            "limit_usd": seed_limit,
+                        },
+                    )
+                    return None, adjusted_size
+                if current_size and abs(quantized - current_size) <= max(1e-9, current_size * 1e-6):
+                    self._emit_debug(
+                        f"Auto-downsize for {symbol} stalled; quantized target ({quantized:.6f}) matches current size"
+                    )
+                    margin_guidance_payload.update({"blocked_reason": "limit_exceeded"})
+                    self._set_margin_guidance(symbol, margin_guidance_payload)
+                    return None, adjusted_size
+
+                adjusted_size = quantized
+                downsized_payload = dict(margin_guidance_payload)
+                downsized_payload.update(
+                    {
+                        "auto_downsize_active": True,
+                        "auto_downsize_scale": scale,
+                        "auto_downsize_previous_size": current_size,
+                        "auto_downsize_target_size": quantized,
+                    }
+                )
+                self._set_margin_guidance(symbol, downsized_payload)
+                self._record_execution_feedback(
+                    symbol,
+                    "Size clipped to fit isolated margin seed limit",
+                    level="warning",
+                    meta={
+                        "previous_size": current_size,
+                        "target_size": quantized,
+                        "required_gap": required_gap,
+                        "seed_limit": seed_limit,
+                    },
+                )
+                current_size = quantized
+                continue
+
+            final_required_gap = required_gap
+            final_seed_limit = seed_limit
+            final_guidance = margin_guidance_payload
+            break
+
+        if final_required_gap is None:
+            return None, adjusted_size
+
+        required_gap = final_required_gap
+        seed_limit = final_seed_limit
+        margin_guidance_payload = final_guidance or {}
+
         pos_side = "long" if action == "BUY" else "short"
         if not dual_side_mode:
             pos_side = "net"
         formatted_amount = self._format_price(required_gap)
         sub_account = self._sub_account if self._sub_account_use_master else None
+
         async def _call_adjustment() -> Any | None:
             try:
                 return await asyncio.to_thread(
@@ -2201,7 +2336,7 @@ class MarketService:
 
         response = await _call_adjustment()
         if response is None:
-            return None
+            return None, adjusted_size
         if not self._response_success(response):
             if guardrails and self._response_indicates_insufficient_margin(response):
                 seed_result = await self._seed_isolated_margin_from_funding(
@@ -2225,7 +2360,7 @@ class MarketService:
                 if seed_result.get("success"):
                     response = await _call_adjustment()
                     if response is None:
-                        return None
+                        return None, adjusted_size
                     if not self._response_success(response):
                         self._emit_debug(
                             f"Isolated margin retry rejected for {symbol} after auto-seed: {response}"
@@ -2236,7 +2371,7 @@ class MarketService:
                             level="error",
                             meta={"response": response},
                         )
-                        return None
+                        return None, adjusted_size
                 else:
                     self._emit_debug(
                         f"Isolated margin top-up rejected for {symbol}: {response}"
@@ -2247,7 +2382,7 @@ class MarketService:
                         level="error",
                         meta={"response": response},
                     )
-                    return None
+                    return None, adjusted_size
             else:
                 self._emit_debug(f"Isolated margin top-up rejected for {symbol}: {response}")
                 self._record_execution_feedback(
@@ -2256,7 +2391,7 @@ class MarketService:
                     level="error",
                     meta={"response": response},
                 )
-                return None
+                return None, adjusted_size
         label = quote_currency or "margin"
         self._record_execution_feedback(
             symbol,
@@ -2267,7 +2402,7 @@ class MarketService:
         refreshed = await self._fetch_account_balance()
         if refreshed:
             self._refresh_execution_limits_from_account(refreshed)
-        return refreshed
+        return refreshed, adjusted_size
 
     def _refresh_execution_limits_from_account(self, account_payload: dict[str, Any] | None) -> None:
         if not isinstance(account_payload, dict):
@@ -2794,7 +2929,7 @@ class MarketService:
                 isolated_margin_available is None
                 or isolated_margin_available < required_isolated_margin
             ):
-                refreshed_balances = await self._ensure_isolated_margin_buffer(
+                refreshed_balances, downsized_size = await self._ensure_isolated_margin_buffer(
                     symbol=symbol,
                     action=action,
                     dual_side_mode=dual_side_mode,
@@ -2808,7 +2943,10 @@ class MarketService:
                     symbol_cap_pct=symbol_cap_pct,
                     max_notional_usd=guardrail_notional_cap,
                     guardrails=guardrails,
+                    min_size=min_size,
                 )
+                if downsized_size is not None and downsized_size > 0:
+                    raw_size = downsized_size
                 if refreshed_balances:
                     balances_block = refreshed_balances.get("available_balances")
                     if isinstance(balances_block, dict):

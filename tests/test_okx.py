@@ -991,3 +991,80 @@ def test_submit_order_attaches_fallback_recommendation_without_guidance() -> Non
     recommendation = latest.get("recommendation")
     assert recommendation
     assert "Transfer additional" in recommendation.get("message", "")
+
+
+def test_isolated_margin_buffer_auto_downsizes_to_seed_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    class DummyAccountApi:
+        def __init__(self) -> None:
+            self.adjust_calls: list[dict[str, Any]] = []
+
+        def adjust_isolated_margin(self, symbol, pos_side, amount, type="add", subAcct="") -> dict[str, Any]:
+            self.adjust_calls.append(
+                {
+                    "symbol": symbol,
+                    "pos_side": pos_side,
+                    "amount": amount,
+                }
+            )
+            return {"code": "0"}
+
+        def get_account_balance(self, subAcct: str | None = None) -> list[dict[str, Any]]:
+            return [
+                {
+                    "totalEq": "1000",
+                    "details": [
+                        {
+                            "ccy": "USDT",
+                            "eq": "1000",
+                            "eqUsd": "1000",
+                            "availEq": "100",
+                            "availBal": "100",
+                            "availEqUsd": "100",
+                        }
+                    ],
+                }
+            ]
+
+    async def scenario() -> tuple[float | None, list[dict[str, Any]]]:
+        state = DummySnapshotStore()
+        account_api = DummyAccountApi()
+        service = MarketService(
+            state_service=state,
+            enable_websocket=False,
+            account_api=account_api,
+            market_api=object(),
+            public_api=object(),
+        )
+        service._instrument_specs[service.symbol] = {
+            "lot_size": 0.1,
+            "min_size": 0.1,
+            "tick_size": 0.0001,
+        }
+
+        refreshed, downsized = await service._ensure_isolated_margin_buffer(
+            symbol=service.symbol,
+            action="BUY",
+            dual_side_mode=False,
+            min_leverage=1.0,
+            size=200.0,
+            last_price=1.0,
+            quote_currency="USDT",
+            available_margin_usd=0.0,
+            account_equity=1000.0,
+            max_position_pct=0.5,
+            symbol_cap_pct=0.5,
+            max_notional_usd=500.0,
+            guardrails={"isolated_margin_seed_usd": 50.0},
+            min_size=0.1,
+        )
+        assert refreshed is not None
+        return downsized, list(service._execution_feedback)
+
+    downsized_size, feedback_entries = asyncio.run(scenario())
+    assert downsized_size is not None
+    assert downsized_size < 200.0
+    assert downsized_size == pytest.approx(40.0, rel=1e-2)
+    assert any(
+        entry.get("message") == "Size clipped to fit isolated margin seed limit"
+        for entry in feedback_entries
+    )
