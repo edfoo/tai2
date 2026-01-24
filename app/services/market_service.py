@@ -1006,7 +1006,7 @@ class MarketService:
 
     async def _fetch_position_tiers(self, symbol: str, trade_mode: str = "cross") -> list[dict[str, Any]]:
         """Hit the OKX public tier endpoint and normalize its payload."""
-        if not self._public_api:
+        if not self._public_api or not hasattr(self._public_api, "get_position_tiers"):
             return []
         kwargs: dict[str, Any] = {
             "instType": "SWAP",
@@ -2220,6 +2220,8 @@ class MarketService:
         max_position_pct: float | None,
         symbol_cap_pct: float | None,
         max_notional_usd: float | None,
+        tier_initial_margin_ratio: float | None = None,
+        tier_max_notional: float | None = None,
     ) -> float | None:
         """Estimate how much isolated margin the requested notional would consume."""
         size_value = self._extract_float(size)
@@ -2242,9 +2244,16 @@ class MarketService:
             cap_value = self._extract_float(max_notional_usd)
             if cap_value:
                 notional_caps.append(cap_value)
+        tier_cap_value = self._extract_float(tier_max_notional)
+        if tier_cap_value:
+            notional_caps.append(tier_cap_value)
         if notional_caps:
             requested_notional = min(requested_notional, max(notional_caps))
-        margin = requested_notional / leverage_floor
+        tier_imr = self._extract_float(tier_initial_margin_ratio)
+        if tier_imr and tier_imr > 0:
+            margin = requested_notional * tier_imr
+        else:
+            margin = requested_notional / leverage_floor
         buffer = max(price_value * 0.01, margin * 0.05, 10.0)
         return margin + buffer
 
@@ -2252,6 +2261,8 @@ class MarketService:
         self,
         guardrails: dict[str, Any] | None,
         symbol: str,
+        *,
+        account_equity: float | None = None,
     ) -> float | None:
         """Resolve guardrail-configured isolated margin transfer caps for a symbol."""
         if not isinstance(guardrails, dict):
@@ -2275,6 +2286,31 @@ class MarketService:
             limit = global_cap
         elif global_cap and global_cap > 0:
             limit = min(limit, global_cap)
+        pct_limit: float | None = None
+        pct_overrides = guardrails.get("isolated_margin_symbol_seed_pct")
+        pct_value = None
+        if isinstance(pct_overrides, dict) and symbol_key:
+            for candidate_key in {symbol_key, symbol}:
+                if not candidate_key:
+                    continue
+                pct_candidate = self._extract_float(pct_overrides.get(candidate_key))
+                if pct_candidate and pct_candidate > 0:
+                    pct_value = pct_candidate
+                    break
+        if pct_value is None:
+            pct_value = self._extract_float(guardrails.get("isolated_margin_seed_pct"))
+        if (
+            pct_value
+            and pct_value > 0
+            and account_equity is not None
+            and account_equity > 0
+        ):
+            pct_limit = account_equity * pct_value
+        if pct_limit is not None:
+            if limit is None:
+                limit = pct_limit
+            else:
+                limit = min(limit, pct_limit)
         if limit is None or limit <= 0:
             return None
         return limit
@@ -2315,6 +2351,7 @@ class MarketService:
         required_gap: float,
         guardrails: dict[str, Any] | None,
         seed_limit: float | None = None,
+        account_equity: float | None = None,
     ) -> dict[str, Any]:
         """Attempt to transfer collateral from funding to trading to fill isolated margin gaps."""
         seed_result = {
@@ -2333,7 +2370,11 @@ class MarketService:
             return seed_result
         limit = seed_limit
         if limit is None:
-            limit = self._resolve_isolated_seed_limit(guardrails, symbol)
+            limit = self._resolve_isolated_seed_limit(
+                guardrails,
+                symbol,
+                account_equity=account_equity,
+            )
         seed_result["limit"] = limit
         if limit is None or limit <= 0:
             seed_result["blocked_reason"] = "no_limit_configured"
@@ -2428,6 +2469,9 @@ class MarketService:
         symbol: str,
         action: str,
         dual_side_mode: bool,
+        trade_mode: str,
+        pos_side: str | None = None,
+        existing_side_size: float | None = None,
         min_leverage: float | None,
         size: float | None,
         last_price: float | None,
@@ -2439,6 +2483,7 @@ class MarketService:
         max_notional_usd: float | None,
         guardrails: dict[str, Any] | None = None,
         min_size: float | None = None,
+        tier_entries: list[dict[str, Any]] | None = None,
     ) -> tuple[dict[str, Any] | None, float | None]:
         """Top up isolated margin (auto-downsizing or seeding if needed) before placing an order."""
         if not self._account_api:
@@ -2458,6 +2503,16 @@ class MarketService:
 
         initial_size = self._extract_float(size)
         initial_notional = _compute_notional(initial_size)
+        existing_side_value = self._extract_float(existing_side_size) or 0.0
+        normalized_trade_mode = (trade_mode or "isolated").lower()
+        tier_dataset: list[dict[str, Any]] = tier_entries or []
+        if (
+            not tier_dataset
+            and price_value
+            and price_value > 0
+            and normalized_trade_mode == "isolated"
+        ):
+            tier_dataset = await self._get_position_tiers(symbol, trade_mode)
 
         adjusted_size: float | None = None
         current_size = initial_size
@@ -2469,6 +2524,30 @@ class MarketService:
 
         while True:
             iteration += 1
+            tier_metadata: dict[str, Any] | None = None
+            tier_imr: float | None = None
+            tier_max_leverage: float | None = None
+            tier_max_notional: float | None = None
+            if tier_dataset:
+                resulting_size = max(0.0, existing_side_value) + max(0.0, current_size or 0.0)
+                tier_metadata = self._select_position_tier(tier_dataset, resulting_size)
+                if tier_metadata:
+                    tier_imr = self._extract_float(tier_metadata.get("imr"))
+                    tier_max_leverage = self._extract_float(tier_metadata.get("maxLever"))
+                    if (
+                        (tier_imr is None or tier_imr <= 0)
+                        and tier_max_leverage
+                        and tier_max_leverage > 0
+                    ):
+                        tier_imr = 1.0 / tier_max_leverage
+                    tier_max_size = self._extract_float(tier_metadata.get("maxSz"))
+                    if (
+                        tier_max_size
+                        and tier_max_size > 0
+                        and price_value
+                        and price_value > 0
+                    ):
+                        tier_max_notional = tier_max_size * price_value
             amount = self._estimate_isolated_margin_requirement(
                 size=current_size,
                 price=last_price,
@@ -2477,13 +2556,23 @@ class MarketService:
                 max_position_pct=max_position_pct,
                 symbol_cap_pct=symbol_cap_pct,
                 max_notional_usd=max_notional_usd,
+                tier_initial_margin_ratio=tier_imr,
+                tier_max_notional=tier_max_notional,
             )
             if not amount or amount <= 0:
                 return None, adjusted_size
             required_gap = amount - current_margin
             if required_gap <= 0:
                 return None, adjusted_size
-            seed_limit = self._resolve_isolated_seed_limit(guardrails, symbol) if guardrails else None
+            seed_limit = (
+                self._resolve_isolated_seed_limit(
+                    guardrails,
+                    symbol,
+                    account_equity=account_equity,
+                )
+                if guardrails
+                else None
+            )
             margin_guidance_payload = {
                 "quote_currency": quote_currency,
                 "required_gap": required_gap,
@@ -2496,6 +2585,12 @@ class MarketService:
                 "initial_requested_size": initial_size,
                 "initial_requested_notional": initial_notional,
             }
+            if tier_imr:
+                margin_guidance_payload["tier_initial_margin_ratio"] = tier_imr
+            if tier_max_leverage:
+                margin_guidance_payload["tier_max_leverage"] = tier_max_leverage
+            if tier_max_notional:
+                margin_guidance_payload["tier_max_notional_usd"] = tier_max_notional
             self._set_margin_guidance(symbol, margin_guidance_payload)
 
             if (
@@ -2617,9 +2712,9 @@ class MarketService:
         seed_limit = final_seed_limit
         margin_guidance_payload = final_guidance or {}
 
-        pos_side = "long" if action == "BUY" else "short"
+        pos_side_value = pos_side or ("long" if action == "BUY" else "short")
         if not dual_side_mode:
-            pos_side = "net"
+            pos_side_value = "net"
         formatted_amount = self._format_price(required_gap)
         sub_account = self._sub_account if self._sub_account_use_master else None
 
@@ -2628,7 +2723,7 @@ class MarketService:
                 return await asyncio.to_thread(
                     self._account_api.adjust_isolated_margin,
                     symbol,
-                    pos_side,
+                    pos_side_value,
                     formatted_amount,
                     type="add",
                     subAcct=sub_account,
@@ -2654,6 +2749,7 @@ class MarketService:
                     required_gap=required_gap,
                     guardrails=guardrails,
                     seed_limit=seed_limit,
+                    account_equity=account_equity,
                 )
                 updated_guidance = dict(margin_guidance_payload)
                 updated_guidance.update(
@@ -3020,6 +3116,9 @@ class MarketService:
                 dual_side_mode = True
                 break
         side_sizes = self._position_side_sizes(positions, symbol)
+        desired_pos_side = "long" if action == "BUY" else "short"
+        if not dual_side_mode:
+            desired_pos_side = "net"
         open_position_notional = self._compute_open_position_notional(positions, price_hints=price_hints)
         available_equity_for_trade = None
         if (
@@ -3252,6 +3351,27 @@ class MarketService:
         ]
         isolated_margin_available = max(quote_margin_candidates) if quote_margin_candidates else None
         if isolated_mode:
+            tier_entries: list[dict[str, Any]] | None = None
+            tier_imr_for_check: float | None = None
+            tier_max_notional_for_check: float | None = None
+            if last_price and last_price > 0:
+                tier_entries = await self._get_position_tiers(symbol, trade_mode)
+                tier_pool = tier_entries or []
+                if tier_pool:
+                    resulting_size = max(0.0, side_sizes.get(desired_pos_side, 0.0)) + max(0.0, raw_size)
+                    tier_meta = self._select_position_tier(tier_pool, resulting_size)
+                    if tier_meta:
+                        tier_imr_for_check = self._extract_float(tier_meta.get("imr"))
+                        tier_max_leverage = self._extract_float(tier_meta.get("maxLever"))
+                        if (
+                            (tier_imr_for_check is None or tier_imr_for_check <= 0)
+                            and tier_max_leverage
+                            and tier_max_leverage > 0
+                        ):
+                            tier_imr_for_check = 1.0 / tier_max_leverage
+                        tier_max_size = self._extract_float(tier_meta.get("maxSz"))
+                        if tier_max_size and tier_max_size > 0:
+                            tier_max_notional_for_check = tier_max_size * last_price
             required_isolated_margin = self._estimate_isolated_margin_requirement(
                 size=raw_size,
                 price=last_price,
@@ -3260,6 +3380,8 @@ class MarketService:
                 max_position_pct=base_max_pct,
                 symbol_cap_pct=symbol_cap_pct,
                 max_notional_usd=guardrail_notional_cap,
+                tier_initial_margin_ratio=tier_imr_for_check,
+                tier_max_notional=tier_max_notional_for_check,
             )
             if required_isolated_margin and (
                 isolated_margin_available is None
@@ -3269,6 +3391,9 @@ class MarketService:
                     symbol=symbol,
                     action=action,
                     dual_side_mode=dual_side_mode,
+                    trade_mode=trade_mode,
+                    pos_side=desired_pos_side,
+                    existing_side_size=side_sizes.get(desired_pos_side, 0.0),
                     min_leverage=min_leverage,
                     size=raw_size,
                     last_price=last_price,
@@ -3280,6 +3405,7 @@ class MarketService:
                     max_notional_usd=guardrail_notional_cap,
                     guardrails=guardrails,
                     min_size=min_size,
+                    tier_entries=tier_entries,
                 )
                 if downsized_size is not None and downsized_size > 0:
                     raw_size = downsized_size

@@ -100,6 +100,148 @@ def test_handle_llm_decision_blocks_without_positions(monkeypatch: pytest.Monkey
     assert any("Execution disabled" in message for message in messages)
 
 
+def test_handle_llm_seeds_isolated_margin_when_tier_requires_more_margin(monkeypatch: pytest.MonkeyPatch) -> None:
+    class RecordingAccountApi:
+        def __init__(self) -> None:
+            self.adjust_calls: list[dict[str, Any]] = []
+            self.leverage_calls: list[dict[str, Any]] = []
+
+        def adjust_isolated_margin(self, symbol, pos_side, amount, type="add", subAcct="") -> dict[str, Any]:
+            self.adjust_calls.append({"symbol": symbol, "pos_side": pos_side, "amount": amount})
+            return {"code": "0"}
+
+        def get_account_balance(self, subAcct: str | None = None) -> list[dict[str, Any]]:
+            return [
+                {
+                    "totalEqUsd": "600",
+                    "details": [
+                        {
+                            "ccy": "USDT",
+                            "eq": "600",
+                            "eqUsd": "600",
+                            "availEq": "650",
+                            "availEqUsd": "650",
+                        }
+                    ],
+                }
+            ]
+
+        def get_positions(self, **kwargs: Any) -> list[dict[str, Any]]:
+            return []
+
+        def set_leverage(self, **payload: Any) -> dict[str, Any]:
+            self.leverage_calls.append(payload)
+            return {"code": "0"}
+
+    class RecordingTradeApi:
+        def __init__(self) -> None:
+            self.payloads: list[dict[str, Any]] = []
+
+        def place_order(self, **payload: Any) -> dict[str, Any]:
+            self.payloads.append(payload)
+            return {
+                "code": "0",
+                "data": [
+                    {
+                        "ordId": "1",
+                        "sCode": "0",
+                    }
+                ],
+            }
+
+    async def scenario() -> tuple[bool, list[dict[str, Any]], list[dict[str, Any]]]:
+        state = DummySnapshotStore()
+        account_api = RecordingAccountApi()
+        trade_api = RecordingTradeApi()
+        service = MarketService(
+            state_service=state,
+            enable_websocket=False,
+            trade_api=trade_api,
+            account_api=account_api,
+            market_api=None,
+            public_api=object(),
+        )
+        service._instrument_specs[service.symbol] = {
+            "lot_size": 0.1,
+            "min_size": 0.1,
+            "tick_size": 0.0001,
+        }
+
+        def fake_size(self, **kwargs: Any) -> float:
+            return 3600.0
+
+        service._compute_leverage_adjusted_size = MethodType(fake_size, service)
+
+        async def fake_tiers(self, symbol: str, trade_mode: str) -> list[dict[str, Any]]:
+            return [
+                {
+                    "minSz": "0",
+                    "maxSz": "1000",
+                    "imr": "0.2",
+                    "maxLever": "5",
+                }
+            ]
+
+        monkeypatch.setattr(service, "_get_position_tiers", MethodType(fake_tiers, service))
+
+        async def permissive_tier_guard(self, **kwargs: Any) -> dict[str, Any]:
+            tier = {
+                "minSz": "0",
+                "maxSz": "1000",
+                "imr": "0.2",
+                "maxLever": "5",
+            }
+            return {
+                "size": kwargs.get("additional_size", 0.0),
+                "tier": tier,
+                "tier_imr": 0.2,
+                "tier_max_leverage": 5.0,
+                "max_notional_allowed": None,
+                "clipped": False,
+                "blocked": False,
+            }
+
+        monkeypatch.setattr(service, "_apply_tier_margin_guard", MethodType(permissive_tier_guard, service))
+
+        decision = {
+            "action": "BUY",
+            "position_size": 3600.0,
+            "confidence": 0.9,
+        }
+        context = {
+            "symbol": service.symbol,
+            "positions": [{"instId": service.symbol, "pos": "0"}],
+            "market": {"last_price": 1.0},
+            "account": {
+                "account_equity": 600.0,
+                "available_eq_usd": 650.0,
+                "available_balances": {
+                    "USDT": {"available_usd": 650.0, "equity_usd": 650.0}
+                },
+            },
+            "execution": {
+                "enabled": True,
+                "trade_mode": "isolated",
+                "order_type": "market",
+                "min_size": 0.1,
+            },
+            "guardrails": {
+                "min_leverage": 6.0,
+                "max_leverage": 10.0,
+                "max_position_pct": 10.0,
+            },
+        }
+
+        executed = await service.handle_llm_decision(decision, context)
+        return executed, account_api.adjust_calls, trade_api.payloads
+
+    executed, adjust_calls, payloads = asyncio.run(scenario())
+    assert executed is True
+    assert payloads
+    assert adjust_calls
+    assert float(adjust_calls[0]["amount"]) == pytest.approx(106.0, rel=1e-3)
+
+
 def test_handle_llm_decision_enforces_min_leverage(monkeypatch: pytest.MonkeyPatch) -> None:
     async def scenario() -> tuple[bool, bool, list[dict[str, Any]]]:
         state = DummySnapshotStore()
@@ -541,7 +683,7 @@ def test_handle_llm_blocks_isolated_when_quote_margin_missing(monkeypatch: pytes
         context = {
             "symbol": service.symbol,
             "guardrails": {
-                "min_leverage": 0.5,
+                "min_leverage": 0.05,
                 "max_leverage": 3,
                 "max_position_pct": 0.5,
             },
@@ -648,7 +790,7 @@ def test_handle_llm_attempts_isolated_margin_top_up(monkeypatch: pytest.MonkeyPa
             trade_api=trade_api,
             account_api=account_api,
             market_api=None,
-            public_api=None,
+            public_api=object(),
         )
 
         balance_responder = BalanceResponder()
@@ -779,7 +921,7 @@ def test_handle_llm_top_up_when_margin_partially_funded(monkeypatch: pytest.Monk
             trade_api=trade_api,
             account_api=account_api,
             market_api=None,
-            public_api=None,
+            public_api=object(),
         )
 
         balance_responder = BalanceResponder()
@@ -794,10 +936,15 @@ def test_handle_llm_top_up_when_margin_partially_funded(monkeypatch: pytest.Monk
 
         monkeypatch.setattr(service, "_fetch_positions", fake_fetch_positions)
 
+        async def fake_tiers(self, symbol: str, trade_mode: str) -> list[dict[str, Any]]:
+            return []
+
+        monkeypatch.setattr(service, "_get_position_tiers", MethodType(fake_tiers, service))
+
         context = {
             "symbol": service.symbol,
             "guardrails": {
-                "min_leverage": 0.5,
+                "min_leverage": 0.05,
                 "max_leverage": 3,
                 "max_position_pct": 0.5,
             },
@@ -1328,6 +1475,9 @@ def test_isolated_margin_buffer_auto_downsizes_to_seed_cap(monkeypatch: pytest.M
             symbol=service.symbol,
             action="BUY",
             dual_side_mode=False,
+            trade_mode="isolated",
+            pos_side="net",
+            existing_side_size=0.0,
             min_leverage=1.0,
             size=200.0,
             last_price=1.0,
@@ -1339,6 +1489,7 @@ def test_isolated_margin_buffer_auto_downsizes_to_seed_cap(monkeypatch: pytest.M
             max_notional_usd=500.0,
             guardrails={"isolated_margin_seed_usd": 50.0},
             min_size=0.1,
+            tier_entries=[{}],
         )
         assert refreshed is not None
         return downsized, list(service._execution_feedback)
@@ -1351,6 +1502,249 @@ def test_isolated_margin_buffer_auto_downsizes_to_seed_cap(monkeypatch: pytest.M
         entry.get("message") == "Size clipped to fit isolated margin seed limit"
         for entry in feedback_entries
     )
+
+
+def test_isolated_margin_buffer_seeds_using_tier_imr() -> None:
+    class RecordingAccountApi:
+        def __init__(self) -> None:
+            self.adjust_calls: list[dict[str, Any]] = []
+
+        def adjust_isolated_margin(self, symbol, pos_side, amount, type="add", subAcct="") -> dict[str, Any]:
+            self.adjust_calls.append({"symbol": symbol, "pos_side": pos_side, "amount": amount})
+            return {"code": "0"}
+
+        def get_account_balance(self, subAcct: str | None = None) -> list[dict[str, Any]]:
+            return [
+                {
+                    "details": [
+                        {
+                            "ccy": "USDT",
+                            "eq": "200",
+                            "eqUsd": "200",
+                            "availEq": "20",
+                            "availEqUsd": "20",
+                        }
+                    ]
+                }
+            ]
+
+        def get_positions(self, **kwargs: Any) -> list[dict[str, Any]]:
+            return []
+
+        def set_leverage(self, **kwargs: Any) -> dict[str, Any]:
+            return {"code": "0"}
+
+    async def scenario() -> list[dict[str, Any]]:
+        state = DummySnapshotStore()
+        account_api = RecordingAccountApi()
+        service = MarketService(
+            state_service=state,
+            enable_websocket=False,
+            account_api=account_api,
+            market_api=None,
+            public_api=object(),
+        )
+        service._instrument_specs[service.symbol] = {
+            "lot_size": 0.1,
+            "min_size": 0.1,
+            "tick_size": 0.0001,
+        }
+        tier_entries = [
+            {
+                "minSz": "0",
+                "maxSz": "1000",
+                "imr": "0.2",
+                "maxLever": "5",
+            }
+        ]
+        await service._ensure_isolated_margin_buffer(
+            symbol=service.symbol,
+            action="BUY",
+            dual_side_mode=True,
+            trade_mode="isolated",
+            pos_side="long",
+            existing_side_size=0.0,
+            min_leverage=1.0,
+            size=100.0,
+            last_price=1.0,
+            quote_currency="USDT",
+            available_margin_usd=7.0,
+            account_equity=200.0,
+            max_position_pct=0.5,
+            symbol_cap_pct=0.5,
+            max_notional_usd=500.0,
+            guardrails={"isolated_margin_seed_pct": 0.5},
+            min_size=0.1,
+            tier_entries=tier_entries,
+        )
+        return account_api.adjust_calls
+
+    adjust_calls = asyncio.run(scenario())
+    assert adjust_calls
+    added_amount = float(adjust_calls[0]["amount"])
+    assert added_amount == pytest.approx(23.0, rel=1e-2)
+
+
+def test_isolated_margin_seed_pct_caps_transfer() -> None:
+    class RecordingAccountApi:
+        def __init__(self) -> None:
+            self.adjust_calls: list[dict[str, Any]] = []
+
+        def adjust_isolated_margin(self, symbol, pos_side, amount, type="add", subAcct="") -> dict[str, Any]:
+            self.adjust_calls.append({"symbol": symbol, "amount": amount})
+            return {"code": "0"}
+
+        def get_account_balance(self, subAcct: str | None = None) -> list[dict[str, Any]]:
+            return [
+                {
+                    "details": [
+                        {
+                            "ccy": "USDT",
+                            "eq": "1000",
+                            "eqUsd": "1000",
+                            "availEq": "0",
+                            "availEqUsd": "0",
+                        }
+                    ]
+                }
+            ]
+
+        def set_leverage(self, **kwargs: Any) -> dict[str, Any]:
+            return {"code": "0"}
+
+    async def scenario() -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        state = DummySnapshotStore()
+        account_api = RecordingAccountApi()
+        service = MarketService(
+            state_service=state,
+            enable_websocket=False,
+            account_api=account_api,
+            market_api=None,
+            public_api=object(),
+        )
+        service._instrument_specs[service.symbol] = {
+            "lot_size": 0.1,
+            "min_size": 0.1,
+            "tick_size": 0.0001,
+        }
+        tier_entries = [
+            {
+                "minSz": "0",
+                "maxSz": "2000",
+                "imr": "0.2",
+                "maxLever": "5",
+            }
+        ]
+        await service._ensure_isolated_margin_buffer(
+            symbol=service.symbol,
+            action="BUY",
+            dual_side_mode=False,
+            trade_mode="isolated",
+            pos_side="net",
+            existing_side_size=0.0,
+            min_leverage=1.0,
+            size=400.0,
+            last_price=1.0,
+            quote_currency="USDT",
+            available_margin_usd=0.0,
+            account_equity=1000.0,
+            max_position_pct=0.5,
+            symbol_cap_pct=0.5,
+            max_notional_usd=1000.0,
+            guardrails={"isolated_margin_seed_pct": 0.05},
+            min_size=0.1,
+            tier_entries=tier_entries,
+        )
+        guidance = service._get_margin_guidance(service.symbol)
+        return account_api.adjust_calls, guidance or {}
+
+    adjust_calls, guidance = asyncio.run(scenario())
+    assert adjust_calls
+    assert float(adjust_calls[0]["amount"]) == pytest.approx(50.0, rel=1e-3)
+    assert guidance.get("seed_limit") == pytest.approx(50.0, rel=1e-3)
+
+
+def test_isolated_margin_symbol_seed_pct_override_wins() -> None:
+    class RecordingAccountApi:
+        def __init__(self) -> None:
+            self.adjust_calls: list[dict[str, Any]] = []
+
+        def adjust_isolated_margin(self, symbol, pos_side, amount, type="add", subAcct="") -> dict[str, Any]:
+            self.adjust_calls.append({"symbol": symbol, "amount": amount})
+            return {"code": "0"}
+
+        def get_account_balance(self, subAcct: str | None = None) -> list[dict[str, Any]]:
+            return [
+                {
+                    "details": [
+                        {
+                            "ccy": "USDT",
+                            "eq": "2000",
+                            "eqUsd": "2000",
+                            "availEq": "0",
+                            "availEqUsd": "0",
+                        }
+                    ]
+                }
+            ]
+
+        def set_leverage(self, **kwargs: Any) -> dict[str, Any]:
+            return {"code": "0"}
+
+    async def scenario() -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        state = DummySnapshotStore()
+        account_api = RecordingAccountApi()
+        service = MarketService(
+            state_service=state,
+            enable_websocket=False,
+            account_api=account_api,
+            market_api=None,
+            public_api=object(),
+        )
+        service._instrument_specs[service.symbol] = {
+            "lot_size": 0.1,
+            "min_size": 0.1,
+            "tick_size": 0.0001,
+        }
+        tier_entries = [
+            {
+                "minSz": "0",
+                "maxSz": "2000",
+                "imr": "0.2",
+                "maxLever": "5",
+            }
+        ]
+        guardrails = {
+            "isolated_margin_seed_pct": 0.5,
+            "isolated_margin_symbol_seed_pct": {service.symbol: 0.02},
+        }
+        await service._ensure_isolated_margin_buffer(
+            symbol=service.symbol,
+            action="BUY",
+            dual_side_mode=False,
+            trade_mode="isolated",
+            pos_side="net",
+            existing_side_size=0.0,
+            min_leverage=1.0,
+            size=150.0,
+            last_price=1.0,
+            quote_currency="USDT",
+            available_margin_usd=0.0,
+            account_equity=2000.0,
+            max_position_pct=0.5,
+            symbol_cap_pct=0.5,
+            max_notional_usd=2000.0,
+            guardrails=guardrails,
+            min_size=0.1,
+            tier_entries=tier_entries,
+        )
+        guidance = service._get_margin_guidance(service.symbol)
+        return account_api.adjust_calls, guidance or {}
+
+    adjust_calls, guidance = asyncio.run(scenario())
+    assert adjust_calls
+    assert float(adjust_calls[0]["amount"]) == pytest.approx(40.0, rel=1e-3)
+    assert guidance.get("seed_limit") == pytest.approx(40.0, rel=1e-3)
 
 
 def test_submit_order_includes_margin_currency_for_isolated() -> None:
