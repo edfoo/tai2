@@ -495,6 +495,7 @@ class MarketService:
             return 0.0
         total = 0.0
         hints = price_hints or {}
+        breakdown: list[dict[str, Any]] = []
         for entry in positions:
             if not isinstance(entry, dict):
                 continue
@@ -503,21 +504,50 @@ class MarketService:
                 continue
             abs_size = abs(size_value)
             instrument = str(entry.get("instId") or entry.get("symbol") or "").upper()
-            price_value = self._extract_float(
-                entry.get("avgPx")
-                or entry.get("markPx")
-                or entry.get("last")
-                or entry.get("px")
-            )
+            price_value = None
+            price_source = None
+            for candidate_key in ("avgPx", "markPx", "last", "px"):
+                candidate_value = self._extract_float(entry.get(candidate_key))
+                if candidate_value is not None and candidate_value > 0:
+                    price_value = candidate_value
+                    price_source = candidate_key
+                    break
             if (price_value is None or price_value <= 0) and instrument:
-                price_value = hints.get(instrument)
+                hint_value = hints.get(instrument)
+                if hint_value is not None and hint_value > 0:
+                    price_value = hint_value
+                    price_source = "hint"
             if (price_value is None or price_value <= 0) and instrument:
                 ticker = self._latest_ticker.get(instrument)
                 if isinstance(ticker, dict):
-                    price_value = self._extract_float(ticker.get("last") or ticker.get("markPx"))
+                    ticker_value = self._extract_float(ticker.get("last") or ticker.get("markPx"))
+                    if ticker_value is not None and ticker_value > 0:
+                        price_value = ticker_value
+                        price_source = "ticker"
             if price_value is None or price_value <= 0:
                 continue
-            total += abs_size * price_value
+            notional = abs_size * price_value
+            total += notional
+            breakdown.append(
+                {
+                    "symbol": instrument,
+                    "abs_size": abs_size,
+                    "price": price_value,
+                    "notional": notional,
+                    "price_source": price_source,
+                }
+            )
+        if breakdown:
+            try:
+                self._emit_debug(
+                    f"Open notional breakdown: {json.dumps({'positions': breakdown, 'total': total})}",
+                    mirror_logger=False,
+                )
+            except Exception:  # pragma: no cover - defensive
+                self._emit_debug(
+                    f"Open notional breakdown: positions={breakdown} total={total}",
+                    mirror_logger=False,
+                )
         return total
 
     async def _sync_position_protection_entries(self, positions: list[dict[str, Any]] | None) -> None:
@@ -3452,18 +3482,34 @@ class MarketService:
             and last_price
             and last_price > 0
         ):
+            margin_headroom = None
+            if available_margin_usd is not None:
+                margin_headroom = max(available_margin_usd, 0.0)
             free_equity = available_equity_for_trade
             if free_equity is None:
                 free_equity = max(account_equity - (open_position_notional or 0.0), 0.0)
+            if (
+                margin_headroom is not None
+                and margin_headroom > 0
+                and max_leverage
+                and max_leverage > 0
+            ):
+                margin_based_notional = margin_headroom * max_leverage
+                if margin_based_notional > (free_equity or 0.0):
+                    free_equity = margin_based_notional
             equity_updates = {
                 "account_equity": account_equity,
                 "open_position_notional": open_position_notional,
                 "equity_available_for_trade": free_equity,
             }
+            if margin_headroom is not None:
+                equity_updates["margin_available_usd"] = margin_headroom
             if quote_currency:
                 equity_updates.setdefault("quote_currency", str(quote_currency).upper())
             self._merge_margin_guidance(symbol, equity_updates)
-            if free_equity <= 0:
+            margin_exhausted = margin_headroom is None or margin_headroom <= 0
+            notional_exhausted = free_equity is None or free_equity <= 0
+            if margin_exhausted and notional_exhausted:
                 self._emit_debug(
                     f"Execution skipped for {symbol}: no free equity after accounting for open positions"
                 )
@@ -3475,6 +3521,7 @@ class MarketService:
                         "account_equity": account_equity,
                         "open_position_notional": open_position_notional,
                         "equity_available_for_trade": free_equity,
+                        "margin_available_usd": margin_headroom,
                     },
                 )
                 block_payload = dict(equity_updates)
@@ -3482,7 +3529,7 @@ class MarketService:
                 self._merge_margin_guidance(symbol, block_payload)
                 return False
             current_notional = raw_size * last_price
-            if current_notional > free_equity + 1e-9:
+            if free_equity is not None and current_notional > free_equity + 1e-9:
                 previous_size = raw_size
                 max_size_from_equity = free_equity / last_price if last_price else 0.0
                 if max_size_from_equity <= 0:
@@ -3498,6 +3545,7 @@ class MarketService:
                             "open_position_notional": open_position_notional,
                             "equity_available_for_trade": free_equity,
                             "requested_notional": current_notional,
+                            "margin_available_usd": margin_headroom,
                         },
                     )
                     failure_payload = dict(equity_updates)
@@ -3524,6 +3572,7 @@ class MarketService:
                         "account_equity": account_equity,
                         "open_position_notional": open_position_notional,
                         "equity_available_for_trade": free_equity,
+                        "margin_available_usd": margin_headroom,
                         "requested_notional": current_notional,
                         "clipped_notional": clipped_notional,
                     },
