@@ -351,6 +351,95 @@ def test_handle_llm_allows_trade_when_margin_available(monkeypatch: pytest.Monke
     assert submit_called is True, feedback
 
 
+def test_guardrail_notional_cap_tracks_available_margin(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def scenario() -> dict[str, Any]:
+        state = DummySnapshotStore()
+        service = MarketService(
+            state_service=state,
+            enable_websocket=False,
+            trade_api=object(),
+            account_api=None,
+            market_api=None,
+            public_api=None,
+        )
+        service._account_api = None
+        service._market_api = None
+        service._public_api = None
+        service._funding_api = None
+        service._instrument_specs[service.symbol] = {
+            "lot_size": 0.001,
+            "min_size": 0.001,
+            "tick_size": 0.1,
+        }
+
+        async def fake_fetch_positions(*args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+            return []
+
+        monkeypatch.setattr(service, "_fetch_positions", fake_fetch_positions)
+        monkeypatch.setattr(
+            service,
+            "_compute_leverage_adjusted_size",
+            lambda **kwargs: 5.0,
+        )
+
+        async def fake_tier_guard(**kwargs):
+            return {"size": kwargs.get("additional_size", 0.0)}
+
+        monkeypatch.setattr(service, "_apply_tier_margin_guard", fake_tier_guard)
+
+        recorded: dict[str, Any] = {}
+        submit_called = {"value": False}
+
+        async def fake_submit_order(**payload: Any):
+            submit_called["value"] = True
+            recorded.update(payload)
+            return {"ordId": "1"}, False
+
+        monkeypatch.setattr(service, "_submit_order", fake_submit_order)
+        monkeypatch.setattr(service, "_emit_debug", lambda *args, **kwargs: None)
+
+        context = {
+            "symbol": service.symbol,
+            "guardrails": {
+                "min_leverage": 0.1,
+                "max_leverage": 4,
+                "max_position_pct": 0.05,
+            },
+            "market": {"last_price": 10.0},
+            "account": {
+                "account_equity": 100.0,
+                    "available_eq_usd": 500.0,
+                "available_balances": {},
+            },
+            "execution": {
+                "enabled": True,
+                "trade_mode": "cross",
+                "order_type": "market",
+                "min_size": 0.001,
+            },
+            "positions": [],
+        }
+
+        decision = {
+            "action": "BUY",
+            "confidence": 0.9,
+            "position_size": 5.0,
+        }
+
+        executed = await service.handle_llm_decision(decision, context)
+        return {
+            "executed": executed,
+            "payload": recorded,
+            "feedback": list(service._execution_feedback),
+            "submitted": submit_called["value"],
+        }
+
+    result = asyncio.run(scenario())
+    assert result["executed"] is True, result["feedback"]
+    assert result["submitted"] is True, result["feedback"]
+    assert result["payload"].get("size") == pytest.approx(5.0)
+
+
 def test_handle_llm_respects_symbol_position_caps(monkeypatch: pytest.MonkeyPatch) -> None:
     async def scenario() -> tuple[bool, dict[str, float]]:
         state = DummySnapshotStore()

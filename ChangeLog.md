@@ -3,6 +3,7 @@
 ## 2026-01-24
 - Ensured `handle_llm_decision()` seeds `price_hints` and margin context before invoking open-position calculations, and added a regression test so future refactors cannot reintroduce the crash when snapshots lack prior prices.
 - Reworked the free-equity guard to prioritize OKX-reported available margin (and added detailed notional breakdown logging plus a regression test) so trades are no longer blocked while real margin headroom remains.
+- Let the per-symbol `guardrail_notional_cap` follow available margin * max leverage * max position %, ensuring we only clip sizes when margin headroom is actually exhausted and capturing the behavior in `test_guardrail_notional_cap_tracks_available_margin`.
 - Documented every remaining helper inside `app/services/market_service.py`, adding detailed docstrings so future maintainers and LLM agents understand leverage prep, TP/SL management, and execution feedback flows.
 - Added a UML sequence diagram to `GUARDRAILS.md` that illustrates how MarketService funnels prompt output through guardrails, margin prep, OKX submission, and protection syncing, giving operators a visual map of the safety layers.
 - Extended `app/services/market_service.py` equity guardrails to record free-equity availability plus requested/clipped notionals, and taught `app/ui/pages.py` to display the extra telemetry (including an "Equity clip" flag) so operators immediately see when exposure was scaled or blocked.

@@ -3381,6 +3381,15 @@ class MarketService:
                 meta={"available_margin_usd": available_margin_usd},
             )
             return False
+
+        if max_leverage and max_leverage > 0:
+            margin_driven_cap = available_margin_usd * max_leverage
+            pct_multiplier = effective_max_pct if effective_max_pct and effective_max_pct > 0 else None
+            if pct_multiplier:
+                margin_driven_cap *= pct_multiplier
+            if margin_driven_cap and margin_driven_cap > 0:
+                if guardrail_notional_cap is None or margin_driven_cap > guardrail_notional_cap:
+                    guardrail_notional_cap = margin_driven_cap
         take_profit_price = self._normalize_take_profit(
             action,
             self._extract_float(decision.get("take_profit")),
