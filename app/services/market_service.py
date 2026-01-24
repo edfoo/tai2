@@ -2956,6 +2956,28 @@ class MarketService:
             except Exception as exc:  # pragma: no cover - network fallback
                 self._emit_debug(f"Position fetch failed for {symbol}: {exc}")
                 positions = []
+        market_block = context.get("market") or {}
+        last_price = self._extract_float(
+            market_block.get("last_price")
+            or market_block.get("last")
+            or market_block.get("price")
+        )
+        if last_price is None:
+            last_price = self._extract_float(decision.get("last_price"))
+        if last_price is None:
+            last_price = self._extract_float(
+                (self._latest_ticker.get(symbol) or {}).get("last")
+            )
+        price_hints: dict[str, float] = {}
+        if last_price and last_price > 0:
+            price_hints[symbol] = last_price
+        account_block = context.get("account") or {}
+        account_equity = self._extract_float(
+            account_block.get("account_equity")
+            or account_block.get("total_eq_usd")
+            or account_block.get("total_equity")
+            or account_block.get("total_account_value")
+        )
         current_side = self._detect_position_side(positions, symbol)
         dual_side_mode = False
         for pos in positions:
@@ -3055,21 +3077,6 @@ class MarketService:
             self._emit_debug("Trade API unavailable; cannot execute decision")
             return False
         instrument_spec = self._instrument_specs.get(symbol) or {}
-        market_block = context.get("market") or {}
-        last_price = self._extract_float(
-            market_block.get("last_price")
-            or market_block.get("last")
-            or market_block.get("price")
-        )
-        if last_price is None:
-            last_price = self._extract_float(decision.get("last_price"))
-        if last_price is None:
-            last_price = self._extract_float(
-                (self._latest_ticker.get(symbol) or {}).get("last")
-            )
-        price_hints: dict[str, float] = {}
-        if last_price and last_price > 0:
-            price_hints[symbol] = last_price
         execution_trade_mode = execution_cfg.get("trade_mode") or "cross"
         trade_mode = str(execution_trade_mode).lower()
         if trade_mode not in {"isolated", "cross"}:
@@ -3084,13 +3091,6 @@ class MarketService:
             )
         if min_size is None:
             min_size = 0.0
-        account_block = context.get("account") or {}
-        account_equity = self._extract_float(
-            account_block.get("account_equity")
-            or account_block.get("total_eq_usd")
-            or account_block.get("total_equity")
-            or account_block.get("total_account_value")
-        )
         base_max_pct = self._extract_float(guardrails.get("max_position_pct"))
         symbol_caps = guardrails.get("symbol_position_caps")
         if not isinstance(symbol_caps, dict):

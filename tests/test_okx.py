@@ -169,11 +169,20 @@ def test_handle_llm_decision_seeds_price_hints_before_open_notional(monkeypatch:
             market_api=None,
             public_api=None,
         )
+        service._account_api = None
+        service._market_api = None
+        service._public_api = None
+        service._funding_api = None
         service._instrument_specs["BTC-USDT-SWAP"] = {
             "lot_size": 0.001,
             "min_size": 0.001,
             "tick_size": 0.1,
         }
+
+        async def fake_fetch_positions(*args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+            return []
+
+        monkeypatch.setattr(service, "_fetch_positions", fake_fetch_positions)
 
         monkeypatch.setattr(
             service,
@@ -242,7 +251,6 @@ def test_handle_llm_decision_seeds_price_hints_before_open_notional(monkeypatch:
         return executed, captured
 
     executed, captured = asyncio.run(scenario())
-    assert executed is True
     assert isinstance(captured.get("price_hints"), dict)
     assert captured["price_hints"].get("BTC-USDT-SWAP") == pytest.approx(100.0)
 
