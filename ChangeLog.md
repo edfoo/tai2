@@ -1,5 +1,9 @@
 # Change Log
 
+## 2026-01-24
+- Documented every remaining helper inside `app/services/market_service.py`, adding detailed docstrings so future maintainers and LLM agents understand leverage prep, TP/SL management, and execution feedback flows.
+- Added a UML sequence diagram to `GUARDRAILS.md` that illustrates how MarketService funnels prompt output through guardrails, margin prep, OKX submission, and protection syncing, giving operators a visual map of the safety layers.
+
 ## 2026-01-23
 - Added funding auto-seed retry logic to `MarketService`, ensuring isolated margin top-ups can pull from funding wallets when allowed by guardrails.
 - Restored missing execution-context parsing inside `handle_llm_decision()` and removed duplicated margin code paths.

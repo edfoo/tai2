@@ -31,6 +31,7 @@ except ImportError:  # pragma: no cover - runtime fallback
 
 ORDERS_ALGO_PENDING_PATH = "/api/v5/trade/orders-algo-pending"
 ORDERS_ALGO_HISTORY_PATH = "/api/v5/trade/orders-algo-history"
+SET_LEVERAGE_PATH = "/api/v5/account/set-leverage"
 
 def _ensure_okx_utils() -> None:
     if not OkxUtils:
@@ -146,6 +147,32 @@ class OkxAccountAdapter:
         if subAcct and hasattr(self._api, "_request_with_params") and ADJUSTMENT_MARGIN and POST:
             return self._api._request_with_params(POST, ADJUSTMENT_MARGIN, params)
         return self._api.adjustment_margin(instId, posSide, type, amt, loanTrans=loanTrans)
+
+    def set_leverage(
+        self,
+        *,
+        instId: str,
+        lever: str | float,
+        mgnMode: str,
+        posSide: str = "",
+        subAcct: str | None = None,
+    ) -> Any:
+        if not self._api:
+            raise RuntimeError("Account API unavailable")
+        params = {
+            "instId": instId,
+            "lever": str(lever),
+            "mgnMode": mgnMode,
+            "posSide": posSide,
+        }
+        if subAcct:
+            params["subAcct"] = subAcct
+        if hasattr(self._api, "_request_with_params") and SET_LEVERAGE_PATH and POST:
+            return self._api._request_with_params(POST, SET_LEVERAGE_PATH, params)
+        setter = getattr(self._api, "set_leverage", None)
+        if setter:
+            return setter(instId=instId, lever=str(lever), mgnMode=mgnMode, posSide=posSide)
+        raise RuntimeError("Account API cannot set leverage")
 
 
 class OkxTradeAdapter:

@@ -98,7 +98,7 @@ FUNDING_ACCOUNT_TYPE = "6"
 TRADING_ACCOUNT_TYPE = "18"
 INSUFFICIENT_MARGIN_CODES = {"59300"}
 ORDER_INSUFFICIENT_MARGIN_CODES = {"51008"}
-
+ 
 
 class MarketService:
     """Streams OKX market data and publishes normalized snapshots to Redis."""
@@ -142,6 +142,7 @@ class MarketService:
         log_sink: Callable[[str], None] | None = None,
         ohlc_bar: str | None = None,
     ) -> None:
+        """Configure in-memory caches, API clients, and symbol set for a service run."""
         self.settings = get_settings()
         self.symbols = self._normalize_symbols(symbols) or [symbol]
         self.symbol = self.symbols[0]
@@ -179,6 +180,7 @@ class MarketService:
         self._execution_feedback: Deque[dict[str, Any]] = deque(maxlen=50)
         self._latest_execution_limits: dict[str, dict[str, Any]] = {}
         self._last_margin_guidance: dict[str, dict[str, Any]] = {}
+        self._isolated_leverage_cache: dict[str, float] = {}
         self._position_tiers: dict[str, dict[str, Any]] = {}
         self._subscribed_symbols: set[str] = set()
         self._available_symbols: list[str] = []
@@ -191,6 +193,7 @@ class MarketService:
         self._wait_for_tp_sl = False
 
     async def start(self) -> None:
+        """Launch the market snapshot poller and websocket consumers if not already running."""
         if self._poller_task:
             return
         await self._hydrate_cached_annotations()
@@ -200,6 +203,7 @@ class MarketService:
         logger.info("MarketService started for %s", ", ".join(self.symbols))
 
     async def stop(self) -> None:
+        """Cancel background tasks, tear down websockets, and reset runtime bookkeeping."""
         if self._poller_task:
             self._poller_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -217,6 +221,7 @@ class MarketService:
         logger.info("MarketService stopped for %s", ", ".join(self.symbols))
 
     async def _poll_loop(self) -> None:
+        """Continuously refresh state snapshots on a fixed interval until cancelled."""
         while True:
             interval = max(1, self._poll_interval)
             try:
@@ -228,6 +233,7 @@ class MarketService:
             await asyncio.sleep(interval)
 
     async def _run_public_ws(self) -> None:
+        """Subscribe to public OKX feeds and stream updates into the in-memory caches."""
         client_factory = self._websocket_factory or WsPublicAsync
         if client_factory is None:
             logger.warning("python-okx websocket modules not available; skipping public WS")
@@ -245,6 +251,7 @@ class MarketService:
             self._subscribed_symbols.clear()
 
     def _handle_ws_message(self, message: Any) -> None:
+        """Route websocket frames into ticker/order book/liquidation caches for active symbols."""
         if isinstance(message, (bytes, bytearray)):
             try:
                 message = message.decode()
@@ -294,6 +301,7 @@ class MarketService:
                 self._emit_debug(f"WS update: {channel}::{symbol}", mirror_logger=False)
 
     def _should_emit_ws_debug(self, channel: str, symbol: str) -> bool:
+        """Throttle websocket debug logging so repeated updates do not spam the log sink."""
         key = f"{channel}:{symbol}"
         interval = max(1.0, self._ws_debug_interval)
         now = time.time()
@@ -305,6 +313,7 @@ class MarketService:
 
     @staticmethod
     def _build_channel_args(symbols: Iterable[str]) -> list[dict[str, str]]:
+        """Return the standardized OKX channel subscription payload for the provided symbols."""
         channels: list[dict[str, str]] = []
         for symbol in symbols:
             channels.extend(
@@ -320,6 +329,7 @@ class MarketService:
         return channels
 
     async def _build_snapshot(self) -> dict[str, Any]:
+        """Collect positions, balances, and market data, returning the synced snapshot payload."""
         positions_raw = await self._fetch_positions()
         await self._sync_position_protection_entries(positions_raw)
         positions = self._annotate_positions(positions_raw)
@@ -414,6 +424,7 @@ class MarketService:
         return snapshot
 
     def _snapshot_position_protection(self) -> dict[str, Any]:
+        """Serialize in-memory TP/SL metadata so it can be persisted with the snapshot."""
         payload: dict[str, Any] = {}
         for symbol, meta in self._position_protection.items():
             payload[symbol] = {
@@ -425,6 +436,7 @@ class MarketService:
         return payload
 
     def _annotate_positions(self, positions: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+        """Attach cached TP/SL and last-trade details onto OKX position rows."""
         if not positions:
             return []
         annotated: list[dict[str, Any]] = []
@@ -451,6 +463,7 @@ class MarketService:
         return annotated
 
     def _position_side_sizes(self, positions: list[dict[str, Any]] | None, symbol: str) -> dict[str, float]:
+        """Aggregate long/short exposure for a single instrument from raw OKX position entries."""
         totals = {"long": 0.0, "short": 0.0}
         if not positions:
             return totals
@@ -472,6 +485,7 @@ class MarketService:
         return totals
 
     async def _sync_position_protection_entries(self, positions: list[dict[str, Any]] | None) -> None:
+        """Periodically reconcile cached TP/SL state with OKX Algo order records."""
         if not positions or not self._trade_api:
             return
         symbol_map: dict[str, str | None] = {}
@@ -527,6 +541,7 @@ class MarketService:
 
     @staticmethod
     def _normalize_symbol_key(symbol: Any) -> str | None:
+        """Normalize symbol identifiers to upper-case keys suitable for dict indexing."""
         if symbol is None:
             return None
         value = str(symbol).strip().upper()
@@ -534,6 +549,7 @@ class MarketService:
 
     @staticmethod
     def _parse_cached_timestamp(value: Any) -> float | None:
+        """Convert cached ISO timestamps into epoch seconds for comparison logic."""
         if value in (None, ""):
             return None
         text = str(value).strip()
@@ -551,6 +567,7 @@ class MarketService:
 
     @staticmethod
     def _format_okx_timestamp(value: Any) -> str | None:
+        """Convert OKX-provided millisecond timestamps into RFC3339 strings."""
         if value in (None, ""):
             return None
         try:
@@ -568,6 +585,7 @@ class MarketService:
         return datetime.fromtimestamp(numeric, timezone.utc).isoformat()
 
     async def _hydrate_cached_annotations(self) -> None:
+        """Reload TP/SL and last-trade hints from Redis so warm restarts retain context."""
         try:
             snapshot = await self.state_service.get_market_snapshot()
         except Exception as exc:  # pragma: no cover - Redis/network safety
@@ -644,11 +662,13 @@ class MarketService:
             )
 
     def set_poll_interval(self, seconds: int) -> None:
+        """Update the REST polling cadence and matching websocket debug interval."""
         self._poll_interval = max(1, seconds)
         self._ws_debug_interval = max(5.0, float(self._poll_interval))
         self._emit_debug(f"Poll interval updated to {self._poll_interval}s")
 
     def set_wait_for_tp_sl(self, enabled: bool) -> None:
+        """Toggle the guardrail that delays new entries until TP/SL anchors exist."""
         flag = bool(enabled)
         if flag == self._wait_for_tp_sl:
             return
@@ -657,6 +677,7 @@ class MarketService:
         self._emit_debug(f"Wait-for-TP/SL guard {state}")
 
     async def set_websocket_enabled(self, enabled: bool) -> None:
+        """Enable or disable websocket streaming at runtime, rebuilding tasks as needed."""
         flag = bool(enabled)
         if flag == self._enable_websocket:
             return
@@ -681,6 +702,7 @@ class MarketService:
         self._ws_task = asyncio.create_task(self._run_public_ws(), name="okx-ws")
 
     async def set_sub_account(self, value: str | None, use_master: bool | None = None) -> None:
+        """Update the sub-account routing preferences and publish a fresh snapshot."""
         normalized = (value or "").strip() or None
         updated = False
         if normalized != self._sub_account:
@@ -697,6 +719,7 @@ class MarketService:
         await self._publish_snapshot()
 
     async def refresh_snapshot(self, reason: str | None = None) -> dict[str, Any] | None:
+        """Force a snapshot rebuild, push it to Redis, and record latest equity metrics."""
         snapshot = await self._build_snapshot()
         if not snapshot:
             return None
@@ -712,6 +735,7 @@ class MarketService:
 
     @staticmethod
     def _normalize_okx_flag(flag: str | int | None) -> str:
+        """Ensure the OKX environment flag is either "0" (live) or "1" (paper)."""
         if isinstance(flag, str) and flag.strip() == "1":
             return "1"
         if isinstance(flag, int) and flag == 1:
@@ -719,6 +743,7 @@ class MarketService:
         return "0"
 
     async def set_okx_flag(self, value: str | int | None) -> None:
+        """Switch between live and paper API environments and rebuild API clients."""
         normalized = self._normalize_okx_flag(value)
         if normalized == self._okx_flag:
             return
@@ -729,6 +754,7 @@ class MarketService:
         await self._publish_snapshot()
 
     async def update_symbols(self, symbols: list[str]) -> None:
+        """Replace the tracked symbol list, syncing caches and websocket subscriptions."""
         cleaned = self._normalize_symbols(symbols)
         if not cleaned:
             return
@@ -754,6 +780,7 @@ class MarketService:
         await self._publish_snapshot()
 
     async def _update_ws_subscriptions(self, added: list[str], removed: list[str]) -> None:
+        """Resubscribe the websocket client to reflect symbol changes."""
         if not self._ws_client:
             return
         if removed:
@@ -765,6 +792,7 @@ class MarketService:
         self._subscribed_symbols = set(self.symbols)
 
     def _reset_symbol_state(self, symbols: list[str] | None = None) -> None:
+        """Clear cached market and execution data for the provided symbol set."""
         if symbols:
             targets = set(symbols)
         else:
@@ -792,16 +820,19 @@ class MarketService:
             self._latest_execution_limits.pop(symbol, None)
 
     def get_cached_ticker(self, symbol: str | None) -> dict[str, Any] | None:
+        """Return the latest known ticker for a symbol without triggering a network call."""
         normalized = self._normalize_symbols([symbol]) if symbol else []
         if not normalized:
             return None
         return self._latest_ticker.get(normalized[0])
 
     def get_last_price(self, symbol: str | None) -> float | None:
+        """Shortcut helper to fetch the cached last-traded price for a symbol."""
         ticker = self.get_cached_ticker(symbol)
         return self._price_from_ticker(ticker)
 
     async def _publish_snapshot(self) -> None:
+        """Build and persist a snapshot, logging but ignoring publish failures."""
         try:
             snapshot = await self._build_snapshot()
         except Exception as exc:  # pragma: no cover - defensive
@@ -813,6 +844,7 @@ class MarketService:
 
     @staticmethod
     def _normalize_symbols(symbols: list[str] | None) -> list[str]:
+        """Deduplicate and upper-case user-provided instrument identifiers."""
         if not symbols:
             return []
         cleaned: list[str] = []
@@ -826,6 +858,7 @@ class MarketService:
         return cleaned
 
     async def list_available_symbols(self) -> list[str]:
+        """Return cached OKX instrument list, fetching from the API once if needed."""
         if self._available_symbols:
             return list(self._available_symbols)
         symbols = await self._fetch_available_symbols()
@@ -833,6 +866,7 @@ class MarketService:
         return list(self._available_symbols)
 
     async def _fetch_available_symbols(self) -> list[str]:
+        """Call the public instruments endpoint and hydrate instrument specs cache."""
         if not self._public_api:
             return list(self.symbols)
         response = await asyncio.to_thread(
@@ -865,12 +899,14 @@ class MarketService:
         return sorted(set(pairs))
 
     def _tier_cache_key(self, symbol: str, trade_mode: str) -> str:
+        """Key helper for memoizing tier metadata per instrument and trade mode."""
         normalized_symbol = (symbol or "").upper()
         normalized_mode = (trade_mode or "cross").lower()
         return f"{normalized_mode}:{normalized_symbol}"
 
     @staticmethod
     def _instrument_family(symbol: str | None) -> str | None:
+        """Reduce an instrument ID into its family identifier (e.g., BTC-USDT)."""
         if not symbol:
             return None
         parts = str(symbol).upper().split("-")
@@ -880,6 +916,7 @@ class MarketService:
 
     @staticmethod
     def _quote_currency_from_symbol(symbol: str | None) -> str | None:
+        """Extract the quote currency (middle segment) from an OKX instrument ID."""
         if not symbol:
             return None
         parts = str(symbol).upper().split("-")
@@ -888,6 +925,7 @@ class MarketService:
         return None
 
     async def _get_position_tiers(self, symbol: str, trade_mode: str = "cross") -> list[dict[str, Any]]:
+        """Return cached or freshly fetched OKX position tier definitions."""
         cache_key = self._tier_cache_key(symbol, trade_mode)
         cached = self._position_tiers.get(cache_key)
         now = time.time()
@@ -901,6 +939,7 @@ class MarketService:
         return tiers or []
 
     async def _fetch_position_tiers(self, symbol: str, trade_mode: str = "cross") -> list[dict[str, Any]]:
+        """Hit the OKX public tier endpoint and normalize its payload."""
         if not self._public_api:
             return []
         kwargs: dict[str, Any] = {
@@ -933,6 +972,7 @@ class MarketService:
         tiers: list[dict[str, Any]],
         size: float,
     ) -> dict[str, Any] | None:
+        """Pick the tier whose [min,max] bracket would include the contemplated position size."""
         if not tiers or size is None:
             return None
         target = abs(size)
@@ -959,6 +999,7 @@ class MarketService:
         last_price: float,
         available_margin_usd: float | None,
     ) -> dict[str, Any]:
+        """Clamp requested size against tier IMR constraints and report the adjusted sizing metadata."""
         tiers = await self._get_position_tiers(symbol, trade_mode)
         if not tiers or last_price is None or last_price <= 0:
             return {"size": additional_size}
@@ -1001,6 +1042,7 @@ class MarketService:
         }
 
     async def _fetch_positions(self, symbol: str | None = None) -> list[dict[str, Any]]:
+        """Pull current SWAP positions from the account API, optionally filtering by instrument."""
         if not self._account_api:
             return []
         kwargs = {"instType": "SWAP"}
@@ -1016,6 +1058,7 @@ class MarketService:
         return data
 
     async def _position_size(self, symbol: str, pos_side: str | None = None) -> float | None:
+        """Return the numeric position size for a given instrument/side if one exists."""
         records = await self._fetch_positions(symbol)
         normalized = symbol.upper()
         normalized_side = (pos_side or "").lower()
@@ -1039,6 +1082,7 @@ class MarketService:
         attempts: int = 6,
         delay: float = 0.25,
     ) -> float | None:
+        """Retry position lookups for a short window to confirm execution took effect."""
         normalized = symbol.upper()
         for attempt in range(attempts):
             size = await self._position_size(normalized, pos_side=pos_side)
@@ -1049,6 +1093,7 @@ class MarketService:
         return None
 
     async def _fetch_account_balance(self) -> dict[str, Any]:
+        """Fetch account balances (respecting sub-account routing) and normalize the payload."""
         if not self._account_api:
             return {
                 "details": [],
@@ -1067,6 +1112,7 @@ class MarketService:
         return self._normalize_account_balances(data)
 
     async def _fetch_order_book(self, symbol: str) -> dict[str, Any]:
+        """Return the cached order book or fetch the latest depth snapshot for a symbol."""
         cached = self._latest_order_book.get(symbol)
         if cached:
             return cached
@@ -1085,6 +1131,7 @@ class MarketService:
         return normalized
 
     async def _fetch_ticker(self, symbol: str) -> dict[str, Any]:
+        """Return the cached ticker or fetch the most recent OKX ticker for a symbol."""
         cached = self._latest_ticker.get(symbol)
         if cached:
             return cached
@@ -1098,6 +1145,7 @@ class MarketService:
         return data[0]
 
     async def _fetch_funding_rate(self, symbol: str) -> dict[str, Any]:
+        """Return current funding-rate metadata for the provided instrument."""
         cached = self._latest_funding.get(symbol)
         if cached:
             return cached
@@ -1111,6 +1159,7 @@ class MarketService:
         return data[0]
 
     async def _fetch_open_interest(self, symbol: str) -> dict[str, Any]:
+        """Return open-interest stats, preferring cached values when fresh."""
         cached = self._latest_open_interest.get(symbol)
         if cached:
             return cached
@@ -1128,6 +1177,7 @@ class MarketService:
         return data[0]
 
     async def _fetch_ohlcv(self, symbol: str) -> list[list[Any]]:
+        """Fetch OHLCV candles (cached fallback) for use in indicator calculations."""
         cached = self._latest_ohlcv.get(symbol)
         if not self._market_api:
             return cached or []
@@ -1149,6 +1199,7 @@ class MarketService:
         return cached or []
 
     def _compute_custom_metrics(self, symbol: str, order_book: dict[str, Any]) -> dict[str, Any]:
+        """Derive proprietary metrics (CVD/OFI/etc.) from cached trades and current depth."""
         cvd = self._calculate_cvd(symbol)
         ofi = self._calculate_ofi(symbol, order_book)
         cvd_series = self._build_cvd_series(symbol)
@@ -1162,6 +1213,7 @@ class MarketService:
 
     @staticmethod
     def _compute_indicators(ohlcv: list[list[Any]]) -> dict[str, Any]:
+        """Build the technical indicator bundle consumed by downstream strategy logic."""
         if not ohlcv:
             return {
                 "bollinger_bands": {},
@@ -1273,6 +1325,7 @@ class MarketService:
         return indicators
 
     def _get_trade_buffer(self, symbol: str) -> Deque[dict[str, float]]:
+        """Return (and lazily create) the rolling trade buffer for a symbol."""
         buffer = self._trade_buffers.get(symbol)
         if buffer is None:
             buffer = deque(maxlen=500)
@@ -1280,6 +1333,7 @@ class MarketService:
         return buffer
 
     def _calculate_cvd(self, symbol: str) -> float:
+        """Compute the cumulative volume delta for the instrument's buffered trades."""
         value = 0.0
         for trade in self._get_trade_buffer(symbol):
             volume = trade.get("volume", 0.0)
@@ -1288,6 +1342,7 @@ class MarketService:
         return value
 
     def _build_cvd_series(self, symbol: str, limit: int = 200) -> list[float]:
+        """Return the historical CVD series (bounded) for visualization/analytics."""
         values: list[float] = []
         running = 0.0
         for trade in self._get_trade_buffer(symbol):
@@ -1298,6 +1353,7 @@ class MarketService:
         return values[-limit:]
 
     async def _fetch_long_short_ratio(self, symbol: str) -> dict[str, Any]:
+        """Fetch or return cached OKX long/short ratio telemetry for the symbol."""
         cache = self._latest_long_short_ratio.get(symbol, {})
         if not self._trading_api:
             return cache
@@ -1364,6 +1420,7 @@ class MarketService:
         custom_metrics: dict[str, Any],
         ticker: dict[str, Any],
     ) -> dict[str, Any]:
+        """Blend indicator and custom metric inputs into a simplified BUY/SELL/HOLD signal."""
         rsi = indicators.get("rsi")
         macd_value = (indicators.get("macd") or {}).get("value")
         stoch = indicators.get("stoch_rsi") or {}
@@ -1432,6 +1489,7 @@ class MarketService:
         }
 
     def _derive_risk_metrics(self, indicators: dict[str, Any], ticker: dict[str, Any]) -> dict[str, Any]:
+        """Summarize ATR-based risk metrics that power downstream risk guidance."""
         atr = indicators.get("atr")
         atr_pct = indicators.get("atr_pct")
         last_price = self._extract_float((ticker or {}).get("last"))
@@ -1445,6 +1503,7 @@ class MarketService:
         }
 
     def _calculate_ofi(self, symbol: str, order_book: dict[str, Any]) -> dict[str, Any]:
+        """Calculate order-flow imbalance metrics from the latest order book snapshot."""
         bids = order_book.get("bids", [])
         asks = order_book.get("asks", [])
         bid_volume = sum(float(level[1]) for level in bids[:20])
@@ -1466,6 +1525,7 @@ class MarketService:
 
     @staticmethod
     def _calculate_account_equity(rows: list[dict[str, Any]]) -> float:
+        """Aggregate equity values from OKX account payload rows (recursing into details)."""
         total = 0.0
         for row in rows:
             if not isinstance(row, dict):
@@ -1486,6 +1546,7 @@ class MarketService:
 
     @staticmethod
     def _normalize_account_balances(entries: list[Any]) -> dict[str, Any]:
+        """Normalize OKX balance payloads into a flattened structure the service expects."""
         details: list[dict[str, Any]] = []
         total_equity = 0.0
         total_account_value = 0.0
@@ -1610,6 +1671,7 @@ class MarketService:
 
     @staticmethod
     def _extract_equity_value(record: dict[str, Any]) -> float | None:
+        """Extract the most relevant numeric equity figure from a balance record."""
         for key in ("eq", "eqUsd", "cashBal", "availEq", "availBal"):
             value = record.get(key)
             if value is None:
@@ -1622,6 +1684,7 @@ class MarketService:
 
     @staticmethod
     def _extract_float(value: Any) -> float | None:
+        """Safely coerce arbitrary types to float, returning None on failure."""
         if value is None:
             return None
         try:
@@ -1630,6 +1693,7 @@ class MarketService:
             return None
 
     def _emit_debug(self, message: str, *, mirror_logger: bool = True) -> None:
+        """Send human-friendly diagnostics to the injected sink and optionally the logger."""
         text = str(message)
         try:
             self._log_sink(text)
@@ -1654,6 +1718,7 @@ class MarketService:
         tier_initial_margin_ratio: float | None = None,
         tier_source: str | None = None,
     ) -> None:
+        """Persist computed execution caps (margin, leverage, quote liquidity) per symbol."""
         normalized = self._normalize_symbol_key(symbol)
         if not normalized:
             return
@@ -1707,6 +1772,7 @@ class MarketService:
         meta: dict[str, Any] | None = None,
         recommendation: dict[str, Any] | None = None,
     ) -> None:
+        """Append a feedback entry and echo warnings/errors through the debug sink."""
         entry = {
             "symbol": symbol,
             "message": message,
@@ -1730,6 +1796,7 @@ class MarketService:
             )
 
     def _set_margin_guidance(self, symbol: str, payload: dict[str, Any] | None) -> None:
+        """Cache or clear the latest isolated-margin guidance for a symbol."""
         key = self._normalize_symbol_key(symbol)
         if not key:
             return
@@ -1739,16 +1806,30 @@ class MarketService:
             self._last_margin_guidance.pop(key, None)
 
     def _get_margin_guidance(self, symbol: str) -> dict[str, Any] | None:
+        """Return any cached margin guidance metadata for the instrument."""
         key = self._normalize_symbol_key(symbol)
         if not key:
             return None
         return self._last_margin_guidance.get(key)
+
+    def _log_margin_guidance_snapshot(self, symbol: str, *, context: str) -> None:
+        """Emit the currently stored margin guidance for observability troubleshooting."""
+        guidance = self._get_margin_guidance(symbol)
+        if guidance:
+            try:
+                payload = json.dumps(guidance, default=str, sort_keys=True)
+            except Exception:
+                payload = str(guidance)
+            self._emit_debug(f"Margin guidance snapshot ({context}) {symbol}: {payload}")
+        else:
+            self._emit_debug(f"Margin guidance snapshot ({context}) {symbol}: <empty>")
 
     def _should_attach_margin_recommendation(
         self,
         error_meta: dict[str, Any] | None,
         error_message: str | None,
     ) -> bool:
+        """Detect whether an order failure corresponds to insufficient margin scenarios."""
         codes: set[str] = set()
         if error_meta:
             for key in ("sCode", "code"):
@@ -1770,6 +1851,7 @@ class MarketService:
         return False
 
     def _build_margin_recommendation(self, symbol: str) -> dict[str, Any] | None:
+        """Craft a human-readable remediation note leveraging cached guidance context."""
         context = self._get_margin_guidance(symbol)
         if not context:
             return None
@@ -1848,6 +1930,7 @@ class MarketService:
         return recommendation
 
     def _fallback_margin_recommendation(self, symbol: str) -> dict[str, Any]:
+        """Produce a generic margin recommendation when detailed guidance is unavailable."""
         quote_currency = self._quote_currency_from_symbol(symbol) or "USDT"
         guidance = self._get_margin_guidance(symbol)
         payload: dict[str, Any] = {}
@@ -1876,7 +1959,56 @@ class MarketService:
                 payload["funding_available"] = funding_available
         return payload
 
+    def _summarize_margin_recommendation(self, recommendation: dict[str, Any] | None) -> str | None:
+        """Condense a recommendation dict into a compact semicolon-delimited summary."""
+        if not isinstance(recommendation, dict):
+            return None
+        bits: list[str] = []
+        currency = str(recommendation.get("quote_currency") or "").upper()
+
+        def _fmt_amount(value: Any) -> str | None:
+            numeric = self._extract_float(value)
+            if numeric is None:
+                return None
+            label = f"{numeric:,.2f}"
+            if currency:
+                label = f"{label} {currency}"
+            return label
+
+        need_label = _fmt_amount(recommendation.get("needed"))
+        if need_label:
+            bits.append(f"need≈{need_label}")
+        cap_label = _fmt_amount(recommendation.get("seed_limit"))
+        if cap_label:
+            bits.append(f"cap={cap_label}")
+        funding_label = _fmt_amount(recommendation.get("funding_available"))
+        if funding_label:
+            bits.append(f"funding={funding_label}")
+
+        target_size = self._extract_float(
+            recommendation.get("auto_downsize_target_size")
+            or recommendation.get("auto_downsize_previous_size")
+        )
+        if target_size is not None:
+            bits.append(f"target_size={target_size:,.4f}")
+        scale = self._extract_float(recommendation.get("auto_downsize_scale"))
+        if scale is not None and scale > 0:
+            bits.append(f"scale={scale:.3f}")
+
+        if recommendation.get("auto_seed_attempted"):
+            success_text = "ok" if recommendation.get("auto_seed_success") else "failed"
+            bits.append(f"auto-seed={success_text}")
+
+        blocked_reason = recommendation.get("blocked_reason")
+        if blocked_reason:
+            bits.append(f"blocked={blocked_reason}")
+
+        if not bits:
+            return None
+        return "; ".join(bits)
+
     def clear_execution_feedback(self, symbol: str | None = None) -> int:
+        """Remove stored execution feedback (optionally scoped to a symbol)."""
         if not self._execution_feedback:
             return 0
         normalized = self._normalize_symbol_key(symbol) if symbol else None
@@ -1897,6 +2029,7 @@ class MarketService:
 
     @staticmethod
     def _response_success(response: Any) -> bool:
+        """Return True if the OKX response and all nested entries report success codes."""
         def _entry_ok(entry: dict[str, Any]) -> bool:
             code = str(entry.get("sCode") or entry.get("code") or "").strip()
             return (not code) or code == "0"
@@ -1915,6 +2048,7 @@ class MarketService:
 
     @staticmethod
     def _extract_response_codes(response: Any) -> tuple[str | None, str | None, str | None]:
+        """Extract (code, subcode, message) triad from OKX API responses."""
         code: str | None = None
         sub_code: str | None = None
         message: str | None = None
@@ -1936,6 +2070,7 @@ class MarketService:
         return code, sub_code, message
 
     def _response_indicates_insufficient_margin(self, response: Any) -> bool:
+        """Check if an OKX response points to insufficient margin error codes."""
         code, sub_code, _ = self._extract_response_codes(response)
         for candidate in (code, sub_code):
             if candidate and candidate in INSUFFICIENT_MARGIN_CODES:
@@ -1953,6 +2088,7 @@ class MarketService:
         symbol_cap_pct: float | None,
         max_notional_usd: float | None,
     ) -> float | None:
+        """Estimate how much isolated margin the requested notional would consume."""
         size_value = self._extract_float(size)
         price_value = self._extract_float(price)
         if not size_value or size_value <= 0 or not price_value or price_value <= 0:
@@ -1984,6 +2120,7 @@ class MarketService:
         guardrails: dict[str, Any] | None,
         symbol: str,
     ) -> float | None:
+        """Resolve guardrail-configured isolated margin transfer caps for a symbol."""
         if not isinstance(guardrails, dict):
             return None
         symbol_key = self._normalize_symbol_key(symbol) or symbol
@@ -2010,6 +2147,7 @@ class MarketService:
         return limit
 
     async def _fetch_funding_balance(self, currency: str) -> float | None:
+        """Return the available balance for a currency in the funding wallet."""
         if not self._funding_api:
             return None
         try:
@@ -2045,6 +2183,7 @@ class MarketService:
         guardrails: dict[str, Any] | None,
         seed_limit: float | None = None,
     ) -> dict[str, Any]:
+        """Attempt to transfer collateral from funding to trading to fill isolated margin gaps."""
         seed_result = {
             "success": False,
             "needed": required_gap,
@@ -2168,6 +2307,7 @@ class MarketService:
         guardrails: dict[str, Any] | None = None,
         min_size: float | None = None,
     ) -> tuple[dict[str, Any] | None, float | None]:
+        """Top up isolated margin (auto-downsizing or seeding if needed) before placing an order."""
         if not self._account_api:
             return None, None
 
@@ -2405,6 +2545,7 @@ class MarketService:
         return refreshed, adjusted_size
 
     def _refresh_execution_limits_from_account(self, account_payload: dict[str, Any] | None) -> None:
+        """Update per-symbol execution caps based on the latest account snapshot."""
         if not isinstance(account_payload, dict):
             return
         available_margin_usd = self._extract_float(account_payload.get("available_eq_usd"))
@@ -2476,11 +2617,13 @@ class MarketService:
 
     @staticmethod
     def _prune_trade_history(history: Deque[float], now: float, window: int) -> None:
+        """Drop stale trade timestamps so guardrail windows stay bounded."""
         cutoff = max(60, window or 3600)
         while history and now - history[0] > cutoff:
             history.popleft()
 
     def _detect_position_side(self, positions: list[dict[str, Any]], symbol: str) -> str:
+        """Return LONG/SHORT/FLAT by inspecting current OKX positions for the symbol."""
         if not positions:
             return "FLAT"
         target = symbol.upper()
@@ -2507,6 +2650,7 @@ class MarketService:
 
     @staticmethod
     def _transition_allowed(current_side: str, action: str) -> bool:
+        """Enforce basic position transition rules for alignment guardrails."""
         if action == "HOLD":
             return True
         if current_side == "FLAT":
@@ -2519,6 +2663,7 @@ class MarketService:
 
     @staticmethod
     def _normalize_confidence(value: Any) -> float:
+        """Clamp arbitrary confidence inputs into the [0,1] range with sane defaults."""
         try:
             confidence = float(value)
         except (TypeError, ValueError):
@@ -2542,6 +2687,7 @@ class MarketService:
         confidence: float,
         confidence_gate: float | None = None,
     ) -> float | None:
+        """Scale desired size toward leverage bounds using confidence-driven interpolation."""
         size_hint_value = size_hint if size_hint and size_hint > 0 else None
         equity = account_equity if account_equity and account_equity > 0 else None
         price = last_price if last_price and last_price > 0 else None
@@ -2603,6 +2749,7 @@ class MarketService:
         decision: dict[str, Any],
         context: dict[str, Any] | None = None,
     ) -> bool:
+        """Apply guardrails, size calculations, and OKX submission for an LLM-issued action."""
         if not decision:
             return False
         context = context or {}
@@ -2852,6 +2999,7 @@ class MarketService:
 
         confidence_value = self._normalize_confidence(decision.get("confidence"))
         size_hint = self._extract_float(decision.get("position_size"))
+        target_leverage: float | None = None
         raw_size = self._compute_leverage_adjusted_size(
             size_hint=size_hint,
             account_equity=account_equity,
@@ -3260,6 +3408,7 @@ class MarketService:
             and last_price > 0
         ):
             achieved_leverage = (raw_size * last_price) / account_equity
+            target_leverage = achieved_leverage
             if achieved_leverage < min_leverage:
                 if leverage_override_reason:
                     self._emit_debug(
@@ -3281,6 +3430,23 @@ class MarketService:
                         },
                     )
                     return False
+        if not reduce_only and (target_leverage is None or target_leverage <= 0) and account_equity and account_equity > 0 and last_price and last_price > 0:
+            target_leverage = (raw_size * last_price) / account_equity
+        if not reduce_only and target_leverage is not None:
+            if tier_max_leverage_used and tier_max_leverage_used > 0:
+                target_leverage = min(target_leverage, tier_max_leverage_used)
+            if max_leverage and max_leverage > 0:
+                target_leverage = min(target_leverage, max_leverage)
+            if min_leverage and min_leverage > 0:
+                target_leverage = max(target_leverage, min_leverage)
+        if not reduce_only and (target_leverage is None or target_leverage <= 0):
+            fallback = None
+            if max_leverage and max_leverage > 0:
+                fallback = max_leverage
+            elif min_leverage and min_leverage > 0:
+                fallback = min_leverage
+            if fallback:
+                target_leverage = max(fallback, 1.0)
 
         attach_algo_orders: list[dict[str, Any]] | None = None
         attachments_take_profit = None
@@ -3334,6 +3500,9 @@ class MarketService:
             reduce_only=reduce_only,
             client_order_id=client_order_id,
             attach_algo_orders=attach_algo_orders,
+            margin_currency=quote_currency,
+            leverage=target_leverage,
+            dual_side_mode=dual_side_mode,
         )
         if not order:
             self._emit_debug(f"Order placement failed for {symbol}")
@@ -3420,6 +3589,7 @@ class MarketService:
         return True
 
     async def _persist_equity(self, snapshot: dict[str, Any]) -> None:
+        """Best-effort persistence of equity metrics so historical curves can be plotted."""
         if not self.settings.database_url:
             return
         try:
@@ -3433,6 +3603,7 @@ class MarketService:
 
     @staticmethod
     def _last_value(frame: pd.DataFrame | None, column: str) -> float | None:
+        """Return the most recent numeric value from a pandas DataFrame column."""
         if frame is None or column not in frame or frame.empty:
             return None
         series = frame[column]
@@ -3440,6 +3611,7 @@ class MarketService:
 
     @staticmethod
     def _column_value(frame: pd.DataFrame | None, candidates: list[str]) -> float | None:
+        """Return the first available column value from a list of candidate names."""
         for name in candidates:
             value = MarketService._last_value(frame, name)
             if value is not None:
@@ -3448,23 +3620,27 @@ class MarketService:
 
     @staticmethod
     def _series_to_list(series: pd.Series | None, limit: int = 200) -> list[float]:
+        """Convert a pandas Series into a bounded list of floats, dropping NaNs."""
         if series is None:
             return []
         return [float(val) for val in series.dropna().tolist()[-limit:]]
 
     @staticmethod
     def _frame_column_to_list(frame: pd.DataFrame | None, column: str, limit: int = 200) -> list[float]:
+        """Convert a DataFrame column into a bounded list of floats."""
         if frame is None or column not in frame:
             return []
         return [float(val) for val in frame[column].dropna().tolist()[-limit:]]
 
     def _normalize_bar(self, value: str | None) -> str:
+        """Map user-provided timeframe strings to OKX-compatible bar identifiers."""
         if not value:
             return self.DEFAULT_TIMEFRAME
         candidate = value.strip()
         return self._TIMEFRAME_CHOICES.get(candidate.lower(), self.DEFAULT_TIMEFRAME)
 
     async def set_ohlc_bar(self, value: str) -> None:
+        """Update the OHLC timeframe used for indicator calculations and republish snapshot."""
         bar = self._normalize_bar(value)
         if bar == self._ohlc_bar:
             return
@@ -3474,6 +3650,7 @@ class MarketService:
 
     @staticmethod
     def _safe_data(response: Any) -> list[Any]:
+        """Normalize OKX responses into list form, regardless of nested structure."""
         if isinstance(response, dict):
             data = response.get("data")
             if isinstance(data, list):
@@ -3484,6 +3661,7 @@ class MarketService:
 
     @staticmethod
     def _price_from_ticker(ticker: dict[str, Any] | None) -> float | None:
+        """Extract a usable price field from heterogeneous OKX ticker payloads."""
         if not ticker:
             return None
         for key in ("last", "lastPx", "px", "close", "askPx", "bidPx"):
@@ -3500,11 +3678,13 @@ class MarketService:
 
     @staticmethod
     def _normalize_order_book(data: dict[str, Any]) -> dict[str, Any]:
+        """Truncate and coerce order book arrays into floats for downstream math."""
         bids = [[float(price), float(size)] for price, size, *_ in data.get("bids", [])][:20]
         asks = [[float(price), float(size)] for price, size, *_ in data.get("asks", [])][:20]
         return {"bids": bids, "asks": asks, "ts": data.get("ts")}
 
     def _build_account_api(self) -> Any | None:
+        """Instantiate the OKX AccountAPI adapter when credentials and SDK are available."""
         if OkxAccount is None:
             logger.warning("okx SDK not installed; AccountAPI unavailable")
             return None
@@ -3520,24 +3700,28 @@ class MarketService:
         return OkxAccountAdapter(raw_api)
 
     def _build_market_api(self) -> Any | None:
+        """Create the MarketAPI client used for ticker/order-book retrievals."""
         if OkxMarket is None:
             logger.warning("python-okx not installed; MarketAPI unavailable")
             return None
         return OkxMarket.MarketAPI(flag=self._okx_flag)
 
     def _build_public_api(self) -> Any | None:
+        """Create the PublicAPI client for instruments, funding, and open-interest info."""
         if OkxPublic is None:
             logger.warning("python-okx not installed; PublicAPI unavailable")
             return None
         return OkxPublic.PublicAPI(flag=self._okx_flag)
 
     def _build_trading_api(self) -> Any | None:
+        """Instantiate the TradingDataAPI client for long/short ratios and analytics."""
         if OkxTrading is None:
             logger.warning("python-okx not installed; TradingDataAPI unavailable")
             return None
         return OkxTrading.TradingDataAPI(flag=self._okx_flag)
 
     def _build_trade_api(self) -> Any | None:
+        """Build the TradeAPI adapter that routes order placement through okx-sdk."""
         if OkxTrade is None:
             logger.warning("okx SDK not installed; TradeAPI unavailable")
             return None
@@ -3553,6 +3737,7 @@ class MarketService:
         return OkxTradeAdapter(raw_api)
 
     def _build_funding_api(self) -> Any | None:
+        """Instantiate the FundingAPI client for wallet transfers and balance queries."""
         if OkxFunding is None:
             logger.warning("python-okx not installed; FundingAPI unavailable")
             return None
@@ -3567,6 +3752,7 @@ class MarketService:
         )
 
     def _rebuild_okx_clients(self) -> None:
+        """Recreate all OKX REST clients, typically after flipping env flags or credentials."""
         self._account_api = self._build_account_api()
         self._market_api = self._build_market_api()
         self._public_api = self._build_public_api()
@@ -3576,14 +3762,31 @@ class MarketService:
 
     @staticmethod
     def _format_size(value: float) -> str:
+        """Format contract sizes with trimmed trailing zeros for OKX payloads."""
         return (f"{value:.6f}".rstrip("0").rstrip(".") or "0") if value is not None else "0"
 
     @staticmethod
     def _format_price(value: float) -> str:
+        """Format prices to 8 decimals, removing redundant zeros."""
         return (f"{value:.8f}".rstrip("0").rstrip(".") or "0") if value is not None else "0"
 
     @staticmethod
+    def _format_leverage(value: float) -> str:
+        """Format leverage inputs while preventing non-positive values."""
+        if value is None or value <= 0:
+            return "1"
+        return (f"{value:.4f}".rstrip("0").rstrip(".") or "1")
+
+    @staticmethod
+    def _leverage_cache_key(symbol: str, pos_side: str) -> str:
+        """Return the dictionary key used to memoize last-set leverage per symbol/side."""
+        safe_symbol = (symbol or "").upper()
+        safe_side = (pos_side or "net").lower()
+        return f"{safe_symbol}::{safe_side}"
+
+    @staticmethod
     def _generate_client_order_id(prefix: str = "tai2") -> str:
+        """Generate a short, unique client order ID compatible with OKX limits."""
         safe_prefix = "".join(ch for ch in (prefix or "") if ch.isalnum()) or "tai2"
         timestamp = str(int(time.time() * 1000))
         random_suffix = secrets.token_hex(3)
@@ -3591,6 +3794,7 @@ class MarketService:
         return value[:32]
 
     def _normalize_order_response(self, response: Any) -> dict[str, Any] | None:
+        """Return the first OKX data entry if the envelope and sub-codes signal success."""
         if not isinstance(response, dict):
             return None
         top_code = str(response.get("code", ""))
@@ -3612,6 +3816,7 @@ class MarketService:
         return response
 
     def _extract_order_error(self, response: Any) -> tuple[str, dict[str, Any]]:
+        """Extract a human-readable error string plus metadata from an OKX response."""
         if not isinstance(response, dict):
             return ("OKX rejected the order", {})
         code = response.get("code")
@@ -3640,6 +3845,7 @@ class MarketService:
 
     @staticmethod
     def _response_indicates_pos_side_error(response: Any) -> bool:
+        """Detect whether an error payload suggests posSide mismatches for net accounts."""
         def _entry_has_issue(entry: Any) -> bool:
             if entry is None:
                 return False
@@ -3669,6 +3875,7 @@ class MarketService:
         return _entry_has_issue(response)
 
     def _quantize_order_size(self, symbol: str, size: float) -> float | None:
+        """Snap requested size to the instrument's lot size and enforce min order size."""
         if size is None or size <= 0:
             return None
         spec = self._instrument_specs.get(symbol)
@@ -3686,6 +3893,7 @@ class MarketService:
         return quantized if quantized > 0 else None
 
     def _quantize_price(self, symbol: str, price: float | None, *, prefer_up: bool) -> float | None:
+        """Align a target price to the instrument's tick size, nudging up or down as requested."""
         if price is None or price <= 0:
             return None
         spec = self._instrument_specs.get(symbol)
@@ -3707,6 +3915,7 @@ class MarketService:
         take_profit: float | None,
         reference_price: float | None,
     ) -> float | None:
+        """Validate that the TP respects directional constraints relative to entry price."""
         if take_profit is None or take_profit <= 0:
             return None
         if reference_price and reference_price > 0:
@@ -3728,6 +3937,7 @@ class MarketService:
         stop_loss: float | None,
         reference_price: float | None,
     ) -> float | None:
+        """Ensure stop-loss inputs are on the protective side of the entry price."""
         if stop_loss is None or stop_loss <= 0:
             return None
         if reference_price and reference_price > 0:
@@ -3744,6 +3954,7 @@ class MarketService:
         return stop_loss
 
     def _response_indicates_protection_error(self, response: Any) -> bool:
+        """Check whether an order response indicates TP/SL validation failures."""
         def _match_entry(entry: dict[str, Any]) -> bool:
             code = str(entry.get("sCode") or entry.get("code") or "").strip()
             if code and code in self.PROTECTION_ERROR_CODES:
@@ -3776,6 +3987,7 @@ class MarketService:
         reference_price: float | None,
         kind: str,
     ) -> bool:
+        """Return True when a TP/SL target sits on the wrong side of the entry price."""
         if target is None or reference_price is None or reference_price <= 0:
             return False
         if kind == "take-profit":
@@ -3793,6 +4005,7 @@ class MarketService:
         symbol: str,
         reference_price: float | None,
     ) -> float:
+        """Compute the minimum tick/ratio offset required when nudging invalid TP/SL levels."""
         if reference_price is None or reference_price <= 0:
             return 0.0
         spec = self._instrument_specs.get(symbol) or {}
@@ -3811,6 +4024,7 @@ class MarketService:
         kind: str,
         stage: str,
     ) -> float | None:
+        """Drop or adjust TP/SL targets that violate OKX constraints relative to entry price."""
         if not self._target_conflicts_with_price(
             action,
             target=target,
@@ -3877,6 +4091,59 @@ class MarketService:
         )
         return None
 
+    async def _ensure_isolated_leverage_setting(
+        self,
+        *,
+        symbol: str,
+        pos_side: str | None,
+        dual_side_mode: bool,
+        leverage: float | None,
+    ) -> None:
+        """Call the account API to set leverage prior to submitting isolated orders."""
+        if not self._account_api:
+            return
+        setter = getattr(self._account_api, "set_leverage", None)
+        if setter is None:
+            return
+        target_leverage = self._extract_float(leverage)
+        if not target_leverage or target_leverage <= 0:
+            return
+        target_leverage = max(1.0, float(target_leverage))
+        if dual_side_mode and pos_side and pos_side.lower() in {"long", "short"}:
+            pos_designator = pos_side.lower()
+        else:
+            pos_designator = "net"
+        cache_key = self._leverage_cache_key(symbol, pos_designator)
+        cached_value = self._isolated_leverage_cache.get(cache_key)
+        if cached_value is not None and abs(cached_value - target_leverage) <= 1e-3:
+            return
+        payload = {
+            "instId": symbol,
+            "lever": self._format_leverage(target_leverage),
+            "mgnMode": "isolated",
+            "posSide": pos_designator,
+        }
+        if self._sub_account and self._sub_account_use_master:
+            payload["subAcct"] = self._sub_account
+        self._emit_debug(
+            f"Setting isolated leverage for {symbol} ({pos_designator}) -> {target_leverage:.2f}x"
+        )
+        try:
+            await asyncio.to_thread(setter, **payload)
+        except Exception as exc:
+            self._emit_debug(f"Failed to set leverage for {symbol}: {exc}")
+            self._record_execution_feedback(
+                symbol,
+                "Failed to set isolated leverage",
+                level="warning",
+                meta={
+                    "requested_leverage": target_leverage,
+                    "pos_side": pos_designator,
+                },
+            )
+            return
+        self._isolated_leverage_cache[cache_key] = target_leverage
+
     async def _submit_order(
         self,
         *,
@@ -3889,13 +4156,24 @@ class MarketService:
         reduce_only: bool,
         client_order_id: str,
         attach_algo_orders: list[dict[str, Any]] | None,
+        margin_currency: str | None = None,
+        leverage: float | None = None,
+        dual_side_mode: bool = False,
     ) -> tuple[dict[str, Any] | None, bool]:
+        """Place an order via the trade API, retrying without posSide if needed."""
         if not self._trade_api:
             self._emit_debug("Trade API unavailable; cannot place order")
             return None
         include_pos_side = pos_side
         attachments_to_use = attach_algo_orders
         attempt = 0
+        if trade_mode == "isolated" and not reduce_only:
+            await self._ensure_isolated_leverage_setting(
+                symbol=symbol,
+                pos_side=pos_side,
+                dual_side_mode=dual_side_mode,
+                leverage=leverage,
+            )
         while True:
             payload = {
                 "instId": symbol,
@@ -3913,6 +4191,10 @@ class MarketService:
                 payload["attachAlgoOrds"] = attachments_to_use
             if self._sub_account and self._sub_account_use_master:
                 payload["subAcct"] = self._sub_account
+            if trade_mode == "isolated":
+                margin_ccy = str(margin_currency or self._quote_currency_from_symbol(symbol) or "").upper()
+                if margin_ccy:
+                    payload["ccy"] = margin_ccy
 
             trace_payload = {
                 "instId": payload["instId"],
@@ -3924,6 +4206,7 @@ class MarketService:
                 "reduceOnly": payload.get("reduceOnly"),
                 "subAcct": bool(payload.get("subAcct")),
                 "clientOrderId": payload.get("clOrdId"),
+                "ccy": payload.get("ccy"),
             }
             self._emit_debug(f"OKX order payload: {trace_payload}")
 
@@ -3961,6 +4244,10 @@ class MarketService:
                 recommendation = self._build_margin_recommendation(symbol)
                 if recommendation is None:
                     recommendation = self._fallback_margin_recommendation(symbol)
+            summary_note = self._summarize_margin_recommendation(recommendation)
+            if summary_note:
+                error_message = f"{error_message} [{summary_note}]"
+            self._log_margin_guidance_snapshot(symbol, context="insufficient-margin")
             self._record_execution_feedback(
                 symbol,
                 error_message,
@@ -3980,6 +4267,7 @@ class MarketService:
         rationale: str | None,
         fee: float | None,
     ) -> None:
+        """Persist successful fills so downstream analytics and the UI have context."""
         if price is None or amount is None:
             return
         symbol_key = symbol.upper()
@@ -4003,6 +4291,7 @@ class MarketService:
 
     @staticmethod
     def _build_tpsl_client_id(symbol: str) -> str:
+        """Create a stable OKX client ID for TP/SL algos, respecting the 32 char limit."""
         sanitized = "".join(ch for ch in str(symbol) if ch.isalnum()).lower() or "symbol"
         value = f"tai2{sanitized}tpsl"
         return value[:32]
@@ -4018,6 +4307,7 @@ class MarketService:
         dual_side_mode: bool,
         pos_side: str | None,
     ) -> None:
+        """Rebuild TP/SL protection for a symbol, replacing any prior algo orders."""
         if not self._trade_api:
             return
         symbol_key = symbol.upper()
@@ -4060,6 +4350,7 @@ class MarketService:
         self._position_protection[symbol_key] = pending_meta
 
     async def _cancel_position_protection(self, symbol: str) -> None:
+        """Cancel the active TP/SL algo for `symbol` if one is known."""
         if not self._trade_api:
             return
         meta = self._position_protection.pop(symbol.upper(), None) or {}
@@ -4078,6 +4369,7 @@ class MarketService:
             self._emit_debug(f"Failed to cancel TP/SL algo for {symbol}: {exc}")
 
     async def _fetch_latest_symbol_protection(self, symbol: str, *, pos_side: str | None = None) -> dict[str, Any] | None:
+        """Return the newest reduce-only conditional algo for the requested symbol."""
         if not self._trade_api:
             return None
         symbol_key = symbol.upper()
@@ -4136,6 +4428,7 @@ class MarketService:
         algo_client_id: str | None = None,
         order_id: str | None = None,
     ) -> dict[str, Any] | None:
+        """Lookup a TP/SL algo either by client ID or OKX order ID across live/history."""
         if not self._trade_api:
             return None
         if not (algo_client_id or order_id):
@@ -4192,6 +4485,7 @@ class MarketService:
         take_profit_price: float | None,
         stop_loss_price: float | None,
     ) -> list[dict[str, Any]] | None:
+        """Construct the attach list for `place_order` when TP and/or SL prices exist."""
         if not (take_profit_price or stop_loss_price):
             return None
         attach_payload: dict[str, Any] = {}
@@ -4224,6 +4518,7 @@ class MarketService:
         dual_side_mode: bool,
         pos_side: str | None,
     ) -> dict[str, str] | None:
+        """Submit a standalone TP/SL algo sized to the detected open position."""
         if not (take_profit_price or stop_loss_price):
             return None
         if not self._trade_api:
@@ -4328,6 +4623,7 @@ class MarketService:
         take_profit_price: float | None,
         stop_loss_price: float | None,
     ) -> bool:
+        """Confirm that OKX accepted the TP/SL attachment and cache its metadata."""
         attempts = 3
         remote_entry: dict[str, Any] | None = None
         for attempt in range(attempts):

@@ -4,6 +4,38 @@ This guide explains the guardrail system in plain language so new operators can 
 
 ---
 
+## Market Service Flow (UML)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant PR as Prompt Runner
+    participant MS as MarketService
+    participant GE as Guardrail Engine
+    participant OA as OKX Adapter
+    participant EX as OKX Exchange
+    participant DB as State/Feedback Store
+
+    PR->>MS: Proposed trade (action, size, TP/SL intent)
+    MS->>GE: Build snapshot + evaluate guardrails
+    GE-->>MS: Sized order + leverage/margin requirements
+    MS->>OA: Ensure leverage + isolated margin
+    alt insufficient margin
+        OA-->>MS: Reject (insufficient balance)
+        MS->>GE: Auto downsize / build recommendation
+        MS-->>PR: Feedback (HOLD + remediation)
+    else margin ready
+        MS->>OA: Submit order + TP/SL attachments
+        OA->>EX: place_order payload
+        EX-->>OA: Execution response
+        OA-->>MS: Normalized fill / order id
+        MS->>OA: Confirm or refresh TP/SL algos
+        MS->>DB: Record trade, protection meta, feedback
+    end
+```
+
+The diagram shows how MarketService mediates between prompt decisions and OKX. Every trade first flows through guardrail sizing, then optional leverage/margin prep. Failures generate downsizing guidance before any retry, while successful orders immediately sync TP/SL algos and persist execution evidence so future prompts inherit up-to-date context.
+
 ## 1. Account-Level Limits
 
 ```

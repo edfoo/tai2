@@ -943,6 +943,7 @@ def test_submit_order_records_margin_recommendation() -> None:
     assert recommendation
     assert "Funding wallet" in recommendation.get("message", "")
     assert recommendation.get("quote_currency") == "USDT"
+    assert "need≈" in latest.get("message", "")
 
 
 def test_submit_order_attaches_fallback_recommendation_without_guidance() -> None:
@@ -1068,3 +1069,115 @@ def test_isolated_margin_buffer_auto_downsizes_to_seed_cap(monkeypatch: pytest.M
         entry.get("message") == "Size clipped to fit isolated margin seed limit"
         for entry in feedback_entries
     )
+
+
+def test_submit_order_includes_margin_currency_for_isolated() -> None:
+    class CaptureTradeApi:
+        def __init__(self) -> None:
+            self.payloads: list[dict[str, Any]] = []
+
+        def place_order(self, **payload: Any) -> dict[str, Any]:
+            self.payloads.append(payload)
+            return {
+                "code": "0",
+                "data": [
+                    {
+                        "ordId": "1",
+                        "sCode": "0",
+                    }
+                ],
+            }
+
+    async def scenario() -> list[dict[str, Any]]:
+        state = DummySnapshotStore()
+        trade_api = CaptureTradeApi()
+        service = MarketService(
+            state_service=state,
+            enable_websocket=False,
+            trade_api=trade_api,
+            account_api=object(),
+            market_api=object(),
+            public_api=object(),
+        )
+        await service._submit_order(
+            symbol=service.symbol,
+            side="BUY",
+            pos_side=None,
+            size=1.0,
+            trade_mode="isolated",
+            order_type="market",
+            reduce_only=False,
+            client_order_id="ccy-test",
+            attach_algo_orders=None,
+            margin_currency="USDT",
+        )
+        return trade_api.payloads
+
+    payloads = asyncio.run(scenario())
+    assert payloads
+    payload = payloads[0]
+    assert payload["tdMode"] == "isolated"
+    assert payload.get("ccy") == "USDT"
+
+
+def test_submit_order_sets_isolated_leverage_before_order() -> None:
+    class RecordingAccountApi:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        def set_leverage(self, **payload: Any) -> dict[str, Any]:
+            self.calls.append(payload)
+            return {"code": "0"}
+
+    class RecordingTradeApi:
+        def __init__(self) -> None:
+            self.payloads: list[dict[str, Any]] = []
+
+        def place_order(self, **payload: Any) -> dict[str, Any]:
+            self.payloads.append(payload)
+            return {
+                "code": "0",
+                "data": [
+                    {
+                        "ordId": "2",
+                        "sCode": "0",
+                    }
+                ],
+            }
+
+    async def scenario() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        state = DummySnapshotStore()
+        account_api = RecordingAccountApi()
+        trade_api = RecordingTradeApi()
+        service = MarketService(
+            state_service=state,
+            enable_websocket=False,
+            trade_api=trade_api,
+            account_api=account_api,
+            market_api=object(),
+            public_api=object(),
+        )
+        await service._submit_order(
+            symbol=service.symbol,
+            side="BUY",
+            pos_side="long",
+            size=1.0,
+            trade_mode="isolated",
+            order_type="market",
+            reduce_only=False,
+            client_order_id="lev-test",
+            attach_algo_orders=None,
+            margin_currency="USDT",
+            leverage=2.5,
+            dual_side_mode=False,
+        )
+        return account_api.calls, trade_api.payloads
+
+    leverage_calls, payloads = asyncio.run(scenario())
+    assert leverage_calls
+    assert payloads
+    leverage_payload = leverage_calls[0]
+    assert leverage_payload["instId"]
+    assert leverage_payload["posSide"] == "net"
+    assert leverage_payload["lever"] == "2.5"
+    assert payloads[0]["tdMode"] == "isolated"
