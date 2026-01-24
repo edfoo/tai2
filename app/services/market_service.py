@@ -484,6 +484,42 @@ class MarketService:
             totals[side_key] += abs(size_value)
         return totals
 
+    def _compute_open_position_notional(
+        self,
+        positions: list[dict[str, Any]] | None,
+        *,
+        price_hints: dict[str, float] | None = None,
+    ) -> float:
+        """Estimate total notional tied up across all open positions using avg/mark prices."""
+        if not positions:
+            return 0.0
+        total = 0.0
+        hints = price_hints or {}
+        for entry in positions:
+            if not isinstance(entry, dict):
+                continue
+            size_value = self._extract_float(entry.get("pos") or entry.get("size"))
+            if size_value is None or size_value == 0:
+                continue
+            abs_size = abs(size_value)
+            instrument = str(entry.get("instId") or entry.get("symbol") or "").upper()
+            price_value = self._extract_float(
+                entry.get("avgPx")
+                or entry.get("markPx")
+                or entry.get("last")
+                or entry.get("px")
+            )
+            if (price_value is None or price_value <= 0) and instrument:
+                price_value = hints.get(instrument)
+            if (price_value is None or price_value <= 0) and instrument:
+                ticker = self._latest_ticker.get(instrument)
+                if isinstance(ticker, dict):
+                    price_value = self._extract_float(ticker.get("last") or ticker.get("markPx"))
+            if price_value is None or price_value <= 0:
+                continue
+            total += abs_size * price_value
+        return total
+
     async def _sync_position_protection_entries(self, positions: list[dict[str, Any]] | None) -> None:
         """Periodically reconcile cached TP/SL state with OKX Algo order records."""
         if not positions or not self._trade_api:
@@ -1812,6 +1848,73 @@ class MarketService:
             return None
         return self._last_margin_guidance.get(key)
 
+    def _merge_margin_guidance(self, symbol: str, updates: dict[str, Any] | None) -> None:
+        """Merge partial guidance telemetry into the cache without discarding previous fields."""
+        if not updates:
+            return
+        key = self._normalize_symbol_key(symbol)
+        if not key:
+            return
+        existing = self._last_margin_guidance.get(key)
+        if not isinstance(existing, dict):
+            existing = {}
+        else:
+            existing = dict(existing)
+        mutated = False
+        for field, value in updates.items():
+            if value is None:
+                continue
+            if existing.get(field) == value:
+                continue
+            existing[field] = value
+            mutated = True
+        if mutated:
+            self._last_margin_guidance[key] = existing
+
+    def _build_margin_meta_snapshot(self, symbol: str) -> dict[str, Any] | None:
+        """Return a trimmed, telemetry-friendly view of the latest margin guidance."""
+        context = self._get_margin_guidance(symbol)
+        if not isinstance(context, dict):
+            return None
+        keys_of_interest = {
+            "quote_currency",
+            "required_gap",
+            "seed_limit",
+            "auto_seed_attempted",
+            "auto_seed_success",
+            "auto_seed_configured",
+            "blocked_reason",
+            "funding_available",
+            "updated_at",
+            "requested_size",
+            "requested_notional",
+            "initial_requested_size",
+            "initial_requested_notional",
+            "auto_downsize_previous_size",
+            "auto_downsize_target_size",
+            "auto_downsize_previous_notional",
+            "auto_downsize_target_notional",
+            "auto_downsize_notional_delta",
+            "auto_downsize_required_gap",
+            "auto_downsize_scale",
+            "auto_downsize_price",
+            "account_equity",
+            "open_position_notional",
+            "equity_available_for_trade",
+            "equity_clip_active",
+            "equity_clip_reason",
+            "equity_clip_requested_size",
+            "equity_clip_target_size",
+            "equity_clip_requested_notional",
+            "equity_clip_target_notional",
+            "equity_clip_notional_delta",
+        }
+        snapshot: dict[str, Any] = {}
+        for key in keys_of_interest:
+            if key in context:
+                snapshot[key] = context.get(key)
+        return snapshot or None
+
     def _log_margin_guidance_snapshot(self, symbol: str, *, context: str) -> None:
         """Emit the currently stored margin guidance for observability troubleshooting."""
         guidance = self._get_margin_guidance(symbol)
@@ -2311,8 +2414,23 @@ class MarketService:
         if not self._account_api:
             return None, None
 
+        quote_currency = str(
+            quote_currency
+            or self._quote_currency_from_symbol(symbol)
+            or "USDT"
+        ).upper()
+        price_value = self._extract_float(last_price)
+
+        def _compute_notional(quantity: float | None) -> float | None:
+            if quantity is None or price_value is None:
+                return None
+            return quantity * price_value
+
+        initial_size = self._extract_float(size)
+        initial_notional = _compute_notional(initial_size)
+
         adjusted_size: float | None = None
-        current_size = size
+        current_size = initial_size
         current_margin = self._extract_float(available_margin_usd) or 0.0
         iteration = 0
         final_required_gap: float | None = None
@@ -2342,6 +2460,11 @@ class MarketService:
                 "seed_limit": seed_limit,
                 "auto_seed_attempted": False,
                 "auto_seed_configured": bool(seed_limit and seed_limit > 0),
+                "price_reference": price_value,
+                "requested_size": current_size,
+                "requested_notional": _compute_notional(current_size),
+                "initial_requested_size": initial_size,
+                "initial_requested_notional": initial_notional,
             }
             self._set_margin_guidance(symbol, margin_guidance_payload)
 
@@ -2412,6 +2535,13 @@ class MarketService:
                     return None, adjusted_size
 
                 adjusted_size = quantized
+                previous_notional = _compute_notional(current_size)
+                target_notional = _compute_notional(quantized)
+                notional_delta = (
+                    previous_notional - target_notional
+                    if previous_notional is not None and target_notional is not None
+                    else None
+                )
                 downsized_payload = dict(margin_guidance_payload)
                 downsized_payload.update(
                     {
@@ -2419,6 +2549,11 @@ class MarketService:
                         "auto_downsize_scale": scale,
                         "auto_downsize_previous_size": current_size,
                         "auto_downsize_target_size": quantized,
+                        "auto_downsize_previous_notional": previous_notional,
+                        "auto_downsize_target_notional": target_notional,
+                        "auto_downsize_notional_delta": notional_delta,
+                        "auto_downsize_required_gap": required_gap,
+                        "auto_downsize_price": price_value,
                     }
                 )
                 self._set_margin_guidance(symbol, downsized_payload)
@@ -2429,8 +2564,12 @@ class MarketService:
                     meta={
                         "previous_size": current_size,
                         "target_size": quantized,
+                        "previous_notional": previous_notional,
+                        "target_notional": target_notional,
+                        "notional_delta": notional_delta,
                         "required_gap": required_gap,
                         "seed_limit": seed_limit,
+                        "quote_currency": quote_currency,
                     },
                 )
                 current_size = quantized
@@ -2829,6 +2968,22 @@ class MarketService:
                 dual_side_mode = True
                 break
         side_sizes = self._position_side_sizes(positions, symbol)
+        open_position_notional = self._compute_open_position_notional(positions, price_hints=price_hints)
+        available_equity_for_trade = None
+        if (
+            account_equity is not None
+            and account_equity > 0
+            and open_position_notional is not None
+        ):
+            available_equity_for_trade = max(account_equity - open_position_notional, 0.0)
+        self._merge_margin_guidance(
+            symbol,
+            {
+                "account_equity": account_equity,
+                "open_position_notional": open_position_notional,
+                "equity_available_for_trade": available_equity_for_trade,
+            },
+        )
         now = time.time()
         summary = (
             f"LLM decision {action} size={decision.get('position_size', '--')} "
@@ -2912,6 +3067,9 @@ class MarketService:
             last_price = self._extract_float(
                 (self._latest_ticker.get(symbol) or {}).get("last")
             )
+        price_hints: dict[str, float] = {}
+        if last_price and last_price > 0:
+            price_hints[symbol] = last_price
         execution_trade_mode = execution_cfg.get("trade_mode") or "cross"
         trade_mode = str(execution_trade_mode).lower()
         if trade_mode not in {"isolated", "cross"}:
@@ -3287,6 +3445,104 @@ class MarketService:
             pos_side = "short"
             reduce_only = True
 
+        if (
+            not reduce_only
+            and account_equity is not None
+            and account_equity > 0
+            and last_price
+            and last_price > 0
+        ):
+            free_equity = available_equity_for_trade
+            if free_equity is None:
+                free_equity = max(account_equity - (open_position_notional or 0.0), 0.0)
+            equity_updates = {
+                "account_equity": account_equity,
+                "open_position_notional": open_position_notional,
+                "equity_available_for_trade": free_equity,
+            }
+            if quote_currency:
+                equity_updates.setdefault("quote_currency", str(quote_currency).upper())
+            self._merge_margin_guidance(symbol, equity_updates)
+            if free_equity <= 0:
+                self._emit_debug(
+                    f"Execution skipped for {symbol}: no free equity after accounting for open positions"
+                )
+                self._record_execution_feedback(
+                    symbol,
+                    "Blocked: all account equity deployed",
+                    level="warning",
+                    meta={
+                        "account_equity": account_equity,
+                        "open_position_notional": open_position_notional,
+                        "equity_available_for_trade": free_equity,
+                    },
+                )
+                block_payload = dict(equity_updates)
+                block_payload["blocked_reason"] = "free_equity_exhausted"
+                self._merge_margin_guidance(symbol, block_payload)
+                return False
+            current_notional = raw_size * last_price
+            if current_notional > free_equity + 1e-9:
+                previous_size = raw_size
+                max_size_from_equity = free_equity / last_price if last_price else 0.0
+                if max_size_from_equity <= 0:
+                    self._emit_debug(
+                        f"Execution skipped for {symbol}: requested notional {current_notional:.4f} exceeds free equity {free_equity:.4f}"
+                    )
+                    self._record_execution_feedback(
+                        symbol,
+                        "Blocked: insufficient free equity",
+                        level="warning",
+                        meta={
+                            "account_equity": account_equity,
+                            "open_position_notional": open_position_notional,
+                            "equity_available_for_trade": free_equity,
+                            "requested_notional": current_notional,
+                        },
+                    )
+                    failure_payload = dict(equity_updates)
+                    failure_payload.update(
+                        {
+                            "blocked_reason": "free_equity_limit",
+                            "equity_clip_active": False,
+                            "equity_clip_requested_size": previous_size,
+                            "equity_clip_requested_notional": current_notional,
+                        }
+                    )
+                    self._merge_margin_guidance(symbol, failure_payload)
+                    return False
+                clipped_notional = max_size_from_equity * last_price
+                clip_delta = current_notional - clipped_notional
+                self._emit_debug(
+                    f"{symbol} size clipped by available equity (free {free_equity:.4f} USD, requested {current_notional:.4f} USD)"
+                )
+                self._record_execution_feedback(
+                    symbol,
+                    "Size clipped by available equity",
+                    level="info",
+                    meta={
+                        "account_equity": account_equity,
+                        "open_position_notional": open_position_notional,
+                        "equity_available_for_trade": free_equity,
+                        "requested_notional": current_notional,
+                        "clipped_notional": clipped_notional,
+                    },
+                )
+                clip_payload = dict(equity_updates)
+                clip_payload.update(
+                    {
+                        "equity_clip_active": True,
+                        "equity_clip_reason": "free_equity_limit",
+                        "equity_clip_requested_size": previous_size,
+                        "equity_clip_target_size": max_size_from_equity,
+                        "equity_clip_requested_notional": current_notional,
+                        "equity_clip_target_notional": clipped_notional,
+                        "equity_clip_notional_delta": clip_delta,
+                    }
+                )
+                self._merge_margin_guidance(symbol, clip_payload)
+                raw_size = max_size_from_equity
+
         tier_cap_limit = None
         tier_max_leverage_used = None
         tier_initial_margin_ratio = None
@@ -3503,6 +3759,7 @@ class MarketService:
             margin_currency=quote_currency,
             leverage=target_leverage,
             dual_side_mode=dual_side_mode,
+            reference_price=last_price,
         )
         if not order:
             self._emit_debug(f"Order placement failed for {symbol}")
@@ -4159,6 +4416,7 @@ class MarketService:
         margin_currency: str | None = None,
         leverage: float | None = None,
         dual_side_mode: bool = False,
+        reference_price: float | None = None,
     ) -> tuple[dict[str, Any] | None, bool]:
         """Place an order via the trade API, retrying without posSide if needed."""
         if not self._trade_api:
@@ -4167,6 +4425,28 @@ class MarketService:
         include_pos_side = pos_side
         attachments_to_use = attach_algo_orders
         attempt = 0
+        resolved_margin_currency = str(
+            margin_currency or self._quote_currency_from_symbol(symbol) or ""
+        ).upper()
+        reference_price_value = self._extract_float(reference_price)
+        requested_size_value = self._extract_float(size)
+        requested_notional = (
+            requested_size_value * reference_price_value
+            if requested_size_value and reference_price_value
+            else None
+        )
+        margin_snapshot = {
+            "quote_currency": resolved_margin_currency or None,
+            "price_reference": reference_price_value,
+            "requested_size": requested_size_value,
+            "requested_notional": requested_notional,
+            "initial_requested_size": requested_size_value,
+            "initial_requested_notional": requested_notional,
+            "trade_mode": trade_mode,
+            "order_type": order_type,
+            "reduce_only": reduce_only,
+        }
+        self._merge_margin_guidance(symbol, margin_snapshot)
         if trade_mode == "isolated" and not reduce_only:
             await self._ensure_isolated_leverage_setting(
                 symbol=symbol,
@@ -4192,9 +4472,8 @@ class MarketService:
             if self._sub_account and self._sub_account_use_master:
                 payload["subAcct"] = self._sub_account
             if trade_mode == "isolated":
-                margin_ccy = str(margin_currency or self._quote_currency_from_symbol(symbol) or "").upper()
-                if margin_ccy:
-                    payload["ccy"] = margin_ccy
+                if resolved_margin_currency:
+                    payload["ccy"] = resolved_margin_currency
 
             trace_payload = {
                 "instId": payload["instId"],
@@ -4248,11 +4527,19 @@ class MarketService:
             if summary_note:
                 error_message = f"{error_message} [{summary_note}]"
             self._log_margin_guidance_snapshot(symbol, context="insufficient-margin")
+            combined_meta: dict[str, Any] | None = None
+            if error_meta:
+                combined_meta = dict(error_meta)
+            margin_meta = self._build_margin_meta_snapshot(symbol)
+            if margin_meta:
+                if combined_meta is None:
+                    combined_meta = {}
+                combined_meta["margin_details"] = margin_meta
             self._record_execution_feedback(
                 symbol,
                 error_message,
                 level="error",
-                meta=error_meta or None,
+                meta=combined_meta,
                 recommendation=recommendation,
             )
             return None, False

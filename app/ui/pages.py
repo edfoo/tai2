@@ -875,6 +875,229 @@ def register_pages(app: FastAPI) -> None:
                     return None
                 return str(value)
 
+            def _format_currency(value: Any, currency: str | None) -> str | None:
+                numeric = _to_float(value)
+                if numeric is None:
+                    return None
+                label = f"{numeric:,.2f}"
+                if currency:
+                    label = f"{label} {currency}"
+                return label
+
+            def _format_size(value: Any) -> str | None:
+                numeric = _to_float(value)
+                if numeric is None:
+                    return None
+                return f"{numeric:,.4f}".rstrip("0").rstrip(".")
+
+            def _first_float(*values: Any) -> float | None:
+                for candidate in values:
+                    numeric = _to_float(candidate)
+                    if numeric is not None:
+                        return numeric
+                return None
+
+            palette_styles = {
+                "amber": {
+                    "guidance_container": "w-full rounded-xl border border-amber-100 bg-white/70 px-3 py-2 gap-1",
+                    "guidance_title": "text-[10px] font-semibold uppercase tracking-wide text-amber-600",
+                    "guidance_row": "w-full justify-between text-[11px] text-amber-800 gap-2",
+                    "guidance_label": "font-medium text-amber-700",
+                    "guidance_value": "text-amber-900",
+                    "sizing_container": "w-full rounded-xl border border-amber-50 bg-white px-3 py-2 gap-1",
+                    "sizing_title": "text-[10px] font-semibold uppercase tracking-wide text-slate-600",
+                    "sizing_row": "w-full justify-between text-[11px] text-slate-700 gap-2",
+                    "sizing_label": "font-medium text-slate-700",
+                    "sizing_value": "text-slate-900",
+                },
+                "slate": {
+                    "guidance_container": "w-full rounded-xl border border-slate-100 bg-white px-3 py-2 gap-1",
+                    "guidance_title": "text-[10px] font-semibold uppercase tracking-wide text-slate-500",
+                    "guidance_row": "w-full justify-between text-[11px] text-slate-600 gap-2",
+                    "guidance_label": "font-medium text-slate-600",
+                    "guidance_value": "text-slate-900",
+                    "sizing_container": "w-full rounded-xl border border-slate-100 bg-white px-3 py-2 gap-1",
+                    "sizing_title": "text-[10px] font-semibold uppercase tracking-wide text-slate-500",
+                    "sizing_row": "w-full justify-between text-[11px] text-slate-600 gap-2",
+                    "sizing_label": "font-medium text-slate-600",
+                    "sizing_value": "text-slate-900",
+                },
+            }
+
+            def _derive_currency(source: dict[str, Any] | None, fallback: str | None) -> str | None:
+                candidate = None
+                if isinstance(source, dict):
+                    candidate = source.get("quote_currency")
+                candidate = candidate or fallback
+                if candidate in (None, ""):
+                    return None
+                return str(candidate).upper()
+
+            def _build_guidance_rows(source: dict[str, Any] | None, currency: str | None) -> list[tuple[str, str]]:
+                rows: list[tuple[str, str]] = []
+                if not isinstance(source, dict):
+                    return rows
+                required_gap = _to_float(source.get("required_gap"))
+                if required_gap is not None:
+                    gap_label = _format_currency(required_gap, currency)
+                    if gap_label:
+                        rows.append(("Required margin gap", gap_label))
+                for label, key in (
+                    ("Auto-seed configured", "auto_seed_configured"),
+                    ("Auto-seed attempted", "auto_seed_attempted"),
+                    ("Auto-seed success", "auto_seed_success"),
+                ):
+                    formatted = _format_bool_flag(source.get(key))
+                    if formatted:
+                        rows.append((label, formatted))
+                seed_limit = _to_float(source.get("seed_limit"))
+                if seed_limit is not None:
+                    limit_label = _format_currency(seed_limit, currency)
+                    if limit_label:
+                        rows.append(("Seed cap", limit_label))
+                funding_available = _to_float(source.get("funding_available"))
+                if funding_available is not None:
+                    funding_label = _format_currency(funding_available, currency)
+                    if funding_label:
+                        rows.append(("Funding wallet", funding_label))
+                free_equity = _to_float(source.get("equity_available_for_trade"))
+                if free_equity is not None:
+                    equity_label = _format_currency(free_equity, currency)
+                    if equity_label:
+                        rows.append(("Free equity", equity_label))
+                account_equity_value = _to_float(source.get("account_equity"))
+                if account_equity_value is not None:
+                    account_label = _format_currency(account_equity_value, currency)
+                    if account_label:
+                        rows.append(("Account equity", account_label))
+                open_notional_value = _to_float(source.get("open_position_notional"))
+                if open_notional_value is not None:
+                    exposure_label = _format_currency(open_notional_value, currency)
+                    if exposure_label:
+                        rows.append(("Open exposure", exposure_label))
+                if source.get("equity_clip_active"):
+                    clip_reason = str(source.get("equity_clip_reason") or "free equity limit").replace(
+                        "_",
+                        " ",
+                    )
+                    clip_label = clip_reason.capitalize() if clip_reason else "Active"
+                    rows.append(("Equity clip", clip_label))
+                blocked_reason = source.get("blocked_reason")
+                if blocked_reason:
+                    rows.append(("Blocked reason", str(blocked_reason)))
+                updated_at = source.get("updated_at")
+                if updated_at:
+                    rows.append(("Updated at", str(updated_at)))
+                return rows
+
+            def _build_sizing_rows(source: dict[str, Any] | None, currency: str | None) -> list[tuple[str, str]]:
+                rows: list[tuple[str, str]] = []
+                if not isinstance(source, dict):
+                    return rows
+                requested_notional_value = _first_float(
+                    source.get("auto_downsize_previous_notional"),
+                    source.get("initial_requested_notional"),
+                    source.get("requested_notional"),
+                    source.get("equity_clip_requested_notional"),
+                )
+                clipped_notional_value = _first_float(
+                    source.get("auto_downsize_target_notional"),
+                    source.get("requested_notional"),
+                    source.get("equity_clip_target_notional"),
+                )
+                if requested_notional_value is not None:
+                    label = _format_currency(requested_notional_value, currency)
+                    if label:
+                        rows.append(("Requested notional", label))
+                if (
+                    clipped_notional_value is not None
+                    and (
+                        requested_notional_value is None
+                        or abs(clipped_notional_value - requested_notional_value) > 1e-6
+                    )
+                ):
+                    label = _format_currency(clipped_notional_value, currency)
+                    if label:
+                        rows.append(("Clipped notional", label))
+                if requested_notional_value is not None and clipped_notional_value is not None:
+                    delta_value = (
+                        source.get("auto_downsize_notional_delta")
+                        or source.get("equity_clip_notional_delta")
+                    )
+                    delta_numeric = _to_float(delta_value)
+                    if delta_numeric is None:
+                        delta_numeric = requested_notional_value - clipped_notional_value
+                    if delta_numeric and abs(delta_numeric) > 1e-6:
+                        delta_label = _format_currency(delta_numeric, currency)
+                        if delta_label:
+                            rows.append(("Notional delta", delta_label))
+                seed_attempt = _first_float(
+                    source.get("auto_downsize_required_gap"),
+                    source.get("required_gap"),
+                )
+                if seed_attempt is not None:
+                    label = _format_currency(seed_attempt, currency)
+                    if label:
+                        rows.append(("Seed attempt", label))
+                requested_size_value = _first_float(
+                    source.get("auto_downsize_previous_size"),
+                    source.get("initial_requested_size"),
+                    source.get("requested_size"),
+                    source.get("equity_clip_requested_size"),
+                )
+                clipped_size_value = _first_float(
+                    source.get("auto_downsize_target_size"),
+                    source.get("requested_size"),
+                    source.get("equity_clip_target_size"),
+                )
+                if requested_size_value is not None:
+                    label = _format_size(requested_size_value)
+                    if label:
+                        rows.append(("Requested size", label))
+                if (
+                    clipped_size_value is not None
+                    and (
+                        requested_size_value is None
+                        or abs(clipped_size_value - requested_size_value) > 1e-9
+                    )
+                ):
+                    label = _format_size(clipped_size_value)
+                    if label:
+                        rows.append(("Clipped size", label))
+                scale_value = _to_float(source.get("auto_downsize_scale"))
+                if scale_value is not None and scale_value > 0:
+                    rows.append(("Downscale factor", f"{scale_value:.3f}×"))
+                return rows
+
+            def _render_margin_panels(
+                source: dict[str, Any] | None,
+                currency_hint: str | None,
+                *,
+                accent: str,
+            ) -> None:
+                if not isinstance(source, dict):
+                    return
+                currency = _derive_currency(source, currency_hint)
+                guidance_rows = _build_guidance_rows(source, currency)
+                sizing_rows = _build_sizing_rows(source, currency)
+                if not guidance_rows and not sizing_rows:
+                    return
+                styles = palette_styles.get(accent, palette_styles["slate"])
+                if guidance_rows:
+                    with ui.column().classes(styles["guidance_container"]):
+                        ui.label("Guidance snapshot").classes(styles["guidance_title"])
+                        for label, value in guidance_rows:
+                            with ui.row().classes(styles["guidance_row"]):
+                                ui.label(label).classes(styles["guidance_label"])
+                                ui.label(value).classes(styles["guidance_value"])
+                if sizing_rows:
+                    with ui.column().classes(styles["sizing_container"]):
+                        ui.label("Sizing breakdown").classes(styles["sizing_title"])
+                        for label, value in sizing_rows:
+                            with ui.row().classes(styles["sizing_row"]):
+                                ui.label(label).classes(styles["sizing_label"])
+                                ui.label(value).classes(styles["sizing_value"])
+
             with container:
                 for entry in recent:
                     level = str(entry.get("level") or "info").lower()
@@ -885,6 +1108,10 @@ def register_pages(app: FastAPI) -> None:
                     recommendation = entry.get("recommendation")
                     recommendation = recommendation if isinstance(recommendation, dict) else None
                     meta = entry.get("meta") if isinstance(entry.get("meta"), dict) else None
+                    margin_details = meta.get("margin_details") if meta else None
+                    merged_margin_source: dict[str, Any] = {}
+                    if isinstance(margin_details, dict):
+                        merged_margin_source.update(margin_details)
                     with ui.column().classes(
                         f"w-full p-3 rounded-2xl border {card_class} shadow-sm gap-2"
                     ):
@@ -898,6 +1125,11 @@ def register_pages(app: FastAPI) -> None:
                         ui.label(message).classes("text-sm text-slate-700")
                         if recommendation:
                             currency = str(recommendation.get("quote_currency") or "").upper()
+                            if merged_margin_source:
+                                detail_source = dict(merged_margin_source)
+                                detail_source.update(recommendation)
+                            else:
+                                detail_source = recommendation
                             needed = _to_float(recommendation.get("needed"))
                             seed_limit = _to_float(recommendation.get("seed_limit"))
                             funding_available = _to_float(recommendation.get("funding_available"))
@@ -928,40 +1160,9 @@ def register_pages(app: FastAPI) -> None:
                                     detail_bits.append(funding_label)
                                 if detail_bits:
                                     ui.label(" · ".join(detail_bits)).classes("text-xs text-amber-700")
-                                guidance_rows: list[tuple[str, str]] = []
-                                required_gap = _to_float(recommendation.get("required_gap"))
-                                if required_gap is not None and (needed is None or abs(required_gap - needed) > 1e-6):
-                                    gap_label = f"{required_gap:,.2f}"
-                                    if currency:
-                                        gap_label = f"{gap_label} {currency}"
-                                    guidance_rows.append(("Guardrail gap", gap_label))
-                                for label, key in (
-                                    ("Auto-seed configured", "auto_seed_configured"),
-                                    ("Auto-seed attempted", "auto_seed_attempted"),
-                                    ("Auto-seed success", "auto_seed_success"),
-                                ):
-                                    formatted = _format_bool_flag(recommendation.get(key))
-                                    if formatted:
-                                        guidance_rows.append((label, formatted))
-                                blocked_reason = recommendation.get("blocked_reason")
-                                if blocked_reason:
-                                    guidance_rows.append(("Blocked reason", str(blocked_reason)))
-                                updated_at = recommendation.get("updated_at")
-                                if updated_at:
-                                    guidance_rows.append(("Updated at", str(updated_at)))
-                                if guidance_rows:
-                                    with ui.column().classes(
-                                        "w-full rounded-xl border border-amber-100 bg-white/70 px-3 py-2 gap-1"
-                                    ):
-                                        ui.label("Guidance snapshot").classes(
-                                            "text-[10px] font-semibold uppercase tracking-wide text-amber-600"
-                                        )
-                                        for label, value in guidance_rows:
-                                            with ui.row().classes(
-                                                "w-full justify-between text-[11px] text-amber-800 gap-2"
-                                            ):
-                                                ui.label(label).classes("font-medium text-amber-700")
-                                                ui.label(value).classes("text-amber-900")
+                                _render_margin_panels(detail_source, currency, accent="amber")
+                        elif margin_details:
+                            _render_margin_panels(margin_details, None, accent="slate")
                         chips: list[str] = []
                         if meta:
                             for key in ("code", "sCode"):
