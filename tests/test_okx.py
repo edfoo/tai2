@@ -158,6 +158,95 @@ def test_handle_llm_decision_enforces_min_leverage(monkeypatch: pytest.MonkeyPat
     assert submit_called is False
 
 
+def test_handle_llm_decision_seeds_price_hints_before_open_notional(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def scenario() -> tuple[bool, dict[str, Any]]:
+        state = DummySnapshotStore()
+        service = MarketService(
+            state_service=state,
+            enable_websocket=False,
+            trade_api=object(),
+            account_api=None,
+            market_api=None,
+            public_api=None,
+        )
+        service._instrument_specs["BTC-USDT-SWAP"] = {
+            "lot_size": 0.001,
+            "min_size": 0.001,
+            "tick_size": 0.1,
+        }
+
+        monkeypatch.setattr(
+            service,
+            "_compute_leverage_adjusted_size",
+            lambda **kwargs: 1.0,
+        )
+
+        captured: dict[str, Any] = {}
+
+        def fake_compute_open_notional(
+            self: MarketService,
+            positions: list[dict[str, Any]] | None,
+            *,
+            price_hints: dict[str, float] | None = None,
+        ) -> float:
+            captured["price_hints"] = price_hints
+            return 0.0
+
+        monkeypatch.setattr(
+            MarketService,
+            "_compute_open_position_notional",
+            fake_compute_open_notional,
+        )
+
+        async def fake_tier_guard(**kwargs):
+            return {"size": kwargs.get("additional_size", 0.0)}
+
+        monkeypatch.setattr(service, "_apply_tier_margin_guard", fake_tier_guard)
+
+        async def fake_submit_order(**kwargs):
+            return {"ordId": "1"}, False
+
+        monkeypatch.setattr(service, "_submit_order", fake_submit_order)
+        monkeypatch.setattr(service, "_emit_debug", lambda *args, **kwargs: None)
+
+        context = {
+            "symbol": "BTC-USDT-SWAP",
+            "guardrails": {
+                "min_leverage": 1,
+                "max_leverage": 2,
+                "max_position_pct": 0.5,
+                "symbol_position_caps": {},
+            },
+            "market": {"last_price": 100.0},
+            "account": {
+                "account_equity": 1000.0,
+                "available_eq_usd": 1000.0,
+                "available_balances": {},
+            },
+            "execution": {
+                "enabled": True,
+                "trade_mode": "cross",
+                "order_type": "market",
+                "min_size": 0.001,
+            },
+            "positions": [],
+        }
+
+        decision = {
+            "action": "BUY",
+            "confidence": 0.9,
+            "position_size": 1.0,
+        }
+
+        executed = await service.handle_llm_decision(decision, context)
+        return executed, captured
+
+    executed, captured = asyncio.run(scenario())
+    assert executed is True
+    assert isinstance(captured.get("price_hints"), dict)
+    assert captured["price_hints"].get("BTC-USDT-SWAP") == pytest.approx(100.0)
+
+
 def test_handle_llm_respects_symbol_position_caps(monkeypatch: pytest.MonkeyPatch) -> None:
     async def scenario() -> tuple[bool, dict[str, float]]:
         state = DummySnapshotStore()
