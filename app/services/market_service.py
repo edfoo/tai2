@@ -1063,9 +1063,8 @@ class MarketService:
         existing_side_size: float,
         additional_size: float,
         last_price: float,
-        available_margin_usd: float | None,
     ) -> dict[str, Any]:
-        """Clamp requested size against tier IMR constraints and report the adjusted sizing metadata."""
+        """Clamp requested size against tier-defined size limits while surfacing IMR metadata."""
         tiers = await self._get_position_tiers(symbol, trade_mode)
         if not tiers or last_price is None or last_price <= 0:
             return {"size": additional_size}
@@ -1080,28 +1079,28 @@ class MarketService:
                 imr = 1.0 / tier_max_leverage
         if (tier_max_leverage is None or tier_max_leverage <= 0) and imr and imr > 0:
             tier_max_leverage = 1.0 / imr
-        if imr is None or imr <= 0 or available_margin_usd is None or available_margin_usd <= 0:
-            return {"size": additional_size, "tier": tier, "tier_max_leverage": tier_max_leverage}
-        proposed_notional = additional_size * last_price
-        required_margin = proposed_notional * imr
-        max_notional_allowed = available_margin_usd / imr if imr > 0 else None
+        tier_max_size = self._extract_float(tier.get("maxSz"))
+        tier_max_notional = None
+        if tier_max_size and tier_max_size > 0:
+            tier_max_notional = tier_max_size * last_price
         final_size = additional_size
         clipped = False
         blocked = False
-        if max_notional_allowed is not None and proposed_notional > max_notional_allowed:
-            if max_notional_allowed <= 0:
-                final_size = 0.0
-                blocked = True
-            else:
-                final_size = max_notional_allowed / last_price
-            clipped = True
+        if tier_max_size and tier_max_size > 0:
+            max_side_allowance = max(tier_max_size - max(0.0, existing_side_size), 0.0)
+            if resulting_size - 1e-9 > tier_max_size:
+                final_size = max_side_allowance
+                clipped = True
+                if max_side_allowance <= 0:
+                    blocked = True
+        required_margin = (additional_size * last_price * imr) if (imr and imr > 0) else None
         return {
             "size": final_size,
             "tier": tier,
             "tier_max_leverage": tier_max_leverage,
             "tier_imr": imr,
             "required_margin": required_margin,
-            "max_notional_allowed": max_notional_allowed,
+            "tier_max_notional_usd": tier_max_notional,
             "clipped": clipped,
             "blocked": blocked,
             "pos_side": pos_side,
@@ -3543,6 +3542,18 @@ class MarketService:
 
         requested_take_profit = take_profit_price
         requested_stop_loss = stop_loss_price
+        take_profit_ratio = self._calculate_target_ratio(
+            action,
+            last_price,
+            take_profit_price,
+            "take-profit",
+        )
+        stop_loss_ratio = self._calculate_target_ratio(
+            action,
+            last_price,
+            stop_loss_price,
+            "stop-loss",
+        )
 
         clipped_by_cap = False
         cap_reason: str | None = None
@@ -3744,9 +3755,8 @@ class MarketService:
                 existing_side_size=existing_side_size,
                 additional_size=raw_size,
                 last_price=last_price,
-                available_margin_usd=available_margin_usd,
             )
-            tier_cap_limit = tier_result.get("max_notional_allowed")
+            tier_cap_limit = tier_result.get("tier_max_notional_usd")
             tier_max_leverage_used = tier_result.get("tier_max_leverage")
             tier_initial_margin_ratio = tier_result.get("tier_imr")
             if tier_result.get("blocked"):
@@ -3977,6 +3987,24 @@ class MarketService:
         take_profit_price = requested_take_profit
         stop_loss_price = requested_stop_loss
         reference_for_protection = executed_price or last_price
+        reprice_reference = reference_for_protection or last_price
+        if not reduce_only and reprice_reference and reprice_reference > 0:
+            take_profit_price = self._reprice_target_from_ratio(
+                symbol=symbol,
+                action=action,
+                kind="take-profit",
+                reference_price=reprice_reference,
+                existing_target=take_profit_price,
+                ratio_hint=take_profit_ratio,
+            )
+            stop_loss_price = self._reprice_target_from_ratio(
+                symbol=symbol,
+                action=action,
+                kind="stop-loss",
+                reference_price=reprice_reference,
+                existing_target=stop_loss_price,
+                ratio_hint=stop_loss_ratio,
+            )
         take_profit_price = self._drop_conflicting_target(
             symbol=symbol,
             action=action,
@@ -4531,6 +4559,81 @@ class MarketService:
             },
         )
         return None
+
+    @staticmethod
+    def _calculate_target_ratio(
+        action: str,
+        reference_price: float | None,
+        target_price: float | None,
+        kind: str,
+    ) -> float | None:
+        """Return the absolute percentage gap between target and reference for repricing."""
+        ref_value = MarketService._extract_float(reference_price)
+        target_value = MarketService._extract_float(target_price)
+        if ref_value is None or ref_value <= 0 or target_value is None or target_value <= 0:
+            return None
+        if kind == "take-profit":
+            delta = target_value - ref_value
+            if action == "BUY" and delta <= 0:
+                return None
+            if action == "SELL" and delta >= 0:
+                return None
+            return abs(delta) / ref_value
+        if kind == "stop-loss":
+            if action == "BUY":
+                delta = ref_value - target_value
+                if delta <= 0:
+                    return None
+                return delta / ref_value
+            delta = target_value - ref_value
+            if delta <= 0:
+                return None
+            return delta / ref_value
+        return None
+
+    @staticmethod
+    def _target_from_ratio(
+        action: str,
+        reference_price: float | None,
+        ratio: float | None,
+        kind: str,
+    ) -> float | None:
+        """Reconstruct a TP/SL target by applying the stored ratio to a new reference price."""
+        ref_value = MarketService._extract_float(reference_price)
+        if ref_value is None or ref_value <= 0 or ratio is None or ratio <= 0:
+            return None
+        if kind == "take-profit":
+            if action == "BUY":
+                return ref_value * (1.0 + ratio)
+            return ref_value * (1.0 - ratio)
+        if kind == "stop-loss":
+            if action == "BUY":
+                return ref_value * (1.0 - ratio)
+            return ref_value * (1.0 + ratio)
+        return None
+
+    def _reprice_target_from_ratio(
+        self,
+        *,
+        symbol: str,
+        action: str,
+        kind: str,
+        reference_price: float | None,
+        existing_target: float | None,
+        ratio_hint: float | None,
+    ) -> float | None:
+        """Apply stored percentage offsets to the latest reference price and quantize the result."""
+        target_value = existing_target
+        recalculated = self._target_from_ratio(action, reference_price, ratio_hint, kind)
+        if recalculated is not None:
+            target_value = recalculated
+        if target_value is None:
+            return None
+        prefer_up = (kind == "take-profit" and action == "BUY") or (
+            kind == "stop-loss" and action == "SELL"
+        )
+        quantized = self._quantize_price(symbol, target_value, prefer_up=prefer_up)
+        return quantized if quantized and quantized > 0 else None
 
     async def _ensure_isolated_leverage_setting(
         self,
