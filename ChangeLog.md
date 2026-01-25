@@ -1,5 +1,10 @@
 # Change Log
 
+## 2026-01-25
+- Carried LLM-provided TP/SL deltas through auto-sizing and rebased them against the final execution price so long stops stay below the fill (and short stops above), eliminating OKX 51008 rejections when fills drift from prompt hints.
+- Hardened protection placement by clamping invalid directional targets inside the TP/SL builders and emitting guardrail warnings instead of pushing obviously bad levels to OKX.
+- Added `test_handle_llm_rebases_tp_sl_to_final_price` to lock the new ratio workflow and prove repriced targets straddle the actual fill before we sync protections.
+
 ## 2026-01-24
 - Ensured `handle_llm_decision()` seeds `price_hints` and margin context before invoking open-position calculations, and added a regression test so future refactors cannot reintroduce the crash when snapshots lack prior prices.
 - Reworked the free-equity guard to prioritize OKX-reported available margin (and added detailed notional breakdown logging plus a regression test) so trades are no longer blocked while real margin headroom remains.
