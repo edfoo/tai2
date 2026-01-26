@@ -111,6 +111,7 @@ class MarketService:
     }
     SUPPORTED_TIMEFRAMES = set(_TIMEFRAME_CHOICES.values())
     DEFAULT_TIMEFRAME = "4H"
+    ISOLATED_WALLET_BOOTSTRAP_PCT = 0.25
     PROTECTION_ERROR_CODES = {
         "51047",
         "51048",
@@ -181,6 +182,7 @@ class MarketService:
         self._latest_execution_limits: dict[str, dict[str, Any]] = {}
         self._last_margin_guidance: dict[str, dict[str, Any]] = {}
         self._isolated_leverage_cache: dict[str, float] = {}
+        self._missing_isolated_wallet_symbols: set[str] = set()
         self._position_tiers: dict[str, dict[str, Any]] = {}
         self._subscribed_symbols: set[str] = set()
         self._available_symbols: list[str] = []
@@ -483,6 +485,50 @@ class MarketService:
             side_key = "long" if side_value == "long" else "short"
             totals[side_key] += abs(size_value)
         return totals
+
+    def _isolated_position_margin(
+        self,
+        positions: list[dict[str, Any]] | None,
+        symbol: str,
+        pos_side: str | None = None,
+    ) -> tuple[float | None, dict[str, Any] | None]:
+        """Return the isolated wallet balance for a symbol/side if OKX reported one."""
+        if not positions:
+            return None, None
+        normalized_symbol = symbol.upper()
+        normalized_side = (pos_side or "").lower()
+        fallback_entry: dict[str, Any] | None = None
+        for entry in positions:
+            if not isinstance(entry, dict):
+                continue
+            entry_symbol = str(entry.get("instId") or entry.get("symbol") or "").upper()
+            if entry_symbol != normalized_symbol:
+                continue
+            mode = str(entry.get("mgnMode") or entry.get("marginMode") or "isolated").lower()
+            if mode != "isolated":
+                continue
+            entry_side = str(entry.get("posSide") or "").lower()
+            if normalized_side and entry_side and entry_side != normalized_side:
+                if fallback_entry is None:
+                    fallback_entry = entry
+                continue
+            target_entry = entry
+            value = None
+            for field in ("margin", "cashBal", "availEq", "equity", "eq", "availBal"):
+                candidate = self._extract_float(target_entry.get(field))
+                if candidate is not None:
+                    value = candidate
+                    break
+            if value is not None:
+                return value, target_entry
+            return 0.0, target_entry
+        if fallback_entry:
+            for field in ("margin", "cashBal", "availEq", "equity", "eq", "availBal"):
+                candidate = self._extract_float(fallback_entry.get(field))
+                if candidate is not None:
+                    return candidate, fallback_entry
+            return 0.0, fallback_entry
+        return None, None
 
     def _compute_open_position_notional(
         self,
@@ -1860,6 +1906,24 @@ class MarketService:
                 f"Execution feedback ({level}) {symbol}: {message}{meta_suffix}"
             )
 
+    def record_execution_feedback(
+        self,
+        symbol: str,
+        message: str,
+        *,
+        level: str = "info",
+        meta: dict[str, Any] | None = None,
+        recommendation: dict[str, Any] | None = None,
+    ) -> None:
+        """Public wrapper so other services (scheduler/UI) can emit execution alerts."""
+        self._record_execution_feedback(
+            symbol,
+            message,
+            level=level,
+            meta=meta,
+            recommendation=recommendation,
+        )
+
     def _set_margin_guidance(self, symbol: str, payload: dict[str, Any] | None) -> None:
         """Cache or clear the latest isolated-margin guidance for a symbol."""
         key = self._normalize_symbol_key(symbol)
@@ -2583,6 +2647,7 @@ class MarketService:
                 "requested_notional": _compute_notional(current_size),
                 "initial_requested_size": initial_size,
                 "initial_requested_notional": initial_notional,
+                "current_margin": current_margin,
             }
             if tier_imr:
                 margin_guidance_payload["tier_initial_margin_ratio"] = tier_imr
@@ -3348,104 +3413,215 @@ class MarketService:
             for value in (quote_cash_usd, quote_available_usd)
             if value is not None and value > 0
         ]
-        isolated_margin_available = max(quote_margin_candidates) if quote_margin_candidates else None
+        isolated_margin_available: float | None = None
+        isolated_margin_entry: dict[str, Any] | None = None
         if isolated_mode:
-            tier_entries: list[dict[str, Any]] | None = None
-            tier_imr_for_check: float | None = None
-            tier_max_notional_for_check: float | None = None
-            if last_price and last_price > 0:
-                tier_entries = await self._get_position_tiers(symbol, trade_mode)
-                tier_pool = tier_entries or []
-                if tier_pool:
-                    resulting_size = max(0.0, side_sizes.get(desired_pos_side, 0.0)) + max(0.0, raw_size)
-                    tier_meta = self._select_position_tier(tier_pool, resulting_size)
-                    if tier_meta:
-                        tier_imr_for_check = self._extract_float(tier_meta.get("imr"))
-                        tier_max_leverage = self._extract_float(tier_meta.get("maxLever"))
-                        if (
-                            (tier_imr_for_check is None or tier_imr_for_check <= 0)
-                            and tier_max_leverage
-                            and tier_max_leverage > 0
-                        ):
-                            tier_imr_for_check = 1.0 / tier_max_leverage
-                        tier_max_size = self._extract_float(tier_meta.get("maxSz"))
-                        if tier_max_size and tier_max_size > 0:
-                            tier_max_notional_for_check = tier_max_size * last_price
-            required_isolated_margin = self._estimate_isolated_margin_requirement(
-                size=raw_size,
-                price=last_price,
-                min_leverage=min_leverage,
-                account_equity=account_equity,
-                max_position_pct=base_max_pct,
-                symbol_cap_pct=symbol_cap_pct,
-                max_notional_usd=guardrail_notional_cap,
-                tier_initial_margin_ratio=tier_imr_for_check,
-                tier_max_notional=tier_max_notional_for_check,
+            wallet_side_key = desired_pos_side if dual_side_mode else None
+            if wallet_side_key == "net":
+                wallet_side_key = None
+            margin_value, isolated_margin_entry = self._isolated_position_margin(
+                positions,
+                symbol,
+                wallet_side_key,
             )
-            if required_isolated_margin and (
-                isolated_margin_available is None
-                or isolated_margin_available < required_isolated_margin
-            ):
-                refreshed_balances, downsized_size = await self._ensure_isolated_margin_buffer(
-                    symbol=symbol,
-                    action=action,
-                    dual_side_mode=dual_side_mode,
-                    trade_mode=trade_mode,
-                    pos_side=desired_pos_side,
-                    existing_side_size=side_sizes.get(desired_pos_side, 0.0),
-                    min_leverage=min_leverage,
+            has_isolated_wallet = isolated_margin_entry is not None
+            if has_isolated_wallet:
+                tier_entries: list[dict[str, Any]] | None = None
+                tier_imr_for_check: float | None = None
+                tier_max_notional_for_check: float | None = None
+                if margin_value is not None:
+                    isolated_margin_available = max(margin_value, 0.0)
+                else:
+                    isolated_margin_available = 0.0
+                if last_price and last_price > 0:
+                    tier_entries = await self._get_position_tiers(symbol, trade_mode)
+                    tier_pool = tier_entries or []
+                    if tier_pool:
+                        resulting_size = max(0.0, side_sizes.get(desired_pos_side, 0.0)) + max(0.0, raw_size)
+                        tier_meta = self._select_position_tier(tier_pool, resulting_size)
+                        if tier_meta:
+                            tier_imr_for_check = self._extract_float(tier_meta.get("imr"))
+                            tier_max_leverage = self._extract_float(tier_meta.get("maxLever"))
+                            if (
+                                (tier_imr_for_check is None or tier_imr_for_check <= 0)
+                                and tier_max_leverage
+                                and tier_max_leverage > 0
+                            ):
+                                tier_imr_for_check = 1.0 / tier_max_leverage
+                            tier_max_size = self._extract_float(tier_meta.get("maxSz"))
+                            if tier_max_size and tier_max_size > 0:
+                                tier_max_notional_for_check = tier_max_size * last_price
+                required_isolated_margin = self._estimate_isolated_margin_requirement(
                     size=raw_size,
-                    last_price=last_price,
-                    quote_currency=quote_currency,
-                    available_margin_usd=isolated_margin_available,
+                    price=last_price,
+                    min_leverage=min_leverage,
                     account_equity=account_equity,
                     max_position_pct=base_max_pct,
                     symbol_cap_pct=symbol_cap_pct,
                     max_notional_usd=guardrail_notional_cap,
-                    guardrails=guardrails,
-                    min_size=min_size,
-                    tier_entries=tier_entries,
+                    tier_initial_margin_ratio=tier_imr_for_check,
+                    tier_max_notional=tier_max_notional_for_check,
                 )
-                if downsized_size is not None and downsized_size > 0:
-                    raw_size = downsized_size
-                if refreshed_balances:
-                    balances_block = refreshed_balances.get("available_balances")
-                    if isinstance(balances_block, dict):
-                        available_balances_block = balances_block
-                    quote_available_usd, quote_cash_usd = _extract_quote_balances(available_balances_block)
-                    quote_margin_candidates = [
-                        value
-                        for value in (quote_cash_usd, quote_available_usd)
-                        if value is not None and value > 0
-                    ]
-                    isolated_margin_available = max(quote_margin_candidates) if quote_margin_candidates else None
-                    refreshed_available = self._extract_float(refreshed_balances.get("available_eq_usd"))
-                    if refreshed_available is not None:
-                        available_margin_usd = refreshed_available
-                    refreshed_equity = self._extract_float(
-                        refreshed_balances.get("total_eq_usd")
-                        or refreshed_balances.get("total_equity")
-                        or refreshed_balances.get("total_account_value")
+                if required_isolated_margin and (
+                    isolated_margin_available is None
+                    or isolated_margin_available < required_isolated_margin
+                ):
+                    refreshed_balances, downsized_size = await self._ensure_isolated_margin_buffer(
+                        symbol=symbol,
+                        action=action,
+                        dual_side_mode=dual_side_mode,
+                        trade_mode=trade_mode,
+                        pos_side=desired_pos_side,
+                        existing_side_size=side_sizes.get(desired_pos_side, 0.0),
+                        min_leverage=min_leverage,
+                        size=raw_size,
+                        last_price=last_price,
+                        quote_currency=quote_currency,
+                        available_margin_usd=isolated_margin_available,
+                        account_equity=account_equity,
+                        max_position_pct=base_max_pct,
+                        symbol_cap_pct=symbol_cap_pct,
+                        max_notional_usd=guardrail_notional_cap,
+                        guardrails=guardrails,
+                        min_size=min_size,
+                        tier_entries=tier_entries,
                     )
-                    if refreshed_equity is not None and refreshed_equity > 0:
-                        account_equity = refreshed_equity
-            if isolated_margin_available:
-                available_margin_usd = isolated_margin_available
-            else:
-                label = f"{quote_currency} margin" if quote_currency else "quote margin"
-                self._emit_debug(
-                    f"Execution skipped for {symbol}: isolated mode requires {label} but none is available"
-                )
-                self._record_execution_feedback(
+                    if downsized_size is not None and downsized_size > 0:
+                        raw_size = downsized_size
+                    if refreshed_balances:
+                        balances_block = refreshed_balances.get("available_balances")
+                        if isinstance(balances_block, dict):
+                            available_balances_block = balances_block
+                        quote_available_usd, quote_cash_usd = _extract_quote_balances(available_balances_block)
+                        quote_margin_candidates = [
+                            value
+                            for value in (quote_cash_usd, quote_available_usd)
+                            if value is not None and value > 0
+                        ]
+                        refreshed_available = self._extract_float(refreshed_balances.get("available_eq_usd"))
+                        if refreshed_available is not None:
+                            available_margin_usd = refreshed_available
+                        refreshed_equity = self._extract_float(
+                            refreshed_balances.get("total_eq_usd")
+                            or refreshed_balances.get("total_equity")
+                            or refreshed_balances.get("total_account_value")
+                        )
+                        if refreshed_equity is not None and refreshed_equity > 0:
+                            account_equity = refreshed_equity
+                        try:
+                            positions = await self._fetch_positions()
+                        except Exception as exc:  # pragma: no cover - network fallback
+                            self._emit_debug(f"Position refresh failed for {symbol}: {exc}")
+                        else:
+                            margin_value, isolated_margin_entry = self._isolated_position_margin(
+                                positions,
+                                symbol,
+                                wallet_side_key,
+                            )
+                            if margin_value is not None:
+                                isolated_margin_available = max(margin_value, 0.0)
+                            else:
+                                isolated_margin_available = 0.0
+                        if (
+                            (isolated_margin_available is None or isolated_margin_available <= 0)
+                            and required_isolated_margin
+                        ):
+                            isolated_margin_available = max(required_isolated_margin, 0.0)
+                self._merge_margin_guidance(
                     symbol,
-                    "Isolated margin unavailable",
-                    level="warning",
-                    meta={
-                        "trade_mode": trade_mode,
-                        "quote_currency": quote_currency,
+                    {
+                        "isolated_margin_balance": isolated_margin_available,
+                        "isolated_pos_side": wallet_side_key,
                     },
                 )
-                return False
+                if isolated_margin_available is not None and isolated_margin_available > 0:
+                    available_margin_usd = isolated_margin_available
+                else:
+                    label = f"{quote_currency} margin" if quote_currency else "quote margin"
+                    self._emit_debug(
+                        f"Execution skipped for {symbol}: isolated mode requires {label} but none is available"
+                    )
+                    self._record_execution_feedback(
+                        symbol,
+                        "Isolated margin unavailable",
+                        level="warning",
+                        meta={
+                            "trade_mode": trade_mode,
+                            "quote_currency": quote_currency,
+                        },
+                    )
+                    return False
+            else:
+                self._merge_margin_guidance(
+                    symbol,
+                    {
+                        "isolated_margin_balance": None,
+                        "isolated_pos_side": wallet_side_key,
+                        "isolated_wallet_status": "missing",
+                    },
+                )
+                if symbol not in self._missing_isolated_wallet_symbols:
+                    self._missing_isolated_wallet_symbols.add(symbol)
+                    self._record_execution_feedback(
+                        symbol,
+                        "Isolated wallet missing; falling back to quote margin",
+                        level="info",
+                        meta={
+                            "trade_mode": trade_mode,
+                            "quote_currency": quote_currency,
+                        },
+                    )
+                    self._emit_debug(
+                        f"No isolated wallet entry for {symbol}; using quote margin fallback until first trade"
+                    )
+                fallback_margin = None
+                if quote_margin_candidates:
+                    fallback_margin = max(quote_margin_candidates)
+                if fallback_margin is None:
+                    fallback_margin = available_margin_usd or account_equity
+                wallet_cap = self._resolve_isolated_seed_limit(
+                    guardrails,
+                    symbol,
+                    account_equity=account_equity,
+                )
+                bootstrap_pct = None
+                if isinstance(guardrails, dict):
+                    bootstrap_pct = self._extract_float(guardrails.get("isolated_wallet_bootstrap_pct"))
+                if bootstrap_pct is None or bootstrap_pct <= 0:
+                    bootstrap_pct = self.ISOLATED_WALLET_BOOTSTRAP_PCT
+                bootstrap_pct = min(max(bootstrap_pct, 0.0), 1.0)
+                if (wallet_cap is None or wallet_cap <= 0) and bootstrap_pct > 0:
+                    baseline = fallback_margin or account_equity
+                    if baseline and baseline > 0:
+                        wallet_cap = baseline * bootstrap_pct
+                if wallet_cap and wallet_cap > 0:
+                    guardrail_notional_cap = wallet_cap if guardrail_notional_cap is None else min(guardrail_notional_cap, wallet_cap)
+                    leverage_for_margin = max(max_leverage or 1.0, 1.0)
+                    fallback_margin_budget = wallet_cap / leverage_for_margin
+                    if fallback_margin_budget > 0 and (
+                        available_margin_usd is None or fallback_margin_budget < available_margin_usd
+                    ):
+                        available_margin_usd = fallback_margin_budget
+                    if last_price and last_price > 0:
+                        fallback_contract_cap = wallet_cap / last_price
+                        if fallback_contract_cap > 0 and raw_size > fallback_contract_cap:
+                            previous_size = raw_size
+                            raw_size = fallback_contract_cap
+                            clip_meta = {
+                                "previous_size": previous_size,
+                                "target_size": fallback_contract_cap,
+                                "price_reference": last_price,
+                                "fallback_cap_usd": wallet_cap,
+                            }
+                            self._record_execution_feedback(
+                                symbol,
+                                "Size clipped while isolated wallet missing",
+                                level="info",
+                                meta=clip_meta,
+                            )
+                            self._emit_debug(
+                                f"{symbol} size clipped to {fallback_contract_cap:.4f} while waiting for isolated wallet"
+                            )
         else:
             for candidate in quote_margin_candidates:
                 if available_margin_usd is None or candidate > available_margin_usd:

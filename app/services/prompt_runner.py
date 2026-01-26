@@ -142,6 +142,8 @@ async def _evaluate_daily_loss_guard(app: FastAPI, snapshot: dict[str, Any]) -> 
             history_rows = await fetch_equity_window(DAILY_LOSS_WINDOW_HOURS)
         except Exception as exc:  # pragma: no cover - optional dependency
             logger.debug("Daily loss guard history fetch failed: %s", exc)
+    risk_locks = runtime_meta.setdefault("risk_locks", {})
+    previous_state = risk_locks.get("daily_loss") if isinstance(risk_locks.get("daily_loss"), dict) else {}
     status = compute_daily_loss_guard_state(
         limit_pct=limit_pct,
         window_hours=DAILY_LOSS_WINDOW_HOURS,
@@ -149,7 +151,20 @@ async def _evaluate_daily_loss_guard(app: FastAPI, snapshot: dict[str, Any]) -> 
         history=history_rows,
         current_timestamp=snapshot.get("generated_at"),
     )
-    runtime_meta.setdefault("risk_locks", {})["daily_loss"] = status
+    now_label = datetime.now(timezone.utc).isoformat()
+    if status.get("active"):
+        status["locked_at"] = (
+            previous_state.get("locked_at")
+            or snapshot.get("generated_at")
+            or now_label
+        )
+        status["execution_alert_logged"] = bool(previous_state.get("execution_alert_logged"))
+        status["auto_prompt_disabled"] = bool(previous_state.get("auto_prompt_disabled"))
+    else:
+        status["locked_at"] = previous_state.get("locked_at")
+        status["execution_alert_logged"] = False
+        status["auto_prompt_disabled"] = bool(previous_state.get("auto_prompt_disabled"))
+    risk_locks["daily_loss"] = status
     return status
 
 

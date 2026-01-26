@@ -1,9 +1,18 @@
 # Change Log
 
+## 2026-01-26
+- When the daily loss guard returns 423, the prompt scheduler now records an execution-alert entry, disables auto prompts in place, and tags the lock with structured metadata so operators immediately see why prompts stopped.
+- Added a LIVE-page risk-lock card that mirrors the guard status, shows the drawdown math, and exposes a "Reset Lock & Resume" control that re-enables the scheduler once equity recovers.
+- Persisted daily-loss metadata (`locked_at`, alert flags, scheduler pause state) so both the backend and UI can debounce notifications; expanded the prompt-runner test suite to cover the new bookkeeping.
+
 ## 2026-01-25
 - Carried LLM-provided TP/SL deltas through auto-sizing and rebased them against the final execution price so long stops stay below the fill (and short stops above), eliminating OKX 51008 rejections when fills drift from prompt hints.
 - Hardened protection placement by clamping invalid directional targets inside the TP/SL builders and emitting guardrail warnings instead of pushing obviously bad levels to OKX.
 - Added `test_handle_llm_rebases_tp_sl_to_final_price` to lock the new ratio workflow and prove repriced targets straddle the actual fill before we sync protections.
+- Taught `MarketService` to read per-symbol isolated wallet balances (instead of quote-level equity) before sizing trades, refreshed snapshots after seeding attempts, and mirrored the new telemetry so symbols like SENT stop tripping OKX 51008 despite ample collateral.
+- Added `test_handle_llm_seeds_isolated_margin_when_position_wallet_empty` to replay the zero-wallet scenario and ensure we retry until the position snapshot shows freshly seeded margin before submitting orders.
+- Added a quote-margin fallback for brand-new isolated symbols that do not yet have an OKX wallet entry, plus `test_handle_llm_executes_isolated_trade_without_wallet` so first trades (like PIPPIN) can proceed while we wait for the position snapshot to appear.
+- Limited the fallback path to the configured seed limits (or a default 25% bootstrap) so first-time isolated trades auto-downsize before reaching OKX, and covered the behavior with `test_handle_llm_notes_wallet_missing_when_quote_margin_missing` and the updated wallet bootstrap regression.
 
 ## 2026-01-24
 - Ensured `handle_llm_decision()` seeds `price_hints` and margin context before invoking open-position calculations, and added a regression test so future refactors cannot reintroduce the crash when snapshots lack prior prices.

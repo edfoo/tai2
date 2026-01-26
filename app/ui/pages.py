@@ -256,6 +256,119 @@ def register_pages(app: FastAPI) -> None:
         selected_position_symbol = {"value": None}
         execution_feed_refs: dict[str, Any] = {"container": None, "empty": None}
         page_client = ui.context.client
+        risk_lock_refs: dict[str, Any] = {
+            "card": None,
+            "state": None,
+            "detail": None,
+            "meta": None,
+            "hint": None,
+            "button": None,
+        }
+        lock_reset_state = {"busy": False}
+
+        def _format_pct(value: Any) -> str:
+            try:
+                numeric = float(value)
+            except (TypeError, ValueError):
+                return "--"
+            return f"{numeric * 100:.2f}%"
+
+        def render_risk_lock_status() -> None:
+            card = risk_lock_refs.get("card")
+            if card is None:
+                return
+            config = getattr(app.state, "runtime_config", {}) or {}
+            risk_locks = config.get("risk_locks") or {}
+            lock_state = risk_locks.get("daily_loss") if isinstance(risk_locks.get("daily_loss"), dict) else {}
+            active = bool(lock_state.get("active"))
+            paused = bool(lock_state.get("auto_prompt_disabled"))
+            auto_prompt_enabled = bool(config.get("auto_prompt_enabled", False))
+            if not active and not paused:
+                card.set_visibility(False)
+                return
+            card.set_visibility(True)
+            drop_label = _format_pct(lock_state.get("change_pct"))
+            limit_label = _format_pct(lock_state.get("threshold_pct"))
+            window_hours = lock_state.get("window_hours")
+            locked_at = lock_state.get("locked_at")
+            state_label = risk_lock_refs.get("state")
+            detail_label = risk_lock_refs.get("detail")
+            meta_label = risk_lock_refs.get("meta")
+            hint_label = risk_lock_refs.get("hint")
+            resume_button = risk_lock_refs.get("button")
+            if active:
+                if state_label:
+                    state_label.set_text("Daily loss lock active")
+                if detail_label:
+                    window_label = f"{int(window_hours)}h" if isinstance(window_hours, (int, float)) else "window"
+                    detail_label.set_text(
+                        f"Equity dropped {drop_label} over the last {window_label} (cap {limit_label})."
+                    )
+                if meta_label:
+                    meta_label.set_text(
+                        f"Auto Prompt Scheduler · {'ON' if auto_prompt_enabled else 'OFF'}"
+                    )
+                if hint_label:
+                    hint_label.set_text("Resume unlocks once equity recovers above the limit.")
+                if resume_button:
+                    resume_button.disable()
+            else:
+                if state_label:
+                    state_label.set_text("Daily loss lock cleared")
+                if detail_label:
+                    detail_label.set_text("Equity recovered, but the scheduler remains paused for manual review.")
+                if meta_label:
+                    meta_label.set_text(
+                        f"Paused since {format_iso_timestamp(locked_at, fmt='%Y-%m-%d %H:%M %Z')}"
+                    )
+                if hint_label:
+                    hint_label.set_text("Click resume to restart auto prompts.")
+                if resume_button and not lock_reset_state.get("busy"):
+                    resume_button.enable()
+
+        async def resume_prompt_scheduler() -> None:
+            if lock_reset_state["busy"]:
+                return
+            lock_reset_state["busy"] = True
+            button = risk_lock_refs.get("button")
+            with page_client:
+                if button:
+                    button.disable()
+            try:
+                runtime_config = getattr(app.state, "runtime_config", {}) or {}
+                risk_locks = runtime_config.setdefault("risk_locks", {})
+                lock_state = risk_locks.get("daily_loss") if isinstance(risk_locks.get("daily_loss"), dict) else {}
+                if not lock_state:
+                    with page_client:
+                        ui.notify("No daily loss lock to reset", color="info")
+                    return
+                if lock_state.get("active"):
+                    with page_client:
+                        ui.notify(
+                            "Equity is still below the configured limit; lock remains active.",
+                            color="warning",
+                        )
+                    return
+                scheduler = getattr(app.state, "prompt_scheduler", None)
+                if not scheduler:
+                    with page_client:
+                        ui.notify("Prompt scheduler unavailable", color="warning")
+                    return
+                runtime_config["auto_prompt_enabled"] = True
+                lock_state["auto_prompt_disabled"] = False
+                lock_state["execution_alert_logged"] = False
+                risk_locks["daily_loss"] = lock_state
+                await scheduler.update_interval(runtime_config.get("auto_prompt_interval", 300))
+                await scheduler.set_enabled(True)
+                with page_client:
+                    ui.notify("Auto prompt scheduler resumed", color="positive")
+            except Exception as exc:  # pragma: no cover - UI feedback
+                with page_client:
+                    ui.notify(f"Failed to resume scheduler: {exc}", color="negative")
+            finally:
+                lock_reset_state["busy"] = False
+                with page_client:
+                    render_risk_lock_status()
 
         def set_ws_status(active: bool) -> None:
             label = status_label["widget"]
@@ -303,6 +416,38 @@ def register_pages(app: FastAPI) -> None:
                                     "text-xs bg-amber-600 text-white px-3 py-1 rounded-lg hover:bg-amber-500"
                                 )
                                 clear_feedback_button["widget"] = clear_btn
+
+                    lock_card = ui.card().classes(
+                        "w-full p-4 gap-2 bg-rose-50/80 border border-rose-200 rounded-2xl shadow-sm"
+                    )
+                    lock_card.set_visibility(False)
+                    risk_lock_refs["card"] = lock_card
+                    with lock_card:
+                        risk_lock_refs["state"] = ui.label("Daily loss lock active").classes(
+                            "text-xs font-semibold tracking-wide uppercase text-rose-600"
+                        )
+                        risk_lock_refs["detail"] = ui.label(
+                            "Equity drop exceeded the configured daily cap."
+                        ).classes("text-sm text-rose-800")
+                        risk_lock_refs["meta"] = ui.label("Auto Prompt Scheduler · OFF").classes(
+                            "text-xs text-rose-700"
+                        )
+                        risk_lock_refs["hint"] = ui.label(
+                            "Resume unlocks once equity recovers above the limit."
+                        ).classes("text-[11px] text-slate-500")
+                        resume_button = ui.button(
+                            "Reset Lock & Resume Auto Prompt",
+                            icon="restart_alt",
+                        )
+                        resume_button.classes(
+                            "text-xs bg-slate-900 text-white px-3 py-1 rounded-lg hover:bg-slate-800"
+                        )
+                        resume_button.disable()
+                        resume_button.on(
+                            "click",
+                            lambda _: asyncio.create_task(resume_prompt_scheduler()),
+                        )
+                        risk_lock_refs["button"] = resume_button
 
                     with ui.row().classes("w-full gap-4"):
                         balance_card = badge_stat("Account Equity", "--")
@@ -1178,6 +1323,7 @@ def register_pages(app: FastAPI) -> None:
 
         refresh_llm_cards()
         render_execution_feedback(last_snapshot["value"])
+        render_risk_lock_status()
         ui.timer(15, refresh_llm_cards)
 
         def _format_credit_amount(usage: dict[str, Any] | None) -> str:
@@ -1411,6 +1557,7 @@ def register_pages(app: FastAPI) -> None:
             last_snapshot["value"] = snapshot
             set_ws_status(snapshot is not None)
             refresh_llm_cards()
+            render_risk_lock_status()
             update_snapshot_health(snapshot)
             label = refresh_label["widget"]
             if label:

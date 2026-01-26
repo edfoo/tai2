@@ -2,9 +2,11 @@ import asyncio
 
 import pytest
 
+from app.core.config import get_settings
 from app.main import create_app
 from app.services.prompt_runner import (
     PromptPayloadBundle,
+    _evaluate_daily_loss_guard,
     compute_daily_loss_guard_state,
     execute_llm_decision,
 )
@@ -89,3 +91,62 @@ def test_compute_daily_loss_guard_state_handles_missing_history():
     )
     assert state["active"] is False
     assert state["reason"] == "insufficient equity history"
+
+
+def test_evaluate_daily_loss_guard_tracks_metadata(monkeypatch):
+    app = create_app(enable_background_services=False)
+    app.state.runtime_config = {
+        "guardrails": {"daily_loss_limit_pct": 0.05},
+        "risk_locks": {},
+        "auto_prompt_enabled": True,
+        "auto_prompt_interval": 300,
+    }
+    settings = get_settings()
+    original_db = settings.database_url
+    settings.database_url = "postgres://test"
+
+    history = [
+        {"observed_at": "2026-01-16T12:00:00Z", "total_eq_usd": 1000.0},
+        {"observed_at": "2026-01-16T18:00:00Z", "total_eq_usd": 980.0},
+    ]
+
+    async def fake_fetch_equity_window(_: float) -> list[dict[str, float]]:
+        return history
+
+    monkeypatch.setattr(
+        "app.services.prompt_runner.fetch_equity_window",
+        fake_fetch_equity_window,
+    )
+
+    snapshot = {
+        "total_eq_usd": 900.0,
+        "account_equity": 900.0,
+        "total_account_value": 900.0,
+        "generated_at": "2026-01-17T12:00:00Z",
+    }
+
+    async def _exercise() -> None:
+        status = await _evaluate_daily_loss_guard(app, snapshot)
+        assert status["active"] is True
+        assert status["locked_at"] == "2026-01-17T12:00:00Z"
+        assert status["execution_alert_logged"] is False
+        assert status["auto_prompt_disabled"] is False
+
+        runtime_state = app.state.runtime_config["risk_locks"]["daily_loss"]
+        runtime_state["execution_alert_logged"] = True
+
+        status_again = await _evaluate_daily_loss_guard(app, snapshot)
+        assert status_again["execution_alert_logged"] is True
+
+        recovered_snapshot = dict(snapshot)
+        recovered_snapshot["total_eq_usd"] = 1100.0
+        recovered_snapshot["account_equity"] = 1100.0
+        status_recovered = await _evaluate_daily_loss_guard(app, recovered_snapshot)
+        assert status_recovered["active"] is False
+        assert status_recovered["execution_alert_logged"] is False
+        assert status_recovered["locked_at"] == "2026-01-17T12:00:00Z"
+
+    try:
+        asyncio.run(_exercise())
+    finally:
+        settings.database_url = original_db

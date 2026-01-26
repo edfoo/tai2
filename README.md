@@ -73,6 +73,8 @@ tests/             # pytest suites
 
 Enable "Auto Prompt Scheduler" on the CFG page to have the backend iterate every tracked symbol and send an LLM prompt automatically. You can configure the interval (minimum 30 seconds) there as well; the FastAPI lifespan wires those values into the new `PromptScheduler`, which reuses the same logic as the `/llm/prompt` and `/llm/execute` endpoints. Disable the toggle to keep prompts purely manual.
 
+If the daily loss guard trips, the scheduler now logs an execution alert, automatically pauses itself, and surfaces a "Reset Lock & Resume" control on the LIVE page. Once equity recovers above the configured drawdown cap, hit that button to re-enable auto prompts without digging through the CFG page.
+
 ## Configuration Controls
 
 Open the `CFG` page in the NiceGUI UI to tune the runtime behavior. Key controls and their impact:
