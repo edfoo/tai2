@@ -53,6 +53,7 @@ class StateService:
     """Stores the most recent market state snapshot in Redis."""
 
     snapshot_key = "tai2:state:latest"
+    risk_locks_key = "tai2:state:risk_locks"
 
     def __init__(self, redis_client: Optional[redis_asyncio.Redis] = None) -> None:
         self.redis = redis_client or get_redis_client()
@@ -68,6 +69,21 @@ class StateService:
         if not data:
             return None
         return json.loads(data)
+
+    async def set_risk_locks(self, risk_locks: dict[str, Any]) -> None:
+        serialized = json.dumps(risk_locks or {})
+        await self.redis.set(self.risk_locks_key, serialized)
+
+    async def get_risk_locks(self) -> Optional[dict[str, Any]]:
+        data = await self.redis.get(self.risk_locks_key)
+        if not data:
+            return None
+        try:
+            return json.loads(data)
+        except json.JSONDecodeError:
+            logger.warning("Failed to decode persisted risk locks; resetting store")
+            await self.redis.delete(self.risk_locks_key)
+            return None
 
     async def subscribe_snapshots(self):
         pubsub = self.redis.pubsub()

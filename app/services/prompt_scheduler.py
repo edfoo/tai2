@@ -167,6 +167,9 @@ class PromptScheduler:
                     "Prompt scheduler disabled · daily loss limit triggered"
                 )
         risk_locks["daily_loss"] = lock_state
+        state_service = getattr(self._app.state, "state_service", None)
+        if state_service:
+            asyncio.create_task(state_service.set_risk_locks(risk_locks))
 
 
 __all__ = ["PromptScheduler", "SchedulerConfig"]

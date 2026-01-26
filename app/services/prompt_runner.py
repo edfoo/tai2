@@ -181,6 +181,12 @@ async def _evaluate_daily_loss_guard(app: FastAPI, snapshot: dict[str, Any]) -> 
         status["execution_alert_logged"] = False
         status["auto_prompt_disabled"] = bool(previous_state.get("auto_prompt_disabled"))
     risk_locks["daily_loss"] = status
+    state_service = getattr(app.state, "state_service", None)
+    if state_service:
+        try:
+            await state_service.set_risk_locks(risk_locks)
+        except Exception as exc:  # pragma: no cover - optional persistence
+            logger.debug("Risk lock persistence skipped: %s", exc)
     return status
 
 

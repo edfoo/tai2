@@ -354,6 +354,12 @@ def register_pages(app: FastAPI) -> None:
                 lock_state["manual_override_active"] = False
                 lock_state.pop("manual_override_since", None)
             risk_locks["daily_loss"] = lock_state
+            state_service = getattr(app.state, "state_service", None)
+            if state_service:
+                try:
+                    await state_service.set_risk_locks(risk_locks)
+                except Exception as exc:  # pragma: no cover - UI feedback only
+                    logger.debug("Risk lock persistence skipped: %s", exc)
             scheduler = getattr(app.state, "prompt_scheduler", None)
             if scheduler:
                 await scheduler.update_interval(runtime_config.get("auto_prompt_interval", 300))

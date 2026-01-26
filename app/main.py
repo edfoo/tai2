@@ -318,6 +318,13 @@ def _create_lifespan(enable_background_services: bool):
             else:
                 state_service = StateService()
                 app.state.state_service = state_service
+                try:
+                    stored_risk_locks = await state_service.get_risk_locks()
+                except Exception as exc:  # pragma: no cover - redis optional
+                    logger.error("Failed to load persisted risk locks: %s", exc)
+                else:
+                    if stored_risk_locks:
+                        app.state.runtime_config["risk_locks"] = stored_risk_locks
                 market_service = MarketService(
                     state_service=state_service,
                     symbols=trading_pairs,

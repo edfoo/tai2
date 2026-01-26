@@ -1013,7 +1013,7 @@ class MarketService:
     def _tier_cache_key(self, symbol: str, trade_mode: str) -> str:
         """Key helper for memoizing tier metadata per instrument and trade mode."""
         normalized_symbol = (symbol or "").upper()
-        normalized_mode = (trade_mode or "cross").lower()
+        normalized_mode = (trade_mode or "isolated").lower()
         return f"{normalized_mode}:{normalized_symbol}"
 
     @staticmethod
@@ -1036,7 +1036,7 @@ class MarketService:
             return parts[1]
         return None
 
-    async def _get_position_tiers(self, symbol: str, trade_mode: str = "cross") -> list[dict[str, Any]]:
+    async def _get_position_tiers(self, symbol: str, trade_mode: str = "isolated") -> list[dict[str, Any]]:
         """Return cached or freshly fetched OKX position tier definitions."""
         cache_key = self._tier_cache_key(symbol, trade_mode)
         cached = self._position_tiers.get(cache_key)
@@ -1050,7 +1050,7 @@ class MarketService:
             self._position_tiers[cache_key] = {"tiers": tiers, "timestamp": now}
         return tiers or []
 
-    async def _fetch_position_tiers(self, symbol: str, trade_mode: str = "cross") -> list[dict[str, Any]]:
+    async def _fetch_position_tiers(self, symbol: str, trade_mode: str = "isolated") -> list[dict[str, Any]]:
         """Hit the OKX public tier endpoint and normalize its payload."""
         if not self._public_api or not hasattr(self._public_api, "get_position_tiers"):
             return []
@@ -3270,10 +3270,13 @@ class MarketService:
             self._emit_debug("Trade API unavailable; cannot execute decision")
             return False
         instrument_spec = self._instrument_specs.get(symbol) or {}
-        execution_trade_mode = execution_cfg.get("trade_mode") or "cross"
+        execution_trade_mode = execution_cfg.get("trade_mode") or "isolated"
         trade_mode = str(execution_trade_mode).lower()
         if trade_mode not in {"isolated", "cross"}:
-            trade_mode = "cross"
+            self._emit_debug(
+                f"Invalid trade_mode '{execution_trade_mode}' provided; forcing isolated"
+            )
+            trade_mode = "isolated"
         isolated_mode = trade_mode == "isolated"
         order_type = str(execution_cfg.get("order_type") or "market").lower()
         min_size = self._extract_float(execution_cfg.get("min_size"))
@@ -3622,6 +3625,7 @@ class MarketService:
                             self._emit_debug(
                                 f"{symbol} size clipped to {fallback_contract_cap:.4f} while waiting for isolated wallet"
                             )
+                            leverage_override_reason = "isolated-wallet-bootstrap"
         else:
             for candidate in quote_margin_candidates:
                 if available_margin_usd is None or candidate > available_margin_usd:
@@ -4053,8 +4057,14 @@ class MarketService:
                             "achieved_leverage": achieved_leverage,
                             "account_equity": account_equity,
                             "price": last_price,
+                            "leverage_override_reason": leverage_override_reason,
                         },
                     )
+                    if leverage_override_reason:
+                        self._emit_debug(
+                            f"Proceeding despite leverage gap due to {leverage_override_reason}"
+                        )
+                        return True
                     return False
         if not reduce_only and (target_leverage is None or target_leverage <= 0) and account_equity and account_equity > 0 and last_price and last_price > 0:
             target_leverage = (raw_size * last_price) / account_equity
