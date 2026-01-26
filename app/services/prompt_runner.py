@@ -152,6 +152,22 @@ async def _evaluate_daily_loss_guard(app: FastAPI, snapshot: dict[str, Any]) -> 
         current_timestamp=snapshot.get("generated_at"),
     )
     now_label = datetime.now(timezone.utc).isoformat()
+    override_active = bool(previous_state.get("manual_override_active"))
+    override_since = previous_state.get("manual_override_since")
+    guard_triggered = bool(status.get("active"))
+    if override_active and guard_triggered:
+        status["active"] = False
+        status["reason"] = "manual override active"
+        status["manual_override_active"] = True
+        if override_since:
+            status["manual_override_since"] = override_since
+    elif override_active and not guard_triggered:
+        override_active = False
+        status["manual_override_active"] = False
+        status.pop("manual_override_since", None)
+    else:
+        status["manual_override_active"] = False
+        status.pop("manual_override_since", None)
     if status.get("active"):
         status["locked_at"] = (
             previous_state.get("locked_at")

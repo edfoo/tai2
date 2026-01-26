@@ -343,18 +343,21 @@ def register_pages(app: FastAPI) -> None:
                         color="warning",
                     )
                 return False
-            scheduler = getattr(app.state, "prompt_scheduler", None)
-            if not scheduler:
-                with page_client:
-                    ui.notify("Prompt scheduler unavailable", color="warning")
-                return False
             runtime_config["auto_prompt_enabled"] = True
             lock_state["active"] = False
             lock_state["auto_prompt_disabled"] = False
             lock_state["execution_alert_logged"] = False
+            if force:
+                lock_state["manual_override_active"] = True
+                lock_state["manual_override_since"] = datetime.now(timezone.utc).isoformat()
+            else:
+                lock_state["manual_override_active"] = False
+                lock_state.pop("manual_override_since", None)
             risk_locks["daily_loss"] = lock_state
-            await scheduler.update_interval(runtime_config.get("auto_prompt_interval", 300))
-            await scheduler.set_enabled(True)
+            scheduler = getattr(app.state, "prompt_scheduler", None)
+            if scheduler:
+                await scheduler.update_interval(runtime_config.get("auto_prompt_interval", 300))
+                await scheduler.set_enabled(True)
             backend_events = getattr(app.state, "backend_events", None)
             if backend_events is not None:
                 backend_events.append(
