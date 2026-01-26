@@ -253,6 +253,8 @@ def register_pages(app: FastAPI) -> None:
         manual_refresh_state = {"busy": False}
         clear_feedback_button: dict[str, ui.button | None] = {"widget": None}
         clear_feedback_state = {"busy": False}
+        daily_lock_reset_button: dict[str, ui.button | None] = {"widget": None}
+        daily_lock_reset_state = {"busy": False}
         selected_position_symbol = {"value": None}
         execution_feed_refs: dict[str, Any] = {"container": None, "empty": None}
         page_client = ui.context.client
@@ -264,7 +266,7 @@ def register_pages(app: FastAPI) -> None:
             "hint": None,
             "button": None,
         }
-        lock_reset_state = {"busy": False}
+        resume_lock_state = {"busy": False}
 
         def _format_pct(value: Any) -> str:
             try:
@@ -323,51 +325,90 @@ def register_pages(app: FastAPI) -> None:
                     )
                 if hint_label:
                     hint_label.set_text("Click resume to restart auto prompts.")
-                if resume_button and not lock_reset_state.get("busy"):
+                if resume_button and not resume_lock_state.get("busy"):
                     resume_button.enable()
 
+        async def reset_daily_loss_lock(*, force: bool = False) -> bool:
+            runtime_config = getattr(app.state, "runtime_config", {}) or {}
+            risk_locks = runtime_config.setdefault("risk_locks", {})
+            lock_state = risk_locks.get("daily_loss") if isinstance(risk_locks.get("daily_loss"), dict) else {}
+            if not lock_state:
+                with page_client:
+                    ui.notify("No daily loss lock to reset", color="info")
+                return False
+            if lock_state.get("active") and not force:
+                with page_client:
+                    ui.notify(
+                        "Equity is still below the configured limit; lock remains active.",
+                        color="warning",
+                    )
+                return False
+            scheduler = getattr(app.state, "prompt_scheduler", None)
+            if not scheduler:
+                with page_client:
+                    ui.notify("Prompt scheduler unavailable", color="warning")
+                return False
+            runtime_config["auto_prompt_enabled"] = True
+            lock_state["active"] = False
+            lock_state["auto_prompt_disabled"] = False
+            lock_state["execution_alert_logged"] = False
+            risk_locks["daily_loss"] = lock_state
+            await scheduler.update_interval(runtime_config.get("auto_prompt_interval", 300))
+            await scheduler.set_enabled(True)
+            backend_events = getattr(app.state, "backend_events", None)
+            if backend_events is not None:
+                backend_events.append(
+                    "Daily loss lock manually cleared via LIVE page"
+                    + (" (forced)" if force else "")
+                )
+            with page_client:
+                ui.notify(
+                    "Daily loss lock cleared; auto prompt scheduler resumed"
+                    if force
+                    else "Auto prompt scheduler resumed",
+                    color="positive",
+                )
+                render_risk_lock_status()
+            return True
+
         async def resume_prompt_scheduler() -> None:
-            if lock_reset_state["busy"]:
+            if resume_lock_state["busy"]:
                 return
-            lock_reset_state["busy"] = True
+            resume_lock_state["busy"] = True
             button = risk_lock_refs.get("button")
             with page_client:
                 if button:
                     button.disable()
             try:
-                runtime_config = getattr(app.state, "runtime_config", {}) or {}
-                risk_locks = runtime_config.setdefault("risk_locks", {})
-                lock_state = risk_locks.get("daily_loss") if isinstance(risk_locks.get("daily_loss"), dict) else {}
-                if not lock_state:
-                    with page_client:
-                        ui.notify("No daily loss lock to reset", color="info")
-                    return
-                if lock_state.get("active"):
-                    with page_client:
-                        ui.notify(
-                            "Equity is still below the configured limit; lock remains active.",
-                            color="warning",
-                        )
-                    return
-                scheduler = getattr(app.state, "prompt_scheduler", None)
-                if not scheduler:
-                    with page_client:
-                        ui.notify("Prompt scheduler unavailable", color="warning")
-                    return
-                runtime_config["auto_prompt_enabled"] = True
-                lock_state["auto_prompt_disabled"] = False
-                lock_state["execution_alert_logged"] = False
-                risk_locks["daily_loss"] = lock_state
-                await scheduler.update_interval(runtime_config.get("auto_prompt_interval", 300))
-                await scheduler.set_enabled(True)
-                with page_client:
-                    ui.notify("Auto prompt scheduler resumed", color="positive")
+                await reset_daily_loss_lock(force=False)
             except Exception as exc:  # pragma: no cover - UI feedback
                 with page_client:
                     ui.notify(f"Failed to resume scheduler: {exc}", color="negative")
             finally:
-                lock_reset_state["busy"] = False
+                resume_lock_state["busy"] = False
                 with page_client:
+                    if button:
+                        button.enable()
+                    render_risk_lock_status()
+
+        async def force_reset_daily_loss_lock() -> None:
+            if daily_lock_reset_state["busy"]:
+                return
+            daily_lock_reset_state["busy"] = True
+            button = daily_lock_reset_button.get("widget")
+            with page_client:
+                if button:
+                    button.disable()
+            try:
+                await reset_daily_loss_lock(force=True)
+            except Exception as exc:  # pragma: no cover - UI feedback
+                with page_client:
+                    ui.notify(f"Failed to reset daily loss lock: {exc}", color="negative")
+            finally:
+                daily_lock_reset_state["busy"] = False
+                with page_client:
+                    if button:
+                        button.enable()
                     render_risk_lock_status()
 
         def set_ws_status(active: bool) -> None:
@@ -401,8 +442,10 @@ def register_pages(app: FastAPI) -> None:
                             )
                             notice.set_visibility(False)
                             stale_indicator["widget"] = notice
-                            action_row = ui.row().classes("gap-2 flex-wrap justify-end")
-                            with action_row:
+                            action_column = ui.column().classes(
+                                "gap-2 w-full sm:w-auto items-stretch"
+                            )
+                            with action_column:
                                 refresh_btn = ui.button("Refresh Snapshot", icon="refresh")
                                 refresh_btn.classes(
                                     "text-xs bg-slate-900 text-white px-3 py-1 rounded-lg hover:bg-slate-800"
@@ -416,6 +459,18 @@ def register_pages(app: FastAPI) -> None:
                                     "text-xs bg-amber-600 text-white px-3 py-1 rounded-lg hover:bg-amber-500"
                                 )
                                 clear_feedback_button["widget"] = clear_btn
+                                reset_btn = ui.button(
+                                    "RESET DAILY LOSS LIMIT",
+                                    icon="warning_amber",
+                                )
+                                reset_btn.classes(
+                                    "text-xs bg-rose-600 text-white px-3 py-1 rounded-lg hover:bg-rose-500"
+                                )
+                                daily_lock_reset_button["widget"] = reset_btn
+                                reset_btn.on(
+                                    "click",
+                                    lambda _: asyncio.create_task(force_reset_daily_loss_lock()),
+                                )
 
                     lock_card = ui.card().classes(
                         "w-full p-4 gap-2 bg-rose-50/80 border border-rose-200 rounded-2xl shadow-sm"
