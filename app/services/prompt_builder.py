@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from typing import Any, Optional
 
+from app.services.prompt_utils import sanitize_prompt_text
+
 
 DEFAULT_SYSTEM_PROMPT = (
     "You are a professional hedge fund trader with profitability as primary goal, but with risk controls. Evaluate the provided snapshot, which includes "
@@ -15,15 +17,14 @@ DEFAULT_SYSTEM_PROMPT = (
 
 DEFAULT_DECISION_PROMPT = (
     "You will receive a JSON object under the key 'context' containing the latest market state, snapshot freshness metadata, "
-    "account/portfolio exposure, any pending orders, and execution guardrails. Before deciding on BUY/SELL/HOLD, confirm: "
-    "(1) the snapshot age is within limits, (2) your recommendation complies with leverage, position size, cooldown, and trade "
-    "limit guardrails, and (3) you are not duplicating an existing position or pending order. Explicitly cite snapshot freshness "
+    "account/portfolio exposure (including total equity and available margin), any pending orders, and execution guardrails. Before deciding on BUY/SELL/HOLD, confirm: "
+    "(1) the snapshot age is within limits, (2) your recommendation complies with leverage, position size, cooldown, trade limits, and max-position-percent guardrails (including symbol caps), and (3) you are not duplicating an existing position or pending order. Explicitly cite snapshot freshness "
     "and guardrail checks in your rationale. Inspect 'context.execution.margin_health' for real-time capital caps and treat "
     "'context.execution_feedback' (and its digest) as hard blockers that must be resolved before sizing up. Base position sizing on "
-    "the trade thesis, stop-loss distance, and reward-to-risk profile—in other words, size the order so that the proposed stop loss "
-    "defines the maximum acceptable loss, instead of anchoring to a fixed daily percentage budget. When existing stop-loss or take-profit "
-    "levels are present, reuse or gently tune them unless you can justify a safer alternative. Choose HOLD whenever cooldowns, capital "
-    "constraints, fee/credit depletion, or duplicate exposure prevent execution, and describe the blocker. Respond strictly as JSON matching "
+    "the trade thesis, stop-loss distance, and reward-to-risk profile. In other words, propose both an absolute position_size and an equity_pct (0-1) sized to the thesis and within max_position_pct/symbol caps. The proposed stop loss defines maximum acceptable loss; do not ignore it. When existing stop-loss or take-profit "
+    "levels are present, reuse or gently tune them unless you can justify a safer alternative. For BUY or SELL you must propose both stop-loss "
+    "and take-profit prices; if you cannot provide valid targets or a safe size, pick HOLD instead. Choose HOLD whenever cooldowns, capital "
+    "constraints, fee/credit depletion, missing TP/SL, or duplicate exposure prevent execution, and describe the blocker. Respond strictly as JSON matching "
     "'response_schema'."
 )
 
@@ -47,6 +48,12 @@ RESPONSE_SCHEMA = {
         "position_size": {
             "type": "number",
             "description": "Suggested position size in contracts or base units",
+        },
+        "equity_pct": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "description": "Suggested fraction of account equity to allocate (0-1)",
         },
         "rationale": {
             "type": "string",
@@ -316,9 +323,11 @@ class PromptBuilder:
         if feedback_digest:
             context["execution_feedback_digest"] = feedback_digest
             execution_settings["feedback_digest"] = feedback_digest
+        system_prompt = sanitize_prompt_text(runtime_meta.get("llm_system_prompt") or DEFAULT_SYSTEM_PROMPT)
+        decision_prompt = sanitize_prompt_text(runtime_meta.get("llm_decision_prompt") or DEFAULT_DECISION_PROMPT)
         prompt_block = {
-            "system": (runtime_meta.get("llm_system_prompt") or DEFAULT_SYSTEM_PROMPT).strip(),
-            "task": (runtime_meta.get("llm_decision_prompt") or DEFAULT_DECISION_PROMPT).strip(),
+            "system": (system_prompt or DEFAULT_SYSTEM_PROMPT).strip(),
+            "task": (decision_prompt or DEFAULT_DECISION_PROMPT).strip(),
             "model": model_id,
             "response_schema": self._response_schema(model_id, schema_overrides),
         }
@@ -1129,6 +1138,7 @@ class PromptBuilder:
             "require_position_alignment": True,
             "snapshot_max_age_seconds": 900,
             "wait_for_tp_sl": False,
+            "require_protection": False,
             "fallback_orders_enabled": True,
             "min_leverage_confidence_gate": 0.5,
             "execution_feedback_ttl_seconds": DEFAULT_EXECUTION_FEEDBACK_TTL_SECONDS,

@@ -39,6 +39,7 @@ from app.services.openrouter_service import (
     fetch_openrouter_credits,
     list_openrouter_models,
 )
+from app.services.prompt_utils import sanitize_prompt_text
 from app.ui.components import SnapshotStore, badge_stat
 
 NAV_LINKS = [
@@ -2796,6 +2797,14 @@ def register_pages(app: FastAPI) -> None:
             "fallback_orders_enabled",
             bool(config.get("fallback_orders_enabled", settings.allow_fallback_orders)),
         )
+        config.setdefault("llm_system_prompt", DEFAULT_SYSTEM_PROMPT)
+        config.setdefault("llm_decision_prompt", DEFAULT_DECISION_PROMPT)
+        sanitized_system_prompt = sanitize_prompt_text(config.get("llm_system_prompt"))
+        if sanitized_system_prompt is not None:
+            config["llm_system_prompt"] = sanitized_system_prompt
+        sanitized_decision_prompt = sanitize_prompt_text(config.get("llm_decision_prompt"))
+        if sanitized_decision_prompt is not None:
+            config["llm_decision_prompt"] = sanitized_decision_prompt
         config["fallback_orders_enabled"] = bool(guardrails.get("fallback_orders_enabled", True))
         config.setdefault("prompt_version_name", None)
         prompt_versions_cache: dict[str, dict[str, Any]] = {}
@@ -3962,16 +3971,20 @@ def register_pages(app: FastAPI) -> None:
             record = prompt_versions_cache.get(version_id or "")
             if not record:
                 return
-            prompt_input.value = record.get("system_prompt", prompt_input.value)
-            decision_prompt_input.value = record.get(
-                "decision_prompt", decision_prompt_input.value
+            new_system_prompt = sanitize_prompt_text(record.get("system_prompt", prompt_input.value))
+            if new_system_prompt is not None:
+                prompt_input.value = new_system_prompt
+            new_decision_prompt = sanitize_prompt_text(
+                record.get("decision_prompt", decision_prompt_input.value)
             )
+            if new_decision_prompt is not None:
+                decision_prompt_input.value = new_decision_prompt
             prompt_version_name_input.value = record.get("name", "")
             prompt_input.update()
             decision_prompt_input.update()
             prompt_version_name_input.update()
-            config["llm_system_prompt"] = prompt_input.value
-            config["llm_decision_prompt"] = decision_prompt_input.value
+            config["llm_system_prompt"] = sanitize_prompt_text(prompt_input.value or "") or ""
+            config["llm_decision_prompt"] = sanitize_prompt_text(decision_prompt_input.value or "") or ""
             config["prompt_version_id"] = record.get("id")
             config["prompt_version_name"] = record.get("name")
             update_prompt_version_param(record.get("id"))
@@ -3993,8 +4006,8 @@ def register_pages(app: FastAPI) -> None:
             config["execution_enabled"] = bool(execution_switch.value)
             config["wait_for_tp_sl"] = bool(wait_for_tp_sl_switch.value)
             config["fallback_orders_enabled"] = bool(fallback_orders_switch.value)
-            config["llm_system_prompt"] = prompt_input.value
-            config["llm_decision_prompt"] = decision_prompt_input.value
+            config["llm_system_prompt"] = sanitize_prompt_text(prompt_input.value or "") or ""
+            config["llm_decision_prompt"] = sanitize_prompt_text(decision_prompt_input.value or "") or ""
             config["llm_model_id"] = model_select.value
             timeframe_value = (
                 ta_timeframe_select_cfg.value

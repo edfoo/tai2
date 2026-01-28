@@ -29,6 +29,7 @@ from app.db.postgres import (
 from app.services.llm_service import LLMService
 from app.services.market_service import MarketService
 from app.services.prompt_builder import DEFAULT_DECISION_PROMPT, DEFAULT_SYSTEM_PROMPT, PromptBuilder
+from app.services.prompt_utils import sanitize_prompt_text
 from app.services.state_service import StateService, close_redis_client, ensure_redis_connection
 from app.services.prompt_scheduler import PromptScheduler
 from app.services.prompt_runner import (
@@ -145,8 +146,8 @@ def _create_lifespan(enable_background_services: bool):
         app.state.runtime_config = {
             "ws_update_interval": settings.ws_update_interval,
             "enable_websocket": True,
-            "llm_system_prompt": DEFAULT_SYSTEM_PROMPT,
-            "llm_decision_prompt": DEFAULT_DECISION_PROMPT,
+            "llm_system_prompt": sanitize_prompt_text(DEFAULT_SYSTEM_PROMPT),
+            "llm_decision_prompt": sanitize_prompt_text(DEFAULT_DECISION_PROMPT),
             "llm_model_id": "openrouter/gpt-4o-mini",
             "trading_pairs": trading_pairs,
             "ta_timeframe": MarketService.DEFAULT_TIMEFRAME,
@@ -230,8 +231,12 @@ def _create_lifespan(enable_background_services: bool):
                     if prompt_versions:
                         latest_version = prompt_versions[0]
                         app.state.runtime_config["prompt_version_id"] = latest_version["id"]
-                        app.state.runtime_config["llm_system_prompt"] = latest_version["system_prompt"]
-                        app.state.runtime_config["llm_decision_prompt"] = latest_version["decision_prompt"]
+                        app.state.runtime_config["llm_system_prompt"] = sanitize_prompt_text(
+                            latest_version.get("system_prompt")
+                        )
+                        app.state.runtime_config["llm_decision_prompt"] = sanitize_prompt_text(
+                            latest_version.get("decision_prompt")
+                        )
                         app.state.runtime_config["prompt_version_name"] = latest_version["name"]
                 try:
                     stored_sub_account = await load_okx_sub_account(

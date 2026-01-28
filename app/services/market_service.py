@@ -3121,6 +3121,7 @@ class MarketService:
         trade_window = int(self._extract_float(guardrails.get("trade_window_seconds")) or 3600)
         require_alignment = bool(guardrails.get("require_position_alignment", True))
         wait_for_tp_sl = guardrails.get("wait_for_tp_sl")
+        require_protection = bool(guardrails.get("require_protection", False))
         if wait_for_tp_sl is None:
             wait_for_tp_sl = self._wait_for_tp_sl
         else:
@@ -3343,16 +3344,31 @@ class MarketService:
                 available_balances_block = live_balances_block
             self._refresh_execution_limits_from_account(live_account_balances)
 
+        equity_based_cap = None
         if (
             account_equity is not None
             and account_equity > 0
             and effective_max_pct
-            and max_leverage
         ):
-            guardrail_notional_cap = max(0.0, account_equity * max_leverage * effective_max_pct)
+            equity_based_cap = max(0.0, account_equity * effective_max_pct)
+            guardrail_notional_cap = equity_based_cap
 
         confidence_value = self._normalize_confidence(decision.get("confidence"))
+        equity_pct = self._extract_float(decision.get("equity_pct"))
         size_hint = self._extract_float(decision.get("position_size"))
+        if (
+            equity_pct is not None
+            and equity_pct > 0
+            and equity_pct <= 1
+            and account_equity is not None
+            and account_equity > 0
+            and last_price
+            and last_price > 0
+        ):
+            target_notional = account_equity * equity_pct
+            size_from_equity_pct = target_notional / last_price if last_price else None
+            if size_from_equity_pct and size_from_equity_pct > 0:
+                size_hint = size_from_equity_pct
         target_leverage: float | None = None
         raw_size = self._compute_leverage_adjusted_size(
             size_hint=size_hint,
@@ -3687,13 +3703,13 @@ class MarketService:
             )
             return False
 
-        if max_leverage and max_leverage > 0:
+        if max_leverage and max_leverage > 0 and available_margin_usd is not None:
             margin_driven_cap = available_margin_usd * max_leverage
             pct_multiplier = effective_max_pct if effective_max_pct and effective_max_pct > 0 else None
             if pct_multiplier:
                 margin_driven_cap *= pct_multiplier
             if margin_driven_cap and margin_driven_cap > 0:
-                if guardrail_notional_cap is None or margin_driven_cap > guardrail_notional_cap:
+                if guardrail_notional_cap is None or margin_driven_cap < guardrail_notional_cap:
                     guardrail_notional_cap = margin_driven_cap
         take_profit_price = self._normalize_take_profit(
             action,
@@ -3734,6 +3750,20 @@ class MarketService:
             stop_loss_price,
             "stop-loss",
         )
+
+        if not reduce_only and (stop_loss_price is None or not isinstance(stop_loss_price, (int, float)) or stop_loss_price <= 0):
+            self._record_execution_feedback(
+                symbol,
+                "Blocked: stop-loss required",
+                level="warning",
+                meta={
+                    "guardrail": "stop_loss_required",
+                    "action": action,
+                    "requested_stop_loss": stop_loss_price,
+                },
+            )
+            self._emit_debug(f"Execution skipped for {symbol}: stop-loss required for entries")
+            return False
 
         clipped_by_cap = False
         cap_reason: str | None = None
@@ -3788,6 +3818,7 @@ class MarketService:
                         "available_margin_usd": available_margin_usd,
                         "requested_notional": current_notional,
                         "max_notional": max_notional_from_margin,
+                        "equity_pct": equity_pct,
                     },
                 )
 
@@ -4096,6 +4127,21 @@ class MarketService:
         else:
             attachments_take_profit = requested_take_profit
             attachments_stop_loss = requested_stop_loss
+            if require_protection and attachments_stop_loss is None:
+                self._record_execution_feedback(
+                    symbol,
+                    "Blocked: stop-loss required by guardrail",
+                    level="warning",
+                    meta={
+                        "guardrail": "require_protection",
+                        "take_profit_supplied": attachments_take_profit is not None,
+                        "stop_loss_supplied": attachments_stop_loss is not None,
+                    },
+                )
+                self._emit_debug(
+                    f"Execution skipped for {symbol}: stop-loss required by guardrail"
+                )
+                return False
             if attachments_take_profit or attachments_stop_loss:
                 await self._cancel_position_protection(symbol)
                 if last_price and last_price > 0:
@@ -4115,6 +4161,22 @@ class MarketService:
                         kind="stop-loss",
                         stage="pre-order attachment",
                     )
+                    if require_protection and attachments_stop_loss is None:
+                        self._record_execution_feedback(
+                            symbol,
+                            "Blocked: stop-loss rejected by guardrail",
+                            level="warning",
+                            meta={
+                                "guardrail": "require_protection",
+                                "take_profit_supplied": attachments_take_profit is not None,
+                                "stop_loss_supplied": False,
+                                "reason": "dropped during validation",
+                            },
+                        )
+                        self._emit_debug(
+                            f"Execution skipped for {symbol}: stop-loss dropped during validation"
+                        )
+                        return False
                     if attachments_take_profit or attachments_stop_loss:
                         attach_algo_orders = self._build_attach_algo_orders(
                             take_profit_price=attachments_take_profit,

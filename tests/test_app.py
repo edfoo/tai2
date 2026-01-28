@@ -355,6 +355,8 @@ def test_llm_prompt_endpoint_uses_builder(monkeypatch) -> None:
     assert body["prompt_id"] == "prompt-1"
     assert recorded["symbol"] == "BTC-USDT-SWAP"
     assert recorded["timeframe"] == "4H"
+    # equity_pct field should be present in schema for the model
+    assert "equity_pct" in body["payload"]["response_schema"]["properties"]
 
 
 def test_llm_prompt_endpoint_blocks_stale_snapshot() -> None:

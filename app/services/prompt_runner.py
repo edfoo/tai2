@@ -18,6 +18,7 @@ from app.db.postgres import (
 )
 from app.services.llm_service import LLMService
 from app.services.prompt_builder import PromptBuilder
+from app.services.prompt_utils import sanitize_prompt_text
 from app.services.openrouter_service import fetch_openrouter_credits
 
 logger = logging.getLogger(__name__)
@@ -281,11 +282,11 @@ async def resolve_prompt_metadata(
             return metadata, _response("prompt version lookup failed", 500)
         if not version_record:
             return metadata, _response("prompt version not found", 404)
-        metadata["llm_system_prompt"] = version_record.get(
-            "system_prompt", metadata.get("llm_system_prompt")
+        metadata["llm_system_prompt"] = sanitize_prompt_text(
+            version_record.get("system_prompt", metadata.get("llm_system_prompt"))
         )
-        metadata["llm_decision_prompt"] = version_record.get(
-            "decision_prompt", metadata.get("llm_decision_prompt")
+        metadata["llm_decision_prompt"] = sanitize_prompt_text(
+            version_record.get("decision_prompt", metadata.get("llm_decision_prompt"))
         )
         metadata["prompt_version_id"] = version_record.get("id")
         metadata["prompt_version_name"] = version_record.get("name")

@@ -1,6 +1,6 @@
 # Trading Guardrails Overview
 
-This guide explains the guardrail system in plain language so new operators can see how sizing, leverage, and safety valves interact. Every guardrail operates on the throttle trades down before the exchange rejects them principle.
+This guide explains the guardrail system in plain language so new operators can see how sizing, leverage, and safety valves interact. Every guardrail operates on the "throttle trades down before the exchange rejects them" principle.
 
 ---
 
@@ -16,21 +16,26 @@ sequenceDiagram
     participant EX as OKX Exchange
     participant DB as State/Feedback Store
 
-    PR->>MS: Proposed trade (action, size, TP/SL intent)
+    PR->>MS: Proposed trade (action, position_size, equity_pct, TP/SL)
     MS->>GE: Build snapshot + evaluate guardrails
     GE-->>MS: Sized order + leverage/margin requirements
-    MS->>OA: Ensure leverage + isolated margin
-    alt insufficient margin
-        OA-->>MS: Reject (insufficient balance)
-        MS->>GE: Auto downsize / build recommendation
-        MS-->>PR: Feedback (HOLD + remediation)
-    else margin ready
-        MS->>OA: Submit order + TP/SL attachments
-        OA->>EX: place_order payload
-        EX-->>OA: Execution response
-        OA-->>MS: Normalized fill / order id
-        MS->>OA: Confirm or refresh TP/SL algos
-        MS->>DB: Record trade, protection meta, feedback
+    MS->>MS: Derive size from equity_pct, then apply max_position and symbol caps
+    MS->>MS: Validate TP/SL and enforce stop-loss guardrails
+    alt missing/invalid SL
+        MS-->>PR: Feedback (blocked: stop-loss required)
+    else
+        MS->>OA: Ensure leverage + isolated margin
+        alt insufficient margin
+            OA-->>MS: Reject (insufficient balance)
+            MS-->>PR: Feedback (HOLD + downsizing guidance)
+        else margin ready
+            MS->>OA: Submit order + TP/SL attachments
+            OA->>EX: place_order payload
+            EX-->>OA: Execution response
+            OA-->>MS: Normalized fill / order id
+            MS->>OA: Confirm or refresh TP/SL algos
+            MS->>DB: Record trade, protection meta, feedback (includes equity_pct and any clipping)
+        end
     end
 ```
 
@@ -78,7 +83,7 @@ Max Leverage ─┘
           └─ Confidence Gate (e.g. 0.6) decides how far toward max leverage a trade may stretch.
 ```
 
-- **Min Leverage** forces a floor; the execution layer scales the LLMs size hint up if necessary. Lower this value to keep low-conviction trades small.
+- **Min Leverage** forces a floor; the execution layer scales the LLM's size hint up if necessary. Lower this value to keep low-conviction trades small.
 - **Max Leverage** forms the ceiling; clip orders above this before reaching the exchange.
 - **Confidence Gate** (0–1) means: only lean into leverage when confidence beats the gate. Below the gate, trades stay near the minimum.
 

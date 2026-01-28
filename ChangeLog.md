@@ -1,5 +1,17 @@
 # Change Log
 
+## 2026-01-28
+- Cleaned up `GUARDRAILS.md` so the Mermaid sequence renders again (duplicate headers removed, ASCII arrows/messages only, no stray fences) and operators have a readable overview of the safety flow.
+- Introduced `sanitize_prompt_text()` and ran it through runtime config, prompt-version loading, prompt building, and the CFG UI so decision/system prompts are scrubbed of em/en dashes before reaching the LLM or the browser (fixes the `\u2014` artifacts in the UI and prompt payloads).
+
+## 2026-01-27
+- Added `equity_pct` to LLM response schema and prompt guidance so the model can propose equity-based sizing while guardrails still clip/limit.
+- Executor now consumes `equity_pct` as a sizing hint (before guardrail clipping) and records it when margin caps clip the order; `require_protection` remains enforced.
+- Enforced stop-loss presence for all entry orders (BUY/SELL); entries without a valid SL are blocked before submission, with regression coverage.
+- Added regression coverage for equity_pct parsing and protection guardrail interactions.
+- Added a `require_protection` guardrail that blocks new entries unless a stop-loss is supplied (and survives validation), plus regression tests covering both blocked and allowed cases.
+- Updated the LLM prompt instructions to insist on TP/SL for BUY/SELL and fall back to HOLD when it cannot supply valid targets.
+
 ## 2026-01-26
 - When the daily loss guard returns 423, the prompt scheduler now records an execution-alert entry, disables auto prompts in place, and tags the lock with structured metadata so operators immediately see why prompts stopped.
 - Added a LIVE-page risk-lock card that mirrors the guard status, shows the drawdown math, and exposes a "Reset Lock & Resume" control that re-enables the scheduler once equity recovers.
