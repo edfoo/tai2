@@ -204,22 +204,22 @@ class PromptBuilder:
                 if raw_value is None and resolved_symbol:
                     raw_value = symbol_caps.get(resolved_symbol)
                 symbol_cap_pct = _to_float(raw_value)
-        guardrail_cap = None
-        symbol_cap_value = None
+        equity_cap_usd = None
+        symbol_equity_cap_usd = None
         if account_equity_usd is not None and max_position_pct:
-            guardrail_cap = account_equity_usd * leverage_for_cap * max_position_pct
-            execution_settings["max_position_value_usd"] = guardrail_cap
-            if price_hint:
-                execution_settings["max_position_contracts"] = guardrail_cap / price_hint
+            equity_cap_usd = account_equity_usd * max_position_pct
+            execution_settings["max_equity_allocation_usd"] = equity_cap_usd
+            if price_hint and equity_cap_usd:
+                execution_settings["max_equity_allocation_contracts"] = equity_cap_usd / price_hint
         if max_position_pct is not None:
             execution_settings["max_position_pct"] = max_position_pct
         if symbol_cap_pct is not None:
             execution_settings["symbol_max_position_pct"] = symbol_cap_pct
         if account_equity_usd is not None and symbol_cap_pct:
-            symbol_cap_value = account_equity_usd * leverage_for_cap * symbol_cap_pct
-            execution_settings["symbol_max_position_value_usd"] = symbol_cap_value
-            if price_hint and symbol_cap_value:
-                execution_settings["symbol_max_position_contracts"] = symbol_cap_value / price_hint
+            symbol_equity_cap_usd = account_equity_usd * symbol_cap_pct
+            execution_settings["symbol_max_equity_allocation_usd"] = symbol_equity_cap_usd
+            if price_hint and symbol_equity_cap_usd:
+                execution_settings["symbol_max_equity_allocation_contracts"] = symbol_equity_cap_usd / price_hint
         if margin_cap_usd is not None:
             execution_settings["margin_max_position_value_usd"] = margin_cap_usd
             if price_hint:
@@ -230,7 +230,7 @@ class PromptBuilder:
                 execution_settings["tier_max_position_contracts"] = tier_cap_usd / price_hint
         effective_candidates = [
             value
-            for value in (guardrail_cap, margin_cap_usd, tier_cap_usd, symbol_cap_value)
+            for value in (margin_cap_usd, tier_cap_usd)
             if value and value > 0
         ]
         if effective_candidates:
@@ -903,11 +903,11 @@ class PromptBuilder:
             return None
         available_margin = _to_float(execution_settings.get("available_margin_usd"))
         account_equity = _to_float(execution_settings.get("account_equity_usd"))
-        guardrail_cap = _to_float(execution_settings.get("max_position_value_usd"))
+        equity_cap = _to_float(execution_settings.get("max_equity_allocation_usd"))
         margin_cap = _to_float(execution_settings.get("margin_max_position_value_usd"))
         tier_cap = _to_float(execution_settings.get("tier_max_position_value_usd"))
         effective_cap = _to_float(execution_settings.get("effective_max_position_value_usd"))
-        symbol_cap = _to_float(execution_settings.get("symbol_max_position_value_usd"))
+        symbol_equity_cap = _to_float(execution_settings.get("symbol_max_equity_allocation_usd"))
         symbol_cap_pct = _to_float(execution_settings.get("symbol_max_position_pct"))
         live_snapshot = execution_settings.get("live_margin_snapshot") or {}
         tier_imr = _to_float(execution_settings.get("tier_initial_margin_ratio"))
@@ -919,8 +919,6 @@ class PromptBuilder:
             if parsed:
                 freshness_seconds = max(0, int((datetime.now(timezone.utc) - parsed).total_seconds()))
         caps = [
-            ("guardrail", guardrail_cap),
-            ("symbol", symbol_cap),
             ("margin", margin_cap),
             ("tier", tier_cap),
         ]
@@ -949,8 +947,10 @@ class PromptBuilder:
         if limiting_value:
             label = limiting_factor or "cap"
             summary_bits.append(f"cap ${limiting_value:,.0f} ({label})")
-        if symbol_cap is not None and symbol_cap_pct is not None:
-            summary_bits.append(f"symbol cap {symbol_cap_pct * 100:.1f}%")
+        if equity_cap is not None:
+            summary_bits.append(f"equity cap ${equity_cap:,.0f}")
+        if symbol_equity_cap is not None and symbol_cap_pct is not None:
+            summary_bits.append(f"symbol cap {symbol_cap_pct * 100:.1f}% (${symbol_equity_cap:,.0f})")
         if tier_imr is not None:
             summary_bits.append(f"tier IMR {tier_imr * 100:.2f}%")
         if freshness_seconds is not None:
@@ -960,8 +960,8 @@ class PromptBuilder:
             "account_equity_usd": account_equity,
             "effective_cap_usd": limiting_value,
             "limiting_factor": limiting_factor,
-            "guardrail_cap_usd": guardrail_cap,
-            "symbol_cap_usd": symbol_cap,
+            "equity_cap_usd": equity_cap,
+            "symbol_equity_cap_usd": symbol_equity_cap,
             "margin_cap_usd": margin_cap,
             "tier_cap_usd": tier_cap,
             "symbol_cap_pct": symbol_cap_pct,

@@ -196,23 +196,26 @@ def test_prompt_builder_respects_live_execution_limits() -> None:
 
     payload = builder.build(symbol="BTC-USDT-SWAP", timeframe="1H")
     execution_block = payload["context"]["execution"]
-    expected_guardrail_cap = 5678.9 * 0.2 * 4.5
-    expected_symbol_cap = 5678.9 * symbol_cap_pct * 4.5
+    expected_equity_cap = 5678.9 * 0.2
+    expected_symbol_equity_cap = 5678.9 * symbol_cap_pct
+    expected_effective_cap = 9876.5
 
     assert execution_block["available_margin_usd"] == pytest.approx(1234.5)
     assert execution_block["account_equity_usd"] == pytest.approx(5678.9)
-    assert execution_block["max_position_value_usd"] == pytest.approx(expected_guardrail_cap)
+    assert execution_block["max_equity_allocation_usd"] == pytest.approx(expected_equity_cap)
     assert execution_block["margin_max_position_value_usd"] == pytest.approx(9876.5)
     assert execution_block["symbol_max_position_pct"] == pytest.approx(symbol_cap_pct)
-    assert execution_block["symbol_max_position_value_usd"] == pytest.approx(expected_symbol_cap)
-    assert execution_block["effective_max_position_value_usd"] == pytest.approx(expected_symbol_cap)
+    assert execution_block["symbol_max_equity_allocation_usd"] == pytest.approx(expected_symbol_equity_cap)
+    assert execution_block["effective_max_position_value_usd"] == pytest.approx(expected_effective_cap)
     assert execution_block["max_leverage"] == pytest.approx(4.5)
     assert execution_block["live_margin_snapshot"]["updated_at"] == updated_at
     assert execution_block["live_margin_snapshot"]["quote_currency"] == "USDT"
     assert execution_block["live_margin_snapshot"]["quote_available_usd"] == pytest.approx(1100.0)
     assert execution_block["live_margin_snapshot"]["quote_cash_usd"] == pytest.approx(1000.0)
-    assert execution_block["margin_health"]["limiting_factor"] == "symbol"
-    assert execution_block["margin_health"]["symbol_cap_usd"] == pytest.approx(expected_symbol_cap)
+    assert execution_block["margin_health"]["limiting_factor"] == "margin"
+    assert execution_block["margin_health"]["equity_cap_usd"] == pytest.approx(expected_equity_cap)
+    assert execution_block["margin_health"]["symbol_equity_cap_usd"] == pytest.approx(expected_symbol_equity_cap)
+    assert execution_block["margin_health"]["effective_cap_usd"] == pytest.approx(expected_effective_cap)
 
 
 def test_prompt_builder_applies_caps_per_symbol() -> None:
@@ -241,10 +244,10 @@ def test_prompt_builder_applies_caps_per_symbol() -> None:
 
     assert btc_execution["symbol_max_position_pct"] == pytest.approx(0.1)
     assert eth_execution["symbol_max_position_pct"] == pytest.approx(0.2)
-    assert btc_execution["symbol_max_position_value_usd"] == pytest.approx(equity * leverage * 0.1)
-    assert eth_execution["symbol_max_position_value_usd"] == pytest.approx(equity * leverage * 0.2)
-    assert btc_execution["effective_max_position_value_usd"] == pytest.approx(equity * leverage * 0.1)
-    assert eth_execution["effective_max_position_value_usd"] == pytest.approx(equity * leverage * 0.2)
+    assert btc_execution["symbol_max_equity_allocation_usd"] == pytest.approx(equity * 0.1)
+    assert eth_execution["symbol_max_equity_allocation_usd"] == pytest.approx(equity * 0.2)
+    assert btc_execution["max_equity_allocation_usd"] == pytest.approx(equity * 0.5)
+    assert eth_execution["max_equity_allocation_usd"] == pytest.approx(equity * 0.5)
 
 
 def test_prompt_builder_includes_margin_health_and_feedback_digest() -> None:
@@ -287,8 +290,9 @@ def test_prompt_builder_includes_margin_health_and_feedback_digest() -> None:
     context = payload["context"]
     execution_block = context["execution"]
     margin_health = execution_block["margin_health"]
-    assert margin_health["limiting_factor"] == "guardrail"
-    assert margin_health["effective_cap_usd"] == pytest.approx(4000.0)
+    assert margin_health["limiting_factor"] == "margin"
+    assert margin_health["effective_cap_usd"] == pytest.approx(15000.0)
+    assert margin_health["equity_cap_usd"] == pytest.approx(1000.0)
     feedback_digest = execution_block["feedback_digest"]
     assert feedback_digest["counts"]["warning"] == 1
     assert feedback_digest["latest"]["message"] == "Submitted test order"
