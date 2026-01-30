@@ -2790,6 +2790,7 @@ def register_pages(app: FastAPI) -> None:
         guardrails.setdefault("isolated_margin_seed_usd", None)
         guardrails.setdefault("isolated_margin_max_transfer_usd", None)
         guardrails.setdefault("isolated_margin_symbol_seeds_usd", {})
+        guardrails.setdefault("isolated_wallet_bootstrap_pct", None)
         if "wait_for_tp_sl" not in config:
             config["wait_for_tp_sl"] = bool(guardrails.get("wait_for_tp_sl", False))
         guardrails.setdefault("wait_for_tp_sl", bool(config.get("wait_for_tp_sl")))
@@ -2863,6 +2864,13 @@ def register_pages(app: FastAPI) -> None:
                 continue
             normalized_symbol_caps[str(symbol).upper()] = numeric
         guardrails["symbol_position_caps"] = normalized_symbol_caps
+        bootstrap_fraction = guardrails.get("isolated_wallet_bootstrap_pct")
+        if bootstrap_fraction is None:
+            ms_instance = getattr(app.state, "market_service", None)
+            bootstrap_fraction = getattr(ms_instance, "ISOLATED_WALLET_BOOTSTRAP_PCT", 0.25)
+        bootstrap_pct_value = _fraction_to_percent(bootstrap_fraction)
+        if bootstrap_pct_value is None:
+            bootstrap_pct_value = 25.0
 
         async def lookup_symbol_price(symbol: str | None) -> float | None:
             normalized = (symbol or "").strip().upper()
@@ -3086,6 +3094,15 @@ def register_pages(app: FastAPI) -> None:
                     step=1,
                 ).classes("w-full md:w-56").props(
                     "hint='Absolute ceiling for any auto-seed attempt; blank means no extra cap' persistent-hint"
+                )
+                isolated_bootstrap_pct_input = ui.number(
+                    label="Wallet Bootstrap % of Equity",
+                    value=bootstrap_pct_value,
+                    min=0,
+                    max=100,
+                    step=0.5,
+                ).classes("w-full md:w-56").props(
+                    "hint='When isolated wallets are missing, cap exposure to this percent of fallback margin (enter 25 for 25%)' persistent-hint"
                 )
             ui.separator().classes("w-full my-4")
             ui.label("Model, cadence, and prompt controls").classes("text-sm text-slate-500")
@@ -3703,6 +3720,10 @@ def register_pages(app: FastAPI) -> None:
             snapshot["isolated_margin_max_transfer_usd"] = _safe_float(isolated_seed_max_input.value)
             seed_overrides_preview = _clean_isolated_seed_overrides()
             snapshot["isolated_margin_symbol_seeds_usd"] = seed_overrides_preview or None
+            bootstrap_pct_snapshot = _percent_to_fraction(isolated_bootstrap_pct_input.value)
+            if bootstrap_pct_snapshot is not None:
+                bootstrap_pct_snapshot = min(max(bootstrap_pct_snapshot, 0.0), 1.0)
+            snapshot["isolated_wallet_bootstrap_pct"] = bootstrap_pct_snapshot
             return snapshot
 
         async def hydrate_execution_settings() -> None:
@@ -3862,6 +3883,7 @@ def register_pages(app: FastAPI) -> None:
                 fallback_orders_switch,
                 isolated_seed_default_input,
                 isolated_seed_max_input,
+                isolated_bootstrap_pct_input,
             ]
             for widget in listeners:
                 widget.on_value_change(lambda _: update_payload_preview())
@@ -4125,6 +4147,9 @@ def register_pages(app: FastAPI) -> None:
                 new_daily_loss_limit = guardrails.get("daily_loss_limit_pct", 0.03)
             else:
                 new_daily_loss_limit = max(0.0, min(1.0, new_daily_loss_limit))
+            bootstrap_pct_fraction = _percent_to_fraction(isolated_bootstrap_pct_input.value)
+            if bootstrap_pct_fraction is not None:
+                bootstrap_pct_fraction = max(0.0, min(1.0, bootstrap_pct_fraction))
 
             config["guardrails"] = {
                 "min_leverage": _coerce(min_leverage_input.value, guardrails.get("min_leverage", 1), float),
@@ -4178,6 +4203,7 @@ def register_pages(app: FastAPI) -> None:
                 "isolated_margin_seed_usd": _safe_float(isolated_seed_default_input.value),
                 "isolated_margin_max_transfer_usd": _safe_float(isolated_seed_max_input.value),
                 "isolated_margin_symbol_seeds_usd": _clean_isolated_seed_overrides(),
+                "isolated_wallet_bootstrap_pct": bootstrap_pct_fraction,
             }
             config["snapshot_max_age_seconds"] = config["guardrails"].get(
                 "snapshot_max_age_seconds",

@@ -21,7 +21,7 @@ DEFAULT_DECISION_PROMPT = (
     "(1) the snapshot age is within limits, (2) your recommendation complies with leverage, position size, cooldown, trade limits, and max-position-percent guardrails (including symbol caps), and (3) you are not duplicating an existing position or pending order. Explicitly cite snapshot freshness "
     "and guardrail checks in your rationale. Inspect 'context.execution.margin_health' for real-time capital caps and treat "
     "'context.execution_feedback' (and its digest) as hard blockers that must be resolved before sizing up. Base position sizing on "
-    "the trade thesis, stop-loss distance, and reward-to-risk profile. In other words, propose both an absolute position_size and an equity_pct (0-1) sized to the thesis and within max_position_pct/symbol caps. The proposed stop loss defines maximum acceptable loss; do not ignore it. When existing stop-loss or take-profit "
+    "the trade thesis, stop-loss distance, and reward-to-risk profile. In other words, propose both an absolute position_size and an equity_pct (0-1) sized to the thesis and within max_position_pct/symbol caps. The proposed stop loss defines maximum acceptable loss; do not ignore it. Treat context.execution.max_position_pct and context.execution.symbol_max_position_pct (when present) as hard ceilings for both position_size and equity_pct, and never recommend exposure above those guardrails. When existing stop-loss or take-profit "
     "levels are present, reuse or gently tune them unless you can justify a safer alternative. For BUY or SELL you must propose both stop-loss "
     "and take-profit prices; if you cannot provide valid targets or a safe size, pick HOLD instead. Choose HOLD whenever cooldowns, capital "
     "constraints, fee/credit depletion, missing TP/SL, or duplicate exposure prevent execution, and describe the blocker. Respond strictly as JSON matching "
@@ -325,13 +325,14 @@ class PromptBuilder:
             execution_settings["feedback_digest"] = feedback_digest
         system_prompt = sanitize_prompt_text(runtime_meta.get("llm_system_prompt") or DEFAULT_SYSTEM_PROMPT)
         decision_prompt = sanitize_prompt_text(runtime_meta.get("llm_decision_prompt") or DEFAULT_DECISION_PROMPT)
+        response_schema = self._response_schema(model_id, schema_overrides)
         prompt_block = {
             "system": (system_prompt or DEFAULT_SYSTEM_PROMPT).strip(),
             "task": (decision_prompt or DEFAULT_DECISION_PROMPT).strip(),
             "model": model_id,
-            "response_schema": self._response_schema(model_id, schema_overrides),
+            "response_schema": response_schema,
         }
-        return {"prompt": prompt_block, "context": context}
+        return {"prompt": prompt_block, "context": context, "response_schema": response_schema}
 
     def _resolve_symbol(self, symbol: str | None) -> str:
         if symbol:
@@ -1145,6 +1146,7 @@ class PromptBuilder:
             "isolated_margin_seed_usd": None,
             "isolated_margin_symbol_seeds_usd": {},
             "isolated_margin_max_transfer_usd": None,
+            "isolated_wallet_bootstrap_pct": None,
         }
 
     @staticmethod

@@ -3355,7 +3355,9 @@ class MarketService:
 
         confidence_value = self._normalize_confidence(decision.get("confidence"))
         equity_pct = self._extract_float(decision.get("equity_pct"))
-        size_hint = self._extract_float(decision.get("position_size"))
+        explicit_size_hint = self._extract_float(decision.get("position_size"))
+        size_hint = explicit_size_hint
+        equity_pct_size_hint = None
         if (
             equity_pct is not None
             and equity_pct > 0
@@ -3366,9 +3368,33 @@ class MarketService:
             and last_price > 0
         ):
             target_notional = account_equity * equity_pct
-            size_from_equity_pct = target_notional / last_price if last_price else None
-            if size_from_equity_pct and size_from_equity_pct > 0:
-                size_hint = size_from_equity_pct
+            equity_pct_size_hint = target_notional / last_price if last_price else None
+        if (
+            explicit_size_hint
+            and explicit_size_hint > 0
+            and equity_pct_size_hint
+            and equity_pct_size_hint > 0
+        ):
+            larger = max(explicit_size_hint, equity_pct_size_hint)
+            smaller = min(explicit_size_hint, equity_pct_size_hint)
+            if smaller > 0:
+                ratio = larger / smaller
+                if ratio >= 2.0:  # warn when the suggestions diverge wildly (>= 2x)
+                    self._record_execution_feedback(
+                        symbol,
+                        "LLM equity_pct disagrees with position_size",
+                        level="warning",
+                        meta={
+                            "position_size": explicit_size_hint,
+                            "equity_pct_size": equity_pct_size_hint,
+                            "equity_pct": equity_pct,
+                            "account_equity": account_equity,
+                            "last_price": last_price,
+                            "ratio": ratio,
+                        },
+                    )
+        if (size_hint is None or size_hint <= 0) and equity_pct_size_hint and equity_pct_size_hint > 0:
+            size_hint = equity_pct_size_hint
         target_leverage: float | None = None
         raw_size = self._compute_leverage_adjusted_size(
             size_hint=size_hint,
@@ -3715,6 +3741,7 @@ class MarketService:
             action,
             self._extract_float(decision.get("take_profit")),
             last_price,
+            symbol=symbol,
         )
         stop_loss_price = self._normalize_stop_loss(
             action,
@@ -3750,6 +3777,16 @@ class MarketService:
             stop_loss_price,
             "stop-loss",
         )
+
+        side = "buy" if action == "BUY" else "sell"
+        pos_side = "long" if action == "BUY" else "short"
+        reduce_only = False
+        if action == "SELL" and current_side == "LONG":
+            pos_side = "long"
+            reduce_only = True
+        elif action == "BUY" and current_side == "SHORT":
+            pos_side = "short"
+            reduce_only = True
 
         if not reduce_only and (stop_loss_price is None or not isinstance(stop_loss_price, (int, float)) or stop_loss_price <= 0):
             self._record_execution_feedback(
@@ -3821,16 +3858,6 @@ class MarketService:
                         "equity_pct": equity_pct,
                     },
                 )
-
-        side = "buy" if action == "BUY" else "sell"
-        pos_side = "long" if action == "BUY" else "short"
-        reduce_only = False
-        if action == "SELL" and current_side == "LONG":
-            pos_side = "long"
-            reduce_only = True
-        elif action == "BUY" and current_side == "SHORT":
-            pos_side = "short"
-            reduce_only = True
 
         if (
             not reduce_only
@@ -4631,21 +4658,60 @@ class MarketService:
         action: str,
         take_profit: float | None,
         reference_price: float | None,
+        *,
+        symbol: str | None = None,
     ) -> float | None:
-        """Validate that the TP respects directional constraints relative to entry price."""
+        """Ensure the TP stays on the profitable side; clip + alert when the LLM violates it."""
         if take_profit is None or take_profit <= 0:
             return None
+
+        def _min_offset() -> float:
+            tick = 0.0
+            if symbol:
+                spec = self._instrument_specs.get(symbol)
+                if spec:
+                    tick = spec.get("tick_size") or 0.0
+            ratio_offset = 0.0
+            if reference_price and reference_price > 0:
+                ratio_offset = reference_price * self.PROTECTION_MIN_OFFSET_RATIO
+            return max(tick, ratio_offset, 1e-6)
+
+        def _emit_clip_feedback(adjusted: float) -> None:
+            if not symbol:
+                return
+            self._record_execution_feedback(
+                symbol,
+                "LLM take-profit adjusted to honor trade direction",
+                level="warning",
+                meta={
+                    "action": action,
+                    "original_take_profit": take_profit,
+                    "adjusted_take_profit": adjusted,
+                    "reference_price": reference_price,
+                },
+            )
+
         if reference_price and reference_price > 0:
             if action == "BUY" and take_profit <= reference_price:
+                offset = _min_offset()
+                adjusted = reference_price + offset
                 self._emit_debug(
-                    f"Ignoring take profit {take_profit:.6f}: BUY action expects target above {reference_price:.6f}"
+                    f"Clipped take profit from {take_profit:.6f} to {adjusted:.6f} for BUY (entry {reference_price:.6f})"
                 )
-                return None
+                _emit_clip_feedback(adjusted)
+                return adjusted
             if action == "SELL" and take_profit >= reference_price:
+                offset = _min_offset()
+                adjusted = reference_price - offset
+                if adjusted <= 0 and reference_price:
+                    adjusted = max(reference_price * (1 - self.PROTECTION_MIN_OFFSET_RATIO), 1e-6)
+                if reference_price and adjusted >= reference_price:
+                    adjusted = max(reference_price - (reference_price * self.PROTECTION_MIN_OFFSET_RATIO), 1e-6)
                 self._emit_debug(
-                    f"Ignoring take profit {take_profit:.6f}: SELL action expects target below {reference_price:.6f}"
+                    f"Clipped take profit from {take_profit:.6f} to {adjusted:.6f} for SELL (entry {reference_price:.6f})"
                 )
-                return None
+                _emit_clip_feedback(adjusted)
+                return adjusted
         return take_profit
 
     def _normalize_stop_loss(

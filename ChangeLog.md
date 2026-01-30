@@ -3,6 +3,7 @@
 ## 2026-01-28
 - Cleaned up `GUARDRAILS.md` so the Mermaid sequence renders again (duplicate headers removed, ASCII arrows/messages only, no stray fences) and operators have a readable overview of the safety flow.
 - Introduced `sanitize_prompt_text()` and ran it through runtime config, prompt-version loading, prompt building, and the CFG UI so decision/system prompts are scrubbed of em/en dashes before reaching the LLM or the browser (fixes the `\u2014` artifacts in the UI and prompt payloads).
+- Updated the LLM decision prompt to call out `context.execution.max_position_pct` and `context.execution.symbol_max_position_pct` as hard ceilings so recommended `position_size`/`equity_pct` never exceed the configured percent-of-equity caps per symbol.
 
 ## 2026-01-27
 - Added `equity_pct` to LLM response schema and prompt guidance so the model can propose equity-based sizing while guardrails still clip/limit.

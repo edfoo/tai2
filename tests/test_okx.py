@@ -66,6 +66,45 @@ def test_normalize_account_balances_preserves_unknown_available_margin() -> None
     assert normalized["available_equity"] is None
 
 
+def test_normalize_take_profit_clips_invalid_short() -> None:
+    service = MarketService(
+        state_service=DummySnapshotStore(),
+        enable_websocket=False,
+        account_api=object(),
+        market_api=object(),
+        public_api=object(),
+        trade_api=object(),
+    )
+    symbol = service.symbol
+    service._instrument_specs[symbol] = {"tick_size": 0.1}
+    clipped = service._normalize_take_profit("SELL", 101.0, 100.0, symbol=symbol)
+    assert clipped is not None and clipped < 100.0
+    feedback = list(service._execution_feedback)
+    assert feedback, "Expected warning entry"
+    assert feedback[-1]["message"] == "LLM take-profit adjusted to honor trade direction"
+    assert feedback[-1]["meta"]["original_take_profit"] == 101.0
+    assert feedback[-1]["meta"]["adjusted_take_profit"] == pytest.approx(clipped)
+
+
+def test_normalize_take_profit_clips_invalid_long() -> None:
+    service = MarketService(
+        state_service=DummySnapshotStore(),
+        enable_websocket=False,
+        account_api=object(),
+        market_api=object(),
+        public_api=object(),
+        trade_api=object(),
+    )
+    symbol = service.symbol
+    service._instrument_specs[symbol] = {"tick_size": 0.1}
+    clipped = service._normalize_take_profit("BUY", 99.0, 100.0, symbol=symbol)
+    assert clipped is not None and clipped > 100.0
+    feedback = list(service._execution_feedback)
+    assert feedback
+    assert feedback[-1]["meta"]["original_take_profit"] == 99.0
+    assert feedback[-1]["meta"]["adjusted_take_profit"] == pytest.approx(clipped)
+
+
 def test_handle_llm_decision_blocks_without_positions(monkeypatch: pytest.MonkeyPatch) -> None:
     async def scenario() -> tuple[int, list[str]]:
         state = DummySnapshotStore()
@@ -89,7 +128,7 @@ def test_handle_llm_decision_blocks_without_positions(monkeypatch: pytest.Monkey
         monkeypatch.setattr(service, "_emit_debug", lambda message: captured.append(message))
 
         await service.handle_llm_decision(
-            {"action": "BUY", "confidence": 0.9},
+            {"action": "BUY", "confidence": 0.9, "stop_loss": 1.0},
             {"symbol": service.symbol},
         )
 
@@ -207,6 +246,7 @@ def test_handle_llm_seeds_isolated_margin_when_tier_requires_more_margin(monkeyp
             "action": "BUY",
             "position_size": 3600.0,
             "confidence": 0.9,
+            "stop_loss": 0.9,
         }
         context = {
             "symbol": service.symbol,
@@ -291,7 +331,7 @@ def test_handle_llm_decision_enforces_min_leverage(monkeypatch: pytest.MonkeyPat
             },
             "positions": [],
         }
-        decision = {"action": "BUY", "confidence": 0.9}
+        decision = {"action": "BUY", "confidence": 0.9, "stop_loss": 90.0}
         executed = await service.handle_llm_decision(decision, context)
         return executed, submit_called["value"]
 
@@ -382,6 +422,7 @@ def test_handle_llm_decision_seeds_price_hints_before_open_notional(monkeypatch:
             "action": "BUY",
             "confidence": 0.9,
             "position_size": 1.0,
+            "stop_loss": 95.0,
         }
 
         executed = await service.handle_llm_decision(decision, context)
@@ -469,7 +510,7 @@ def test_handle_llm_seeds_isolated_margin_when_position_wallet_empty(monkeypatch
             submitted["count"] += 1
             return ({"ordId": "1", "fillPx": "0.03", "fillSz": "100"}, False)
 
-        async def noop_refresh(**kwargs: Any) -> None:
+        async def noop_refresh(*args: Any, **kwargs: Any) -> None:
             return None
 
         monkeypatch.setattr(service, "_submit_order", fake_submit_order)
@@ -512,6 +553,7 @@ def test_handle_llm_seeds_isolated_margin_when_position_wallet_empty(monkeypatch
             "action": "BUY",
             "confidence": 0.9,
             "position_size": 100.0,
+            "stop_loss": 0.02,
         }
 
         executed = await service.handle_llm_decision(decision, context)
@@ -574,9 +616,12 @@ def test_handle_llm_executes_isolated_trade_without_wallet(monkeypatch: pytest.M
                 False,
             )
 
+        async def noop_protection(*args: Any, **kwargs: Any) -> None:
+            return None
+
         monkeypatch.setattr(service, "_submit_order", fake_submit_order)
-        monkeypatch.setattr(service, "_refresh_position_protection", lambda **kwargs: None)
-        monkeypatch.setattr(service, "_cancel_position_protection", lambda **kwargs: None)
+        monkeypatch.setattr(service, "_refresh_position_protection", noop_protection)
+        monkeypatch.setattr(service, "_cancel_position_protection", noop_protection)
         monkeypatch.setattr(service, "_emit_debug", lambda *args, **kwargs: None)
 
         context = {
@@ -609,6 +654,7 @@ def test_handle_llm_executes_isolated_trade_without_wallet(monkeypatch: pytest.M
             "action": "BUY",
             "confidence": 0.5,
             "position_size": 500.0,
+            "stop_loss": 0.3,
         }
 
         executed = await service.handle_llm_decision(decision, context)
@@ -620,7 +666,189 @@ def test_handle_llm_executes_isolated_trade_without_wallet(monkeypatch: pytest.M
     messages = [entry["message"] for entry in feedback]
     assert "Isolated margin unavailable" not in messages
     assert "Size clipped while isolated wallet missing" in messages
-    assert submit_meta["size"] == pytest.approx(60.0, rel=1e-6)
+    assert submit_meta["size"] == pytest.approx(30.0, rel=1e-6)
+
+
+def test_handle_llm_prefers_explicit_position_size(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def scenario() -> tuple[bool, float | None, float | None, list[dict[str, Any]]]:
+        state = DummySnapshotStore()
+        service = MarketService(
+            state_service=state,
+            enable_websocket=False,
+            trade_api=object(),
+            account_api=None,
+            market_api=None,
+            public_api=None,
+        )
+        service._instrument_specs[service.symbol] = {
+            "lot_size": 1.0,
+            "min_size": 1.0,
+            "tick_size": 0.01,
+        }
+
+        async def fake_fetch_positions(self, symbol: str | None = None) -> list[dict[str, Any]]:
+            return []
+
+        monkeypatch.setattr(service, "_fetch_positions", MethodType(fake_fetch_positions, service))
+
+        captured: dict[str, float | None] = {"size_hint": None, "submitted": None}
+
+        def fake_leverage_adjust(**kwargs: Any) -> float | None:
+            captured["size_hint"] = kwargs.get("size_hint")
+            return kwargs.get("size_hint")
+
+        monkeypatch.setattr(service, "_compute_leverage_adjusted_size", fake_leverage_adjust)
+
+        async def fake_tier_guard(**kwargs: Any) -> dict[str, Any]:
+            return {"size": kwargs.get("additional_size", 0.0)}
+
+        monkeypatch.setattr(service, "_apply_tier_margin_guard", fake_tier_guard)
+
+        async def fake_submit_order(**kwargs: Any) -> tuple[dict[str, Any], bool]:
+            captured["submitted"] = kwargs.get("size")
+            return ({"ordId": "1", "fillSz": str(kwargs.get("size", 0.0))}, False)
+
+        async def noop_protection(*_args: Any, **_kwargs: Any) -> None:
+            return None
+
+        monkeypatch.setattr(service, "_submit_order", fake_submit_order)
+        monkeypatch.setattr(service, "_refresh_position_protection", noop_protection)
+        monkeypatch.setattr(service, "_cancel_position_protection", noop_protection)
+        monkeypatch.setattr(service, "_emit_debug", lambda *args, **kwargs: None)
+
+        context = {
+            "symbol": service.symbol,
+            "guardrails": {
+                "min_leverage": 0.0,
+                "max_leverage": 5.0,
+                "max_position_pct": 0.5,
+                "min_hold_seconds": 0,
+                "max_trades_per_hour": 0,
+                "trade_window_seconds": 3600,
+            },
+            "market": {"last_price": 1.0},
+            "account": {
+                "account_equity": 1000.0,
+                "available_eq_usd": 1000.0,
+                "available_balances": {
+                    "USDT": {"available_usd": 1000.0, "cash": 1000.0}
+                },
+            },
+            "execution": {
+                "enabled": True,
+                "trade_mode": "cross",
+                "order_type": "market",
+                "min_size": 1.0,
+            },
+            "positions": [],
+        }
+
+        decision = {
+            "action": "BUY",
+            "confidence": 0.8,
+            "position_size": 10.0,
+            "equity_pct": 0.5,
+            "stop_loss": 0.95,
+            "take_profit": 1.05,
+        }
+
+        executed = await service.handle_llm_decision(decision, context)
+        return executed, captured["size_hint"], captured["submitted"], list(service._execution_feedback)
+
+    executed, size_hint, submitted_size, feedback = asyncio.run(scenario())
+    assert executed is True, feedback
+    assert size_hint == pytest.approx(10.0)
+    assert submitted_size == pytest.approx(10.0)
+
+
+def test_handle_llm_emits_feedback_for_size_conflict(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def scenario() -> tuple[bool, list[dict[str, Any]]]:
+        state = DummySnapshotStore()
+        service = MarketService(
+            state_service=state,
+            enable_websocket=False,
+            trade_api=object(),
+            account_api=None,
+            market_api=None,
+            public_api=None,
+        )
+        service._instrument_specs[service.symbol] = {
+            "lot_size": 1.0,
+            "min_size": 1.0,
+            "tick_size": 0.01,
+        }
+
+        async def fake_fetch_positions(self, symbol: str | None = None) -> list[dict[str, Any]]:
+            return []
+
+        monkeypatch.setattr(service, "_fetch_positions", MethodType(fake_fetch_positions, service))
+
+        monkeypatch.setattr(
+            service,
+            "_compute_leverage_adjusted_size",
+            lambda **kwargs: kwargs.get("size_hint"),
+        )
+
+        async def fake_tier_guard(**kwargs: Any) -> dict[str, Any]:
+            return {"size": kwargs.get("additional_size", 0.0)}
+
+        monkeypatch.setattr(service, "_apply_tier_margin_guard", fake_tier_guard)
+
+        async def fake_submit_order(**kwargs: Any) -> tuple[dict[str, Any], bool]:
+            return ({"ordId": "1", "fillSz": str(kwargs.get("size", 0.0))}, False)
+
+        async def noop_protection(*_args: Any, **_kwargs: Any) -> None:
+            return None
+
+        monkeypatch.setattr(service, "_submit_order", fake_submit_order)
+        monkeypatch.setattr(service, "_refresh_position_protection", noop_protection)
+        monkeypatch.setattr(service, "_cancel_position_protection", noop_protection)
+        monkeypatch.setattr(service, "_emit_debug", lambda *args, **kwargs: None)
+
+        context = {
+            "symbol": service.symbol,
+            "guardrails": {
+                "min_leverage": 0.0,
+                "max_leverage": 5.0,
+                "max_position_pct": 0.5,
+                "min_hold_seconds": 0,
+                "max_trades_per_hour": 0,
+                "trade_window_seconds": 3600,
+            },
+            "market": {"last_price": 1.0},
+            "account": {
+                "account_equity": 1000.0,
+                "available_eq_usd": 1000.0,
+                "available_balances": {
+                    "USDT": {"available_usd": 1000.0, "cash": 1000.0}
+                },
+            },
+            "execution": {
+                "enabled": True,
+                "trade_mode": "cross",
+                "order_type": "market",
+                "min_size": 1.0,
+            },
+            "positions": [],
+        }
+
+        decision = {
+            "action": "BUY",
+            "confidence": 0.7,
+            "position_size": 5.0,
+            "equity_pct": 0.5,
+            "stop_loss": 0.95,
+            "take_profit": 1.05,
+        }
+
+        executed = await service.handle_llm_decision(decision, context)
+        return executed, list(service._execution_feedback)
+
+    executed, feedback = asyncio.run(scenario())
+    assert executed is True, feedback
+    mismatch_messages = [entry for entry in feedback if entry["message"] == "LLM equity_pct disagrees with position_size"]
+    assert mismatch_messages, feedback
+    assert mismatch_messages[0]["level"] == "warning"
 
 
 def test_handle_llm_allows_trade_when_margin_available(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -704,6 +932,7 @@ def test_handle_llm_allows_trade_when_margin_available(monkeypatch: pytest.Monke
             "action": "BUY",
             "confidence": 0.8,
             "position_size": 1.0,
+            "stop_loss": 95.0,
         }
 
         executed = await service.handle_llm_decision(decision, context)
@@ -898,6 +1127,7 @@ def test_guardrail_notional_cap_tracks_available_margin(monkeypatch: pytest.Monk
             "confidence": 0.9,
             "position_size": 5.0,
             "equity_pct": 0.5,
+            "stop_loss": 9.0,
         }
 
         executed = await service.handle_llm_decision(decision, context)
@@ -911,7 +1141,7 @@ def test_guardrail_notional_cap_tracks_available_margin(monkeypatch: pytest.Monk
     result = asyncio.run(scenario())
     assert result["executed"] is True, result["feedback"]
     assert result["submitted"] is True, result["feedback"]
-    assert result["payload"].get("size") == pytest.approx(5.0)
+    assert result["payload"].get("size") == pytest.approx(0.5)
 
 
 def test_stop_loss_is_required_for_entries(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1035,8 +1265,8 @@ def test_require_protection_blocks_when_stop_loss_missing(monkeypatch: pytest.Mo
             },
             "market": {"last_price": 100.0},
             "account": {
-                "account_equity": 500.0,
-                "available_eq_usd": 400.0,
+                "account_equity": 150.0,
+                "available_eq_usd": 150.0,
                 "available_balances": {},
             },
             "execution": {
@@ -1118,8 +1348,8 @@ def test_require_protection_allows_when_stop_loss_present(monkeypatch: pytest.Mo
             },
             "market": {"last_price": 100.0},
             "account": {
-                "account_equity": 500.0,
-                "available_eq_usd": 400.0,
+                "account_equity": 150.0,
+                "available_eq_usd": 150.0,
                 "available_balances": {},
             },
             "execution": {
@@ -1216,13 +1446,16 @@ def test_handle_llm_respects_symbol_position_caps(monkeypatch: pytest.MonkeyPatc
             },
             "positions": [],
         }
-        executed = await service.handle_llm_decision({"action": "BUY", "confidence": 0.9}, context)
+        executed = await service.handle_llm_decision(
+            {"action": "BUY", "confidence": 0.9, "stop_loss": 95.0},
+            context,
+        )
         return executed, recorded
 
     executed, recorded = asyncio.run(scenario())
     assert executed is True
-    assert recorded.get("pre_quantize_size") == pytest.approx(2.0)
-    assert recorded.get("size", 0.0) == pytest.approx(2.0)
+    assert recorded.get("pre_quantize_size") == pytest.approx(1.0)
+    assert recorded.get("size", 0.0) == pytest.approx(1.0)
 
 
 def test_handle_llm_notes_wallet_missing_when_quote_margin_missing(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1273,7 +1506,10 @@ def test_handle_llm_notes_wallet_missing_when_quote_margin_missing(monkeypatch: 
             "positions": [],
         }
 
-        executed = await service.handle_llm_decision({"action": "SELL", "confidence": 0.6}, context)
+        executed = await service.handle_llm_decision(
+            {"action": "SELL", "confidence": 0.6, "stop_loss": 105.0},
+            context,
+        )
         return executed, list(service._execution_feedback)
 
     executed, feedback = asyncio.run(scenario())
@@ -1411,7 +1647,7 @@ def test_handle_llm_attempts_isolated_margin_top_up(monkeypatch: pytest.MonkeyPa
             },
             "positions": base_positions,
         }
-        decision = {"action": "BUY", "confidence": 0.6, "position_size": 1.0}
+        decision = {"action": "BUY", "confidence": 0.6, "position_size": 1.0, "stop_loss": 95.0}
         executed = await service.handle_llm_decision(decision, context)
         return executed, account_api, trade_api
 
@@ -1562,7 +1798,7 @@ def test_handle_llm_top_up_when_margin_partially_funded(monkeypatch: pytest.Monk
             },
             "positions": base_positions,
         }
-        decision = {"action": "BUY", "confidence": 0.6, "position_size": 1.0}
+        decision = {"action": "BUY", "confidence": 0.6, "position_size": 1.0, "stop_loss": 95.0}
         executed = await service.handle_llm_decision(decision, context)
         return executed, account_api, trade_api
 
@@ -1711,7 +1947,7 @@ def test_handle_llm_auto_seeds_isolated_margin(monkeypatch: pytest.MonkeyPatch) 
             },
             "positions": base_positions,
         }
-        decision = {"action": "BUY", "confidence": 0.9, "position_size": 1.5}
+        decision = {"action": "BUY", "confidence": 0.9, "position_size": 1.5, "stop_loss": 95.0}
         executed = await service.handle_llm_decision(decision, context)
         return account_api, funding_api, trade_api, executed
 
@@ -1789,7 +2025,7 @@ def test_handle_llm_blocks_when_margin_unknown(monkeypatch: pytest.MonkeyPatch) 
             "positions": [],
         }
         executed = await service.handle_llm_decision(
-            {"action": "BUY", "confidence": 0.9, "position_size": 1.0},
+            {"action": "BUY", "confidence": 0.9, "position_size": 1.0, "stop_loss": 95.0},
             context,
         )
         return executed, service._execution_feedback, balance_responder.calls
