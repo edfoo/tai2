@@ -21,7 +21,13 @@ DEFAULT_DECISION_PROMPT = (
     "(1) the snapshot age is within limits, (2) your recommendation complies with leverage, position size, cooldown, trade limits, and max-position-percent guardrails (including symbol caps), and (3) you are not duplicating an existing position or pending order. Explicitly cite snapshot freshness "
     "and guardrail checks in your rationale. Inspect 'context.execution.margin_health' for real-time capital caps and treat "
     "'context.execution_feedback' (and its digest) as hard blockers that must be resolved before sizing up. Base position sizing on "
-    "the trade thesis, stop-loss distance, and reward-to-risk profile. In other words, propose both an absolute position_size and an equity_pct (0-1) sized to the thesis and within max_position_pct/symbol caps. The proposed stop loss defines maximum acceptable loss; do not ignore it. Treat context.execution.max_position_pct and context.execution.symbol_max_position_pct (when present) as hard ceilings for both position_size and equity_pct, and never recommend exposure above those guardrails. When existing stop-loss or take-profit "
+    "the trade thesis, stop-loss distance, and reward-to-risk profile. In other words, propose both an absolute position_size and an equity_pct (0-1) sized to the thesis and within max_position_pct/symbol caps. The proposed stop loss defines maximum acceptable loss; do not ignore it. Treat context.execution.max_position_pct and context.execution.symbol_max_position_pct (when present) as hard ceilings for both position_size and equity_pct, and never recommend exposure above those guardrails. "
+    "CRITICAL SIZING RULE: context.execution.max_safe_notional_usd is the pre-computed absolute ceiling for position notional "
+    "(= available_margin_usd x max_leverage, already capped by all position and tier limits). "
+    "context.execution.max_safe_contracts is its equivalent in contract units. "
+    "You MUST NOT propose a position_size or notional above these values - the exchange will reject the order regardless of equity_pct. "
+    "Sizing based on account_equity alone is incorrect; always verify that your chosen notional stays within max_safe_notional_usd. "
+    "When existing stop-loss or take-profit "
     "levels are present, reuse or gently tune them unless you can justify a safer alternative. For BUY or SELL you must propose both stop-loss "
     "and take-profit prices; if you cannot provide valid targets or a safe size, pick HOLD instead. "
     "CRITICAL: the take-profit distance from entry must be at least context.guardrails.min_reward_risk_ratio times the stop-loss distance from entry "
@@ -245,6 +251,20 @@ class PromptBuilder:
         effective_max_leverage = guardrail_max_leverage if guardrail_max_leverage and guardrail_max_leverage > 0 else None
         if effective_max_leverage is not None:
             execution_settings["max_leverage"] = effective_max_leverage
+        # Pre-compute the authoritative notional ceiling so the LLM never has to
+        # guess: max_safe_notional_usd = available_margin_usd × max_leverage, then
+        # capped by whichever position/tier/equity limit is tightest.
+        if available_margin_usd is not None and effective_max_leverage is not None and effective_max_leverage > 0:
+            max_safe_notional_usd: Optional[float] = available_margin_usd * effective_max_leverage
+            cap_candidates = [
+                v for v in (margin_cap_usd, tier_cap_usd, equity_cap_usd, symbol_equity_cap_usd)
+                if v is not None and v > 0
+            ]
+            if cap_candidates:
+                max_safe_notional_usd = min(max_safe_notional_usd, min(cap_candidates))
+            execution_settings["max_safe_notional_usd"] = round(max_safe_notional_usd, 2)
+            if price_hint and price_hint > 0:
+                execution_settings["max_safe_contracts"] = round(max_safe_notional_usd / price_hint, 8)
         if tier_imr is not None:
             execution_settings["tier_initial_margin_ratio"] = tier_imr
         if tier_source:

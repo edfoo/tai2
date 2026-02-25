@@ -1994,6 +1994,8 @@ class MarketService:
             "account_equity",
             "open_position_notional",
             "equity_available_for_trade",
+            "max_tradeable_notional_usd",
+            "margin_available_usd",
             "equity_clip_active",
             "equity_clip_reason",
             "equity_clip_requested_size",
@@ -3916,6 +3918,9 @@ class MarketService:
             free_equity = available_equity_for_trade
             if free_equity is None:
                 free_equity = max(account_equity - (open_position_notional or 0.0), 0.0)
+            # Keep the real (un-leveraged) equity for display / feedback so the guidance
+            # snapshot never shows a value larger than account_equity.
+            real_free_equity = free_equity
             if (
                 margin_headroom is not None
                 and margin_headroom > 0
@@ -3924,11 +3929,17 @@ class MarketService:
             ):
                 margin_based_notional = margin_headroom * max_leverage
                 if margin_based_notional > (free_equity or 0.0):
+                    # Override free_equity with the leveraged notional so size-clipping
+                    # below allows trades that require leverage beyond raw equity.
                     free_equity = margin_based_notional
             equity_updates = {
                 "account_equity": account_equity,
                 "open_position_notional": open_position_notional,
-                "equity_available_for_trade": free_equity,
+                # Store real equity so the guidance display is never inflated to
+                # a leveraged notional (which would be > account_equity).
+                "equity_available_for_trade": real_free_equity,
+                # Store the leveraged capacity under a separate, clearly-named key.
+                "max_tradeable_notional_usd": free_equity,
             }
             if margin_headroom is not None:
                 equity_updates["margin_available_usd"] = margin_headroom
