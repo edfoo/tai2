@@ -23,18 +23,22 @@ sequenceDiagram
     MS->>MS: Validate TP/SL and enforce stop-loss guardrails
     alt missing/invalid SL
         MS-->>PR: Feedback (blocked: stop-loss required)
-    else
-        MS->>OA: Ensure leverage + isolated margin
-        alt insufficient margin
-            OA-->>MS: Reject (insufficient balance)
-            MS-->>PR: Feedback (HOLD + downsizing guidance)
-        else margin ready
-            MS->>OA: Submit order + TP/SL attachments
-            OA->>EX: place_order payload
-            EX-->>OA: Execution response
-            OA-->>MS: Normalized fill / order id
-            MS->>OA: Confirm or refresh TP/SL algos
-            MS->>DB: Record trade, protection meta, feedback (includes equity_pct and any clipping)
+    else SL present — check reward-to-risk ratio
+        alt TP dist / SL dist < min_reward_risk_ratio
+            MS-->>PR: Feedback (blocked: poor reward-to-risk)
+        else ratio acceptable
+            MS->>OA: Ensure leverage + isolated margin
+            alt insufficient margin
+                OA-->>MS: Reject (insufficient balance)
+                MS-->>PR: Feedback (HOLD + downsizing guidance)
+            else margin ready
+                MS->>OA: Submit order + TP/SL attachments
+                OA->>EX: place_order payload
+                EX-->>OA: Execution response
+                OA-->>MS: Normalized fill / order id
+                MS->>OA: Confirm or refresh TP/SL algos
+                MS->>DB: Record trade, protection meta, feedback (includes equity_pct and any clipping)
+            end
         end
     end
 ```
@@ -131,21 +135,45 @@ Available Margin from OKX
 
 ---
 
-## 6. Risk Locks Recap
+## 6. Reward-to-Risk Ratio Guard
 
-| Lock            | Trigger                                     | Effect                              |
-|-----------------|---------------------------------------------|-------------------------------------|
-| Daily Loss      | Equity drawdown beyond configured % / 24h   | Scheduler + execution halt          |
-| Margin Feedback | Latest OKX response reports insufficient USDT | LLM decisions default to HOLD       |
-| Wait-for-TP/SL  | Position already has synced TP/SL orders    | Prevents exits until protection fills|
+```
+Entry Price
+│
+├─ Take-Profit distance  (TP dist)  ─┐
+│                                     ├─ ratio = TP dist / SL dist
+└─ Stop-Loss distance    (SL dist)  ─┘
+              ↓
+       ratio >= min_reward_risk_ratio  → allowed
+       ratio <  min_reward_risk_ratio  → BLOCKED
+```
+
+- **`min_reward_risk_ratio`** (default `1.0`) sets the minimum acceptable reward-to-risk ratio for every new entry.
+- For a **BUY**: `TP dist = take_profit − entry`, `SL dist = entry − stop_loss`.
+- For a **SELL**: `TP dist = entry − take_profit`, `SL dist = stop_loss − entry`.
+- If the LLM proposes a take-profit that is closer to entry than the stop-loss (ratio < 1.0 by default), the trade is hard-blocked and an `execution_feedback` warning is recorded so the model can correct itself on the next prompt cycle.
+- Set `min_reward_risk_ratio: 1.5` (or higher) in **CFG → Execution Guardrails** to enforce trades that only open when the upside is at least 1.5× the downside.
+- This check is skipped for reduce-only (**closing**) orders and for trades where no take-profit price is provided.
 
 ---
 
-## 7. Quick Tuning Checklist
+## 7. Risk Locks Recap
+
+| Lock                  | Trigger                                                   | Effect                               |
+|-----------------------|-----------------------------------------------------------|--------------------------------------|
+| Daily Loss            | Equity drawdown beyond configured % / 24h                 | Scheduler + execution halt           |
+| Margin Feedback       | Latest OKX response reports insufficient USDT             | LLM decisions default to HOLD        |
+| Wait-for-TP/SL        | Position already has synced TP/SL orders                  | Prevents exits until protection fills |
+| Reward-to-Risk        | TP distance < `min_reward_risk_ratio` × SL distance       | Entry blocked; feedback recorded     |
+
+---
+
+## 8. Quick Tuning Checklist
 
 1. **Set per-symbol caps** summing to the amount of equity you want deployed simultaneously.
 2. **Lower min leverage** (or raise the confidence gate) so low-confidence calls stay tiny instead of scaling to the floor.
-3. **Monitor margin health** in the UI; top up cross margin before the new trades are attempted.
-4. **Keep an eye on `GUARDRAILS.md`** (this file!) whenever onboarding teammates—they can follow the diagrams to see how caps layer together.
+3. **Set `min_reward_risk_ratio`** (e.g. `1.5`) so trades only open when the potential gain is at least 1.5× the potential loss.
+4. **Monitor margin health** in the UI; top up cross margin before the new trades are attempted.
+5. **Keep an eye on `GUARDRAILS.md`** (this file!) whenever onboarding teammates—they can follow the diagrams to see how caps layer together.
 
 With these layers in place, the LLM can focus on signal quality while the execution layer silently shrinks orders to whatever the venue and your policies allow.

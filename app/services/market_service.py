@@ -3802,6 +3802,50 @@ class MarketService:
             self._emit_debug(f"Execution skipped for {symbol}: stop-loss required for entries")
             return False
 
+        # Reward-to-risk guard: take-profit distance must be >= min_reward_risk_ratio * stop-loss distance.
+        # This prevents trades where the potential loss greatly outweighs the potential gain.
+        if (
+            not reduce_only
+            and take_profit_price
+            and isinstance(take_profit_price, (int, float))
+            and take_profit_price > 0
+            and last_price
+            and last_price > 0
+            and stop_loss_price
+            and isinstance(stop_loss_price, (int, float))
+            and stop_loss_price > 0
+        ):
+            min_rr = self._extract_float(guardrails.get("min_reward_risk_ratio")) or 1.0
+            if action == "BUY":
+                tp_dist = take_profit_price - last_price
+                sl_dist = last_price - stop_loss_price
+            else:  # SELL
+                tp_dist = last_price - take_profit_price
+                sl_dist = stop_loss_price - last_price
+            if sl_dist > 0 and tp_dist / sl_dist < min_rr:
+                rr_actual = tp_dist / sl_dist
+                self._record_execution_feedback(
+                    symbol,
+                    f"Blocked: reward-to-risk ratio {rr_actual:.2f} below minimum {min_rr:.2f}",
+                    level="warning",
+                    meta={
+                        "guardrail": "min_reward_risk_ratio",
+                        "action": action,
+                        "last_price": last_price,
+                        "take_profit_price": take_profit_price,
+                        "stop_loss_price": stop_loss_price,
+                        "tp_dist": tp_dist,
+                        "sl_dist": sl_dist,
+                        "rr_ratio": rr_actual,
+                        "min_reward_risk_ratio": min_rr,
+                    },
+                )
+                self._emit_debug(
+                    f"Execution skipped for {symbol}: reward-to-risk {rr_actual:.2f} < {min_rr:.2f} "
+                    f"(TP {take_profit_price}, SL {stop_loss_price}, entry ~{last_price})"
+                )
+                return False
+
         clipped_by_cap = False
         cap_reason: str | None = None
         if guardrail_notional_cap and guardrail_notional_cap > 0 and last_price:
