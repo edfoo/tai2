@@ -11,14 +11,14 @@ from app.services.prompt_builder import PromptBuilder
 
 
 def test_settings_reads_environment_variables(monkeypatch) -> None:
-    monkeypatch.setenv("WS_UPDATE_INTERVAL", "240")
+    monkeypatch.setenv("POLL_INTERVAL", "240")
     monkeypatch.setenv("OKX_API_KEY", "demo")
     config.get_settings.cache_clear()
 
     settings = config.get_settings()
 
     assert settings.okx_api_key == "demo"
-    assert settings.ws_update_interval == 240
+    assert settings.poll_interval == 240
 
 
 def test_fastapi_app_health_endpoint() -> None:

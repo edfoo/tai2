@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     allow_fallback_orders: bool = Field(default=True, alias="ALLOW_FALLBACK_ORDERS")
     database_url: Optional[str] = Field(default=None, alias="DATABASE_URL")
     redis_url: Optional[str] = Field(default=None, alias="REDIS_URL")
-    ws_update_interval: int = Field(default=180, alias="WS_UPDATE_INTERVAL", ge=1)
+    poll_interval: int = Field(default=180, alias="POLL_INTERVAL", ge=1)
     snapshot_max_age_seconds: int = Field(
         default=900, alias="SNAPSHOT_MAX_AGE_SECONDS", ge=60
     )

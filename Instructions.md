@@ -17,7 +17,7 @@ This document contains a sequence of structured prompts to be used with an LLM t
 >    - `app/ui/`: NiceGUI pages and components.
 >    - `app/models/`: Pydantic schemas.
 >    - `tests/`: Pytest suite.
-> 3. Create a `config.py` using `Pydantic Settings` that reads from environment variables: `OKX_API_KEY`, `OKX_SECRET_KEY`, `OKX_PASSPHRASE`, `OPENROUTER_API_KEY`, `DATABASE_URL`, `REDIS_URL`, and a `WS_UPDATE_INTERVAL` (default 180 seconds).
+> 3. Create a `config.py` using `Pydantic Settings` that reads from environment variables: `OKX_API_KEY`, `OKX_SECRET_KEY`, `OKX_PASSPHRASE`, `OPENROUTER_API_KEY`, `DATABASE_URL`, `REDIS_URL`, and a `POLL_INTERVAL` (default 180 seconds).
 > 4. Create a basic `main.py` that initializes a FastAPI app and includes a "Hello World" NiceGUI landing page.
 > 5. **Testing:** Provide a `pytest` script to verify that the environment variables are loaded correctly and the FastAPI server can start.
 
@@ -46,7 +46,7 @@ This document contains a sequence of structured prompts to be used with an LLM t
 >    - Order book depth (Top 20 levels).
 >    - Live ticker data and funding rates.
 >    - Open Interest and recent liquidation data.
-> 3. **WebSocket Logic:** Use the `WS_UPDATE_INTERVAL` from the config to control how often the data is processed or emitted to the frontend.
+> 3. **REST Poll Logic:** Use the `POLL_INTERVAL` from the config to control how often account/market data is fetched and emitted to the frontend.
 > 4. **Professional Metrics:** Use `pandas-ta` to process OHLCV data and calculate: Bollinger Bands, Stochastic RSI, VWAP, and Volume. 
 > 5. **Custom Metrics:** Manually calculate **Cumulative Volume Delta (CVD)** and **Order Flow Imbalance** based on the trade stream and order book.
 > 6. Every update must refresh the Redis "Latest Market Snapshot."
@@ -81,7 +81,7 @@ This document contains a sequence of structured prompts to be used with an LLM t
 > 5. **HISTORY Page:** A sortable table showing all executed trades from the Postgres database.
 > 6. **DEBUG Page:** A dual-window log viewer showing backend logs (market data/orders) and frontend events.
 > 7. **CFG Page:** A settings form to update:
->    - `WS_UPDATE_INTERVAL`.
+>    - `POLL_INTERVAL`.
 >    - The LLM System Prompt.
 >    - The OpenRouter Model ID.
 > 8. **Reactivity:** Use NiceGUI's timers or event bus to ensure that when Redis updates, the `LIVE` and `TA` pages refresh without a page reload.
@@ -94,7 +94,7 @@ This document contains a sequence of structured prompts to be used with an LLM t
 > 
 > **Requirements:**
 > 1. Create a `startup` event in FastAPI that initializes the Redis connection, Database pool, and starts the OKX WebSocket background task.
-> 2. Ensure that the `WS_UPDATE_INTERVAL` set in the `CFG` page immediately updates the background task frequency.
+> 2. Ensure that the `POLL_INTERVAL` set in the `CFG` page immediately updates the background task frequency.
 > 3. Add global exception handling to capture API errors and display them in the `DEBUG` page.
 > 4. Finalize the `README.md` with instructions on how to run the app using `uv run uvicorn app.main:app`.
 > 5. **Testing:** Create a full integration test in `tests/test_integration.py` that simulates a full loop: Data Ingest -> LLM Logic -> Trade Execution -> DB Persistence.

@@ -155,7 +155,7 @@ def register_pages(app: FastAPI) -> None:
 
     def get_refresh_interval() -> float:
         config = getattr(app.state, "runtime_config", {}) or {}
-        interval = config.get("ws_update_interval", 10)
+        interval = config.get("poll_interval", 10)
         return max(3.0, float(interval) / 2.0)
 
     def _parse_timestamp(raw: str | None) -> datetime | None:
@@ -3129,8 +3129,8 @@ def register_pages(app: FastAPI) -> None:
             ui.label("Model, cadence, and prompt controls").classes("text-sm text-slate-500")
             with ui.row().classes("w-full flex-wrap gap-4"):
                 ws_interval_input = ui.number(
-                    label="WS Update Interval (seconds)",
-                    value=config.get("ws_update_interval", 180),
+                    label="Poll Interval (seconds)",
+                    value=config.get("poll_interval", 180),
                     min=1,
                 ).classes("w-full md:w-48")
                 websocket_switch = ui.switch(
@@ -4059,7 +4059,7 @@ def register_pages(app: FastAPI) -> None:
         prompt_version_select.on_value_change(on_prompt_version_change)
 
         async def save_settings(event: Any | None = None) -> None:
-            config["ws_update_interval"] = int(ws_interval_input.value or 5)
+            config["poll_interval"] = int(ws_interval_input.value or 5)
             config["enable_websocket"] = bool(websocket_switch.value)
             config["auto_prompt_enabled"] = bool(auto_prompt_switch.value)
             config["execution_enabled"] = bool(execution_switch.value)
@@ -4316,7 +4316,7 @@ def register_pages(app: FastAPI) -> None:
                     config.get("okx_sub_account_use_master"),
                 )
                 await market_service.set_ohlc_bar(config["ta_timeframe"])
-                market_service.set_poll_interval(config["ws_update_interval"])
+                market_service.set_poll_interval(config["poll_interval"])
                 await market_service.set_websocket_enabled(config.get("enable_websocket", True))
                 await market_service.update_symbols(symbols)
             scheduler = getattr(app.state, "prompt_scheduler", None)

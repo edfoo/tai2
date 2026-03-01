@@ -144,7 +144,7 @@ def _create_lifespan(enable_background_services: bool):
         app.state.backend_log_handler = backend_handler
         app.state.backend_log_targets = attached_loggers
         app.state.runtime_config = {
-            "ws_update_interval": settings.ws_update_interval,
+            "poll_interval": settings.poll_interval,
             "enable_websocket": True,
             "llm_system_prompt": sanitize_prompt_text(DEFAULT_SYSTEM_PROMPT),
             "llm_decision_prompt": sanitize_prompt_text(DEFAULT_DECISION_PROMPT),
@@ -392,7 +392,7 @@ def create_app(enable_background_services: bool | None = None) -> FastAPI:
 
     @app.get("/health")
     async def health() -> dict[str, str]:
-        return {"status": "ok", "ws_interval": str(settings.ws_update_interval)}
+        return {"status": "ok", "poll_interval": str(settings.poll_interval)}
 
     @app.get("/state/latest")
     async def latest_state() -> JSONResponse:

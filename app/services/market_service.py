@@ -192,7 +192,7 @@ class MarketService:
         self._subscribed_symbols: set[str] = set()
         self._available_symbols: list[str] = []
         self._instrument_specs: dict[str, dict[str, float]] = {}
-        self._poll_interval = max(1, self.settings.ws_update_interval)
+        self._poll_interval = max(1, self.settings.poll_interval)
         self._ohlc_bar = self._normalize_bar(ohlc_bar)
         self._log_sink = log_sink or (lambda msg: None)
         self._ws_debug_interval = max(5.0, float(self._poll_interval))
@@ -434,7 +434,7 @@ class MarketService:
             "custom_metrics": primary_market.get("custom_metrics", {}),
             "strategy_signal": primary_market.get("strategy_signal", {}),
             "risk_metrics": primary_market.get("risk_metrics", {}),
-            "ws_update_interval": self.settings.ws_update_interval,
+            "poll_interval": self.settings.poll_interval,
             "market_data": market_data,
             "position_activity": position_activity,
             "position_protection": position_protection,

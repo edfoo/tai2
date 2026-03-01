@@ -26,7 +26,7 @@
 - `OPENROUTER_API_KEY`
 - `DATABASE_URL` (e.g. `postgresql://user:pass@host:5432/tai2`)
 - `REDIS_URL` (e.g. `redis://localhost:6379/0`)
-- `WS_UPDATE_INTERVAL` (seconds, defaults to 180)
+- `POLL_INTERVAL` (seconds, defaults to 180)
 
 ## Running the App
 
