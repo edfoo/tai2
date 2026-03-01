@@ -272,6 +272,35 @@ class OkxTradeAdapter:
             return self._api._request_with_params(POST, PLACE_ALGO_ORDER, params)
         return self._api.place_algo_order(**params)
 
+    def get_fills_history(
+        self,
+        inst_type: str = "SWAP",
+        inst_id: str = "",
+        after: str = "",
+        limit: int = 100,
+        sub_acct: str | None = None,
+    ) -> Any:
+        """Retrieve fill (trade) history including realized PnL for each fill.
+
+        Uses ``/api/v5/trade/fills-history`` (max 90-day lookback).
+        ``after`` is the OKX Unix-ms cursor for pagination (returns fills *before* that time).
+        """
+        if not self._api:
+            return []
+        params: dict[str, Any] = {"instType": inst_type, "limit": str(limit)}
+        if inst_id:
+            params["instId"] = inst_id
+        if after:
+            params["after"] = after
+        if sub_acct:
+            params["subAcct"] = sub_acct
+        if hasattr(self._api, "_request_with_params") and GET:
+            return self._api._request_with_params(GET, "/api/v5/trade/fills-history", params)
+        getter = getattr(self._api, "get_fills_history", None)
+        if getter:
+            return getter(**params)
+        return []
+
     def cancel_algo_order(self, params: list[dict[str, Any]] | tuple[dict[str, Any], ...]) -> Any:
         if not self._api:
             raise RuntimeError("Trade API unavailable")

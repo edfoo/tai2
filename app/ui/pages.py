@@ -13,6 +13,7 @@ from nicegui import ui
 from app.core.config import get_settings
 from app.db.postgres import (
     fetch_equity_history,
+    fetch_equity_window,
     fetch_okx_fees_window,
     fetch_prompt_versions,
     fetch_prompt_runs,
@@ -247,6 +248,7 @@ def register_pages(app: FastAPI) -> None:
 
         last_snapshot = {"value": None}
         equity_refresh = {"last": 0.0}
+        equity_timeframe_hours = {"value": 24.0}
         refresh_label: dict[str, ui.label | None] = {"widget": None}
         status_label: dict[str, ui.label | None] = {"widget": None}
         stale_indicator: dict[str, ui.element | None] = {"widget": None}
@@ -536,6 +538,18 @@ def register_pages(app: FastAPI) -> None:
                     )
                     fee_hint_label.set_visibility(False)
 
+                    with ui.row().classes("w-full justify-between items-center mb-1"):
+                        ui.label("Total Equity").classes("text-sm font-medium text-slate-600")
+                        equity_timeframe_toggle = ui.toggle(
+                            {6: "6h", 12: "12h", 24: "24h", 72: "3d", 168: "7d", 720: "30d"},
+                            value=24,
+                        ).props("dense unelevated")
+                        equity_timeframe_toggle.on_value_change(
+                            lambda e: [
+                                equity_timeframe_hours.update({"value": float(e.value)}),
+                                asyncio.create_task(refresh_equity_chart()),
+                            ]
+                        )
                     equity_chart = ui.echart(
                         {
                             "tooltip": {"trigger": "axis"},
@@ -1500,7 +1514,7 @@ def register_pages(app: FastAPI) -> None:
 
         async def refresh_equity_chart() -> None:
             try:
-                history = await fetch_equity_history(limit=200)
+                history = await fetch_equity_window(hours=equity_timeframe_hours["value"])
             except Exception:
                 return
             if not history:
@@ -2791,6 +2805,7 @@ def register_pages(app: FastAPI) -> None:
         guardrails.setdefault("isolated_margin_max_transfer_usd", None)
         guardrails.setdefault("isolated_margin_symbol_seeds_usd", {})
         guardrails.setdefault("isolated_wallet_bootstrap_pct", None)
+        guardrails.setdefault("require_reward_risk_ratio", True)
         if "wait_for_tp_sl" not in config:
             config["wait_for_tp_sl"] = bool(guardrails.get("wait_for_tp_sl", False))
         guardrails.setdefault("wait_for_tp_sl", bool(config.get("wait_for_tp_sl")))
@@ -3055,6 +3070,12 @@ def register_pages(app: FastAPI) -> None:
                 value=config.get("fallback_orders_enabled", settings.allow_fallback_orders),
             ).classes("mt-2").props(
                 "hint='Permit heuristic backup trades when LLM calls fail; disable to ignore fallback orders entirely' persistent-hint"
+            )
+            require_rr_switch = ui.switch(
+                "Require Min Reward-to-Risk Ratio (≥ 1)",
+                value=guardrails.get("require_reward_risk_ratio", True),
+            ).classes("mt-2").props(
+                "hint='When enabled, entries where take-profit distance is less than stop-loss distance are hard-blocked' persistent-hint"
             )
             snapshot_max_age_input = ui.number(
                 label="Snapshot Max Age (sec)",
@@ -3570,6 +3591,20 @@ def register_pages(app: FastAPI) -> None:
             ui.label("Choose all perpetual instruments to monitor").classes(
                 "text-sm text-slate-500"
             )
+            with ui.row().classes("w-full justify-between items-center"):
+                ui.label("System Prompt").classes("text-sm font-medium text-slate-700")
+                ui.button(
+                    "Reset to defaults",
+                    icon="restart_alt",
+                    color="grey-7",
+                ).props("flat dense size=sm").on(
+                    "click",
+                    lambda: [
+                        setattr(prompt_input, "value", DEFAULT_SYSTEM_PROMPT) or prompt_input.update(),
+                        setattr(decision_prompt_input, "value", DEFAULT_DECISION_PROMPT) or decision_prompt_input.update(),
+                        ui.notify("Prompts reset to current code defaults — click Save to apply", type="info"),
+                    ],
+                )
             prompt_input = ui.textarea(
                 label="System Prompt",
                 value=config.get("llm_system_prompt", DEFAULT_SYSTEM_PROMPT),
@@ -3711,6 +3746,7 @@ def register_pages(app: FastAPI) -> None:
                 "require_position_alignment": bool(require_alignment_switch.value),
                 "wait_for_tp_sl": bool(wait_for_tp_sl_switch.value),
                 "fallback_orders_enabled": bool(fallback_orders_switch.value),
+                "require_reward_risk_ratio": bool(require_rr_switch.value),
                 "snapshot_max_age_seconds": _safe_int(snapshot_max_age_input.value)
                 or config.get("snapshot_max_age_seconds"),
             }
@@ -3881,6 +3917,7 @@ def register_pages(app: FastAPI) -> None:
                 require_alignment_switch,
                 wait_for_tp_sl_switch,
                 fallback_orders_switch,
+                require_rr_switch,
                 isolated_seed_default_input,
                 isolated_seed_max_input,
                 isolated_bootstrap_pct_input,
@@ -4186,6 +4223,7 @@ def register_pages(app: FastAPI) -> None:
                 "require_position_alignment": bool(require_alignment_switch.value),
                 "wait_for_tp_sl": bool(wait_for_tp_sl_switch.value),
                 "fallback_orders_enabled": bool(fallback_orders_switch.value),
+                "require_reward_risk_ratio": bool(require_rr_switch.value),
                 "snapshot_max_age_seconds": _coerce(
                     snapshot_max_age_input.value,
                     config.get("snapshot_max_age_seconds", settings.snapshot_max_age_seconds),

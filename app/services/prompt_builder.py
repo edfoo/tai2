@@ -1172,6 +1172,7 @@ class PromptBuilder:
             "isolated_margin_max_transfer_usd": None,
             "isolated_wallet_bootstrap_pct": None,
             "min_reward_risk_ratio": 1.0,
+            "require_reward_risk_ratio": True,
         }
 
     @staticmethod

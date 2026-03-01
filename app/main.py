@@ -231,11 +231,13 @@ def _create_lifespan(enable_background_services: bool):
                     if prompt_versions:
                         latest_version = prompt_versions[0]
                         app.state.runtime_config["prompt_version_id"] = latest_version["id"]
-                        app.state.runtime_config["llm_system_prompt"] = sanitize_prompt_text(
-                            latest_version.get("system_prompt")
+                        app.state.runtime_config["llm_system_prompt"] = (
+                            sanitize_prompt_text(latest_version.get("system_prompt"))
+                            or sanitize_prompt_text(DEFAULT_SYSTEM_PROMPT)
                         )
-                        app.state.runtime_config["llm_decision_prompt"] = sanitize_prompt_text(
-                            latest_version.get("decision_prompt")
+                        app.state.runtime_config["llm_decision_prompt"] = (
+                            sanitize_prompt_text(latest_version.get("decision_prompt"))
+                            or sanitize_prompt_text(DEFAULT_DECISION_PROMPT)
                         )
                         app.state.runtime_config["prompt_version_name"] = latest_version["name"]
                 try:

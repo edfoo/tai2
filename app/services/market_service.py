@@ -20,7 +20,12 @@ import pandas as pd
 import pandas_ta as ta
 
 from app.core.config import get_settings
-from app.db.postgres import insert_equity_point, insert_executed_trade
+from app.db.postgres import (
+    fetch_unreconciled_trades,
+    insert_equity_point,
+    insert_executed_trade,
+    update_trade_pnl,
+)
 from app.models.trade import ExecutedTrade
 from app.services.okx_sdk_adapter import OkxAccountAdapter, OkxTradeAdapter
 from app.services.state_service import StateService
@@ -193,6 +198,9 @@ class MarketService:
         self._ws_debug_interval = max(5.0, float(self._poll_interval))
         self._ws_last_debug: Dict[str, float] = {}
         self._wait_for_tp_sl = False
+        # Cursor for fills-history pagination: OKX Unix-ms string (empty = from now).
+        self._fills_cursor: str = ""
+        self._reconcile_task: Optional[asyncio.Task] = None
 
     async def start(self) -> None:
         """Launch the market snapshot poller and websocket consumers if not already running."""
@@ -211,6 +219,11 @@ class MarketService:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._poller_task
             self._poller_task = None
+        if self._reconcile_task:
+            self._reconcile_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._reconcile_task
+            self._reconcile_task = None
         if self._ws_task:
             self._ws_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -224,6 +237,7 @@ class MarketService:
 
     async def _poll_loop(self) -> None:
         """Continuously refresh state snapshots on a fixed interval until cancelled."""
+        loop_count = 0
         while True:
             interval = max(1, self._poll_interval)
             try:
@@ -232,6 +246,16 @@ class MarketService:
                 raise
             except Exception as exc:  # pragma: no cover - defensive logging
                 logger.exception("Failed to refresh market snapshot: %s", exc)
+            loop_count += 1
+            # Run fill reconciliation every other poll to keep realized PnL up-to-date
+            # without hammering the REST endpoint on every tick.
+            if loop_count % 2 == 0 and self.settings.database_url:
+                try:
+                    await self._reconcile_fills()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # pragma: no cover - best-effort
+                    logger.debug("Fill reconciliation error: %s", exc)
             await asyncio.sleep(interval)
 
     async def _run_public_ws(self) -> None:
@@ -3807,7 +3831,8 @@ class MarketService:
         # Reward-to-risk guard: take-profit distance must be >= min_reward_risk_ratio * stop-loss distance.
         # This prevents trades where the potential loss greatly outweighs the potential gain.
         if (
-            not reduce_only
+            guardrails.get("require_reward_risk_ratio", True)
+            and not reduce_only
             and take_profit_price
             and isinstance(take_profit_price, (int, float))
             and take_profit_price > 0
@@ -5231,6 +5256,110 @@ class MarketService:
             await insert_executed_trade(trade)
         except Exception as exc:  # pragma: no cover - persistence best-effort
             self._emit_debug(f"Failed to persist executed trade: {exc}")
+
+    async def _reconcile_fills(self) -> None:
+        """Poll OKX fills-history and back-fill realized PnL on locally recorded entry trades.
+
+        Flow
+        ----
+        1. Fetch up to 100 fills since the last cursor (most-recent-first).
+        2. Keep only fills where ``pnl != "0"`` — those are closing/reduce fills that carry
+           actual realized profit/loss.
+        3. For each such fill look up the most recent unreconciled ``executed_trades`` row for
+           the same symbol whose side is the **opposite** of the fill side (the original open
+           order) and update its ``pnl``, ``fee``, and ``okx_fill_id`` columns.
+        4. Advance the cursor so the next call only fetches newer fills.
+        """
+        if not self._trade_api:
+            return
+        sub_acct = self._sub_account if self._sub_account_use_master else None
+        try:
+            response = await asyncio.to_thread(
+                self._trade_api.get_fills_history,
+                inst_type="SWAP",
+                after=self._fills_cursor,
+                limit=100,
+                sub_acct=sub_acct,
+            )
+        except Exception as exc:  # pragma: no cover - network variance
+            logger.debug("fills-history fetch failed: %s", exc)
+            return
+
+        fills = self._safe_data(response)
+        if not fills:
+            return
+
+        # OKX returns fills newest-first; collect the oldest Unix-ms ts as next cursor so
+        # subsequent calls fetch only fills that arrived *before* the current batch.
+        new_cursor: str = self._fills_cursor
+        for fill in fills:
+            fill_ts = str(fill.get("fillTime") or fill.get("ts") or "")
+            if fill_ts and (not new_cursor or int(fill_ts) < int(new_cursor)):
+                new_cursor = fill_ts
+
+        reconciled = 0
+        for fill in fills:
+            raw_pnl = fill.get("pnl") or fill.get("fillPnl") or "0"
+            try:
+                pnl_value = float(raw_pnl)
+            except (TypeError, ValueError):
+                continue
+            if pnl_value == 0.0:
+                # Entry fills always have pnl=0; nothing to record yet.
+                continue
+
+            inst_id = str(fill.get("instId") or "").upper()
+            fill_side = str(fill.get("side") or "").lower()  # "buy" or "sell"
+            fill_id = str(fill.get("fillId") or fill.get("tradeId") or "")
+            raw_fee = fill.get("fee") or fill.get("fillFee") or None
+            try:
+                fee_value: float | None = float(raw_fee) if raw_fee is not None else None
+                # OKX fees are negative (cost); store as positive absolute value.
+                if fee_value is not None:
+                    fee_value = abs(fee_value)
+            except (TypeError, ValueError):
+                fee_value = None
+
+            if not inst_id or not fill_side:
+                continue
+
+            try:
+                candidates = await fetch_unreconciled_trades(
+                    symbol=inst_id,
+                    side=fill_side,  # helper queries the *opposite* side (open direction)
+                    lookback_hours=48.0,
+                )
+            except Exception as exc:  # pragma: no cover - best-effort
+                logger.debug("unreconciled trade lookup failed for %s: %s", inst_id, exc)
+                continue
+
+            if not candidates:
+                continue
+
+            # Take the most recent unreconciled entry as the match.
+            target = candidates[0]
+            try:
+                await update_trade_pnl(
+                    trade_id=target["id"],
+                    pnl=pnl_value,
+                    fee=fee_value,
+                    okx_fill_id=fill_id or None,
+                )
+                reconciled += 1
+                self._emit_debug(
+                    f"Reconciled PnL for {inst_id}: {pnl_value:+.4f} USDT "
+                    f"(fill {fill_id}, trade {target['id']})"
+                )
+            except Exception as exc:  # pragma: no cover - best-effort
+                logger.debug("Failed to update trade PnL for %s: %s", inst_id, exc)
+
+        if reconciled:
+            logger.info("Fill reconciliation: updated PnL for %d trade(s)", reconciled)
+
+        # Advance cursor to the oldest fill time seen, so the next poll requests
+        # only fills that arrived before the current batch (OKX pagination direction).
+        if new_cursor and new_cursor != self._fills_cursor:
+            self._fills_cursor = new_cursor
 
     @staticmethod
     def _build_tpsl_client_id(symbol: str) -> str:
