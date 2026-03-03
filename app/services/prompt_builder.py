@@ -1163,7 +1163,7 @@ class PromptBuilder:
             "require_position_alignment": True,
             "snapshot_max_age_seconds": 900,
             "wait_for_tp_sl": False,
-            "require_protection": False,
+            "require_protection": True,
             "fallback_orders_enabled": True,
             "min_leverage_confidence_gate": 0.5,
             "execution_feedback_ttl_seconds": DEFAULT_EXECUTION_FEEDBACK_TTL_SECONDS,

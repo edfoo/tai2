@@ -67,6 +67,23 @@ INSERT_SQL = (
     "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"
 )
 
+UPDATE_TRADE_PNL_SQL = (
+    "UPDATE executed_trades SET pnl = $1, fee = COALESCE($2, fee), okx_fill_id = $3 "
+    "WHERE id = $4"
+)
+
+FETCH_UNRECONCILED_SQL = """
+    SELECT id, timestamp, symbol, side
+    FROM executed_trades
+    WHERE symbol = $1
+      AND side = $2
+      AND pnl IS NULL
+      AND okx_fill_id IS NULL
+      AND timestamp >= NOW() - ($3::double precision * INTERVAL '1 hour')
+    ORDER BY timestamp DESC
+    LIMIT 5
+"""
+
 FETCH_RECENT_SQL = (
     "SELECT id, timestamp, symbol, instrument, side, size, price, amount, llm_reasoning, pnl, fee "
     "FROM executed_trades ORDER BY timestamp DESC LIMIT $1"
@@ -188,6 +205,13 @@ async def init_postgres_pool(*, min_size: int = 1, max_size: int = 10) -> asyncp
         );
         """
     )
+    # Add okx_fill_id column idempotently (no-op if it already exists).
+    await _POOL.execute(
+        """
+        ALTER TABLE executed_trades
+        ADD COLUMN IF NOT EXISTS okx_fill_id TEXT;
+        """
+    )
     logger.info("PostgreSQL pool initialized")
     return _POOL
 
@@ -223,6 +247,45 @@ async def insert_executed_trade(trade: ExecutedTrade) -> None:
         trade.pnl,
         trade.fee,
     )
+
+
+async def update_trade_pnl(
+    trade_id: Any,
+    pnl: float,
+    fee: float | None,
+    okx_fill_id: str | None,
+) -> None:
+    """Back-fill realized PnL (and optionally fee) on a previously recorded entry trade."""
+    pool = await get_postgres_pool()
+    await pool.execute(
+        UPDATE_TRADE_PNL_SQL,
+        pnl,
+        fee,
+        okx_fill_id,
+        trade_id,
+    )
+
+
+async def fetch_unreconciled_trades(
+    symbol: str,
+    side: str,
+    lookback_hours: float = 48.0,
+) -> list[dict[str, Any]]:
+    """Return the most recent trades for *symbol*/*side* that still have no PnL recorded.
+
+    *side* is the **closing** side from OKX (e.g. ``"buy"`` means the closing leg of a SHORT).
+    The open-position side is the opposite one, so we query the opposite direction to find the
+    original entry that should receive the realized PnL.
+    """
+    opposite = "sell" if side.lower() == "buy" else "buy"
+    pool = await get_postgres_pool()
+    records = await pool.fetch(
+        FETCH_UNRECONCILED_SQL,
+        symbol.upper(),
+        opposite,
+        float(lookback_hours),
+    )
+    return [dict(row) for row in records]
 
 
 async def fetch_recent_trades(limit: int = 200) -> list[dict[str, Any]]:

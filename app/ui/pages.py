@@ -2562,9 +2562,27 @@ def register_pages(app: FastAPI) -> None:
                             {"name": "price", "label": "Price", "field": "price"},
                             {"name": "amount", "label": "Amount", "field": "amount"},
                             {"name": "fee", "label": "Fee", "field": "fee"},
+                            {"name": "pnl", "label": "Realized PnL", "field": "pnl"},
                         ],
                         rows=[],
                     ).classes("w-full")
+                    trades_table.add_slot(
+                        "body-cell-pnl",
+                        """
+                        <q-td :props="props">
+                          <span
+                            :style="{
+                              color: props.value === '—'
+                                ? '#94a3b8'
+                                : props.value.startsWith('+')
+                                  ? '#16a34a'
+                                  : '#dc2626',
+                              fontWeight: props.value === '—' ? 'normal' : '600'
+                            }"
+                          >{{ props.value }}</span>
+                        </q-td>
+                        """,
+                    )
                 with ui.card().classes("w-full flex-1 p-4 gap-3"):
                     with ui.row().classes("w-full items-center justify-between"):
                         ui.label("Prompt Runs").classes("text-lg font-semibold")
@@ -2599,6 +2617,16 @@ def register_pages(app: FastAPI) -> None:
                     record.get("timestamp"),
                     fmt="%Y-%m-%d %H:%M:%S %Z",
                 )
+                raw_pnl = record.get("pnl")
+                if raw_pnl is None:
+                    record["pnl"] = "—"
+                else:
+                    try:
+                        pnl_val = float(raw_pnl)
+                        sign = "+" if pnl_val >= 0 else ""
+                        record["pnl"] = f"{sign}{pnl_val:.2f} USDT"
+                    except (TypeError, ValueError):
+                        record["pnl"] = "—"
                 formatted_rows.append(record)
             trades_table.rows = formatted_rows
             trades_table.update()
@@ -2806,6 +2834,7 @@ def register_pages(app: FastAPI) -> None:
         guardrails.setdefault("isolated_margin_symbol_seeds_usd", {})
         guardrails.setdefault("isolated_wallet_bootstrap_pct", None)
         guardrails.setdefault("require_reward_risk_ratio", True)
+        guardrails.setdefault("require_protection", True)
         if "wait_for_tp_sl" not in config:
             config["wait_for_tp_sl"] = bool(guardrails.get("wait_for_tp_sl", False))
         guardrails.setdefault("wait_for_tp_sl", bool(config.get("wait_for_tp_sl")))
@@ -3076,6 +3105,12 @@ def register_pages(app: FastAPI) -> None:
                 value=guardrails.get("require_reward_risk_ratio", True),
             ).classes("mt-2").props(
                 "hint='When enabled, entries where take-profit distance is less than stop-loss distance are hard-blocked' persistent-hint"
+            )
+            require_protection_switch = ui.switch(
+                "Require TP/SL Protection on Entry",
+                value=guardrails.get("require_protection", True),
+            ).classes("mt-2").props(
+                "hint='Block any new entry order that has no stop-loss; prevents unprotected positions' persistent-hint"
             )
             snapshot_max_age_input = ui.number(
                 label="Snapshot Max Age (sec)",
@@ -3747,6 +3782,7 @@ def register_pages(app: FastAPI) -> None:
                 "wait_for_tp_sl": bool(wait_for_tp_sl_switch.value),
                 "fallback_orders_enabled": bool(fallback_orders_switch.value),
                 "require_reward_risk_ratio": bool(require_rr_switch.value),
+                "require_protection": bool(require_protection_switch.value),
                 "snapshot_max_age_seconds": _safe_int(snapshot_max_age_input.value)
                 or config.get("snapshot_max_age_seconds"),
             }
@@ -3918,6 +3954,7 @@ def register_pages(app: FastAPI) -> None:
                 wait_for_tp_sl_switch,
                 fallback_orders_switch,
                 require_rr_switch,
+                require_protection_switch,
                 isolated_seed_default_input,
                 isolated_seed_max_input,
                 isolated_bootstrap_pct_input,
@@ -4224,6 +4261,7 @@ def register_pages(app: FastAPI) -> None:
                 "wait_for_tp_sl": bool(wait_for_tp_sl_switch.value),
                 "fallback_orders_enabled": bool(fallback_orders_switch.value),
                 "require_reward_risk_ratio": bool(require_rr_switch.value),
+                "require_protection": bool(require_protection_switch.value),
                 "snapshot_max_age_seconds": _coerce(
                     snapshot_max_age_input.value,
                     config.get("snapshot_max_age_seconds", settings.snapshot_max_age_seconds),
