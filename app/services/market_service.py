@@ -3828,6 +3828,24 @@ class MarketService:
             self._emit_debug(f"Execution skipped for {symbol}: stop-loss required for entries")
             return False
 
+        if require_protection and not reduce_only and (
+            take_profit_price is None
+            or not isinstance(take_profit_price, (int, float))
+            or take_profit_price <= 0
+        ):
+            self._record_execution_feedback(
+                symbol,
+                "Blocked: take-profit required",
+                level="warning",
+                meta={
+                    "guardrail": "require_protection",
+                    "action": action,
+                    "requested_take_profit": take_profit_price,
+                },
+            )
+            self._emit_debug(f"Execution skipped for {symbol}: take-profit required for entries")
+            return False
+
         # Reward-to-risk guard: take-profit distance must be >= min_reward_risk_ratio * stop-loss distance.
         # This prevents trades where the potential loss greatly outweighs the potential gain.
         if (
@@ -4249,6 +4267,21 @@ class MarketService:
                     f"Execution skipped for {symbol}: stop-loss required by guardrail"
                 )
                 return False
+            if require_protection and attachments_take_profit is None:
+                self._record_execution_feedback(
+                    symbol,
+                    "Blocked: take-profit required by guardrail",
+                    level="warning",
+                    meta={
+                        "guardrail": "require_protection",
+                        "take_profit_supplied": False,
+                        "stop_loss_supplied": attachments_stop_loss is not None,
+                    },
+                )
+                self._emit_debug(
+                    f"Execution skipped for {symbol}: take-profit required by guardrail"
+                )
+                return False
             if attachments_take_profit or attachments_stop_loss:
                 await self._cancel_position_protection(symbol)
                 if last_price and last_price > 0:
@@ -4282,6 +4315,22 @@ class MarketService:
                         )
                         self._emit_debug(
                             f"Execution skipped for {symbol}: stop-loss dropped during validation"
+                        )
+                        return False
+                    if require_protection and attachments_take_profit is None:
+                        self._record_execution_feedback(
+                            symbol,
+                            "Blocked: take-profit dropped by guardrail",
+                            level="warning",
+                            meta={
+                                "guardrail": "require_protection",
+                                "take_profit_supplied": False,
+                                "stop_loss_supplied": attachments_stop_loss is not None,
+                                "reason": "dropped during validation",
+                            },
+                        )
+                        self._emit_debug(
+                            f"Execution skipped for {symbol}: take-profit dropped during validation"
                         )
                         return False
                     if attachments_take_profit or attachments_stop_loss:
