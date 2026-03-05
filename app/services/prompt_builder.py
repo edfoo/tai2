@@ -30,6 +30,9 @@ DEFAULT_DECISION_PROMPT = (
     "When existing stop-loss or take-profit "
     "levels are present, reuse or gently tune them unless you can justify a safer alternative. For BUY or SELL you must propose both stop-loss "
     "and take-profit prices; if you cannot provide valid targets or a safe size, pick HOLD instead. "
+    "CRITICAL DIRECTION RULE: for a BUY, stop_loss MUST be strictly below entry price and take_profit MUST be strictly above entry price. "
+    "For a SELL, stop_loss MUST be strictly above entry price and take_profit MUST be strictly below entry price. "
+    "A take_profit or stop_loss on the wrong side of entry will be rejected by the execution layer — choose HOLD if you cannot satisfy this constraint. "
     "CRITICAL: the take-profit distance from entry must be at least context.guardrails.min_reward_risk_ratio times the stop-loss distance from entry "
     "(reward-to-risk >= min_reward_risk_ratio, default 1.0). A trade where the potential loss exceeds the potential gain will be hard-blocked by "
     "the execution layer — choose HOLD if you cannot find a target that meets this constraint. "
@@ -77,11 +80,11 @@ RESPONSE_SCHEMA = {
         },
         "stop_loss": {
             "type": "number",
-            "description": "Recommended stop level in price terms",
+            "description": "Stop-loss price: for BUY must be BELOW entry price; for SELL must be ABOVE entry price",
         },
         "take_profit": {
             "type": "number",
-            "description": "Recommended take profit level in price terms",
+            "description": "Take-profit price: for BUY must be ABOVE entry price; for SELL must be BELOW entry price",
         },
         "timeframe_alignment": {
             "type": "string",

@@ -4790,57 +4790,43 @@ class MarketService:
         *,
         symbol: str | None = None,
     ) -> float | None:
-        """Ensure the TP stays on the profitable side; clip + alert when the LLM violates it."""
+        """Ensure the TP is on the profitable side of entry; reject if the LLM got the direction wrong."""
         if take_profit is None or take_profit <= 0:
             return None
 
-        def _min_offset() -> float:
-            tick = 0.0
-            if symbol:
-                spec = self._instrument_specs.get(symbol)
-                if spec:
-                    tick = spec.get("tick_size") or 0.0
-            ratio_offset = 0.0
-            if reference_price and reference_price > 0:
-                ratio_offset = reference_price * self.PROTECTION_MIN_OFFSET_RATIO
-            return max(tick, ratio_offset, 1e-6)
-
-        def _emit_clip_feedback(adjusted: float) -> None:
-            if not symbol:
-                return
-            self._record_execution_feedback(
-                symbol,
-                "LLM take-profit adjusted to honor trade direction",
-                level="warning",
-                meta={
-                    "action": action,
-                    "original_take_profit": take_profit,
-                    "adjusted_take_profit": adjusted,
-                    "reference_price": reference_price,
-                },
-            )
-
         if reference_price and reference_price > 0:
             if action == "BUY" and take_profit <= reference_price:
-                offset = _min_offset()
-                adjusted = reference_price + offset
+                if symbol:
+                    self._record_execution_feedback(
+                        symbol,
+                        f"LLM take-profit {take_profit:.6f} rejected: BUY requires TP above entry {reference_price:.6f}",
+                        level="warning",
+                        meta={
+                            "action": action,
+                            "take_profit": take_profit,
+                            "reference_price": reference_price,
+                        },
+                    )
                 self._emit_debug(
-                    f"Clipped take profit from {take_profit:.6f} to {adjusted:.6f} for BUY (entry {reference_price:.6f})"
+                    f"Rejected take profit {take_profit:.6f}: BUY action requires TP above entry {reference_price:.6f}"
                 )
-                _emit_clip_feedback(adjusted)
-                return adjusted
+                return None
             if action == "SELL" and take_profit >= reference_price:
-                offset = _min_offset()
-                adjusted = reference_price - offset
-                if adjusted <= 0 and reference_price:
-                    adjusted = max(reference_price * (1 - self.PROTECTION_MIN_OFFSET_RATIO), 1e-6)
-                if reference_price and adjusted >= reference_price:
-                    adjusted = max(reference_price - (reference_price * self.PROTECTION_MIN_OFFSET_RATIO), 1e-6)
+                if symbol:
+                    self._record_execution_feedback(
+                        symbol,
+                        f"LLM take-profit {take_profit:.6f} rejected: SELL requires TP below entry {reference_price:.6f}",
+                        level="warning",
+                        meta={
+                            "action": action,
+                            "take_profit": take_profit,
+                            "reference_price": reference_price,
+                        },
+                    )
                 self._emit_debug(
-                    f"Clipped take profit from {take_profit:.6f} to {adjusted:.6f} for SELL (entry {reference_price:.6f})"
+                    f"Rejected take profit {take_profit:.6f}: SELL action requires TP below entry {reference_price:.6f}"
                 )
-                _emit_clip_feedback(adjusted)
-                return adjusted
+                return None
         return take_profit
 
     def _normalize_stop_loss(
