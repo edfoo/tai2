@@ -1214,8 +1214,8 @@ class MarketService:
         symbol: str,
         *,
         pos_side: str | None = None,
-        attempts: int = 6,
-        delay: float = 0.25,
+        attempts: int = 10,
+        delay: float = 0.5,
     ) -> float | None:
         """Retry position lookups for a short window to confirm execution took effect."""
         normalized = symbol.upper()
@@ -4339,6 +4339,21 @@ class MarketService:
                             stop_loss_price=attachments_stop_loss,
                         )
                 else:
+                    if require_protection:
+                        self._record_execution_feedback(
+                            symbol,
+                            "Blocked: cannot validate TP/SL without current price (require_protection enabled)",
+                            level="warning",
+                            meta={
+                                "guardrail": "require_protection",
+                                "action": action,
+                                "reason": "last price unavailable for direction validation",
+                            },
+                        )
+                        self._emit_debug(
+                            f"Execution skipped for {symbol}: require_protection=True but last price is unavailable"
+                        )
+                        return False
                     self._emit_debug(
                         f"Skipping attached TP/SL for {symbol}: missing last price for validation"
                     )
@@ -4441,7 +4456,7 @@ class MarketService:
                         f"Attached TP/SL for {symbol} not confirmed; falling back to standalone algo"
                     )
             if not protection_ready:
-                await self._refresh_position_protection(
+                protection_placed = await self._refresh_position_protection(
                     symbol=symbol,
                     trade_mode=trade_mode,
                     action=action,
@@ -4450,6 +4465,18 @@ class MarketService:
                     dual_side_mode=dual_side_mode,
                     pos_side=pos_side,
                 )
+                if not protection_placed and require_protection:
+                    self._record_execution_feedback(
+                        symbol,
+                        "WARNING: trade executed but TP/SL protection could not be placed on OKX",
+                        level="warning",
+                        meta={
+                            "guardrail": "require_protection",
+                            "action": action,
+                            "take_profit": take_profit_price,
+                            "stop_loss": stop_loss_price,
+                        },
+                    )
 
         await self._record_trade_execution(
             symbol=symbol,
@@ -5413,15 +5440,18 @@ class MarketService:
         stop_loss_price: float | None,
         dual_side_mode: bool,
         pos_side: str | None,
-    ) -> None:
-        """Rebuild TP/SL protection for a symbol, replacing any prior algo orders."""
+    ) -> bool:
+        """Rebuild TP/SL protection for a symbol, replacing any prior algo orders.
+
+        Returns True when placement was accepted by OKX, False otherwise.
+        """
         if not self._trade_api:
-            return
+            return False
         symbol_key = symbol.upper()
         await self._cancel_position_protection(symbol)
         if not (take_profit_price or stop_loss_price):
             self._position_protection.pop(symbol_key, None)
-            return
+            return False
         pending_meta = {
             "take_profit": take_profit_price,
             "stop_loss": stop_loss_price,
@@ -5439,22 +5469,35 @@ class MarketService:
             dual_side_mode=dual_side_mode,
             pos_side=pos_side,
         )
-        if placement:
-            confirmed = bool(placement.get("confirmed"))
-            pending_meta.update(
-                {
-                    "algo_id": placement.get("algo_id"),
-                    "algo_cl_ord_id": placement.get("algo_cl_ord_id")
-                    or pending_meta.get("algo_cl_ord_id"),
-                    "updated_at": datetime.now(timezone.utc).isoformat(),
-                    "synced": confirmed,
-                }
+        if not placement:
+            self._record_execution_feedback(
+                symbol,
+                "Protection placement failed: OKX did not accept TP/SL algo",
+                level="warning",
+                meta={
+                    "take_profit": take_profit_price,
+                    "stop_loss": stop_loss_price,
+                    "reason": "_place_position_protection returned None",
+                },
             )
-            if not confirmed:
-                self._emit_debug(
-                    f"OKX pending list does not show TP/SL algo for {symbol}; guard left unsynced"
-                )
+            self._position_protection[symbol_key] = pending_meta
+            return False
+        confirmed = bool(placement.get("confirmed"))
+        pending_meta.update(
+            {
+                "algo_id": placement.get("algo_id"),
+                "algo_cl_ord_id": placement.get("algo_cl_ord_id")
+                or pending_meta.get("algo_cl_ord_id"),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "synced": confirmed,
+            }
+        )
+        if not confirmed:
+            self._emit_debug(
+                f"OKX pending list does not show TP/SL algo for {symbol}; guard left unsynced"
+            )
         self._position_protection[symbol_key] = pending_meta
+        return True
 
     async def _cancel_position_protection(self, symbol: str) -> None:
         """Cancel the active TP/SL algo for `symbol` if one is known."""
@@ -5635,8 +5678,14 @@ class MarketService:
             pos_side=pos_side if dual_side_mode else None,
         )
         if detected_size is None:
+            self._record_execution_feedback(
+                symbol,
+                "TP/SL algo skipped: position not detected after wait (protection not placed)",
+                level="warning",
+                meta={"symbol": symbol, "pos_side": pos_side},
+            )
             self._emit_debug(
-                f"Skipping TP/SL algo for {symbol}: position not yet confirmed"
+                f"Skipping TP/SL algo for {symbol}: position not confirmed after wait"
             )
             return None
         close_size = abs(detected_size)
