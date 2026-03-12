@@ -3112,6 +3112,12 @@ def register_pages(app: FastAPI) -> None:
             ).classes("mt-2").props(
                 "hint='Block any new entry order that has no stop-loss; prevents unprotected positions' persistent-hint"
             )
+            flip_llm_decision_switch = ui.switch(
+                "Flip LLM Decision",
+                value=guardrails.get("flip_llm_decision", False),
+            ).classes("mt-2").props(
+                "hint='Invert the LLM\'s SIDE and swap TP/SL before opening the trade; useful for contrarian testing' persistent-hint"
+            )
             snapshot_max_age_input = ui.number(
                 label="Snapshot Max Age (sec)",
                 value=config.get(
@@ -3783,6 +3789,7 @@ def register_pages(app: FastAPI) -> None:
                 "fallback_orders_enabled": bool(fallback_orders_switch.value),
                 "require_reward_risk_ratio": bool(require_rr_switch.value),
                 "require_protection": bool(require_protection_switch.value),
+                "flip_llm_decision": bool(flip_llm_decision_switch.value),
                 "snapshot_max_age_seconds": _safe_int(snapshot_max_age_input.value)
                 or config.get("snapshot_max_age_seconds"),
             }
@@ -3955,6 +3962,7 @@ def register_pages(app: FastAPI) -> None:
                 fallback_orders_switch,
                 require_rr_switch,
                 require_protection_switch,
+                flip_llm_decision_switch,
                 isolated_seed_default_input,
                 isolated_seed_max_input,
                 isolated_bootstrap_pct_input,
@@ -4262,6 +4270,7 @@ def register_pages(app: FastAPI) -> None:
                 "fallback_orders_enabled": bool(fallback_orders_switch.value),
                 "require_reward_risk_ratio": bool(require_rr_switch.value),
                 "require_protection": bool(require_protection_switch.value),
+                "flip_llm_decision": bool(flip_llm_decision_switch.value),
                 "snapshot_max_age_seconds": _coerce(
                     snapshot_max_age_input.value,
                     config.get("snapshot_max_age_seconds", settings.snapshot_max_age_seconds),
@@ -4348,6 +4357,7 @@ def register_pages(app: FastAPI) -> None:
             market_service = getattr(app.state, "market_service", None)
             if market_service:
                 market_service.set_wait_for_tp_sl(config.get("wait_for_tp_sl", False))
+                market_service.set_flip_llm_decision(config["guardrails"].get("flip_llm_decision", False))
                 await market_service.set_okx_flag(config.get("okx_api_flag"))
                 await market_service.set_sub_account(
                     config.get("okx_sub_account"),

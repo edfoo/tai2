@@ -198,6 +198,7 @@ class MarketService:
         self._ws_debug_interval = max(5.0, float(self._poll_interval))
         self._ws_last_debug: Dict[str, float] = {}
         self._wait_for_tp_sl = False
+        self._flip_llm_decision = False
         # Cursor for fills-history pagination: OKX Unix-ms string (empty = from now).
         self._fills_cursor: str = ""
         self._reconcile_task: Optional[asyncio.Task] = None
@@ -811,6 +812,15 @@ class MarketService:
         self._wait_for_tp_sl = flag
         state = "enabled" if flag else "disabled"
         self._emit_debug(f"Wait-for-TP/SL guard {state}")
+
+    def set_flip_llm_decision(self, enabled: bool) -> None:
+        """Toggle the flag that inverts BUY/SELL and swaps TP/SL before opening a trade."""
+        flag = bool(enabled)
+        if flag == self._flip_llm_decision:
+            return
+        self._flip_llm_decision = flag
+        state = "enabled" if flag else "disabled"
+        self._emit_debug(f"Flip-LLM-decision {state}")
 
     async def set_websocket_enabled(self, enabled: bool) -> None:
         """Enable or disable websocket streaming at runtime, rebuilding tasks as needed."""
@@ -3152,6 +3162,19 @@ class MarketService:
             wait_for_tp_sl = self._wait_for_tp_sl
         else:
             wait_for_tp_sl = bool(wait_for_tp_sl)
+        flip_llm_decision = guardrails.get("flip_llm_decision")
+        if flip_llm_decision is None:
+            flip_llm_decision = self._flip_llm_decision
+        else:
+            flip_llm_decision = bool(flip_llm_decision)
+        if flip_llm_decision and action in {"BUY", "SELL"}:
+            action = "SELL" if action == "BUY" else "BUY"
+            decision = dict(decision)
+            decision["take_profit"], decision["stop_loss"] = (
+                decision.get("stop_loss"),
+                decision.get("take_profit"),
+            )
+            self._emit_debug(f"Flip-LLM-decision applied: flipped to {action}; TP/SL swapped")
         cooldown_seconds = max(0, cooldown_seconds)
         trade_limit = max(0, trade_limit)
         trade_window = max(60, trade_window)
