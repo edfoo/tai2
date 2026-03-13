@@ -3167,14 +3167,6 @@ class MarketService:
             flip_llm_decision = self._flip_llm_decision
         else:
             flip_llm_decision = bool(flip_llm_decision)
-        if flip_llm_decision and action in {"BUY", "SELL"}:
-            action = "SELL" if action == "BUY" else "BUY"
-            decision = dict(decision)
-            decision["take_profit"], decision["stop_loss"] = (
-                decision.get("stop_loss"),
-                decision.get("take_profit"),
-            )
-            self._emit_debug(f"Flip-LLM-decision applied: flipped to {action}; TP/SL swapped")
         cooldown_seconds = max(0, cooldown_seconds)
         trade_limit = max(0, trade_limit)
         trade_window = max(60, trade_window)
@@ -3208,6 +3200,34 @@ class MarketService:
             last_price = self._extract_float(
                 (self._latest_ticker.get(symbol) or {}).get("last")
             )
+        if flip_llm_decision and action in {"BUY", "SELL"}:
+            action = "SELL" if action == "BUY" else "BUY"
+            decision = dict(decision)
+            orig_tp = self._extract_float(decision.get("take_profit"))
+            orig_sl = self._extract_float(decision.get("stop_loss"))
+            if last_price and last_price > 0 and (orig_tp or orig_sl):
+                # Mirror each level through the current price so that
+                # the absolute distance — and therefore R:R — is preserved.
+                # new_level = 2 * price - original_level
+                decision["take_profit"] = (
+                    round(2 * last_price - orig_tp, 10) if orig_tp else None
+                )
+                decision["stop_loss"] = (
+                    round(2 * last_price - orig_sl, 10) if orig_sl else None
+                )
+                self._emit_debug(
+                    f"Flip-LLM-decision applied: flipped to {action}; "
+                    f"TP {orig_tp} -> {decision['take_profit']}, "
+                    f"SL {orig_sl} -> {decision['stop_loss']} "
+                    f"(mirrored around {last_price})"
+                )
+            else:
+                # No price available – fall back to raw swap and warn.
+                decision["take_profit"], decision["stop_loss"] = orig_sl, orig_tp
+                self._emit_debug(
+                    f"Flip-LLM-decision applied: flipped to {action}; "
+                    f"TP/SL raw-swapped (no reference price available)"
+                )
         price_hints: dict[str, float] = {}
         if last_price and last_price > 0:
             price_hints[symbol] = last_price
