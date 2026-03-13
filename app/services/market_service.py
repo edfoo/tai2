@@ -3825,12 +3825,12 @@ class MarketService:
                         wallet_cap = actual_quote_balance
                 if wallet_cap and wallet_cap > 0:
                     guardrail_notional_cap = wallet_cap if guardrail_notional_cap is None else min(guardrail_notional_cap, wallet_cap)
-                    leverage_for_margin = max(max_leverage or 1.0, 1.0)
-                    fallback_margin_budget = wallet_cap / leverage_for_margin
-                    if fallback_margin_budget > 0 and (
-                        available_margin_usd is None or fallback_margin_budget < available_margin_usd
-                    ):
-                        available_margin_usd = fallback_margin_budget
+                    # Do NOT cap available_margin_usd by wallet_cap / leverage here.
+                    # That produces a nonsense budget (e.g. 29.50 / 10 = 2.95) which
+                    # does not reflect the real usable USDT balance and confuses
+                    # the pre-submit margin guidance snapshot without preventing 51008.
+                    # The notional cap (guardrail_notional_cap = wallet_cap) is the
+                    # correct place to limit the trade size in the bootstrap path.
                     if last_price and last_price > 0:
                         fallback_contract_cap = wallet_cap / last_price
                         if fallback_contract_cap > 0 and raw_size > fallback_contract_cap:
@@ -5394,9 +5394,19 @@ class MarketService:
                 payload["attachAlgoOrds"] = attachments_to_use
             if self._sub_account and self._sub_account_use_master:
                 payload["subAcct"] = self._sub_account
-            if trade_mode == "isolated":
-                if resolved_margin_currency:
-                    payload["ccy"] = resolved_margin_currency
+            # Per OKX API docs, 'ccy' (margin currency) is only applicable to
+            # cross MARGIN orders in single-currency margin mode.  Sending it
+            # on isolated SWAP/FUTURES orders routes the request through a
+            # borrow-path check that triggers sCode 51008 even when the
+            # account holds sufficient quote-currency balance.
+            # Rule: only attach ccy for cross-mode non-SWAP/FUTURES instruments.
+            _is_perpetual = "-SWAP" in symbol
+            _is_futures = not _is_perpetual and (
+                len(symbol.split("-")) >= 3 and symbol.split("-")[-1].isdigit()
+            )
+            _is_spot_margin = not _is_perpetual and not _is_futures
+            if trade_mode == "cross" and _is_spot_margin and resolved_margin_currency:
+                payload["ccy"] = resolved_margin_currency
 
             trace_payload = {
                 "instId": payload["instId"],
