@@ -5348,6 +5348,7 @@ class MarketService:
         include_pos_side = pos_side
         attachments_to_use = attach_algo_orders
         attempt = 0
+        _margin_retry_count = 0
         resolved_margin_currency = str(
             margin_currency or self._quote_currency_from_symbol(symbol) or ""
         ).upper()
@@ -5418,8 +5419,9 @@ class MarketService:
                 "reduceOnly": payload.get("reduceOnly"),
                 "subAcct": bool(payload.get("subAcct")),
                 "clientOrderId": payload.get("clOrdId"),
-                "ccy": payload.get("ccy"),
             }
+            if "ccy" in payload:
+                trace_payload["ccy"] = payload["ccy"]
             self._emit_debug(f"OKX order payload: {trace_payload}")
 
             def _place() -> Any:
@@ -5450,6 +5452,28 @@ class MarketService:
                 )
                 attachments_to_use = None
                 continue
+            if (
+                not reduce_only
+                and _margin_retry_count < 2
+                and self._response_indicates_insufficient_margin(response)
+            ):
+                _cur_size = self._extract_float(size)
+                if _cur_size and _cur_size > 1:
+                    _reduced_size = max(1.0, _cur_size * 0.5)
+                    _margin_retry_count += 1
+                    self._emit_debug(
+                        f"51008 margin error for {symbol}; auto-downsize "
+                        f"{_cur_size:.0f} -> {_reduced_size:.0f} "
+                        f"(margin retry {_margin_retry_count}/2)"
+                    )
+                    self._record_execution_feedback(
+                        symbol,
+                        f"Margin insufficient for size {_cur_size:.0f}; "
+                        f"auto-downsized to {_reduced_size:.0f} and retrying",
+                        level="warning",
+                    )
+                    size = _reduced_size
+                    continue
             error_message, error_meta = self._extract_order_error(response)
             recommendation: dict[str, Any] | None = None
             if self._should_attach_margin_recommendation(error_meta, error_message):
