@@ -3688,6 +3688,29 @@ class MarketService:
                     baseline = fallback_margin or account_equity
                     if baseline and baseline > 0:
                         wallet_cap = baseline * bootstrap_pct
+                # Cap wallet_cap by the actual available quote-currency balance
+                # (e.g., real USDT, not just USD-equivalent of all assets).
+                # Without this, the system sizes the order against the configured
+                # seed limit while OKX has less of the specific margin currency
+                # available, causing code-51008 "insufficient USDT balance".
+                if wallet_cap and wallet_cap > 0 and quote_margin_candidates:
+                    actual_quote_balance = max(quote_margin_candidates)
+                    if actual_quote_balance > 0 and actual_quote_balance < wallet_cap:
+                        self._emit_debug(
+                            f"{symbol} isolated seed cap reduced from {wallet_cap:.4f} to "
+                            f"{actual_quote_balance:.4f} by actual {quote_currency or 'quote'} balance"
+                        )
+                        self._record_execution_feedback(
+                            symbol,
+                            "Seed cap reduced to available quote balance",
+                            level="info",
+                            meta={
+                                "configured_wallet_cap": wallet_cap,
+                                "actual_quote_balance": actual_quote_balance,
+                                "quote_currency": quote_currency,
+                            },
+                        )
+                        wallet_cap = actual_quote_balance
                 if wallet_cap and wallet_cap > 0:
                     guardrail_notional_cap = wallet_cap if guardrail_notional_cap is None else min(guardrail_notional_cap, wallet_cap)
                     leverage_for_margin = max(max_leverage or 1.0, 1.0)
