@@ -3401,6 +3401,32 @@ class MarketService:
         # Cap account_equity and available_margin_usd to the real quote-currency
         # balance so that every downstream sizing step stays within what OKX
         # will actually accept.
+
+        # --- diagnostic dump so we can see exactly what OKX returned ---
+        try:
+            _diag = {
+                "isolated_mode": isolated_mode,
+                "quote_currency": quote_currency,
+                "account_equity_before_cap": account_equity,
+                "available_margin_usd_before_cap": available_margin_usd,
+                "available_balances_keys": (
+                    list(available_balances_block.keys())
+                    if isinstance(available_balances_block, dict)
+                    else None
+                ),
+                "usdt_balance_entry": (
+                    available_balances_block.get(quote_currency)
+                    if isinstance(available_balances_block, dict) and quote_currency
+                    else None
+                ),
+            }
+            self._emit_debug(
+                f"[51008-diag] {symbol} pre-cap balance state: {json.dumps(_diag, default=str)}"
+            )
+        except Exception:
+            pass
+        # -----------------------------------------------------------------
+
         if isolated_mode and quote_currency and isinstance(available_balances_block, dict):
             _iso_quote_meta = available_balances_block.get(quote_currency)
             if isinstance(_iso_quote_meta, dict):
@@ -3425,6 +3451,24 @@ class MarketService:
                         account_equity = _iso_avail
                     if available_margin_usd is None or _iso_avail < available_margin_usd:
                         available_margin_usd = _iso_avail
+                elif quote_currency in STABLE_CURRENCIES:
+                    # Quote currency key exists but balance is 0 (or negative).
+                    # Force available_margin_usd to 0 so the downstream
+                    # "insufficient available margin" guard blocks this trade
+                    # cleanly instead of reaching OKX and getting a 51008.
+                    self._emit_debug(
+                        f"{symbol} {quote_currency} balance is zero or absent; "
+                        "forcing available_margin_usd=0 to block trade"
+                    )
+                    available_margin_usd = 0.0
+            else:
+                # No quote-currency entry at all in the balances block.
+                if quote_currency in STABLE_CURRENCIES:
+                    self._emit_debug(
+                        f"{symbol} no {quote_currency} entry in available_balances; "
+                        "forcing available_margin_usd=0 to block trade"
+                    )
+                    available_margin_usd = 0.0
 
         equity_based_cap = None
         if (
@@ -3706,6 +3750,41 @@ class MarketService:
                     fallback_margin = max(quote_margin_candidates)
                 if fallback_margin is None:
                     fallback_margin = available_margin_usd or account_equity
+
+                # --- bootstrap diagnostic ---
+                try:
+                    self._emit_debug(
+                        f"[51008-diag] {symbol} bootstrap path: "
+                        f"quote_margin_candidates={quote_margin_candidates} "
+                        f"fallback_margin={fallback_margin} "
+                        f"account_equity={account_equity} "
+                        f"available_margin_usd={available_margin_usd} "
+                        f"quote_currency={quote_currency}"
+                    )
+                except Exception:
+                    pass
+
+                # If we're in isolated mode with a USDT-margined contract but have
+                # NO usable quote-currency balance at all, block the trade immediately
+                # rather than letting OKX return 51008.
+                if not quote_margin_candidates and quote_currency:
+                    self._emit_debug(
+                        f"Execution skipped for {symbol}: no free {quote_currency} balance "
+                        "available to fund isolated margin (account equity is non-USDT assets)"
+                    )
+                    self._record_execution_feedback(
+                        symbol,
+                        f"No free {quote_currency} balance; cannot fund isolated margin",
+                        level="warning",
+                        meta={
+                            "trade_mode": trade_mode,
+                            "quote_currency": quote_currency,
+                            "account_equity": account_equity,
+                            "available_margin_usd": available_margin_usd,
+                        },
+                    )
+                    return False
+
                 wallet_cap = self._resolve_isolated_seed_limit(
                     guardrails,
                     symbol,
@@ -4438,6 +4517,28 @@ class MarketService:
                     )
 
         client_order_id = self._generate_client_order_id()
+        try:
+            _pre_order_diag = {
+                "symbol": symbol,
+                "side": side,
+                "raw_size": raw_size,
+                "last_price": last_price,
+                "notional": round(raw_size * last_price, 4) if last_price else None,
+                "trade_mode": trade_mode,
+                "isolated_mode": isolated_mode,
+                "available_margin_usd": available_margin_usd,
+                "account_equity": account_equity,
+                "min_leverage": min_leverage,
+                "max_leverage": max_leverage,
+                "target_leverage": target_leverage,
+                "guardrail_notional_cap": guardrail_notional_cap,
+                "quote_currency": quote_currency,
+            }
+            self._emit_debug(
+                f"[51008-diag] {symbol} pre-submit state: {json.dumps(_pre_order_diag, default=str)}"
+            )
+        except Exception:
+            pass
         order, attachments_used = await self._submit_order(
             symbol=symbol,
             side=side,
