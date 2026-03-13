@@ -3393,6 +3393,39 @@ class MarketService:
                 available_balances_block = live_balances_block
             self._refresh_execution_limits_from_account(live_account_balances)
 
+        # For isolated contracts (e.g. RESOLV-USDT-SWAP), OKX only accepts the
+        # actual quote currency (USDT) as margin — it cannot borrow from or
+        # convert other assets.  available_eq_usd is the USD-equivalent of ALL
+        # holdings (RESOLV tokens, BTC, etc.) and will overstate tradeable
+        # capacity, producing a notional that triggers code-51008.
+        # Cap account_equity and available_margin_usd to the real quote-currency
+        # balance so that every downstream sizing step stays within what OKX
+        # will actually accept.
+        if isolated_mode and quote_currency and isinstance(available_balances_block, dict):
+            _iso_quote_meta = available_balances_block.get(quote_currency)
+            if isinstance(_iso_quote_meta, dict):
+                _iso_avail = self._extract_float(
+                    _iso_quote_meta.get("available_usd")
+                    or _iso_quote_meta.get("equity_usd")
+                )
+                if _iso_avail is None and quote_currency in STABLE_CURRENCIES:
+                    _iso_avail = self._extract_float(_iso_quote_meta.get("available"))
+                _iso_cash = self._extract_float(_iso_quote_meta.get("cash"))
+                if _iso_cash is not None and quote_currency in STABLE_CURRENCIES:
+                    _iso_avail = (
+                        max(_iso_avail, _iso_cash) if _iso_avail is not None else _iso_cash
+                    )
+                if _iso_avail is not None and _iso_avail > 0:
+                    if account_equity is None or _iso_avail < account_equity:
+                        self._emit_debug(
+                            f"{symbol} account_equity capped {account_equity:.4f} → "
+                            f"{_iso_avail:.4f} (actual {quote_currency} balance; "
+                            "prevents over-sizing against non-USDT assets)"
+                        )
+                        account_equity = _iso_avail
+                    if available_margin_usd is None or _iso_avail < available_margin_usd:
+                        available_margin_usd = _iso_avail
+
         equity_based_cap = None
         if (
             account_equity is not None
