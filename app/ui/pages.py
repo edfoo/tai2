@@ -1023,8 +1023,13 @@ def register_pages(app: FastAPI) -> None:
                 for entry in items:
                     symbol = entry.get("symbol") or "--"
                     decision = entry.get("decision") or {}
-                    action = (decision.get("action") or "--").upper()
-                    header = f"{symbol} · {action} · {format_llm_timestamp(entry.get('timestamp'))}"
+                    original_action = (decision.get("action") or "--").upper()
+                    flipped = bool(entry.get("_flipped"))
+                    effective_action = entry.get("_effective_action") or original_action
+                    action_label = effective_action
+                    if flipped:
+                        action_label = f"{effective_action} (FLIPPED)"
+                    header = f"{symbol} · {action_label} · {format_llm_timestamp(entry.get('timestamp'))}"
                     schema = entry.get("response_schema") or {}
                     confidence = decision.get("confidence")
                     confidence_label = (
@@ -1041,9 +1046,10 @@ def register_pages(app: FastAPI) -> None:
                         "w-full bg-white rounded-xl border border-slate-200 shadow-sm"
                     )
                     with card:
-                        ui.label(
-                            f"Decision: {action} (conf {confidence_label})"
-                        ).classes("text-sm font-semibold text-slate-700")
+                        decision_line = f"Decision: {effective_action} (conf {confidence_label})"
+                        if flipped:
+                            decision_line += f"  ·  LLM said {original_action}, flipped by guardrail"
+                        ui.label(decision_line).classes("text-sm font-semibold text-slate-700")
                         with ui.column().classes("gap-2 text-xs text-slate-600"):
                             if not ordered_fields:
                                 ui.label("No decision values returned.")
