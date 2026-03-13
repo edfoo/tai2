@@ -479,6 +479,13 @@ def _record_llm_interaction(
     extra = max(0, len(properties) - 4)
     if extra:
         overview.append(f"+{extra} additional fields …")
+    original_action = (decision.get("action") or "").upper()
+    guardrails = (bundle.payload.get("context") or {}).get("guardrails") or {}
+    flip_active = bool(guardrails.get("flip_llm_decision"))
+    if not flip_active:
+        flip_active = bool((bundle.runtime_meta.get("guardrails") or {}).get("flip_llm_decision"))
+    flipped = flip_active and original_action in {"BUY", "SELL"}
+    effective_action = ("SELL" if original_action == "BUY" else "BUY") if flipped else original_action
     interactions[symbol] = {
         "symbol": symbol,
         "timestamp": context.get("generated_at")
@@ -486,6 +493,8 @@ def _record_llm_interaction(
         "decision": decision,
         "response_schema": schema,
         "schema_overview": overview,
+        "_flipped": flipped,
+        "_effective_action": effective_action,
     }
 
 
