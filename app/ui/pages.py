@@ -3383,6 +3383,42 @@ def register_pages(app: FastAPI) -> None:
 
             trading_pairs_select.on_value_change(on_trading_pair_select)
             render_trading_pair_rows()
+
+            def _sync_screener_pairs() -> None:
+                """Refresh the CFG trading-pairs list when the screener fires.
+                The flag _screener_pairs_changed is set by the scheduler after a
+                screener run so this callback does nothing in the common case."""
+                rt: dict[str, Any] = getattr(app.state, "runtime_config", {}) or {}
+                if not rt.get("_screener_pairs_changed"):
+                    return
+                rt["_screener_pairs_changed"] = False
+                latest = [
+                    str(s).strip().upper()
+                    for s in (rt.get("trading_pairs") or [])
+                    if str(s).strip()
+                ]
+                if not latest or set(latest) == set(selected_trading_pairs):
+                    return
+                selected_trading_pairs[:] = latest
+                config["trading_pairs"] = latest.copy()
+                render_trading_pair_rows()
+                # render_min_size_rows / render_symbol_cap_rows / render_isolated_seed_rows
+                # are defined later in the same scope; Python late-binding means they are
+                # already resolved by the time this timer fires.
+                try:
+                    render_min_size_rows()  # type: ignore[name-defined]  # noqa: F821
+                    render_symbol_cap_rows()  # type: ignore[name-defined]  # noqa: F821
+                    render_isolated_seed_rows()  # type: ignore[name-defined]  # noqa: F821
+                except NameError:
+                    pass  # guard during initial page construction
+                ui.notify(
+                    f"Trading pairs updated by screener: {', '.join(latest)}",
+                    color="info",
+                    timeout=6000,
+                )
+
+            ui.timer(5.0, _sync_screener_pairs)
+
             ui.label("Live Execution").classes("text-sm font-semibold text-rose-600 mt-2")
             with ui.row().classes("w-full flex-wrap gap-4"):
                 execution_switch = ui.switch(
