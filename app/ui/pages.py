@@ -25,6 +25,7 @@ from app.db.postgres import (
     save_prompt_interval,
     save_llm_model,
     save_okx_sub_account,
+    save_screener_config,
     save_ta_timeframe,
     save_frontend_timezone,
     set_enabled_trading_pairs,
@@ -4474,6 +4475,10 @@ def register_pages(app: FastAPI) -> None:
                 market_service.set_poll_interval(config["poll_interval"])
                 await market_service.set_websocket_enabled(config.get("enable_websocket", True))
                 await market_service.update_symbols(symbols)
+            try:
+                await save_screener_config(config["screener"])
+            except Exception as exc:  # pragma: no cover - db optional
+                ui.notify(f"Failed to persist screener config: {exc}", color="warning")
             scheduler = getattr(app.state, "prompt_scheduler", None)
             if scheduler:
                 await scheduler.update_interval(config["auto_prompt_interval"])

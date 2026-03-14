@@ -576,6 +576,34 @@ async def load_guardrails() -> dict[str, Any]:
     return {}
 
 
+async def save_screener_config(config: dict[str, Any]) -> None:
+    pool = await get_postgres_pool()
+    await pool.execute(
+        """
+        INSERT INTO runtime_settings (key, value, updated_at)
+        VALUES ('screener_config', $1::jsonb, NOW())
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+        """,
+        json.dumps(config or {}),
+    )
+
+
+async def load_screener_config() -> dict[str, Any]:
+    pool = await get_postgres_pool()
+    row = await pool.fetchrow("SELECT value FROM runtime_settings WHERE key = 'screener_config'")
+    if not row:
+        return {}
+    value = row["value"]
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+    if isinstance(value, dict):
+        return value
+    return {}
+
+
 async def save_llm_model(model_id: str | None) -> None:
     pool = await get_postgres_pool()
     payload = json.dumps({"model_id": model_id} if model_id else {})
@@ -1018,6 +1046,7 @@ __all__ = [
     "get_postgres_pool",
     "get_prompt_version",
     "init_postgres_pool",
+    "load_screener_config",
     "load_ta_timeframe",
     "load_guardrails",
     "load_llm_model",
@@ -1029,6 +1058,7 @@ __all__ = [
     "save_okx_sub_account",
     "save_llm_model",
     "save_guardrails",
+    "save_screener_config",
     "set_enabled_trading_pairs",
     "save_ta_timeframe",
     "save_frontend_timezone",
