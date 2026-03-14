@@ -3173,6 +3173,61 @@ def register_pages(app: FastAPI) -> None:
                     "hint='When isolated wallets are missing, cap exposure to this percent of fallback margin (enter 25 for 25%)' persistent-hint"
                 )
             ui.separator().classes("w-full my-4")
+            ui.label("Autonomous Symbol Screener").classes("text-sm font-semibold text-slate-600")
+            ui.label(
+                "When enabled, replaces the manual trading pairs list by scoring all USDT-SWAP "
+                "instruments on OKX by 24h volume (60%) and absolute price momentum (40%), "
+                "then activates the top-N symbols. The manual list is ignored while this is on."
+            ).classes("text-xs text-slate-500 mb-1")
+            screener_cfg = (config.get("screener") or {})
+            with ui.row().classes("w-full flex-wrap gap-4 items-start"):
+                auto_select_symbols_switch = ui.switch(
+                    "Auto-select symbols",
+                    value=bool(screener_cfg.get("enabled", False)),
+                ).classes("w-full md:w-56").props(
+                    "hint='Let the engine pick symbols by market activity instead of the manual list' persistent-hint"
+                )
+            with ui.row().classes("w-full flex-wrap gap-4"):
+                screener_universe_input = ui.input(
+                    label="Universe filter",
+                    value=str(screener_cfg.get("universe_filter") or "*-USDT-SWAP"),
+                ).classes("w-full md:w-56").props(
+                    "hint='Glob pattern for eligible instruments, e.g. *-USDT-SWAP' persistent-hint"
+                )
+                screener_max_symbols_input = ui.number(
+                    label="Max active symbols",
+                    value=int(screener_cfg.get("max_symbols") or 5),
+                    min=1,
+                    max=20,
+                    step=1,
+                ).classes("w-full md:w-48").props(
+                    "hint='How many top-scoring symbols to trade at once' persistent-hint"
+                )
+                screener_interval_input = ui.number(
+                    label="Selection interval (min)",
+                    value=int(screener_cfg.get("interval_minutes") or 60),
+                    min=5,
+                    step=5,
+                ).classes("w-full md:w-48").props(
+                    "hint='How often to re-score the universe and update the active list' persistent-hint"
+                )
+                screener_min_volume_input = ui.number(
+                    label="Min 24h volume (USD)",
+                    value=float(screener_cfg.get("min_volume_usd") or 500_000),
+                    min=0,
+                    step=100_000,
+                ).classes("w-full md:w-56").props(
+                    "hint='Exclude symbols whose 24h quote-volume is below this (0 = no filter)' persistent-hint"
+                )
+                screener_min_momentum_input = ui.number(
+                    label="Min momentum (%)",
+                    value=float(screener_cfg.get("min_momentum_pct") or 0.5),
+                    min=0,
+                    step=0.1,
+                ).classes("w-full md:w-48").props(
+                    "hint='Exclude symbols whose absolute 24h price change is below this %' persistent-hint"
+                )
+            ui.separator().classes("w-full my-4")
             ui.label("Model, cadence, and prompt controls").classes("text-sm text-slate-500")
             with ui.row().classes("w-full flex-wrap gap-4"):
                 ws_interval_input = ui.number(
@@ -4356,6 +4411,14 @@ def register_pages(app: FastAPI) -> None:
                 await save_guardrails(config["guardrails"])
             except Exception as exc:  # pragma: no cover - db optional
                 ui.notify(f"Failed to persist guardrails: {exc}", color="warning")
+            config["screener"] = {
+                "enabled": bool(auto_select_symbols_switch.value),
+                "universe_filter": str(screener_universe_input.value or "*-USDT-SWAP").strip(),
+                "max_symbols": max(1, _coerce(screener_max_symbols_input.value, 5, int)),
+                "interval_minutes": max(5, _coerce(screener_interval_input.value, 60, int)),
+                "min_volume_usd": max(0.0, _coerce(screener_min_volume_input.value, 0.0, float)),
+                "min_momentum_pct": max(0.0, _coerce(screener_min_momentum_input.value, 0.0, float)),
+            }
             app.state.runtime_config = config
             llm_service = getattr(app.state, "llm_service", None)
             if llm_service:
@@ -4364,6 +4427,7 @@ def register_pages(app: FastAPI) -> None:
             if market_service:
                 market_service.set_wait_for_tp_sl(config.get("wait_for_tp_sl", False))
                 market_service.set_flip_llm_decision(config["guardrails"].get("flip_llm_decision", False))
+                market_service.set_screener_config(config["screener"])
                 await market_service.set_okx_flag(config.get("okx_api_flag"))
                 await market_service.set_sub_account(
                     config.get("okx_sub_account"),

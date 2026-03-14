@@ -73,6 +73,12 @@ class PromptScheduler:
             logger.debug("Prompt scheduler loop exited")
 
     async def _tick(self) -> None:
+        market_service = getattr(self._app.state, "market_service", None)
+        if market_service:
+            try:
+                await market_service.run_screener_if_due()
+            except Exception as exc:  # pragma: no cover - network variance
+                logger.debug("Symbol screener tick failed: %s", exc)
         state_service = getattr(self._app.state, "state_service", None)
         if not state_service:
             logger.debug("Prompt scheduler: state service unavailable")

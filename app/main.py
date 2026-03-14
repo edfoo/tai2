@@ -348,6 +348,9 @@ def _create_lifespan(enable_background_services: bool):
                 market_service.set_wait_for_tp_sl(
                     app.state.runtime_config.get("wait_for_tp_sl", False)
                 )
+                market_service.set_screener_config(
+                    app.state.runtime_config.get("screener") or {}
+                )
                 app.state.market_service = market_service
                 await market_service.start()
                 scheduler = PromptScheduler(

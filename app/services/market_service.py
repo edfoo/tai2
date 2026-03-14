@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-import functools
 import contextlib
+import fnmatch
+import functools
 import json
 import logging
 import math
@@ -202,6 +203,10 @@ class MarketService:
         self._ws_last_debug: Dict[str, float] = {}
         self._wait_for_tp_sl = False
         self._flip_llm_decision = False
+        # Symbol screener state
+        self._screener_config: dict[str, Any] = {}
+        self._screener_last_run: float = 0.0
+        self._screener_selected_symbols: list[str] = []
         # Cursor for fills-history pagination: OKX Unix-ms string (empty = from now).
         self._fills_cursor: str = ""
         self._reconcile_task: Optional[asyncio.Task] = None
@@ -824,6 +829,105 @@ class MarketService:
         self._flip_llm_decision = flag
         state = "enabled" if flag else "disabled"
         self._emit_debug(f"Flip-LLM-decision {state}")
+
+    def set_screener_config(self, config: dict[str, Any]) -> None:
+        """Update the symbol screener configuration at runtime."""
+        self._screener_config = dict(config or {})
+        self._emit_debug(
+            f"Symbol screener config updated: enabled={self._screener_config.get('enabled')} "
+            f"max={self._screener_config.get('max_symbols')} "
+            f"interval={self._screener_config.get('interval_minutes')}min"
+        )
+
+    async def _fetch_all_swap_tickers(self) -> list[dict[str, Any]]:
+        """Batch-fetch all SWAP tickers from OKX for screener scoring."""
+        if not self._market_api:
+            return []
+        try:
+            response = await asyncio.to_thread(self._market_api.get_tickers, "SWAP")
+            return self._safe_data(response)
+        except Exception as exc:
+            self._emit_debug(f"Screener ticker fetch failed: {exc}")
+            return []
+
+    async def run_screener_if_due(self) -> bool:
+        """Run the symbol screener if enabled and its interval has elapsed.
+
+        Scores all USDT-SWAP tickers by 24h volume (60%) and absolute momentum (40%),
+        applies configured filters, then replaces the active symbol list with the
+        top-N winners.  Returns True when the active symbol list was modified.
+        """
+        cfg = self._screener_config
+        if not cfg or not cfg.get("enabled"):
+            return False
+        interval_secs = max(300, int(cfg.get("interval_minutes") or 60) * 60)
+        now = time.time()
+        if now - self._screener_last_run < interval_secs:
+            return False
+
+        tickers = await self._fetch_all_swap_tickers()
+        if not tickers:
+            self._emit_debug("Screener: no tickers returned from OKX")
+            return False
+
+        universe_pattern = str(cfg.get("universe_filter") or "*-USDT-SWAP").strip().upper()
+        max_symbols = max(1, int(cfg.get("max_symbols") or 5))
+        min_volume_usd = float(cfg.get("min_volume_usd") or 0.0)
+        min_momentum_pct = float(cfg.get("min_momentum_pct") or 0.0)
+
+        candidates: list[dict[str, Any]] = []
+        for ticker in tickers:
+            if not isinstance(ticker, dict):
+                continue
+            inst_id = str(ticker.get("instId") or "").upper()
+            if not inst_id:
+                continue
+            if not fnmatch.fnmatch(inst_id, universe_pattern):
+                continue
+            last = self._extract_float(ticker.get("last"))
+            open24h = self._extract_float(ticker.get("open24h"))
+            vol_ccy_24h = self._extract_float(ticker.get("volCcy24h"))
+            if not last or last <= 0:
+                continue
+            if vol_ccy_24h is None or vol_ccy_24h < min_volume_usd:
+                continue
+            momentum_pct = (
+                abs((last - open24h) / open24h * 100)
+                if open24h and open24h > 0
+                else 0.0
+            )
+            if momentum_pct < min_momentum_pct:
+                continue
+            candidates.append(
+                {
+                    "symbol": inst_id,
+                    "vol_ccy_24h": vol_ccy_24h,
+                    "momentum_pct": momentum_pct,
+                }
+            )
+
+        self._emit_debug(
+            f"Screener: {len(candidates)} candidates from {len(tickers)} tickers "
+            f"(vol>={min_volume_usd:.0f} USD, mom>={min_momentum_pct:.2f}%)"
+        )
+        if not candidates:
+            self._screener_last_run = now
+            return False
+
+        max_vol = max(c["vol_ccy_24h"] for c in candidates) or 1.0
+        max_mom = max(c["momentum_pct"] for c in candidates) or 1.0
+        for c in candidates:
+            c["score"] = (c["vol_ccy_24h"] / max_vol) * 0.6 + (c["momentum_pct"] / max_mom) * 0.4
+        candidates.sort(key=lambda x: x["score"], reverse=True)
+        selected = [c["symbol"] for c in candidates[:max_symbols]]
+        self._screener_last_run = now
+        self._screener_selected_symbols = selected
+        self._emit_debug(f"Screener selected: {selected}")
+
+        if set(selected) == set(self.symbols):
+            return False
+        await self.update_symbols(selected)
+        return True
 
     async def set_websocket_enabled(self, enabled: bool) -> None:
         """Enable or disable websocket streaming at runtime, rebuilding tasks as needed."""
