@@ -117,6 +117,9 @@ class MarketService:
     SUPPORTED_TIMEFRAMES = set(_TIMEFRAME_CHOICES.values())
     DEFAULT_TIMEFRAME = "4H"
     ISOLATED_WALLET_BOOTSTRAP_PCT = 0.25
+    # OKX will reject a new isolated-mode order with 51008 when the required
+    # initial margin is below its internal floor.  Block such trades pre-emptively.
+    OKX_ISOLATED_BOOT_MIN_NOTIONAL_USD = 2.0
     PROTECTION_ERROR_CODES = {
         "51047",
         "51048",
@@ -3606,6 +3609,7 @@ class MarketService:
         ]
         isolated_margin_available: float | None = None
         isolated_margin_entry: dict[str, Any] | None = None
+        has_isolated_wallet: bool = False
         if isolated_mode:
             wallet_side_key = desired_pos_side if dual_side_mode else None
             if wallet_side_key == "net":
@@ -3872,6 +3876,34 @@ class MarketService:
                                 f"{symbol} size clipped to {fallback_contract_cap:.4f} while waiting for isolated wallet"
                             )
                             leverage_override_reason = "isolated-wallet-bootstrap"
+                # Guard: OKX requires a minimum notional to seed a brand-new
+                # isolated sub-account.  Below this floor the exchange returns
+                # 51008 regardless of available USDT.  Block pre-emptively and
+                # emit a clear feedback card instead of a confusing margin error.
+                if last_price and last_price > 0:
+                    _bootstrap_notional = raw_size * last_price
+                    if _bootstrap_notional < self.OKX_ISOLATED_BOOT_MIN_NOTIONAL_USD:
+                        _min = self.OKX_ISOLATED_BOOT_MIN_NOTIONAL_USD
+                        self._emit_debug(
+                            f"Execution skipped for {symbol}: notional "
+                            f"{_bootstrap_notional:.4f} USDT is below OKX isolated "
+                            f"minimum {_min:.2f} USDT (no existing wallet)"
+                        )
+                        self._record_execution_feedback(
+                            symbol,
+                            f"Trade notional {_bootstrap_notional:.2f} USDT is too small "
+                            f"to seed a new isolated position "
+                            f"(OKX minimum \u2248 {_min:.2f} USDT); skipping",
+                            level="warning",
+                            meta={
+                                "bootstrap_notional": _bootstrap_notional,
+                                "min_notional_usd": _min,
+                                "raw_size": raw_size,
+                                "last_price": last_price,
+                                "isolated_wallet_status": "missing",
+                            },
+                        )
+                        return False
         else:
             for candidate in quote_margin_candidates:
                 if available_margin_usd is None or candidate > available_margin_usd:
@@ -4573,6 +4605,7 @@ class MarketService:
             leverage=target_leverage,
             dual_side_mode=dual_side_mode,
             reference_price=last_price,
+            isolated_bootstrap=isolated_mode and not has_isolated_wallet,
         )
         if not order:
             self._emit_debug(f"Order placement failed for {symbol}")
@@ -5360,6 +5393,7 @@ class MarketService:
         leverage: float | None = None,
         dual_side_mode: bool = False,
         reference_price: float | None = None,
+        isolated_bootstrap: bool = False,
     ) -> tuple[dict[str, Any] | None, bool]:
         """Place an order via the trade API, retrying without posSide if needed."""
         if not self._trade_api:
@@ -5480,20 +5514,49 @@ class MarketService:
                 _cur_size = self._extract_float(size)
                 if _cur_size and _cur_size > 1:
                     _reduced_size = max(1.0, _cur_size * 0.5)
-                    _margin_retry_count += 1
-                    self._emit_debug(
-                        f"51008 margin error for {symbol}; auto-downsize "
-                        f"{_cur_size:.0f} -> {_reduced_size:.0f} "
-                        f"(margin retry {_margin_retry_count}/2)"
-                    )
-                    self._record_execution_feedback(
-                        symbol,
-                        f"Margin insufficient for size {_cur_size:.0f}; "
-                        f"auto-downsized to {_reduced_size:.0f} and retrying",
-                        level="warning",
-                    )
-                    size = _reduced_size
-                    continue
+                    # For bootstrap orders (no existing isolated wallet), check
+                    # that the reduced notional would still clear the minimum
+                    # seeding floor.  Retrying below the floor would just fail
+                    # again with the same 51008 and produce a confusing card.
+                    if isolated_bootstrap and reference_price_value and reference_price_value > 0:
+                        _reduced_notional = _reduced_size * reference_price_value
+                        if _reduced_notional < self.OKX_ISOLATED_BOOT_MIN_NOTIONAL_USD:
+                            self._emit_debug(
+                                f"51008 bootstrap: reduced notional {_reduced_notional:.4f} "
+                                f"would be below floor {self.OKX_ISOLATED_BOOT_MIN_NOTIONAL_USD:.2f}; "
+                                f"skipping downsize retry"
+                            )
+                            # Fall through to the normal error-reporting path.
+                        else:
+                            _margin_retry_count += 1
+                            self._emit_debug(
+                                f"51008 margin error for {symbol} (bootstrap); auto-downsize "
+                                f"{_cur_size:.0f} -> {_reduced_size:.0f} "
+                                f"(margin retry {_margin_retry_count}/2)"
+                            )
+                            self._record_execution_feedback(
+                                symbol,
+                                f"Margin insufficient for size {_cur_size:.0f}; "
+                                f"auto-downsized to {_reduced_size:.0f} and retrying",
+                                level="warning",
+                            )
+                            size = _reduced_size
+                            continue
+                    else:
+                        _margin_retry_count += 1
+                        self._emit_debug(
+                            f"51008 margin error for {symbol}; auto-downsize "
+                            f"{_cur_size:.0f} -> {_reduced_size:.0f} "
+                            f"(margin retry {_margin_retry_count}/2)"
+                        )
+                        self._record_execution_feedback(
+                            symbol,
+                            f"Margin insufficient for size {_cur_size:.0f}; "
+                            f"auto-downsized to {_reduced_size:.0f} and retrying",
+                            level="warning",
+                        )
+                        size = _reduced_size
+                        continue
             error_message, error_meta = self._extract_order_error(response)
             recommendation: dict[str, Any] | None = None
             if self._should_attach_margin_recommendation(error_meta, error_message):
