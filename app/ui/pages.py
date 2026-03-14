@@ -3212,12 +3212,13 @@ def register_pages(app: FastAPI) -> None:
                     "hint='How often to re-score the universe and update the active list' persistent-hint"
                 )
                 screener_min_volume_input = ui.number(
-                    label="Min 24h volume (USD)",
-                    value=float(screener_cfg.get("min_volume_usd") or 500_000),
+                    label="Min 24h volume (M USDT)",
+                    value=float((screener_cfg.get("min_volume_usd") or 500_000) / 1_000_000),
                     min=0,
-                    step=100_000,
+                    step=0.1,
+                    format="%.2f",
                 ).classes("w-full md:w-56").props(
-                    "hint='Exclude symbols whose 24h quote-volume is below this (0 = no filter)' persistent-hint"
+                    "hint='Exclude symbols below this 24h quote-volume — enter in millions, e.g. 0.5 = 500,000 USDT (0 = no filter)' persistent-hint"
                 )
                 screener_min_momentum_input = ui.number(
                     label="Min momentum (%)",
@@ -4416,7 +4417,7 @@ def register_pages(app: FastAPI) -> None:
                 "universe_filter": str(screener_universe_input.value or "*-USDT-SWAP").strip(),
                 "max_symbols": max(1, _coerce(screener_max_symbols_input.value, 5, int)),
                 "interval_minutes": max(5, _coerce(screener_interval_input.value, 60, int)),
-                "min_volume_usd": max(0.0, _coerce(screener_min_volume_input.value, 0.0, float)),
+                "min_volume_usd": max(0.0, _coerce(screener_min_volume_input.value, 0.0, float) * 1_000_000),
                 "min_momentum_pct": max(0.0, _coerce(screener_min_momentum_input.value, 0.0, float)),
             }
             app.state.runtime_config = config
