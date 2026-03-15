@@ -25,6 +25,10 @@ DEFAULT_DECISION_PROMPT = (
     "CRITICAL SIZING RULE: context.execution.max_safe_notional_usd is the pre-computed absolute ceiling for position notional "
     "(= available_margin_usd x max_leverage, already capped by all position and tier limits). "
     "context.execution.max_safe_contracts is its equivalent in contract units. "
+    "CONTRACT SIZE: for USDT-margined linear perpetual swaps, 1 contract = 1 base token, "
+    "so notional_usd = position_size_contracts × last_price. "
+    "Do NOT infer the contract multiplier from open_interest — "
+    "open_interest.base_tokens is the OI expressed in base tokens (not USD) and must not be used to derive contract sizing. "
     "You MUST NOT propose a position_size or notional above these values - the exchange will reject the order regardless of equity_pct. "
     "Sizing based on account_equity alone is incorrect; always verify that your chosen notional stays within max_safe_notional_usd. "
     "When existing stop-loss or take-profit "
@@ -418,7 +422,7 @@ class PromptBuilder:
             "next_funding": next_funding,
             "open_interest": {
                 "contracts": oi_value,
-                "usd": oi_value_ccy,
+                "base_tokens": oi_value_ccy,
             },
             "order_flow": {
                 "imbalance": ofi,
