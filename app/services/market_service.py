@@ -115,6 +115,14 @@ class MarketService:
         "4h": "4H",
         "1d": "1D",
     }
+    # Maps each base bar to (higher-TF bar, candle limit preserving the same wall-clock window).
+    # limit = max_candles * base_minutes / htf_minutes ≈ 120 / ratio
+    _HTF_MAP: dict[str, tuple[str, int]] = {
+        "15m": ("1H", 30),
+        "1H":  ("4H", 30),
+        "4H":  ("1D", 20),
+        "1D":  ("", 0),
+    }
     SUPPORTED_TIMEFRAMES = set(_TIMEFRAME_CHOICES.values())
     DEFAULT_TIMEFRAME = "4H"
     ISOLATED_WALLET_BOOTSTRAP_PCT = 0.25
@@ -179,6 +187,7 @@ class MarketService:
         self._latest_open_interest: dict[str, dict[str, Any]] = {}
         self._latest_liquidations: dict[str, list[dict[str, Any]]] = {}
         self._latest_ohlcv: dict[str, list[list[Any]]] = {}
+        self._latest_ohlcv_htf: dict[str, list[list[Any]]] = {}
         self._latest_long_short_ratio: dict[str, dict[str, Any]] = {}
         self._last_long_short_fetch: dict[str, float] = {}
         self._trade_buffers: dict[str, Deque[dict[str, float]]] = {}
@@ -387,6 +396,12 @@ class MarketService:
             open_interest = await self._fetch_open_interest(symbol)
             ohlcv = await self._fetch_ohlcv(symbol)
             indicators = self._compute_indicators(ohlcv)
+            ohlcv_htf = await self._fetch_ohlcv_htf(symbol)
+            if ohlcv_htf:
+                htf_bar, _ = self._HTF_MAP.get(self._ohlc_bar, ("", 0))
+                indicators["ohlcv_htf"] = ohlcv_htf
+                if htf_bar:
+                    indicators["ohlcv_htf_bar"] = htf_bar
             custom_metrics = self._compute_custom_metrics(symbol, order_book)
             market_ls_ratio = await self._fetch_long_short_ratio(symbol)
             if market_ls_ratio:
@@ -1064,6 +1079,7 @@ class MarketService:
             self._latest_open_interest.pop(symbol, None)
             self._latest_liquidations.pop(symbol, None)
             self._latest_ohlcv.pop(symbol, None)
+            self._latest_ohlcv_htf.pop(symbol, None)
             self._trade_buffers.pop(symbol, None)
             self._recent_trades.pop(symbol, None)
             self._decision_state.pop(symbol, None)
@@ -1447,6 +1463,30 @@ class MarketService:
         data = self._safe_data(response)
         if data:
             self._latest_ohlcv[symbol] = data
+            return data
+        return cached or []
+
+    async def _fetch_ohlcv_htf(self, symbol: str) -> list[list[Any]]:
+        """Fetch OHLCV candles at the next-higher timeframe for the same wall-clock window."""
+        htf_bar, limit = self._HTF_MAP.get(self._ohlc_bar, ("", 0))
+        if not htf_bar or limit <= 0:
+            return []
+        cached = self._latest_ohlcv_htf.get(symbol)
+        if not self._market_api:
+            return cached or []
+        try:
+            response = await asyncio.to_thread(
+                self._market_api.get_candlesticks,
+                instId=symbol,
+                bar=htf_bar,
+                limit=limit,
+            )
+        except Exception as exc:  # pragma: no cover - network failures
+            logger.warning("HTF OHLCV fetch failed for %s (%s): %s", symbol, htf_bar, exc)
+            return cached or []
+        data = self._safe_data(response)
+        if data:
+            self._latest_ohlcv_htf[symbol] = data
             return data
         return cached or []
 

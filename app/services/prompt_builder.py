@@ -32,7 +32,11 @@ DEFAULT_DECISION_PROMPT = (
     "You MUST NOT propose a position_size or notional above these values - the exchange will reject the order regardless of equity_pct. "
     "Sizing based on account_equity alone is incorrect; always verify that your chosen notional stays within max_safe_notional_usd. "
     "When existing stop-loss or take-profit "
-    "levels are present, reuse or gently tune them unless you can justify a safer alternative. For BUY or SELL you must propose both stop-loss "
+    "levels are present, reuse or gently tune them unless you can justify a safer alternative. "
+    "MULTI-TIMEFRAME: context.history.candles_htf contains candles at context.history.timeframe_htf "
+    "(one step up the timeframe ladder) covering the same wall-clock window as context.history.candles. "
+    "Use candles_htf to confirm the higher-timeframe trend and structure before committing to a direction. "
+    "For BUY or SELL you must propose both stop-loss "
     "and take-profit prices; if you cannot provide valid targets or a safe size, pick HOLD instead. "
     "CRITICAL DIRECTION RULE: for a BUY, stop_loss MUST be strictly below entry price and take_profit MUST be strictly above entry price. "
     "For a SELL, stop_loss MUST be strictly above entry price and take_profit MUST be strictly below entry price. "
@@ -437,12 +441,19 @@ class PromptBuilder:
     def _build_history_section(self, indicators: dict[str, Any]) -> dict[str, Any]:
         ohlcv_rows = indicators.get("ohlcv") or []
         trimmed = ohlcv_rows[-self.max_candles :]
-        return {
+        section: dict[str, Any] = {
             "candles": trimmed,
             "vwap_series": indicators.get("vwap_series"),
             "volume_series": (indicators.get("volume") or {}).get("series"),
             "volume_rsi_series": indicators.get("volume_rsi_series"),
         }
+        ohlcv_htf = indicators.get("ohlcv_htf")
+        htf_bar = indicators.get("ohlcv_htf_bar")
+        if ohlcv_htf:
+            section["candles_htf"] = ohlcv_htf
+        if htf_bar:
+            section["timeframe_htf"] = htf_bar
+        return section
 
     def _build_indicator_section(self, indicators: dict[str, Any]) -> dict[str, Any]:
         macd = indicators.get("macd") or {}
