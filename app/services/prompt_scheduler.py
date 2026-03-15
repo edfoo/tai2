@@ -140,6 +140,14 @@ class PromptScheduler:
             logger.debug("Prompt scheduler snapshot refresh skipped (%s): %s", reason, exc)
 
     async def _evaluate_symbol(self, symbol: str) -> None:
+        market_service = getattr(self._app.state, "market_service", None)
+        if market_service:
+            runtime_config = getattr(self._app.state, "runtime_config", {}) or {}
+            guardrails = runtime_config.get("guardrails") or {}
+            blocked_reason = market_service.is_symbol_blocked(symbol, guardrails)
+            if blocked_reason:
+                logger.debug("Skipping LLM for %s: %s", symbol, blocked_reason)
+                return
         await self._refresh_snapshot(reason=f"scheduler:{symbol}")
         bundle, error_response = await prepare_prompt_payload(self._app, symbol=symbol)
         if error_response:

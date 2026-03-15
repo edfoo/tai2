@@ -944,6 +944,39 @@ class MarketService:
         await self.update_symbols(selected)
         return True
 
+    def is_symbol_blocked(self, symbol: str, guardrails: dict[str, Any] | None = None) -> str | None:
+        """Return a human-readable reason string if the symbol cannot be traded right now
+        due to cooldown or trade-rate-limit guardrails, or None if clear.
+        This is a cheap synchronous read of in-memory state, used to skip the LLM
+        call entirely when execution would be blocked regardless of the decision.
+        """
+        g: dict[str, Any] = guardrails or {}
+        cooldown_seconds = int(
+            self._extract_float(
+                g.get("min_hold_seconds") or g.get("cooldown_seconds")
+            )
+            or self._poll_interval
+        )
+        cooldown_seconds = max(0, cooldown_seconds)
+        trade_limit = int(self._extract_float(g.get("max_trades_per_hour")) or 0)
+        trade_window = int(self._extract_float(g.get("trade_window_seconds")) or 3600)
+        now = time.time()
+        if cooldown_seconds > 0:
+            last_decision = self._decision_state.get(symbol)
+            if last_decision:
+                last_ts = last_decision.get("timestamp")
+                if isinstance(last_ts, (int, float)) and now - float(last_ts) < cooldown_seconds:
+                    remaining = cooldown_seconds - (now - float(last_ts))
+                    return f"cooldown active ({remaining:.0f}s remaining)"
+        if trade_limit > 0:
+            history = self._recent_trades.get(symbol)
+            if history:
+                cutoff = now - max(60, trade_window)
+                recent_count = sum(1 for ts in history if ts >= cutoff)
+                if recent_count >= trade_limit:
+                    return f"trade rate limit reached ({recent_count}/{trade_limit} in window)"
+        return None
+
     async def set_websocket_enabled(self, enabled: bool) -> None:
         """Enable or disable websocket streaming at runtime, rebuilding tasks as needed."""
         flag = bool(enabled)

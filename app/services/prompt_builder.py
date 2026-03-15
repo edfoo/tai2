@@ -12,13 +12,13 @@ DEFAULT_SYSTEM_PROMPT = (
     "You are a professional hedge fund trader with profitability as primary goal, but with risk controls. Evaluate the provided snapshot, which includes "
     "positions, exposures, technical indicators, order flow, derivatives, liquidity context, and guardrails. Always "
     "verify how stale the snapshot is, whether open positions already exist on the symbol, and whether guardrails such "
-    "as leverage caps or cooldowns might block an order."
+    "as leverage caps might block an order."
 )
 
 DEFAULT_DECISION_PROMPT = (
     "You will receive a JSON object under the key 'context' containing the latest market state, snapshot freshness metadata, "
     "account/portfolio exposure (including total equity and available margin), any pending orders, and execution guardrails. Before deciding on BUY/SELL/HOLD, confirm: "
-    "(1) the snapshot age is within limits, (2) your recommendation complies with leverage, position size, cooldown, trade limits, and max-position-percent guardrails (including symbol caps), and (3) you are not duplicating an existing position or pending order. Explicitly cite snapshot freshness "
+    "(1) the snapshot age is within limits, (2) your recommendation complies with leverage, position size, trade limits, and max-position-percent guardrails (including symbol caps), and (3) you are not duplicating an existing position or pending order. Explicitly cite snapshot freshness "
     "and guardrail checks in your rationale. Inspect 'context.execution.margin_health' for real-time capital caps and treat "
     "'context.execution_feedback' (and its digest) as hard blockers that must be resolved before sizing up. Base position sizing on "
     "the trade thesis, stop-loss distance, and reward-to-risk profile. In other words, propose both an absolute position_size and an equity_pct (0-1) sized to the thesis and within max_position_pct/symbol caps. The proposed stop loss defines maximum acceptable loss; do not ignore it. Treat context.execution.max_position_pct and context.execution.symbol_max_position_pct (when present) as hard ceilings for both position_size and equity_pct, and never recommend exposure above those guardrails. "
@@ -44,7 +44,7 @@ DEFAULT_DECISION_PROMPT = (
     "CRITICAL: the take-profit distance from entry must be at least context.guardrails.min_reward_risk_ratio times the stop-loss distance from entry "
     "(reward-to-risk >= min_reward_risk_ratio, default 1.0). A trade where the potential loss exceeds the potential gain will be hard-blocked by "
     "the execution layer — choose HOLD if you cannot find a target that meets this constraint. "
-    "Choose HOLD whenever cooldowns, capital "
+    "Choose HOLD whenever capital "
     "constraints, fee/credit depletion, missing TP/SL, poor reward-to-risk, or duplicate exposure prevent execution, and describe the blocker. Respond strictly as JSON matching "
     "'response_schema'."
 )
