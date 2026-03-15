@@ -449,6 +449,9 @@ def register_pages(app: FastAPI) -> None:
                             refresh_label["widget"] = ui.label("Last refresh: --").classes(
                                 "text-xs text-slate-500"
                             )
+                            next_prompt_label = ui.label("Next prompt: --").classes(
+                                "text-xs text-slate-500"
+                            )
                             notice = (
                                 ui.label("Snapshot stale")
                                 .classes("text-xs font-semibold text-red-600 uppercase tracking-wide")
@@ -1961,6 +1964,23 @@ def register_pages(app: FastAPI) -> None:
         page_client.on_disconnect(_teardown_client)
         page_client.on_delete(_teardown_client)
         ui.timer(5, lambda: update_snapshot_health(last_snapshot["value"]))
+
+        def _update_next_prompt_countdown() -> None:
+            scheduler = getattr(app.state, "prompt_scheduler", None)
+            if scheduler is None:
+                next_prompt_label.set_text("Next prompt: --")
+                return
+            secs = scheduler.seconds_until_next_tick
+            if secs is None:
+                next_prompt_label.set_text("Next prompt: off")
+                return
+            mins, s = divmod(int(secs), 60)
+            if mins:
+                next_prompt_label.set_text(f"Next prompt: {mins}m {s:02d}s")
+            else:
+                next_prompt_label.set_text(f"Next prompt: {s}s")
+
+        ui.timer(1, _update_next_prompt_countdown)
         asyncio.create_task(refresh_equity_chart())
 
 

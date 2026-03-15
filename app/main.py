@@ -19,6 +19,7 @@ from app.db.postgres import (
     fetch_trading_pairs,
     init_postgres_pool,
     load_guardrails,
+    load_screener_config,
     load_ta_timeframe,
     load_llm_model,
     load_execution_settings,
@@ -312,6 +313,13 @@ def _create_lifespan(enable_background_services: bool):
                 else:
                     if stored_timezone:
                         app.state.runtime_config["frontend_timezone"] = stored_timezone
+                try:
+                    stored_screener = await load_screener_config()
+                except Exception as exc:  # pragma: no cover - optional
+                    logger.error("Failed to load screener config: %s", exc)
+                else:
+                    if stored_screener:
+                        app.state.runtime_config["screener"] = stored_screener
         elif not enable_background_services:
             logger.info("Background DB init disabled; skipping Postgres init")
         else:
@@ -350,6 +358,9 @@ def _create_lifespan(enable_background_services: bool):
                 )
                 market_service.set_screener_config(
                     app.state.runtime_config.get("screener") or {}
+                )
+                market_service.set_flip_llm_decision(
+                    app.state.runtime_config.get("guardrails", {}).get("flip_llm_decision", False)
                 )
                 app.state.market_service = market_service
                 await market_service.start()

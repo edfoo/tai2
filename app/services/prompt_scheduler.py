@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any, Iterable, Optional
 
@@ -26,6 +27,7 @@ class PromptScheduler:
         self._task: Optional[asyncio.Task] = None
         self._lock = asyncio.Lock()
         self._last_error: Optional[str] = None
+        self._last_tick_at: float = 0.0
 
     async def start(self) -> None:
         async with self._lock:
@@ -59,10 +61,21 @@ class PromptScheduler:
             if self._task and not self._task.done():
                 logger.info("Prompt scheduler interval updated to %ss", seconds)
 
+    @property
+    def seconds_until_next_tick(self) -> float | None:
+        """Seconds until the next scheduled tick, or None if the scheduler is not running."""
+        if not self._enabled or self._task is None or self._task.done():
+            return None
+        if self._last_tick_at == 0.0:
+            return None
+        remaining = self._interval - (time.monotonic() - self._last_tick_at)
+        return max(0.0, remaining)
+
     async def _run(self) -> None:
         try:
             while self._enabled:
                 await self._tick()
+                self._last_tick_at = time.monotonic()
                 await asyncio.sleep(self._interval)
         except asyncio.CancelledError:
             raise
