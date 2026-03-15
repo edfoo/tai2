@@ -1970,6 +1970,9 @@ def register_pages(app: FastAPI) -> None:
             if scheduler is None:
                 next_prompt_label.set_text("Next prompt: --")
                 return
+            if getattr(scheduler, "is_ticking", False):
+                next_prompt_label.set_text("Next prompt: running…")
+                return
             secs = scheduler.seconds_until_next_tick
             if secs is None:
                 next_prompt_label.set_text("Next prompt: off")

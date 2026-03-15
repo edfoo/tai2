@@ -20,6 +20,13 @@ class SchedulerConfig:
 
 
 class PromptScheduler:
+    # Maximum wall-clock time a single _tick() is allowed to run before it is
+    # cancelled and the loop continues.  Prevents a hanging LLM / network call
+    # from blocking the scheduler indefinitely.
+    TICK_TIMEOUT_SECONDS = 240
+    # Delay before automatically restarting after an unexpected crash.
+    RESTART_DELAY_SECONDS = 30
+
     def __init__(self, app: FastAPI, *, default_interval: int = 300) -> None:
         self._app = app
         self._interval = max(30, default_interval)
@@ -28,6 +35,7 @@ class PromptScheduler:
         self._lock = asyncio.Lock()
         self._last_error: Optional[str] = None
         self._last_tick_at: float = 0.0
+        self._tick_running: bool = False
 
     async def start(self) -> None:
         async with self._lock:
@@ -62,28 +70,53 @@ class PromptScheduler:
                 logger.info("Prompt scheduler interval updated to %ss", seconds)
 
     @property
+    def is_ticking(self) -> bool:
+        """True while a _tick() coroutine is currently executing."""
+        return self._tick_running
+
+    @property
     def seconds_until_next_tick(self) -> float | None:
         """Seconds until the next scheduled tick, or None if the scheduler is not running."""
         if not self._enabled or self._task is None or self._task.done():
             return None
+        if self._tick_running:
+            # Tick is currently in progress; return 0 to indicate active.
+            return 0.0
         if self._last_tick_at == 0.0:
             return None
         remaining = self._interval - (time.monotonic() - self._last_tick_at)
         return max(0.0, remaining)
 
     async def _run(self) -> None:
-        try:
-            while self._enabled:
-                await self._tick()
-                self._last_tick_at = time.monotonic()
+        while self._enabled:
+            try:
+                self._tick_running = True
+                try:
+                    await asyncio.wait_for(
+                        self._tick(),
+                        timeout=self.TICK_TIMEOUT_SECONDS,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "Prompt scheduler tick timed out after %ss; skipping cycle",
+                        self.TICK_TIMEOUT_SECONDS,
+                    )
+                finally:
+                    self._tick_running = False
+                    self._last_tick_at = time.monotonic()
                 await asyncio.sleep(self._interval)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:  # pragma: no cover - defensive logging
-            self._last_error = str(exc)
-            logger.exception("Prompt scheduler crashed: %s", exc)
-        finally:
-            logger.debug("Prompt scheduler loop exited")
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # pragma: no cover - defensive logging
+                self._tick_running = False
+                self._last_error = str(exc)
+                logger.exception("Prompt scheduler crashed; restarting in %ss: %s",
+                                  self.RESTART_DELAY_SECONDS, exc)
+                try:
+                    await asyncio.sleep(self.RESTART_DELAY_SECONDS)
+                except asyncio.CancelledError:
+                    raise
+        logger.debug("Prompt scheduler loop exited")
 
     async def _tick(self) -> None:
         market_service = getattr(self._app.state, "market_service", None)
