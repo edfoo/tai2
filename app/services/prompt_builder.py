@@ -146,7 +146,6 @@ class PromptBuilder:
         open_interest = market_block.get("open_interest") or snapshot.get("open_interest") or {}
         custom_metrics = market_block.get("custom_metrics") or snapshot.get("custom_metrics") or {}
         risk_metrics = market_block.get("risk_metrics") or snapshot.get("risk_metrics") or {}
-        strategy_signal = market_block.get("strategy_signal") or snapshot.get("strategy_signal") or {}
         order_book = market_block.get("order_book") or snapshot.get("order_book") or {}
         liquidations = market_block.get("liquidations") or snapshot.get("liquidations") or []
         snapshot_health = self._build_snapshot_health(snapshot, runtime_meta)
@@ -331,7 +330,6 @@ class PromptBuilder:
             "market": live_section,
             "history": history_section,
             "indicators": indicator_section,
-            "strategy_signal": strategy_signal,
             "risk_metrics": risk_metrics,
             "positions": positions_section,
             "account": account_section,
