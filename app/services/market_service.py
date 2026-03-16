@@ -115,13 +115,14 @@ class MarketService:
         "4h": "4H",
         "1d": "1D",
     }
-    # Maps each base bar to (higher-TF bar, candle limit preserving the same wall-clock window).
-    # limit = max_candles * base_minutes / htf_minutes ≈ 120 / ratio
+    # Maps each base bar to (higher-TF bar, candle limit).
+    # 200 candles gives enough history for EMA_50 and EMA_200 on any HTF.
+    # OKX allows up to 300 candles per request.
     _HTF_MAP: dict[str, tuple[str, int]] = {
-        "15m": ("1H", 30),
-        "1H":  ("4H", 30),
-        "4H":  ("1D", 20),
-        "1D":  ("", 0),
+        "15m": ("1H",  200),
+        "1H":  ("4H",  200),
+        "4H":  ("1D",  200),
+        "1D":  ("",     0),
     }
     SUPPORTED_TIMEFRAMES = set(_TIMEFRAME_CHOICES.values())
     DEFAULT_TIMEFRAME = "4H"
@@ -400,6 +401,7 @@ class MarketService:
             if ohlcv_htf:
                 htf_bar, _ = self._HTF_MAP.get(self._ohlc_bar, ("", 0))
                 indicators["ohlcv_htf"] = ohlcv_htf
+                indicators["htf_indicators"] = self._compute_indicators(ohlcv_htf)
                 if htf_bar:
                     indicators["ohlcv_htf_bar"] = htf_bar
             custom_metrics = self._compute_custom_metrics(symbol, order_book)

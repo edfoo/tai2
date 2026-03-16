@@ -27,11 +27,14 @@ DEFAULT_DECISION_PROMPT = (
     "Cite all pre-flight checks in your rationale. "
 
     "STEP 2 — HIGHER-TIMEFRAME TREND FILTER (mandatory gate): "
-    "context.history.candles_htf contains candles at context.history.timeframe_htf, covering the same wall-clock window as context.history.candles. "
-    "The HTF trend is the non-negotiable primary directional bias. "
-    "A BUY is only valid if the HTF trend is bullish (e.g., price above HTF EMA, HTF ADX > 25 with +DI > -DI). "
-    "A SELL is only valid if the HTF trend is bearish. "
+    "context.history.candles_htf contains candles at context.history.timeframe_htf (same wall-clock window as context.history.candles). "
+    "Both candles and candles_htf are sorted ascending (oldest first, most recent last) — no ordering check needed. "
+    "context.indicators.htf contains pre-computed HTF indicators: adx (value/di_plus/di_minus), moving_averages (ema_50/ema_200), bollinger_bands, rsi, vwap. "
+    "Use these to determine HTF directional bias. "
+    "A BUY is only valid if the HTF trend is bullish: e.g. ema_50 > ema_200 AND (adx.value > 25 with di_plus > di_minus OR price above ema_50). "
+    "A SELL is only valid if the HTF trend is bearish: e.g. ema_50 < ema_200 AND (adx.value > 25 with di_minus > di_plus OR price below ema_50). "
     "If the lower-timeframe signal contradicts the HTF trend, you MUST recommend HOLD regardless of other signals. "
+    "FALLBACK: if context.indicators.htf is empty or context.history.candles_htf is empty, skip this mandatory gate and rely solely on LTF indicators (Steps 3-4) with a confidence penalty of 0.2. "
 
     "STEP 3 — DIVERGENCE CHECK (strong filter): "
     "Compare context.history.candles close prices with context.history.volume_series (OBV proxy) and context.market.order_flow.cvd. "
@@ -472,6 +475,31 @@ class PromptBuilder:
             },
         }
 
+    @staticmethod
+    def _normalize_htf_candles(raw: list[Any]) -> list[dict[str, Any]]:
+        """Convert raw OKX candlestick rows (list-of-lists) to named-field dicts.
+
+        OKX returns candles newest-first; we sort ascending (oldest first) so the
+        LLM receives the same chronological order as context.history.candles.
+        """
+        result = []
+        for row in raw:
+            if len(row) < 6:
+                continue
+            try:
+                result.append({
+                    "ts": int(row[0]),
+                    "open": float(row[1]),
+                    "high": float(row[2]),
+                    "low": float(row[3]),
+                    "close": float(row[4]),
+                    "volume": float(row[5]),
+                })
+            except (ValueError, TypeError):
+                continue
+        result.sort(key=lambda c: c["ts"])
+        return result
+
     def _build_history_section(self, indicators: dict[str, Any]) -> dict[str, Any]:
         ohlcv_rows = indicators.get("ohlcv") or []
         trimmed = ohlcv_rows[-self.max_candles :]
@@ -484,7 +512,10 @@ class PromptBuilder:
         ohlcv_htf = indicators.get("ohlcv_htf")
         htf_bar = indicators.get("ohlcv_htf_bar")
         if ohlcv_htf:
-            section["candles_htf"] = ohlcv_htf
+            # Fetch 200 candles for indicator accuracy; only send the last 50 to the LLM
+            # (enough to identify swing highs/lows and TP levels, saves significant tokens).
+            htf_normalized = self._normalize_htf_candles(ohlcv_htf)
+            section["candles_htf"] = htf_normalized[-50:]
         if htf_bar:
             section["timeframe_htf"] = htf_bar
         return section
@@ -527,6 +558,30 @@ class PromptBuilder:
             "atr": indicators.get("atr"),
             "atr_pct": indicators.get("atr_pct"),
             "volume": indicators.get("volume"),
+            "htf": self._build_htf_indicator_section(indicators),
+        }
+
+    def _build_htf_indicator_section(self, indicators: dict[str, Any]) -> dict[str, Any]:
+        """Extract key HTF indicators from pre-computed htf_indicators bundle."""
+        htf = indicators.get("htf_indicators") or {}
+        if not htf:
+            return {}
+        adx = htf.get("adx") or {}
+        ma = htf.get("moving_averages") or {}
+        bb = htf.get("bollinger_bands") or {}
+        return {
+            "adx": {
+                "value": adx.get("value"),
+                "di_plus": adx.get("di_plus"),
+                "di_minus": adx.get("di_minus"),
+            },
+            "moving_averages": {
+                "ema_50": ma.get("ema_50"),
+                "ema_200": ma.get("ema_200"),
+            },
+            "bollinger_bands": bb,
+            "rsi": htf.get("rsi"),
+            "vwap": htf.get("vwap"),
         }
 
     def _build_trend_confirmation(

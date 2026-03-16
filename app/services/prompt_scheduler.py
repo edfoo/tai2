@@ -149,11 +149,18 @@ class PromptScheduler:
         if not symbols:
             logger.debug("Prompt scheduler: no symbols to evaluate")
             return
-        for symbol in symbols:
+        # Refresh once — _build_snapshot covers all symbols in one pass.
+        await self._refresh_snapshot(reason="scheduler")
+        # Evaluate all symbols concurrently so N symbols cost the same wall-clock
+        # time as 1 (each LLM call is I/O-bound). return_exceptions=True ensures
+        # one failure does not cancel the rest.
+        async def _safe_evaluate(symbol: str) -> None:
             try:
                 await self._evaluate_symbol(symbol)
             except Exception as exc:  # pragma: no cover - defensive logging
                 logger.exception("Prompt scheduler failed for %s: %s", symbol, exc)
+
+        await asyncio.gather(*(_safe_evaluate(s) for s in symbols))
 
     def _resolve_symbols(self, snapshot: dict[str, Any]) -> Iterable[str]:
         symbols = snapshot.get("symbols") or []
@@ -181,7 +188,6 @@ class PromptScheduler:
             if blocked_reason:
                 logger.debug("Skipping LLM for %s: %s", symbol, blocked_reason)
                 return
-        await self._refresh_snapshot(reason=f"scheduler:{symbol}")
         bundle, error_response = await prepare_prompt_payload(self._app, symbol=symbol)
         if error_response:
             logger.debug(

@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 import logging
 from typing import Any
+
+# Hard cap on a single OpenRouter request.  Keeps the scheduler tick well
+# within TICK_TIMEOUT_SECONDS even when multiple symbols are evaluated.
+LLM_REQUEST_TIMEOUT_SECONDS = 90
 
 from openrouter import OpenRouter, errors as openrouter_errors
 
@@ -193,7 +198,15 @@ class LLMService:
         model_id: str | None,
     ) -> dict[str, Any]:
         try:
-            response = await client.chat.send_async(**request_kwargs)
+            response = await asyncio.wait_for(
+                client.chat.send_async(**request_kwargs),
+                timeout=LLM_REQUEST_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            raise TimeoutError(
+                f"OpenRouter request timed out after {LLM_REQUEST_TIMEOUT_SECONDS}s "
+                f"(model={model_id or request_kwargs.get('model')})"
+            )
         except openrouter_errors.ChatError as exc:
             detail = self._describe_openrouter_error(exc)
             logger.warning(
