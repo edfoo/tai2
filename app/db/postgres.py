@@ -548,6 +548,17 @@ async def fetch_prompt_versions(limit: int = 50) -> list[dict[str, Any]]:
     return results
 
 
+async def delete_prompt_version(version_id: str) -> bool:
+    """Delete a prompt version by ID. Returns True if a row was deleted."""
+    pool = await get_postgres_pool()
+    result = await pool.execute(
+        "DELETE FROM prompt_versions WHERE id = $1",
+        version_id,
+    )
+    # result is e.g. 'DELETE 1' or 'DELETE 0'
+    return result.endswith("1")
+
+
 async def save_guardrails(config: dict[str, Any]) -> None:
     pool = await get_postgres_pool()
     await pool.execute(

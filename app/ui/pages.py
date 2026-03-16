@@ -12,6 +12,7 @@ from nicegui import ui
 
 from app.core.config import get_settings
 from app.db.postgres import (
+    delete_prompt_version,
     fetch_equity_history,
     fetch_equity_window,
     fetch_okx_fees_window,
@@ -3783,6 +3784,22 @@ def register_pages(app: FastAPI) -> None:
                     with_input=False,
                 ).classes("w-full md:w-64")
                 prompt_version_select.disable()
+                delete_version_button = ui.button(
+                    icon="delete",
+                    color="negative",
+                ).props("flat dense").tooltip("Delete selected prompt version")
+                with ui.dialog() as _delete_version_dialog, ui.card().classes("p-6 gap-4"):
+                    _delete_confirm_label = ui.label("").classes("text-base font-semibold")
+                    ui.label(
+                        "This cannot be undone. Prompt runs that reference this version will keep their data."
+                    ).classes("text-sm text-slate-500")
+                    with ui.row().classes("gap-2 justify-end w-full"):
+                        ui.button("Cancel", color="grey").on(
+                            "click", lambda: _delete_version_dialog.submit(False)
+                        )
+                        ui.button("Delete", color="negative", icon="delete").on(
+                            "click", lambda: _delete_version_dialog.submit(True)
+                        )
                 prompt_version_name_input = ui.input(
                     label="Save As New Version",
                     placeholder="e.g., Momentum bias v2",
@@ -4186,7 +4203,7 @@ def register_pages(app: FastAPI) -> None:
                 label = f"{row['name']} ({created[:16]})"
                 prompt_version_options[label] = row["id"]
                 options.append(label)
-            prompt_version_select.options = options
+            prompt_version_select.set_options(options, value=None)
             if options:
                 prompt_version_select.enable()
             else:
@@ -4224,6 +4241,38 @@ def register_pages(app: FastAPI) -> None:
             apply_prompt_version(version_id)
 
         prompt_version_select.on_value_change(on_prompt_version_change)
+
+        async def confirm_delete_prompt_version() -> None:
+            selected_label = prompt_version_select.value
+            version_id = prompt_version_options.get(selected_label) if selected_label else None
+            if not version_id:
+                ui.notify("Select a version to delete", color="warning")
+                return
+            record = prompt_versions_cache.get(version_id)
+            version_name = record.get("name", selected_label) if record else selected_label
+
+            # Dialog is pre-built at render time to avoid creating UI elements
+            # inside a background task (which has no NiceGUI slot context).
+            _delete_confirm_label.set_text(f'Delete prompt version "{version_name}"?')
+            confirmed = await _delete_version_dialog
+            if not confirmed:
+                return
+            try:
+                deleted = await delete_prompt_version(version_id)
+            except Exception as exc:
+                ui.notify(f"Delete failed: {exc}", color="negative")
+                return
+            if not deleted:
+                ui.notify("Version not found — already deleted?", color="warning")
+            else:
+                ui.notify(f'Deleted "{version_name}"', color="positive")
+            if config.get("prompt_version_id") == version_id:
+                config["prompt_version_id"] = None
+                config["prompt_version_name"] = None
+                update_prompt_version_param(None)
+            await load_prompt_versions_list()
+
+        delete_version_button.on("click", confirm_delete_prompt_version)
 
         async def save_settings(event: Any | None = None) -> None:
             config["poll_interval"] = int(ws_interval_input.value or 5)
