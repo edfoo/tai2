@@ -2491,7 +2491,10 @@ class MarketService:
         """Check if an OKX response points to insufficient margin error codes."""
         code, sub_code, _ = self._extract_response_codes(response)
         for candidate in (code, sub_code):
-            if candidate and candidate in INSUFFICIENT_MARGIN_CODES:
+            if candidate and (
+                candidate in INSUFFICIENT_MARGIN_CODES
+                or candidate in ORDER_INSUFFICIENT_MARGIN_CODES
+            ):
                 return True
         return False
 
@@ -3425,14 +3428,15 @@ class MarketService:
             or account_block.get("total_account_value")
         )
         current_side = self._detect_position_side(positions, symbol)
+        # Detect hedge/dual-side mode from ANY position in the account, not
+        # just the target symbol.  When opening a brand-new position (bootstrap)
+        # there are no existing entries for this symbol, so a symbol-specific
+        # check always returns False — even on hedge-mode accounts.
         dual_side_mode = False
         for pos in positions:
             if not isinstance(pos, dict):
                 continue
-            pos_symbol = str(pos.get("instId") or pos.get("symbol") or "").upper()
-            if pos_symbol != symbol:
-                continue
-            if isinstance(pos.get("posSide"), str):
+            if pos.get("posSide") in {"long", "short"}:
                 dual_side_mode = True
                 break
         side_sizes = self._position_side_sizes(positions, symbol)
@@ -4051,6 +4055,40 @@ class MarketService:
                             },
                         )
                         wallet_cap = actual_quote_balance
+                # Apply bootstrap_pct as a hard upper bound on wallet_cap even when
+                # a larger isolated_margin_seed_usd / isolated_margin_seed_pct is
+                # configured.  OKX market orders for new isolated positions require
+                # the full initial margin at WORST-CASE fill price, which for illiquid
+                # small-cap pairs can be substantially above the mark price.  Sizing
+                # to 50 % of equity consistently triggers 51008 in practice; keeping
+                # bootstrap orders at ≤ bootstrap_pct of the free quote balance gives
+                # OKX the headroom it needs for fees, slippage, and its internal
+                # margin calculations.  Users who want larger bootstraps should raise
+                # isolated_wallet_bootstrap_pct in the guardrails config.
+                if bootstrap_pct > 0 and quote_margin_candidates:
+                    actual_quote_balance = max(quote_margin_candidates)
+                    if actual_quote_balance > 0:
+                        bootstrap_budget = actual_quote_balance * bootstrap_pct
+                        if bootstrap_budget > 0 and (wallet_cap is None or wallet_cap > bootstrap_budget):
+                            _prev_cap_str = f"{wallet_cap:.4f}" if wallet_cap is not None else "None"
+                            self._emit_debug(
+                                f"{symbol} bootstrap notional cap: "
+                                f"{_prev_cap_str} → {bootstrap_budget:.4f} "
+                                f"(bootstrap_pct={bootstrap_pct:.2f} × "
+                                f"quote_balance={actual_quote_balance:.4f})"
+                            )
+                            self._record_execution_feedback(
+                                symbol,
+                                "Bootstrap notional capped by bootstrap_pct guardrail",
+                                level="info",
+                                meta={
+                                    "previous_wallet_cap": wallet_cap,
+                                    "bootstrap_budget": bootstrap_budget,
+                                    "bootstrap_pct": bootstrap_pct,
+                                    "actual_quote_balance": actual_quote_balance,
+                                },
+                            )
+                            wallet_cap = bootstrap_budget
                 if wallet_cap and wallet_cap > 0:
                     guardrail_notional_cap = wallet_cap if guardrail_notional_cap is None else min(guardrail_notional_cap, wallet_cap)
                     # Do NOT cap available_margin_usd by wallet_cap / leverage here.
@@ -5573,20 +5611,101 @@ class MarketService:
         self._emit_debug(
             f"Setting isolated leverage for {symbol} ({pos_designator}) -> {target_leverage:.2f}x"
         )
+
+        def _leverage_ok(resp: Any) -> bool:
+            """Return True only when OKX confirms the leverage change succeeded."""
+            if not isinstance(resp, dict):
+                return False
+            return str(resp.get("code", "1")) == "0"
+
         try:
-            await asyncio.to_thread(setter, **payload)
+            resp = await asyncio.to_thread(setter, **payload)
         except Exception as exc:
             self._emit_debug(f"Failed to set leverage for {symbol}: {exc}")
             self._record_execution_feedback(
                 symbol,
                 "Failed to set isolated leverage",
                 level="warning",
-                meta={
-                    "requested_leverage": target_leverage,
-                    "pos_side": pos_designator,
-                },
+                meta={"requested_leverage": target_leverage, "pos_side": pos_designator},
             )
             return
+
+        if not _leverage_ok(resp):
+            # posSide="net" is rejected by OKX for hedge-mode accounts.  When
+            # the order itself will use a directional posSide, retry with that
+            # side so the leverage is correctly registered before the order fires.
+            if pos_designator == "net" and pos_side and pos_side.lower() in {"long", "short"}:
+                retry_designator = pos_side.lower()
+                retry_payload = dict(payload)
+                retry_payload["posSide"] = retry_designator
+                retry_cache_key = self._leverage_cache_key(symbol, retry_designator)
+                retry_cached = self._isolated_leverage_cache.get(retry_cache_key)
+                if retry_cached is not None and abs(retry_cached - target_leverage) <= 1e-3:
+                    # Already confirmed for this direction; treat as success.
+                    return
+                self._emit_debug(
+                    f"Retrying set-leverage for {symbol} with posSide={retry_designator} "
+                    f"(net was rejected — hedge-mode account)"
+                )
+                try:
+                    retry_resp = await asyncio.to_thread(setter, **retry_payload)
+                except Exception as exc2:
+                    self._emit_debug(f"Failed to set leverage for {symbol} ({retry_designator}): {exc2}")
+                    self._record_execution_feedback(
+                        symbol,
+                        "Failed to set isolated leverage (hedge-mode retry)",
+                        level="warning",
+                        meta={"requested_leverage": target_leverage, "pos_side": retry_designator},
+                    )
+                    return
+                if _leverage_ok(retry_resp):
+                    self._isolated_leverage_cache[retry_cache_key] = target_leverage
+                    # Also record under the original cache key so subsequent calls
+                    # with pos_designator="net" don't retry the rejected call.
+                    self._isolated_leverage_cache[cache_key] = target_leverage
+                    # Also set leverage for the OPPOSITE direction so the account
+                    # is fully configured for isolated hedge-mode trading.  OKX
+                    # tracks long/short leverage independently and having only one
+                    # side configured can cause order rejections on some accounts.
+                    opposite = "short" if retry_designator == "long" else "long"
+                    opp_cache_key = self._leverage_cache_key(symbol, opposite)
+                    if self._isolated_leverage_cache.get(opp_cache_key) is None:
+                        opp_payload = dict(retry_payload)
+                        opp_payload["posSide"] = opposite
+                        try:
+                            opp_resp = await asyncio.to_thread(setter, **opp_payload)
+                            if _leverage_ok(opp_resp):
+                                self._isolated_leverage_cache[opp_cache_key] = target_leverage
+                                self._emit_debug(
+                                    f"Set leverage for {symbol} ({opposite}) -> {target_leverage:.2f}x "
+                                    f"(hedge-mode complement)"
+                                )
+                        except Exception:  # pragma: no cover - best-effort
+                            pass
+                else:
+                    self._emit_debug(
+                        f"set-leverage rejected for {symbol} ({retry_designator}): {retry_resp}"
+                    )
+                    self._record_execution_feedback(
+                        symbol,
+                        "Failed to set isolated leverage (both net and directional failed)",
+                        level="warning",
+                        meta={
+                            "requested_leverage": target_leverage,
+                            "net_response": resp,
+                            "directional_response": retry_resp,
+                        },
+                    )
+            else:
+                self._emit_debug(f"set-leverage rejected for {symbol} ({pos_designator}): {resp}")
+                self._record_execution_feedback(
+                    symbol,
+                    "Failed to set isolated leverage",
+                    level="warning",
+                    meta={"requested_leverage": target_leverage, "pos_side": pos_designator, "response": resp},
+                )
+            return
+
         self._isolated_leverage_cache[cache_key] = target_leverage
 
     async def _submit_order(
