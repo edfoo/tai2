@@ -71,9 +71,20 @@ tests/             # pytest suites
 
 ## Prompt Scheduler
 
-Enable "Auto Prompt Scheduler" on the CFG page to have the backend iterate every tracked symbol and send an LLM prompt automatically. You can configure the interval (minimum 30 seconds) there as well; the FastAPI lifespan wires those values into the new `PromptScheduler`, which reuses the same logic as the `/llm/prompt` and `/llm/execute` endpoints. Disable the toggle to keep prompts purely manual.
+Enable "Auto Prompt Scheduler" on the CFG page to have the backend iterate every tracked symbol and send an LLM prompt automatically. You can configure the interval (minimum 30 seconds) there as well; the FastAPI lifespan wires those values into the `PromptScheduler`, which reuses the same logic as the `/llm/prompt` and `/llm/execute` endpoints. Disable the toggle to keep prompts purely manual.
 
-If the daily loss guard trips, the scheduler now logs an execution alert, automatically pauses itself, and surfaces a "Reset Lock & Resume" control on the LIVE page. Once equity recovers above the configured drawdown cap, hit that button to re-enable auto prompts without digging through the CFG page.
+### Execution ordering by confidence
+
+Each scheduler tick runs in four phases to ensure the highest-quality setups get first access to available capital:
+
+1. **LLM calls — concurrent.** All symbols are queried in parallel (pure I/O), so wall-clock time does not scale with the number of pairs.
+2. **Sort.** BUY/SELL decisions are ranked by `confidence` descending, then `risk_score` ascending, so the most compelling setup executes first.
+3. **Execute BUY/SELL — sequential.** Trades fire one at a time in ranked order. Each call to `handle_llm_decision` fetches a live balance, so the second trade automatically sees the reduced available equity left after the first trade committed funds. Size is clipped accordingly; stop-loss and take-profit levels from the LLM are preserved unchanged.
+4. **Record HOLDs — concurrent.** HOLD decisions do not place orders and carry no budget impact, so they are persisted in parallel.
+
+This design prevents a lower-confidence trade from racing a higher-confidence one to the same USDT pool and avoids the OKX `51008` "insufficient balance" error that occurs when two isolated-margin bootstraps each size to 50 % of equity simultaneously.
+
+If the daily loss guard trips, the scheduler logs an execution alert, automatically pauses itself, and surfaces a "Reset Lock & Resume" control on the LIVE page. Once equity recovers above the configured drawdown cap, hit that button to re-enable auto prompts without digging through the CFG page.
 
 ## Configuration Controls
 

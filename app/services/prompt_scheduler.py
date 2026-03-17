@@ -8,7 +8,11 @@ from typing import Any, Iterable, Optional
 
 from fastapi import FastAPI
 
-from app.services.prompt_runner import execute_llm_decision, prepare_prompt_payload
+from app.services.prompt_runner import (
+    apply_llm_decision,
+    fetch_llm_decision,
+    prepare_prompt_payload,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -151,16 +155,101 @@ class PromptScheduler:
             return
         # Refresh once — _build_snapshot covers all symbols in one pass.
         await self._refresh_snapshot(reason="scheduler")
-        # Evaluate all symbols concurrently so N symbols cost the same wall-clock
-        # time as 1 (each LLM call is I/O-bound). return_exceptions=True ensures
-        # one failure does not cancel the rest.
-        async def _safe_evaluate(symbol: str) -> None:
-            try:
-                await self._evaluate_symbol(symbol)
-            except Exception as exc:  # pragma: no cover - defensive logging
-                logger.exception("Prompt scheduler failed for %s: %s", symbol, exc)
 
-        await asyncio.gather(*(_safe_evaluate(s) for s in symbols))
+        # ── Phase 1: ask the LLM for ALL symbols concurrently ─────────────
+        # LLM calls are pure I/O — running them in parallel costs the same
+        # wall-clock time as a single call and lets us see every decision
+        # before committing any funds.
+        async def _fetch_decision(
+            symbol: str,
+        ) -> tuple[str, Any, dict[str, Any] | None, str | None]:
+            """Prepare prompt + call LLM. Returns (symbol, bundle, decision, prompt_id)."""
+            try:
+                _ms = getattr(self._app.state, "market_service", None)
+                if _ms:
+                    _rc = getattr(self._app.state, "runtime_config", {}) or {}
+                    _gr = _rc.get("guardrails") or {}
+                    _blocked = _ms.is_symbol_blocked(symbol, _gr)
+                    if _blocked:
+                        logger.debug("Skipping LLM for %s: %s", symbol, _blocked)
+                        return symbol, None, None, None
+                bundle, error_response = await prepare_prompt_payload(self._app, symbol=symbol)
+                if error_response:
+                    logger.debug(
+                        "Prompt scheduler skipping %s: %s",
+                        symbol,
+                        getattr(error_response, "body", b"error"),
+                    )
+                    if getattr(error_response, "status_code", None) == 423:
+                        self._handle_daily_loss_lock(symbol)
+                    return symbol, None, None, None
+                if not bundle:
+                    return symbol, None, None, None
+                decision, prompt_id = await fetch_llm_decision(self._app, bundle)
+                return symbol, bundle, decision, prompt_id
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.exception("Prompt scheduler LLM fetch failed for %s: %s", symbol, exc)
+                return symbol, None, None, None
+
+        raw_results: list[tuple[str, Any, dict[str, Any] | None, str | None]] = list(
+            await asyncio.gather(*(_fetch_decision(s) for s in symbols))
+        )
+        valid = [
+            (sym, bundle, decision, prompt_id)
+            for sym, bundle, decision, prompt_id in raw_results
+            if bundle is not None and decision is not None
+        ]
+
+        # ── Phase 2: sort BUY/SELL by quality ─────────────────────────────
+        # Highest confidence first; lowest risk_score as tiebreaker so the
+        # most compelling setups consume capital before weaker ones.
+        def _is_actionable(item: tuple) -> bool:
+            return (item[2].get("action") or "HOLD").upper() in {"BUY", "SELL"}
+
+        def _decision_sort_key(item: tuple) -> tuple[float, float]:
+            d = item[2]
+            conf = float(d.get("confidence") or 0.0)
+            risk = float(d.get("risk_score") or 1.0)
+            return (-conf, risk)  # highest confidence, lowest risk first
+
+        actionable = sorted([i for i in valid if _is_actionable(i)], key=_decision_sort_key)
+        non_actionable = [i for i in valid if not _is_actionable(i)]
+
+        # ── Phase 3: execute BUY/SELL sequentially ────────────────────────
+        # Running sequentially means each trade sees the actual remaining
+        # balance (or the _pending_notional deduction when OKX balance hasn't
+        # updated yet), so later trades automatically size down to whatever
+        # equity is left after earlier trades have committed funds.
+        for sym, bundle, decision, prompt_id in actionable:
+            try:
+                await apply_llm_decision(self._app, bundle, decision, prompt_id)
+                logger.info(
+                    "Prompt scheduler decision for %s action=%s confidence=%s prompt_id=%s",
+                    sym,
+                    decision.get("action"),
+                    decision.get("confidence"),
+                    prompt_id,
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.exception("Prompt scheduler execution failed for %s: %s", sym, exc)
+
+        # ── Phase 4: record HOLDs concurrently ────────────────────────────
+        # HOLDs do not place orders so they are safe to run in parallel.
+        async def _apply_hold(item: tuple) -> None:
+            sym, bundle, decision, prompt_id = item
+            try:
+                await apply_llm_decision(self._app, bundle, decision, prompt_id)
+                logger.info(
+                    "Prompt scheduler decision for %s action=%s confidence=%s prompt_id=%s",
+                    sym,
+                    decision.get("action"),
+                    decision.get("confidence"),
+                    prompt_id,
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.exception("Prompt scheduler HOLD recording failed for %s: %s", sym, exc)
+
+        await asyncio.gather(*(_apply_hold(i) for i in non_actionable))
 
     def _resolve_symbols(self, snapshot: dict[str, Any]) -> Iterable[str]:
         symbols = snapshot.get("symbols") or []
@@ -179,33 +268,6 @@ class PromptScheduler:
         except Exception as exc:  # pragma: no cover - upstream network risks
             logger.debug("Prompt scheduler snapshot refresh skipped (%s): %s", reason, exc)
 
-    async def _evaluate_symbol(self, symbol: str) -> None:
-        market_service = getattr(self._app.state, "market_service", None)
-        if market_service:
-            runtime_config = getattr(self._app.state, "runtime_config", {}) or {}
-            guardrails = runtime_config.get("guardrails") or {}
-            blocked_reason = market_service.is_symbol_blocked(symbol, guardrails)
-            if blocked_reason:
-                logger.debug("Skipping LLM for %s: %s", symbol, blocked_reason)
-                return
-        bundle, error_response = await prepare_prompt_payload(self._app, symbol=symbol)
-        if error_response:
-            logger.debug(
-                "Prompt scheduler skipping %s: %s", symbol, getattr(error_response, "body", b"error")
-            )
-            if getattr(error_response, "status_code", None) == 423:
-                self._handle_daily_loss_lock(symbol)
-            return
-        if not bundle:
-            return
-        decision, prompt_id = await execute_llm_decision(self._app, bundle)
-        logger.info(
-            "Prompt scheduler decision for %s action=%s confidence=%s prompt_id=%s",
-            symbol,
-            decision.get("action"),
-            decision.get("confidence"),
-            prompt_id,
-        )
 
     def _handle_daily_loss_lock(self, symbol: str | None) -> None:
         runtime_config = getattr(self._app.state, "runtime_config", {}) or {}

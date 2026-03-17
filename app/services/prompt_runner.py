@@ -400,18 +400,37 @@ async def persist_prompt_run(
         return None
 
 
-async def execute_llm_decision(
+async def fetch_llm_decision(
     app: FastAPI,
     bundle: PromptPayloadBundle,
 ) -> Tuple[dict[str, Any], str | None]:
-    runtime_meta = bundle.runtime_meta
-    fallback_orders_enabled = bool(runtime_meta.get("fallback_orders_enabled", True))
+    """Call the LLM and persist the prompt run.  Does NOT execute the trade.
+
+    Use this when you want to gather all LLM results before deciding execution
+    order (e.g. sorted by confidence).  Call apply_llm_decision() afterwards.
+    """
     llm_service = getattr(app.state, "llm_service", None)
     if llm_service is None:
-        llm_service = LLMService(model_id=runtime_meta.get("llm_model_id"))
+        llm_service = LLMService(model_id=bundle.runtime_meta.get("llm_model_id"))
         app.state.llm_service = llm_service
     decision = await llm_service.run(bundle.payload)
     prompt_id = await persist_prompt_run(app, bundle, decision=decision)
+    return decision, prompt_id
+
+
+async def apply_llm_decision(
+    app: FastAPI,
+    bundle: PromptPayloadBundle,
+    decision: dict[str, Any],
+    prompt_id: str | None,
+) -> bool:
+    """Execute an already-fetched LLM decision through the market service.
+
+    Returns True if a trade was submitted.  Handles daily-loss guard, fallback
+    suppression, post-trade snapshot refresh, and UI event recording.
+    """
+    runtime_meta = bundle.runtime_meta
+    fallback_orders_enabled = bool(runtime_meta.get("fallback_orders_enabled", True))
     market_service = getattr(app.state, "market_service", None)
     state_changed = False
     decision_is_fallback = bool((decision or {}).get("_decision_origin") == "fallback")
@@ -429,7 +448,7 @@ async def execute_llm_decision(
             backend_events.append(
                 "Daily loss limit active; new decisions blocked until equity recovers"
             )
-        return decision, prompt_id
+        return False
     if market_service and not fallback_blocked:
         context_block = bundle.payload.get("context") or {}
         try:
@@ -456,6 +475,21 @@ async def execute_llm_decision(
         backend_events.append(
             f"LLM decision ({version_label}) action={decision.get('action')} conf={decision.get('confidence', '--')}"
         )
+    return state_changed
+
+
+async def execute_llm_decision(
+    app: FastAPI,
+    bundle: PromptPayloadBundle,
+) -> Tuple[dict[str, Any], str | None]:
+    """Fetch an LLM decision and immediately execute it.
+
+    This is the single-call path used by the manual /run-prompt endpoint and
+    tests.  The scheduler uses fetch_llm_decision + apply_llm_decision
+    separately so it can sort decisions by confidence before execution.
+    """
+    decision, prompt_id = await fetch_llm_decision(app, bundle)
+    await apply_llm_decision(app, bundle, decision, prompt_id)
     return decision, prompt_id
 
 
@@ -500,8 +534,10 @@ def _record_llm_interaction(
 
 __all__ = [
     "PromptPayloadBundle",
+    "apply_llm_decision",
     "compute_daily_loss_guard_state",
     "execute_llm_decision",
+    "fetch_llm_decision",
     "persist_prompt_run",
     "prepare_prompt_payload",
     "resolve_prompt_metadata",

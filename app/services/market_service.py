@@ -220,6 +220,10 @@ class MarketService:
         # Cursor for fills-history pagination: OKX Unix-ms string (empty = from now).
         self._fills_cursor: str = ""
         self._reconcile_task: Optional[asyncio.Task] = None
+        # Notional (USD) reserved for in-flight orders, keyed by symbol.
+        # Concurrent handle_llm_decision coroutines deduct these before sizing
+        # so they never collectively over-commit the same USDT pool.
+        self._pending_notional: dict[str, float] = {}
 
     async def start(self) -> None:
         """Launch the market snapshot poller and websocket consumers if not already running."""
@@ -3672,6 +3676,27 @@ class MarketService:
                     )
                     available_margin_usd = 0.0
 
+        # Reduce effective budget by notionals already reserved for other symbols
+        # that are concurrently in-flight.  This prevents two simultaneous orders
+        # from each sizing to 50 % of the same USDT pool and together consuming
+        # 100 % of available balance (which OKX rejects with code 51008).
+        _other_pending = sum(
+            v for k, v in self._pending_notional.items() if k != symbol
+        )
+        if _other_pending > 0:
+            _prev_equity = account_equity
+            _prev_margin = available_margin_usd
+            if account_equity is not None:
+                account_equity = max(0.0, account_equity - _other_pending)
+            if available_margin_usd is not None:
+                available_margin_usd = max(0.0, available_margin_usd - _other_pending)
+            self._emit_debug(
+                f"{symbol} budget reduced by {_other_pending:.2f} USDT "
+                f"(other in-flight orders): equity {_prev_equity:.2f} "
+                f"→ {account_equity:.2f}, margin {_prev_margin:.2f} "
+                f"→ {available_margin_usd:.2f}"
+            )
+
         equity_based_cap = None
         if (
             account_equity is not None
@@ -4770,22 +4795,30 @@ class MarketService:
             )
         except Exception:
             pass
-        order, attachments_used = await self._submit_order(
-            symbol=symbol,
-            side=side,
-            pos_side=pos_side,
-            size=raw_size,
-            trade_mode=trade_mode,
-            order_type=order_type,
-            reduce_only=reduce_only,
-            client_order_id=client_order_id,
-            attach_algo_orders=attach_algo_orders,
-            margin_currency=quote_currency,
-            leverage=target_leverage,
-            dual_side_mode=dual_side_mode,
-            reference_price=last_price,
-            isolated_bootstrap=isolated_mode and not has_isolated_wallet,
-        )
+        # Reserve this order's notional so any concurrent symbol handler that
+        # hasn't yet computed its equity cap will see the commitment and reduce
+        # its own budget accordingly (avoids double-spending the USDT pool).
+        if not reduce_only and raw_size and last_price and last_price > 0:
+            self._pending_notional[symbol] = raw_size * last_price
+        try:
+            order, attachments_used = await self._submit_order(
+                symbol=symbol,
+                side=side,
+                pos_side=pos_side,
+                size=raw_size,
+                trade_mode=trade_mode,
+                order_type=order_type,
+                reduce_only=reduce_only,
+                client_order_id=client_order_id,
+                attach_algo_orders=attach_algo_orders,
+                margin_currency=quote_currency,
+                leverage=target_leverage,
+                dual_side_mode=dual_side_mode,
+                reference_price=last_price,
+                isolated_bootstrap=isolated_mode and not has_isolated_wallet,
+            )
+        finally:
+            self._pending_notional.pop(symbol, None)
         if not order:
             self._emit_debug(f"Order placement failed for {symbol}")
             return False
