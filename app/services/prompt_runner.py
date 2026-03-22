@@ -385,7 +385,7 @@ async def persist_prompt_run(
         prompt_id = await insert_prompt_run(
             symbol=context_block.get("symbol")
             or bundle.snapshot.get("symbol")
-            or "BTC-USDT-SWAP",
+            or "unknown",
             timeframe=context_block.get("timeframe"),
             model_id=model_id,
             guardrails=context_block.get("guardrails"),

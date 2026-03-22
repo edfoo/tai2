@@ -4504,7 +4504,8 @@ def register_pages(app: FastAPI) -> None:
                     continue
                 symbols.append(normalized)
             if not symbols:
-                symbols = ["BTC-USDT-SWAP"]
+                ui.notify("At least one trading pair must be selected before saving.", color="negative")
+                return
             selected_trading_pairs[:] = symbols
             config["trading_pairs"] = symbols
             try:

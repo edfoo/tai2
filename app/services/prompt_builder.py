@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import copy
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from typing import Any, Optional
 
 from app.services.prompt_utils import sanitize_prompt_text
+
+logger = logging.getLogger(__name__)
 
 
 DEFAULT_SYSTEM_PROMPT = (
@@ -405,7 +408,8 @@ class PromptBuilder:
         if symbols:
             self._cache_symbol = symbols[0]
             return symbols[0]
-        return "BTC-USDT-SWAP"
+        logger.warning("PromptBuilder: could not resolve symbol from snapshot; no symbol will be used")
+        return "UNKNOWN"
 
     def _select_market(self, symbol: str) -> dict[str, Any]:
         snapshot = self.snapshot or {}
