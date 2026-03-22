@@ -1012,6 +1012,8 @@ def register_pages(app: FastAPI) -> None:
                 return json.dumps(value, ensure_ascii=False)
             return str(value)
 
+        _expanded_cards: set[str] = set()
+
         def refresh_llm_cards() -> None:
             llm_card_container.clear()
             interactions = getattr(app.state, "llm_interactions", {}) or {}
@@ -1047,9 +1049,22 @@ def register_pages(app: FastAPI) -> None:
                     for key in decision.keys():
                         if key not in ordered_fields:
                             ordered_fields.append(key)
+                    card_key = symbol
                     card = ui.expansion(header).classes(
                         "w-full bg-white rounded-xl border border-slate-200 shadow-sm"
                     )
+                    if card_key in _expanded_cards:
+                        card.open()
+
+                    def _make_toggle(k: str):
+                        def _on_change(e: Any) -> None:
+                            if e.value:
+                                _expanded_cards.add(k)
+                            else:
+                                _expanded_cards.discard(k)
+                        return _on_change
+
+                    card.on_value_change(_make_toggle(card_key))
                     with card:
                         decision_line = f"Decision: {effective_action} (conf {confidence_label})"
                         if flipped:
