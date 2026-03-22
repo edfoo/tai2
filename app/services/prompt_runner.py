@@ -414,7 +414,14 @@ async def fetch_llm_decision(
         llm_service = LLMService(model_id=bundle.runtime_meta.get("llm_model_id"))
         app.state.llm_service = llm_service
     decision = await llm_service.run(bundle.payload)
-    prompt_id = await persist_prompt_run(app, bundle, decision=decision)
+    try:
+        prompt_id = await asyncio.wait_for(
+            persist_prompt_run(app, bundle, decision=decision),
+            timeout=10.0,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("persist_prompt_run timed out (DB stall?); continuing without prompt_id")
+        prompt_id = None
     return decision, prompt_id
 
 

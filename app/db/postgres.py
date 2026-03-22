@@ -410,6 +410,7 @@ async def insert_prompt_run(
         _serialize_json(decision),
         notes,
         prompt_version_id,
+        timeout=10,
     )
     return str(record_id)
 
