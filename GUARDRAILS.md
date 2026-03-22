@@ -53,11 +53,11 @@ Total Equity (100%)
 ├─ Global Max Position % (e.g. 80%)
 │   └─ Defines how much notional the entire strategy may use at once.
 │
-└─ Daily Loss Limit (e.g. 5%)
+└─ Daily Loss Limit (e.g. 3%)
     └─ If equity drops past this % within 24h, all prompts + trades halt.
 ```
 
-- **Global Max Position %** multiplies equity by max leverage to set a hard budget. If set to 0.8, the system clips combined exposure to 80% of equity before leverage.
+- **Global Max Position %** sets a hard notional budget as a fraction of account equity. If set to 0.8, the system clips the proposed trade size so that the resulting notional (in USD) does not exceed 80% of account equity. Leverage is applied separately and does not inflate this cap.
 - **Daily Loss Limit** watches trailing equity history (24h window). Breach ⇒ prompt scheduler returns 423 (locked) and execution ignores decisions until equity recovers.
 
 ---
