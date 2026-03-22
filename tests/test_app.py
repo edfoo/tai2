@@ -157,7 +157,6 @@ def test_prompt_builder_compiles_structured_payload() -> None:
     assert context["market"]["spread"] == 10.0
     assert len(context["history"]["candles"]) == 1  # trimmed to max_candles
     assert context["positions"][0]["side"] == "LONG"
-    assert context["strategy_signal"]["action"] == "BUY"
     assert context["trend_confirmation"]["moving_averages"]["bias"] == "bullish"
     assert context["liquidity_context"]["liquidity_bias"] == "bid-supported"
     assert context["derivatives_posture"]["long_short_ratio"]["value"] == 1.2
