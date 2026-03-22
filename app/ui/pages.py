@@ -2673,6 +2673,14 @@ def register_pages(app: FastAPI) -> None:
                         record["pnl"] = f"{sign}{pnl_val:.2f} USDT"
                     except (TypeError, ValueError):
                         record["pnl"] = "—"
+                raw_fee = record.get("fee")
+                if raw_fee is None:
+                    record["fee"] = "—"
+                else:
+                    try:
+                        record["fee"] = f"{float(raw_fee):.4f} USDT"
+                    except (TypeError, ValueError):
+                        record["fee"] = "—"
                 formatted_rows.append(record)
             trades_table.rows = formatted_rows
             trades_table.update()

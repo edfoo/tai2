@@ -287,7 +287,7 @@ class MarketService:
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:  # pragma: no cover - best-effort
-                    logger.debug("Fill reconciliation error: %s", exc)
+                    logger.warning("Fill reconciliation error: %s", exc)
             await asyncio.sleep(interval)
 
     async def _run_public_ws(self) -> None:
@@ -6328,7 +6328,7 @@ class MarketService:
                 sub_acct=sub_acct,
             )
         except Exception as exc:  # pragma: no cover - network variance
-            logger.debug("fills-history fetch failed: %s", exc)
+            logger.warning("fills-history fetch failed: %s", exc)
             return
 
         fills = self._safe_data(response)
@@ -6397,7 +6397,7 @@ class MarketService:
                     f"(fill {fill_id}, trade {target['id']})"
                 )
             except Exception as exc:  # pragma: no cover - best-effort
-                logger.debug("Failed to update trade PnL for %s: %s", inst_id, exc)
+                logger.warning("Failed to update trade PnL for %s: %s", inst_id, exc)
 
         if reconciled:
             logger.info("Fill reconciliation: updated PnL for %d trade(s)", reconciled)

@@ -6,11 +6,8 @@ import json
 import logging
 from typing import Any
 
-# Hard cap on a single OpenRouter request.  Keeps the scheduler tick well
-# within TICK_TIMEOUT_SECONDS even when multiple symbols are evaluated.
-LLM_REQUEST_TIMEOUT_SECONDS = 90
-# Reasoning models (DeepSeek-R1, o1, o4, etc.) require much longer to think.
-LLM_REASONING_TIMEOUT_SECONDS = 300
+# Hard cap on a single OpenRouter request.
+LLM_REQUEST_TIMEOUT_SECONDS = 300
 
 from openrouter import OpenRouter, errors as openrouter_errors
 
@@ -89,17 +86,11 @@ class LLMService:
             request_kwargs["reasoning"] = reasoning_config
 
         client = self._get_client(api_key)
-        timeout = (
-            LLM_REASONING_TIMEOUT_SECONDS
-            if self._model_requires_reasoning(model_id)
-            else LLM_REQUEST_TIMEOUT_SECONDS
-        )
         payload = await self._dispatch_chat_request(
             client,
             request_kwargs,
             response_format_included=response_format_included,
             model_id=model_id,
-            timeout=timeout,
         )
 
         decision = self._parse_response(payload)
@@ -231,16 +222,15 @@ class LLMService:
         *,
         response_format_included: bool,
         model_id: str | None,
-        timeout: float = LLM_REQUEST_TIMEOUT_SECONDS,
     ) -> dict[str, Any]:
         try:
             response = await asyncio.wait_for(
                 client.chat.send_async(**request_kwargs),
-                timeout=timeout,
+                timeout=LLM_REQUEST_TIMEOUT_SECONDS,
             )
         except asyncio.TimeoutError:
             raise TimeoutError(
-                f"OpenRouter request timed out after {timeout:.0f}s "
+                f"OpenRouter request timed out after {LLM_REQUEST_TIMEOUT_SECONDS:.0f}s "
                 f"(model={model_id or request_kwargs.get('model')})"
             )
         except openrouter_errors.ChatError as exc:
