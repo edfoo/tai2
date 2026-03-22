@@ -4222,7 +4222,7 @@ def register_pages(app: FastAPI) -> None:
             )
             if new_decision_prompt is not None:
                 decision_prompt_input.value = new_decision_prompt
-            prompt_version_name_input.value = record.get("name", "")
+            prompt_version_name_input.value = ""
             prompt_input.update()
             decision_prompt_input.update()
             prompt_version_name_input.update()
