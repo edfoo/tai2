@@ -179,15 +179,23 @@ class LLMService:
             history.pop("vwap_series", None)
             history.pop("volume_rsi_series", None)
 
-        # Compact "indicators": drop heavy per-bar series sub-arrays from LTF indicators
+        # Compact "indicators": trim heavy per-bar series sub-arrays from LTF indicators
         # while keeping all scalars and the full "htf" block (required by prompt Step 2).
-        _SERIES_HEAVY_KEYS = ("macd", "adx", "obv", "cmf")
+        # OBV and CMF series are kept (trimmed to 20) — required for divergence check in prompt Step 3.
+        _SERIES_DROP_KEYS = ("macd", "adx")
+        _SERIES_TRIM_KEYS = ("obv", "cmf")
         indicators = context.get("indicators")
         if isinstance(indicators, dict):
-            for _ind_key in _SERIES_HEAVY_KEYS:
+            for _ind_key in _SERIES_DROP_KEYS:
                 _ind_block = indicators.get(_ind_key)
                 if isinstance(_ind_block, dict):
                     _ind_block.pop("series", None)
+            for _ind_key in _SERIES_TRIM_KEYS:
+                _ind_block = indicators.get(_ind_key)
+                if isinstance(_ind_block, dict):
+                    _series = _ind_block.get("series")
+                    if isinstance(_series, list) and len(_series) > 20:
+                        _ind_block["series"] = _series[-20:]
 
         positions = self._compact_positions(context.get("positions"))
         if positions is not None:
