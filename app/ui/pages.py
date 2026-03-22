@@ -3308,8 +3308,6 @@ def register_pages(app: FastAPI) -> None:
                     if not normalized or normalized in selected_trading_pairs:
                         continue
                     selected_trading_pairs.append(normalized)
-                if not selected_trading_pairs:
-                    selected_trading_pairs.append("BTC-USDT-SWAP")
                 config["trading_pairs"] = selected_trading_pairs.copy()
                 trading_pair_checkboxes: dict[str, ui.checkbox] = {}
                 with ui.column().classes("w-full flex-1 gap-2"):
@@ -3337,10 +3335,13 @@ def register_pages(app: FastAPI) -> None:
             def render_trading_pair_rows() -> None:
                 trading_pairs_list.clear()
                 trading_pair_checkboxes.clear()
-                if not selected_trading_pairs:
-                    selected_trading_pairs.append("BTC-USDT-SWAP")
                 config["trading_pairs"] = selected_trading_pairs.copy()
                 with trading_pairs_list:
+                    if not selected_trading_pairs:
+                        ui.label("No trading pairs configured. Add one using the dropdown above.").classes(
+                            "text-xs text-slate-400 italic"
+                        )
+                        return
                     grid_container = ui.element("div").classes(
                         "grid gap-2 w-full grid-cols-1 sm:grid-cols-2 xl:grid-cols-3"
                     )

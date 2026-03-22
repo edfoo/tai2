@@ -224,6 +224,10 @@ class PromptScheduler:
         actionable = sorted([i for i in valid if _is_actionable(i)], key=_decision_sort_key)
         non_actionable = [i for i in valid if not _is_actionable(i)]
 
+        # Per-symbol execution budget: keeps one stuck OKX call from consuming
+        # the entire tick timeout and blocking all remaining decisions.
+        _EXEC_TIMEOUT = 90
+
         # ── Phase 3: execute BUY/SELL sequentially ────────────────────────
         # Running sequentially means each trade sees the actual remaining
         # balance (or the _pending_notional deduction when OKX balance hasn't
@@ -231,13 +235,22 @@ class PromptScheduler:
         # equity is left after earlier trades have committed funds.
         for sym, bundle, decision, prompt_id in actionable:
             try:
-                await apply_llm_decision(self._app, bundle, decision, prompt_id)
+                await asyncio.wait_for(
+                    apply_llm_decision(self._app, bundle, decision, prompt_id),
+                    timeout=_EXEC_TIMEOUT,
+                )
                 logger.info(
                     "Prompt scheduler decision for %s action=%s confidence=%s prompt_id=%s",
                     sym,
                     decision.get("action"),
                     decision.get("confidence"),
                     prompt_id,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Prompt scheduler execution timed out after %ss for %s; continuing",
+                    _EXEC_TIMEOUT,
+                    sym,
                 )
             except Exception as exc:  # pragma: no cover - defensive
                 logger.exception("Prompt scheduler execution failed for %s: %s", sym, exc)
@@ -247,13 +260,22 @@ class PromptScheduler:
         async def _apply_hold(item: tuple) -> None:
             sym, bundle, decision, prompt_id = item
             try:
-                await apply_llm_decision(self._app, bundle, decision, prompt_id)
+                await asyncio.wait_for(
+                    apply_llm_decision(self._app, bundle, decision, prompt_id),
+                    timeout=_EXEC_TIMEOUT,
+                )
                 logger.info(
                     "Prompt scheduler decision for %s action=%s confidence=%s prompt_id=%s",
                     sym,
                     decision.get("action"),
                     decision.get("confidence"),
                     prompt_id,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Prompt scheduler HOLD timed out after %ss for %s; continuing",
+                    _EXEC_TIMEOUT,
+                    sym,
                 )
             except Exception as exc:  # pragma: no cover - defensive
                 logger.exception("Prompt scheduler HOLD recording failed for %s: %s", sym, exc)

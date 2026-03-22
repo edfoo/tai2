@@ -449,6 +449,19 @@ async def apply_llm_decision(
                 "Daily loss limit active; new decisions blocked until equity recovers"
             )
         return False
+    # Record the LLM decision to the insight feed BEFORE execution so the UI
+    # updates immediately even if order placement later hangs or times out.
+    _record_llm_interaction(app, bundle, decision)
+    version_label = (
+        bundle.metadata.get("prompt_version_name")
+        or bundle.metadata.get("prompt_version_id")
+        or "default"
+    )
+    backend_events = getattr(app.state, "backend_events", None)
+    if backend_events is not None:
+        backend_events.append(
+            f"LLM decision ({version_label}) action={decision.get('action')} conf={decision.get('confidence', '--')}"
+        )
     if market_service and not fallback_blocked:
         context_block = bundle.payload.get("context") or {}
         try:
@@ -464,17 +477,6 @@ async def apply_llm_decision(
                     )
                 except Exception as exc:  # pragma: no cover - best-effort snapshot refresh
                     logger.debug("Snapshot refresh after execution failed: %s", exc)
-    _record_llm_interaction(app, bundle, decision)
-    version_label = (
-        bundle.metadata.get("prompt_version_name")
-        or bundle.metadata.get("prompt_version_id")
-        or "default"
-    )
-    backend_events = getattr(app.state, "backend_events", None)
-    if backend_events is not None:
-        backend_events.append(
-            f"LLM decision ({version_label}) action={decision.get('action')} conf={decision.get('confidence', '--')}"
-        )
     return state_changed
 
 
