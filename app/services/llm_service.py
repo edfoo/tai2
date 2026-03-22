@@ -179,17 +179,12 @@ class LLMService:
             history.pop("vwap_series", None)
             history.pop("volume_rsi_series", None)
 
-        # Compact "indicators": trim heavy per-bar series sub-arrays from LTF indicators
-        # while keeping all scalars and the full "htf" block (required by prompt Step 2).
-        # OBV and CMF series are kept (trimmed to 20) — required for divergence check in prompt Step 3.
-        _SERIES_DROP_KEYS = ("macd", "adx")
-        _SERIES_TRIM_KEYS = ("obv", "cmf")
+        # Compact "indicators": trim heavy per-bar series sub-arrays to the last 20 bars.
+        # All series are kept (trimmed) — the LLM needs ADX/MACD trajectory for trend strength,
+        # and OBV/CMF series for divergence detection (prompt Step 3).
+        _SERIES_TRIM_KEYS = ("macd", "adx", "obv", "cmf")
         indicators = context.get("indicators")
         if isinstance(indicators, dict):
-            for _ind_key in _SERIES_DROP_KEYS:
-                _ind_block = indicators.get(_ind_key)
-                if isinstance(_ind_block, dict):
-                    _ind_block.pop("series", None)
             for _ind_key in _SERIES_TRIM_KEYS:
                 _ind_block = indicators.get(_ind_key)
                 if isinstance(_ind_block, dict):
