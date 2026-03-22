@@ -150,9 +150,10 @@ class LLMService:
         if not isinstance(context, dict):
             return trimmed
 
+        # Drop derived/summary sections that add bulk but low signal for raw reasoning.
+        # NOTE: "history" and "indicators" are NOT dropped — they contain candles_htf,
+        # volume_series, and indicators.htf which the prompt's Steps 2-5 require.
         drop_keys = {
-            "history",
-            "indicators",
             "trend_confirmation",
             "liquidity_context",
             "derivatives_posture",
@@ -164,6 +165,30 @@ class LLMService:
         for key in sorted(drop_keys):
             if context.pop(key, None) is not None:
                 removed_sections.append(key)
+
+        # Compact "history": trim LTF candles to last 20 (heavy), keep HTF candles and
+        # volume_series intact (required by prompt Steps 2-5).
+        history = context.get("history")
+        if isinstance(history, dict):
+            ltf_candles = history.get("candles")
+            if isinstance(ltf_candles, list) and len(ltf_candles) > 20:
+                history["candles"] = ltf_candles[-20:]
+            vol_series = history.get("volume_series")
+            if isinstance(vol_series, list) and len(vol_series) > 60:
+                history["volume_series"] = vol_series[-60:]
+            # vwap_series and volume_rsi_series are supplementary; drop to save tokens.
+            history.pop("vwap_series", None)
+            history.pop("volume_rsi_series", None)
+
+        # Compact "indicators": drop heavy per-bar series sub-arrays from LTF indicators
+        # while keeping all scalars and the full "htf" block (required by prompt Step 2).
+        _SERIES_HEAVY_KEYS = ("macd", "adx", "obv", "cmf")
+        indicators = context.get("indicators")
+        if isinstance(indicators, dict):
+            for _ind_key in _SERIES_HEAVY_KEYS:
+                _ind_block = indicators.get(_ind_key)
+                if isinstance(_ind_block, dict):
+                    _ind_block.pop("series", None)
 
         positions = self._compact_positions(context.get("positions"))
         if positions is not None:

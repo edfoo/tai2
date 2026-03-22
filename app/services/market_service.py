@@ -129,7 +129,12 @@ class MarketService:
     ISOLATED_WALLET_BOOTSTRAP_PCT = 0.25
     # OKX will reject a new isolated-mode order with 51008 when the required
     # initial margin is below its internal floor.  Block such trades pre-emptively.
-    OKX_ISOLATED_BOOT_MIN_NOTIONAL_USD = 2.0
+    # 5 USDT is a more realistic minimum that prevents pointless downsize retries
+    # when the tier-based dynamic floor is unavailable.
+    OKX_ISOLATED_BOOT_MIN_NOTIONAL_USD = 5.0
+    # After exhausting all 51008 retries for a bootstrap order, block further
+    # attempts for this many seconds so we stop hammering OKX.
+    BOOTSTRAP_BLOCK_SECONDS = 3600  # 1 hour
     PROTECTION_ERROR_CODES = {
         "51047",
         "51048",
@@ -224,6 +229,10 @@ class MarketService:
         # Concurrent handle_llm_decision coroutines deduct these before sizing
         # so they never collectively over-commit the same USDT pool.
         self._pending_notional: dict[str, float] = {}
+        # Symbols whose bootstrap (first isolated-wallet seed) has exhausted all
+        # 51008 retries.  Mapped to the epoch time the block was set.  Cleared
+        # automatically after BOOTSTRAP_BLOCK_SECONDS so the bot can retry later.
+        self._bootstrap_blocked: dict[str, float] = {}
 
     async def start(self) -> None:
         """Launch the market snapshot poller and websocket consumers if not already running."""
@@ -431,6 +440,7 @@ class MarketService:
                     "lot_size": self._extract_float(spec.get("lot_size")),
                     "min_size": self._extract_float(spec.get("min_size")),
                     "tick_size": self._extract_float(spec.get("tick_size")),
+                    "ct_val": spec.get("ct_val") or 1.0,
                 }
 
         primary_symbol = self.symbols[0]
@@ -981,6 +991,22 @@ class MarketService:
                 recent_count = sum(1 for ts in history if ts >= cutoff)
                 if recent_count >= trade_limit:
                     return f"trade rate limit reached ({recent_count}/{trade_limit} in window)"
+        # Check whether the isolated-wallet bootstrap for this symbol was
+        # recently exhausted (all 51008 retries burned through).  We block for
+        # BOOTSTRAP_BLOCK_SECONDS so we don't hammer OKX with guaranteed-failing
+        # orders.  The block lifts automatically after the TTL expires.
+        if symbol in self._bootstrap_blocked:
+            blocked_at = self._bootstrap_blocked[symbol]
+            remaining = self.BOOTSTRAP_BLOCK_SECONDS - (now - blocked_at)
+            if remaining > 0:
+                mins = remaining / 60
+                return (
+                    f"bootstrap blocked ({mins:.0f}m remaining — add USDT to the account "
+                    "or reduce isolated_wallet_bootstrap_pct in guardrails)"
+                )
+            else:
+                # TTL expired — remove stale entry and allow retry
+                del self._bootstrap_blocked[symbol]
         return None
 
     async def set_websocket_enabled(self, enabled: bool) -> None:
@@ -1195,12 +1221,20 @@ class MarketService:
                 tick_size = self._extract_float(entry.get("tickSz"))
                 max_market_size = self._extract_float(entry.get("maxMktSz"))
                 max_limit_size = self._extract_float(entry.get("maxLmtSz"))
+                # ctVal: how many units of the base asset constitute one OKX contract.
+                # For BTC-USDT-SWAP this is 0.01 (so 100 contracts = 1 BTC).
+                # For micro-priced tokens like NEIRO/BONK it can be in the hundreds or
+                # thousands so that each contract has a reasonable USD value.
+                # CRITICAL: the order `sz` field is in CONTRACTS, not base-token units.
+                # Notional = sz × ctVal × last_price (NOT sz × last_price).
+                ct_val = self._extract_float(entry.get("ctVal"))
                 self._instrument_specs[symbol] = {
                     "lot_size": lot_size or 0.0,
                     "min_size": min_size or 0.0,
                     "tick_size": tick_size or 0.0,
                     "max_market_size": max_market_size or 0.0,
                     "max_limit_size": max_limit_size or 0.0,
+                    "ct_val": ct_val if ct_val and ct_val > 0 else 1.0,
                 }
         if not pairs:
             return list(self.symbols)
@@ -3314,6 +3348,11 @@ class MarketService:
         symbol = str(context.get("symbol") or decision.get("symbol") or self.symbol).upper()
         symbol_parts = symbol.split("-")
         quote_currency = symbol_parts[1].upper() if len(symbol_parts) >= 2 else None
+        # OKX ctVal: how many base-token units constitute one *contract*.
+        # raw_size throughout this function is kept in base-token units so that
+        # `raw_size × last_price` always gives the correct USD notional.
+        # The final conversion to OKX `sz` (contracts) happens just before _submit_order.
+        ct_val = self._contract_value(symbol)
         guardrails = context.get("guardrails") or {}
         risk_locks_block = context.get("risk_locks") or {}
         daily_loss_state = risk_locks_block.get("daily_loss") if isinstance(risk_locks_block, dict) else None
@@ -3818,6 +3857,8 @@ class MarketService:
         isolated_margin_available: float | None = None
         isolated_margin_entry: dict[str, Any] | None = None
         has_isolated_wallet: bool = False
+        _bootstrap_min_notional: float | None = None  # set in bootstrap path, threaded to _submit_order
+        _bootstrap_order_chunks: int = 1  # >1 when per-order cap requires multiple orders to seed isolated wallet
         if isolated_mode:
             wallet_side_key = desired_pos_side if dual_side_mode else None
             if wallet_side_key == "net":
@@ -4119,27 +4160,113 @@ class MarketService:
                             )
                             leverage_override_reason = "isolated-wallet-bootstrap"
                 # Guard: OKX requires a minimum notional to seed a brand-new
-                # isolated sub-account.  Below this floor the exchange returns
-                # 51008 regardless of available USDT.  Block pre-emptively and
-                # emit a clear feedback card instead of a confusing margin error.
+                # isolated sub-account.  We compute this floor dynamically from
+                # the position-tiers API (tier-1 IMR × min contracts × price) so
+                # illiquid instruments with high margin requirements are handled
+                # correctly.  The static OKX_ISOLATED_BOOT_MIN_NOTIONAL_USD is
+                # used only as a safety fallback when tier data is unavailable.
                 if last_price and last_price > 0:
+                    # --- dynamic minimum-seed calculation from position tiers ---
+                    _dyn_min_notional: float | None = None
+                    _dyn_min_contracts: float | None = None
+                    try:
+                        _seed_tiers = await self._get_position_tiers(symbol, trade_mode)
+                        if _seed_tiers:
+                            _t1 = _seed_tiers[0]  # tier-1 = smallest position bracket
+                            _t1_imr = self._extract_float(_t1.get("imr"))
+                            _t1_max_lever = self._extract_float(_t1.get("maxLever"))
+                            _t1_min_sz = self._extract_float(_t1.get("minSz"))
+                            # Derive IMR from maxLever if not directly available
+                            if (_t1_imr is None or _t1_imr <= 0) and _t1_max_lever and _t1_max_lever > 0:
+                                _t1_imr = 1.0 / _t1_max_lever
+                            # min_seed_notional = contracts × price such that the
+                            # margin required (notional × IMR) ≥ 1 USDT minimum.
+                            # Equivalently: min_contracts = ceil(1 / (price × IMR))
+                            # but at least minSz from the tier definition.
+                            if _t1_imr and _t1_imr > 0 and _t1_min_sz and _t1_min_sz > 0:
+                                # The seed order must provide enough margin for tier-1:
+                                # required_margin = notional × imr  ≥  1 USDT
+                                # ⟹  min_notional = 1 / imr
+                                # But at a minimum we also need minSz contracts to be
+                                # a valid order, so take the larger of the two floors.
+                                _floor_from_imr = 1.0 / _t1_imr
+                                # _t1_min_sz is in CONTRACTS; multiply by ct_val to get
+                                # base-token units and then by price for USD notional.
+                                _floor_from_min_sz = _t1_min_sz * ct_val * last_price
+                                _dyn_min_notional = max(_floor_from_imr, _floor_from_min_sz)
+                                # Add 10 % buffer for fees, slippage, OKX internal checks
+                                _dyn_min_notional *= 1.10
+                                _dyn_min_contracts = _t1_min_sz
+                                self._emit_debug(
+                                    f"[bootstrap] {symbol} OKX dynamic minimum seed: "
+                                    f"tier-1 imr={_t1_imr:.4f} maxLever={_t1_max_lever} "
+                                    f"minSz={_t1_min_sz} → min_notional={_dyn_min_notional:.4f} USDT"
+                                )
+                    except Exception as _tier_exc:
+                        self._emit_debug(f"[bootstrap] tier fetch for min-seed failed: {_tier_exc}")
+
+                    _effective_min_notional = _dyn_min_notional or self.OKX_ISOLATED_BOOT_MIN_NOTIONAL_USD
+                    _bootstrap_min_notional = _effective_min_notional
+
+                    # If our wallet_cap is already below the minimum seed
+                    # notional, we cannot bootstrap at all — block cleanly.
+                    if wallet_cap and wallet_cap > 0 and wallet_cap < _effective_min_notional:
+                        self._emit_debug(
+                            f"Execution skipped for {symbol}: wallet_cap {wallet_cap:.4f} USDT "
+                            f"is below OKX minimum seed notional {_effective_min_notional:.4f} USDT; "
+                            "adding to bootstrap blocklist"
+                        )
+                        self._bootstrap_blocked[symbol] = time.time()
+                        self._record_execution_feedback(
+                            symbol,
+                            f"Cannot seed isolated position: available USDT "
+                            f"({wallet_cap:.2f}) is below OKX minimum "
+                            f"({_effective_min_notional:.2f} USDT). "
+                            "Add USDT to the account or raise isolated_wallet_bootstrap_pct. "
+                            f"Bot will retry in {self.BOOTSTRAP_BLOCK_SECONDS // 60} minutes.",
+                            level="warning",
+                            meta={
+                                "wallet_cap": wallet_cap,
+                                "min_seed_notional_usd": _effective_min_notional,
+                                "source": "position-tiers" if _dyn_min_notional else "static-fallback",
+                                "isolated_wallet_status": "missing",
+                            },
+                        )
+                        return False
+
+                    # Ensure raw_size (in base tokens) is at least the minimum
+                    # contracts required by the tier.  _dyn_min_contracts is in
+                    # OKX contract units so multiply by ct_val to convert to
+                    # base-token units for comparison with raw_size.
+                    if _dyn_min_contracts and _dyn_min_contracts > 0:
+                        if raw_size is not None and raw_size < _dyn_min_contracts * ct_val:
+                            self._emit_debug(
+                                f"{symbol} bootstrap: raw_size {raw_size:.4f} base-tokens "
+                                f"< tier minSz {_dyn_min_contracts:.4f} contracts "
+                                f"(≡ {_dyn_min_contracts * ct_val:.4f} base-tokens); "
+                                f"raising to meet minimum"
+                            )
+                            raw_size = _dyn_min_contracts * ct_val
+
                     _bootstrap_notional = raw_size * last_price
-                    if _bootstrap_notional < self.OKX_ISOLATED_BOOT_MIN_NOTIONAL_USD:
-                        _min = self.OKX_ISOLATED_BOOT_MIN_NOTIONAL_USD
+                    if _bootstrap_notional < _effective_min_notional:
                         self._emit_debug(
                             f"Execution skipped for {symbol}: notional "
                             f"{_bootstrap_notional:.4f} USDT is below OKX isolated "
-                            f"minimum {_min:.2f} USDT (no existing wallet)"
+                            f"minimum {_effective_min_notional:.2f} USDT (no existing wallet)"
                         )
+                        self._bootstrap_blocked[symbol] = time.time()
                         self._record_execution_feedback(
                             symbol,
                             f"Trade notional {_bootstrap_notional:.2f} USDT is too small "
                             f"to seed a new isolated position "
-                            f"(OKX minimum \u2248 {_min:.2f} USDT); skipping",
+                            f"(OKX minimum \u2248 {_effective_min_notional:.2f} USDT). "
+                            f"Bot will retry in {self.BOOTSTRAP_BLOCK_SECONDS // 60} minutes.",
                             level="warning",
                             meta={
                                 "bootstrap_notional": _bootstrap_notional,
-                                "min_notional_usd": _min,
+                                "min_notional_usd": _effective_min_notional,
+                                "source": "position-tiers" if _dyn_min_notional else "static-fallback",
                                 "raw_size": raw_size,
                                 "last_price": last_price,
                                 "isolated_wallet_status": "missing",
@@ -4221,6 +4348,9 @@ class MarketService:
             last_price,
             symbol=symbol,
         )
+        # Preserve the raw LLM value (may have been a wrong-direction TP that
+        # normalization dropped).  Used later to snap at require_protection.
+        _llm_raw_take_profit = self._extract_float(decision.get("take_profit"))
         stop_loss_price = self._normalize_stop_loss(
             action,
             self._extract_float(decision.get("stop_loss")),
@@ -4602,11 +4732,14 @@ class MarketService:
             per_order_limit = spec.get("max_market_size") or spec.get("max_limit_size")
         else:
             per_order_limit = spec.get("max_limit_size") or spec.get("max_market_size")
-        if per_order_limit and per_order_limit > 0 and raw_size > per_order_limit:
+        if per_order_limit and per_order_limit > 0 and (raw_size / ct_val) > per_order_limit:
             previous_size = raw_size
-            raw_size = per_order_limit
+            # per_order_limit is in OKX contracts; convert back to base-token units
+            # so raw_size stays in base-token units throughout this function.
+            raw_size = per_order_limit * ct_val
             self._emit_debug(
-                f"{symbol} size clipped to {per_order_limit:.6f} by OKX per-order limit"
+                f"{symbol} size clipped to {per_order_limit:.6f} contracts "
+                f"({raw_size:.4f} base-tokens) by OKX per-order limit"
             )
             self._record_execution_feedback(
                 symbol,
@@ -4618,6 +4751,43 @@ class MarketService:
                     "per_order_limit": per_order_limit,
                 },
             )
+            # Re-check bootstrap minimum after per-order clip: for micro-priced
+            # tokens (e.g. BONK at 6.8e-6 USDT), OKX's max order size may cap
+            # the notional of a single order well below the isolated-wallet seed
+            # floor.  Instead of blocking, we split the bootstrap into multiple
+            # sequential max-size orders until the cumulative notional reaches
+            # the floor — after the first order succeeds the wallet exists, so
+            # subsequent orders are regular top-ups.
+            if (
+                isolated_mode
+                and not has_isolated_wallet
+                and last_price
+                and last_price > 0
+            ):
+                _post_clip_notional = raw_size * last_price
+                _boot_floor = _bootstrap_min_notional or self.OKX_ISOLATED_BOOT_MIN_NOTIONAL_USD
+                if _post_clip_notional > 0 and _post_clip_notional < _boot_floor:
+                    _bootstrap_order_chunks = min(10, math.ceil(_boot_floor / _post_clip_notional))
+                    self._emit_debug(
+                        f"{symbol} bootstrap: single order notional {_post_clip_notional:.4f} USDT "
+                        f"< floor {_boot_floor:.2f} USDT; "
+                        f"will submit {_bootstrap_order_chunks} × {per_order_limit:.0f}-contract "
+                        f"orders to seed isolated wallet"
+                    )
+                    self._record_execution_feedback(
+                        symbol,
+                        f"Bootstrap multi-chunk: submitting {_bootstrap_order_chunks} sequential "
+                        f"{per_order_limit:.0f}-contract orders "
+                        f"({_post_clip_notional:.4f} USDT each) to reach seed floor "
+                        f"({_boot_floor:.2f} USDT)",
+                        level="info",
+                        meta={
+                            "chunk_notional": _post_clip_notional,
+                            "chunks": _bootstrap_order_chunks,
+                            "bootstrap_floor_usd": _boot_floor,
+                            "per_order_limit_contracts": per_order_limit,
+                        },
+                    )
 
         if raw_size < min_size:
             self._emit_debug(
@@ -4720,20 +4890,32 @@ class MarketService:
                 )
                 return False
             if require_protection and attachments_take_profit is None:
-                self._record_execution_feedback(
-                    symbol,
-                    "Blocked: take-profit required by guardrail",
-                    level="warning",
-                    meta={
-                        "guardrail": "require_protection",
-                        "take_profit_supplied": False,
-                        "stop_loss_supplied": attachments_stop_loss is not None,
-                    },
-                )
-                self._emit_debug(
-                    f"Execution skipped for {symbol}: take-profit required by guardrail"
-                )
-                return False
+                # If the LLM supplied a TP but got the direction wrong, snap it
+                # to the nearest valid value rather than blocking the trade.
+                # Only snap when LLM provided something; no TP at all → block.
+                if _llm_raw_take_profit and _llm_raw_take_profit > 0 and last_price and last_price > 0:
+                    _snapped_tp = self._snap_take_profit_to_valid(action, last_price, symbol)
+                    if _snapped_tp:
+                        attachments_take_profit = _snapped_tp
+                        self._emit_debug(
+                            f"{symbol} require_protection: snapped wrong-direction TP "
+                            f"{_llm_raw_take_profit:.6f} → {_snapped_tp:.6f}"
+                        )
+                if attachments_take_profit is None:
+                    self._record_execution_feedback(
+                        symbol,
+                        "Blocked: take-profit required by guardrail",
+                        level="warning",
+                        meta={
+                            "guardrail": "require_protection",
+                            "take_profit_supplied": False,
+                            "stop_loss_supplied": attachments_stop_loss is not None,
+                        },
+                    )
+                    self._emit_debug(
+                        f"Execution skipped for {symbol}: take-profit required by guardrail"
+                    )
+                    return False
             if attachments_take_profit or attachments_stop_loss:
                 await self._cancel_position_protection(symbol)
                 if last_price and last_price > 0:
@@ -4836,25 +5018,80 @@ class MarketService:
         # Reserve this order's notional so any concurrent symbol handler that
         # hasn't yet computed its equity cap will see the commitment and reduce
         # its own budget accordingly (avoids double-spending the USDT pool).
-        if not reduce_only and raw_size and last_price and last_price > 0:
-            self._pending_notional[symbol] = raw_size * last_price
-        try:
-            order, attachments_used = await self._submit_order(
-                symbol=symbol,
-                side=side,
-                pos_side=pos_side,
-                size=raw_size,
-                trade_mode=trade_mode,
-                order_type=order_type,
-                reduce_only=reduce_only,
-                client_order_id=client_order_id,
-                attach_algo_orders=attach_algo_orders,
-                margin_currency=quote_currency,
-                leverage=target_leverage,
-                dual_side_mode=dual_side_mode,
-                reference_price=last_price,
-                isolated_bootstrap=isolated_mode and not has_isolated_wallet,
+        # Convert raw_size (base-token units) to OKX contract units for submission.
+        # raw_size = notional / last_price (base tokens); OKX sz = raw_size / ct_val (contracts).
+        # Re-quantize at contract granularity so the sz field is a valid lot multiple.
+        if ct_val > 1.0:
+            _okx_sz = raw_size / ct_val
+            _okx_sz_quantized = self._quantize_order_size(symbol, _okx_sz)
+            if _okx_sz_quantized is not None and _okx_sz_quantized > 0:
+                okx_sz: float = _okx_sz_quantized
+            else:
+                okx_sz = math.floor(_okx_sz) if _okx_sz >= 1 else _okx_sz
+            if okx_sz <= 0:
+                self._emit_debug(
+                    f"Execution skipped for {symbol}: contract count {_okx_sz:.4f} rounded "
+                    f"to zero after ctVal={ct_val} division (raw_size={raw_size:.4f})"
+                )
+                return False
+            self._emit_debug(
+                f"{symbol} ctVal={ct_val}: raw_size {raw_size:.4f} base-tokens "
+                f"→ {okx_sz:.4f} OKX contracts "
+                f"(notional ≈ {okx_sz * ct_val * last_price:.4f} USDT)"
             )
+        else:
+            okx_sz = raw_size
+        if not reduce_only and raw_size and last_price and last_price > 0:
+            self._pending_notional[symbol] = raw_size * last_price * _bootstrap_order_chunks
+        try:
+            order: dict[str, Any] | None = None
+            attachments_used: bool = False
+            for _chunk_idx in range(_bootstrap_order_chunks):
+                _chunk_order_id = (
+                    client_order_id
+                    if _chunk_idx == 0
+                    else self._generate_client_order_id()
+                )
+                # Only the first chunk is a true bootstrap (no wallet yet);
+                # subsequent chunks go in as normal isolated orders.
+                _is_bootstrap_chunk = (isolated_mode and not has_isolated_wallet and _chunk_idx == 0)
+                _chunk_order, _chunk_attachments = await self._submit_order(
+                    symbol=symbol,
+                    side=side,
+                    pos_side=pos_side,
+                    size=okx_sz,
+                    trade_mode=trade_mode,
+                    order_type=order_type,
+                    reduce_only=reduce_only,
+                    client_order_id=_chunk_order_id,
+                    attach_algo_orders=attach_algo_orders if _chunk_idx == 0 else None,
+                    margin_currency=quote_currency,
+                    leverage=target_leverage,
+                    dual_side_mode=dual_side_mode,
+                    reference_price=ct_val * last_price,
+                    isolated_bootstrap=_is_bootstrap_chunk,
+                    bootstrap_min_notional=_bootstrap_min_notional,
+                )
+                if not _chunk_order:
+                    if _chunk_idx == 0:
+                        # First chunk failed — nothing opened, treat as full failure
+                        order = None
+                    else:
+                        # Partial success: wallet seeded, but extra top-up chunk failed.
+                        # Use the last successful order as the result.
+                        self._emit_debug(
+                            f"{symbol} bootstrap chunk {_chunk_idx + 1}/{_bootstrap_order_chunks} "
+                            f"failed; using partial seed from {_chunk_idx} chunk(s)"
+                        )
+                    break
+                order = _chunk_order
+                attachments_used = _chunk_attachments
+                if _bootstrap_order_chunks > 1:
+                    _cid = _chunk_order.get("ordId") or _chunk_order_id
+                    self._emit_debug(
+                        f"{symbol} bootstrap chunk {_chunk_idx + 1}/{_bootstrap_order_chunks} "
+                        f"placed ({_cid})"
+                    )
         finally:
             self._pending_notional.pop(symbol, None)
         if not order:
@@ -4874,6 +5111,7 @@ class MarketService:
                 "side": side.upper(),
                 "size": round(raw_size, 6),
                 "trade_mode": trade_mode,
+                "bootstrap_chunks": _bootstrap_order_chunks if _bootstrap_order_chunks > 1 else None,
             },
         )
 
@@ -5257,6 +5495,22 @@ class MarketService:
             return _entry_has_issue(response)
         return _entry_has_issue(response)
 
+    def _contract_value(self, symbol: str) -> float:
+        """Return OKX ctVal for a symbol: how many base-token units make one contract.
+
+        For BTC-USDT-SWAP this is 0.01 (100 contracts = 1 BTC).  For micro-priced meme
+        tokens it can be in the hundreds or thousands.  Returns 1.0 as a safe default when
+        the spec has not been fetched yet (e.g. in tests or config-only mode).
+
+        CRITICAL: OKX's ``sz`` order field is in *contracts*.  Correct conversion::
+
+            sz_contracts  = notional_usd / (ct_val × last_price)
+            notional_usd  = sz_contracts × ct_val × last_price
+        """
+        spec = self._instrument_specs.get((symbol or "").upper()) or {}
+        ct_val = spec.get("ct_val")
+        return float(ct_val) if ct_val and ct_val > 0 else 1.0
+
     def _quantize_order_size(self, symbol: str, size: float) -> float | None:
         """Snap requested size to the instrument's lot size and enforce min order size."""
         if size is None or size <= 0:
@@ -5300,7 +5554,14 @@ class MarketService:
         *,
         symbol: str | None = None,
     ) -> float | None:
-        """Ensure the TP is on the profitable side of entry; reject if the LLM got the direction wrong."""
+        """Ensure the TP is on the profitable side of entry; return None if wrong direction.
+
+        A None return does NOT block the trade by itself — that only happens
+        when ``require_protection`` is True.  When the LLM supplies a TP but
+        gets the direction slightly wrong, callers that enforce
+        ``require_protection`` should snap to the nearest valid value rather
+        than discarding it.
+        """
         if take_profit is None or take_profit <= 0:
             return None
 
@@ -5338,6 +5599,44 @@ class MarketService:
                 )
                 return None
         return take_profit
+
+    def _snap_take_profit_to_valid(
+        self,
+        action: str,
+        reference_price: float,
+        symbol: str,
+    ) -> float | None:
+        """Return the minimum valid TP just beyond entry for use as a last-resort fallback.
+
+        Called only when ``require_protection`` is True and the LLM supplied a
+        TP that was wrong-direction (so normalization dropped it).  Snapping
+        is preferable to blocking the trade entirely.
+        """
+        tick = (self._instrument_specs.get(symbol) or {}).get("tick_size") or 0.0
+        min_offset = max(tick, reference_price * self.PROTECTION_MIN_OFFSET_RATIO)
+        if action == "BUY":
+            snapped = reference_price + min_offset
+            final = self._quantize_price(symbol, snapped, prefer_up=True) or snapped
+        else:
+            snapped = reference_price - min_offset
+            if snapped <= 0:
+                return None
+            final = self._quantize_price(symbol, snapped, prefer_up=False) or snapped
+        self._record_execution_feedback(
+            symbol,
+            "LLM take-profit adjusted to honor trade direction",
+            level="warning",
+            meta={
+                "action": action,
+                "adjusted_take_profit": final,
+                "reference_price": reference_price,
+                "reason": "require_protection: snapped wrong-direction TP to nearest valid value",
+            },
+        )
+        self._emit_debug(
+            f"{symbol} take-profit snapped to {final:.6f} (require_protection last-resort)"
+        )
+        return final
 
     def _normalize_stop_loss(
         self,
@@ -5725,6 +6024,7 @@ class MarketService:
         dual_side_mode: bool = False,
         reference_price: float | None = None,
         isolated_bootstrap: bool = False,
+        bootstrap_min_notional: float | None = None,
     ) -> tuple[dict[str, Any] | None, bool]:
         """Place an order via the trade API, retrying without posSide if needed."""
         if not self._trade_api:
@@ -5839,22 +6139,35 @@ class MarketService:
                 continue
             if (
                 not reduce_only
-                and _margin_retry_count < 2
+                # Bootstrap orders: allow only 1 downsize retry.  Creating a new
+                # isolated wallet requires a minimum notional; a second halving
+                # almost always undershoots that floor and just wastes API quota.
+                and _margin_retry_count < (1 if isolated_bootstrap else 2)
                 and self._response_indicates_insufficient_margin(response)
             ):
                 _cur_size = self._extract_float(size)
                 if _cur_size and _cur_size > 1:
                     _reduced_size = max(1.0, _cur_size * 0.5)
+                    # Snap to lot size so OKX doesn't reject with 51121
+                    # "Order quantity must be a multiple of the lot size".
+                    _quantized_reduced = self._quantize_order_size(symbol, _reduced_size)
+                    if _quantized_reduced and _quantized_reduced > 0:
+                        _reduced_size = _quantized_reduced
+                    else:
+                        _reduced_size = math.floor(_reduced_size)
+                    if _reduced_size <= 0:
+                        _reduced_size = 1.0
                     # For bootstrap orders (no existing isolated wallet), check
                     # that the reduced notional would still clear the minimum
                     # seeding floor.  Retrying below the floor would just fail
                     # again with the same 51008 and produce a confusing card.
                     if isolated_bootstrap and reference_price_value and reference_price_value > 0:
                         _reduced_notional = _reduced_size * reference_price_value
-                        if _reduced_notional < self.OKX_ISOLATED_BOOT_MIN_NOTIONAL_USD:
+                        _boot_floor = bootstrap_min_notional or self.OKX_ISOLATED_BOOT_MIN_NOTIONAL_USD
+                        if _reduced_notional < _boot_floor:
                             self._emit_debug(
                                 f"51008 bootstrap: reduced notional {_reduced_notional:.4f} "
-                                f"would be below floor {self.OKX_ISOLATED_BOOT_MIN_NOTIONAL_USD:.2f}; "
+                                f"would be below floor {_boot_floor:.2f}; "
                                 f"skipping downsize retry"
                             )
                             # Fall through to the normal error-reporting path.
@@ -5906,6 +6219,33 @@ class MarketService:
                 if combined_meta is None:
                     combined_meta = {}
                 combined_meta["margin_details"] = margin_meta
+            # If this was a bootstrap order, add to the blocklist regardless of
+            # how many retries ran.  When the floor-check prevents the downsize
+            # _margin_retry_count stays 0, but the symbol still can't be seeded
+            # and would fail again every scheduler tick without a block.
+            if isolated_bootstrap and self._response_indicates_insufficient_margin(response):
+                self._bootstrap_blocked[symbol] = time.time()
+                block_mins = self.BOOTSTRAP_BLOCK_SECONDS // 60
+                if _margin_retry_count > 0:
+                    self._emit_debug(
+                        f"[bootstrap] {symbol} exhausted 51008 retries; "
+                        f"adding to bootstrap blocklist for {block_mins} minutes"
+                    )
+                    error_message = (
+                        f"{error_message} — all bootstrap retries exhausted. "
+                        f"Bot will pause trying to seed {symbol} for {block_mins} minutes. "
+                        "Add USDT to your account or reduce isolated_wallet_bootstrap_pct."
+                    )
+                else:
+                    self._emit_debug(
+                        f"[bootstrap] {symbol} initial 51008 not retryable; "
+                        f"adding to bootstrap blocklist for {block_mins} minutes"
+                    )
+                    error_message = (
+                        f"{error_message} — bootstrap order not retryable (notional below floor). "
+                        f"Bot will pause trying to seed {symbol} for {block_mins} minutes. "
+                        "Add USDT to your account or reduce isolated_wallet_bootstrap_pct."
+                    )
             self._record_execution_feedback(
                 symbol,
                 error_message,

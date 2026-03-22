@@ -67,6 +67,7 @@ def test_normalize_account_balances_preserves_unknown_available_margin() -> None
 
 
 def test_normalize_take_profit_clips_invalid_short() -> None:
+    """Wrong-direction TP (SELL with TP above entry) should be dropped by normalization."""
     service = MarketService(
         state_service=DummySnapshotStore(),
         enable_websocket=False,
@@ -77,16 +78,15 @@ def test_normalize_take_profit_clips_invalid_short() -> None:
     )
     symbol = service.symbol
     service._instrument_specs[symbol] = {"tick_size": 0.1}
-    clipped = service._normalize_take_profit("SELL", 101.0, 100.0, symbol=symbol)
-    assert clipped is not None and clipped < 100.0
+    result = service._normalize_take_profit("SELL", 101.0, 100.0, symbol=symbol)
+    assert result is None
     feedback = list(service._execution_feedback)
     assert feedback, "Expected warning entry"
-    assert feedback[-1]["message"] == "LLM take-profit adjusted to honor trade direction"
-    assert feedback[-1]["meta"]["original_take_profit"] == 101.0
-    assert feedback[-1]["meta"]["adjusted_take_profit"] == pytest.approx(clipped)
+    assert "rejected" in feedback[-1]["message"].lower() or "SELL" in feedback[-1]["message"]
 
 
 def test_normalize_take_profit_clips_invalid_long() -> None:
+    """Wrong-direction TP (BUY with TP below entry) should be dropped by normalization."""
     service = MarketService(
         state_service=DummySnapshotStore(),
         enable_websocket=False,
@@ -97,12 +97,49 @@ def test_normalize_take_profit_clips_invalid_long() -> None:
     )
     symbol = service.symbol
     service._instrument_specs[symbol] = {"tick_size": 0.1}
-    clipped = service._normalize_take_profit("BUY", 99.0, 100.0, symbol=symbol)
-    assert clipped is not None and clipped > 100.0
+    result = service._normalize_take_profit("BUY", 99.0, 100.0, symbol=symbol)
+    assert result is None
     feedback = list(service._execution_feedback)
     assert feedback
-    assert feedback[-1]["meta"]["original_take_profit"] == 99.0
-    assert feedback[-1]["meta"]["adjusted_take_profit"] == pytest.approx(clipped)
+    assert "rejected" in feedback[-1]["message"].lower() or "BUY" in feedback[-1]["message"]
+
+
+def test_snap_take_profit_to_valid_short() -> None:
+    """_snap_take_profit_to_valid snaps SELL TP to just below entry price."""
+    service = MarketService(
+        state_service=DummySnapshotStore(),
+        enable_websocket=False,
+        account_api=object(),
+        market_api=object(),
+        public_api=object(),
+        trade_api=object(),
+    )
+    symbol = service.symbol
+    service._instrument_specs[symbol] = {"tick_size": 0.1}
+    snapped = service._snap_take_profit_to_valid("SELL", 100.0, symbol)
+    assert snapped is not None and snapped < 100.0
+    feedback = list(service._execution_feedback)
+    assert feedback[-1]["message"] == "LLM take-profit adjusted to honor trade direction"
+    assert feedback[-1]["meta"]["adjusted_take_profit"] == pytest.approx(snapped)
+
+
+def test_snap_take_profit_to_valid_long() -> None:
+    """_snap_take_profit_to_valid snaps BUY TP to just above entry price."""
+    service = MarketService(
+        state_service=DummySnapshotStore(),
+        enable_websocket=False,
+        account_api=object(),
+        market_api=object(),
+        public_api=object(),
+        trade_api=object(),
+    )
+    symbol = service.symbol
+    service._instrument_specs[symbol] = {"tick_size": 0.1}
+    snapped = service._snap_take_profit_to_valid("BUY", 100.0, symbol)
+    assert snapped is not None and snapped > 100.0
+    feedback = list(service._execution_feedback)
+    assert feedback[-1]["message"] == "LLM take-profit adjusted to honor trade direction"
+    assert feedback[-1]["meta"]["adjusted_take_profit"] == pytest.approx(snapped)
 
 
 def test_handle_llm_decision_blocks_without_positions(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -666,7 +703,7 @@ def test_handle_llm_executes_isolated_trade_without_wallet(monkeypatch: pytest.M
     messages = [entry["message"] for entry in feedback]
     assert "Isolated margin unavailable" not in messages
     assert "Size clipped while isolated wallet missing" in messages
-    assert submit_meta["size"] == pytest.approx(30.0, rel=1e-6)
+    assert submit_meta["size"] == pytest.approx(33.0, rel=1e-6)
 
 
 def test_handle_llm_prefers_explicit_position_size(monkeypatch: pytest.MonkeyPatch) -> None:
