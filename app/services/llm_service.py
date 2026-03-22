@@ -338,6 +338,26 @@ class LLMService:
                 position_size = float(abs(size)) if size is not None else position_size
             except (TypeError, ValueError):
                 position_size = 1.0
+        # Compute a notional_usd for the fallback decision.  Use the existing
+        # position size × market price if available, otherwise default to a
+        # small fraction of equity (~5%).
+        try:
+            market_price = float(last_price) if last_price else 0.0
+        except (TypeError, ValueError):
+            market_price = 0.0
+        account_section = context.get("account") or {}
+        try:
+            equity = float(
+                account_section.get("account_equity") or account_section.get("equity_usd") or 0
+            )
+        except (TypeError, ValueError):
+            equity = 0.0
+        if market_price > 0 and position_size > 0:
+            notional_usd = position_size * market_price
+        elif equity > 0:
+            notional_usd = equity * 0.05
+        else:
+            notional_usd = 1.0
 
         rationale = strategy.get("reason") or "Default strategy output"
         tags = ["model:" + (self.model_id or "unknown"), f"guardrails:max_leverage={guardrails.get('max_leverage', '--')}"]
@@ -345,7 +365,7 @@ class LLMService:
         result = {
             "action": action,
             "confidence": round(confidence, 3),
-            "position_size": position_size,
+            "notional_usd": round(notional_usd, 4),
             "rationale": rationale,
             "risk_score": round(risk_score, 3),
             "stop_loss": stop_loss,

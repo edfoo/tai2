@@ -55,10 +55,10 @@ DEFAULT_DECISION_PROMPT = (
     "Your confidence score (0–1) reflects the proportion of signals aligning with your directional bias after applying all Step 2 penalties: "
     "0.75–1.0: HTF aligned, LTF momentum and volume confirm — full size allowed. "
     "0.55–0.75: HTF neutral or mildly opposed, but LTF signals are clear — reduce size proportionally. "
-    "0.45–0.55: meaningful conflicts (e.g. strong counter-trend trade) — trade at ≤50% max_safe_contracts only if R:R is compelling. "
+    "0.45–0.55: meaningful conflicts (e.g. strong counter-trend trade) — trade at ≤50% max_safe_notional_usd only if R:R is compelling. "
     "< 0.45: too many conflicts — you MUST recommend HOLD. "
-    "Base position sizing: base_size = max_safe_contracts × confidence (then apply the 50% HTF-counter-trend cap if triggered in Step 2). "
-    "Then apply the risk_score as a final multiplier: final_position_size = base_size × (1 − risk_score). "
+    "Base position sizing: base_notional = max_safe_notional_usd × confidence (then apply the 50% HTF-counter-trend cap if triggered in Step 2). "
+    "Then apply the risk_score as a final multiplier: notional_usd = base_notional × (1 − risk_score). "
     "The risk_score (0–1) must reflect current volatility (ATR %), spread width, and proximity to major support/resistance. "
     "A higher risk_score automatically reduces final size. "
 
@@ -71,13 +71,9 @@ DEFAULT_DECISION_PROMPT = (
 
     "CRITICAL SIZING RULE: context.execution.max_safe_notional_usd is the pre-computed absolute ceiling for position notional "
     "(= available_margin_usd × max_leverage, already capped by all position and tier limits). "
-    "context.execution.max_safe_contracts is its equivalent in contract units. "
-    "CONTRACT SIZING: express position_size in base-token units (the bot converts to OKX contract units internally using the instrument's ctVal). "
-    "notional_usd = position_size × last_price. "
-    "Do NOT infer the contract multiplier from open_interest — "
-    "open_interest.base_tokens is the OI expressed in base tokens (not USD) and must not be used to derive contract sizing. "
-    "You MUST NOT propose a position_size or notional above max_safe_notional_usd — the exchange will reject the order regardless of equity_pct. "
-    "Sizing based on account_equity alone is incorrect; always verify that your chosen notional stays within max_safe_notional_usd. "
+    "Express your desired position size as `notional_usd` — the USD dollar value of the position (e.g. 150.0 for a $150 position). "
+    "You MUST NOT set notional_usd above max_safe_notional_usd — the exchange will reject the order regardless of equity_pct. "
+    "The bot converts your notional_usd to exchange contracts internally; you do not need to know contract sizes or multipliers. "
 
     "CRITICAL DIRECTION RULE: for a BUY, stop_loss MUST be strictly below entry price and take_profit MUST be strictly above entry price. "
     "For a SELL, stop_loss MUST be strictly above entry price and take_profit MUST be strictly below entry price. "
@@ -108,9 +104,9 @@ RESPONSE_SCHEMA = {
             "maximum": 1,
             "description": "Confidence value between 0 and 1",
         },
-        "position_size": {
+        "notional_usd": {
             "type": "number",
-            "description": "Suggested position size in contracts or base units",
+            "description": "Dollar value of the position (e.g. 150.0 for a $150 position). Must not exceed max_safe_notional_usd.",
         },
         "equity_pct": {
             "type": "number",
@@ -271,8 +267,6 @@ class PromptBuilder:
         if account_equity_usd is not None and max_position_pct:
             equity_cap_usd = account_equity_usd * max_position_pct
             execution_settings["max_equity_allocation_usd"] = equity_cap_usd
-            if price_hint and equity_cap_usd:
-                execution_settings["max_equity_allocation_contracts"] = equity_cap_usd / price_hint
         if max_position_pct is not None:
             execution_settings["max_position_pct"] = max_position_pct
         if symbol_cap_pct is not None:
@@ -280,16 +274,10 @@ class PromptBuilder:
         if account_equity_usd is not None and symbol_cap_pct:
             symbol_equity_cap_usd = account_equity_usd * symbol_cap_pct
             execution_settings["symbol_max_equity_allocation_usd"] = symbol_equity_cap_usd
-            if price_hint and symbol_equity_cap_usd:
-                execution_settings["symbol_max_equity_allocation_contracts"] = symbol_equity_cap_usd / price_hint
         if margin_cap_usd is not None:
             execution_settings["margin_max_position_value_usd"] = margin_cap_usd
-            if price_hint:
-                execution_settings["margin_max_position_contracts"] = margin_cap_usd / price_hint
         if tier_cap_usd is not None:
             execution_settings["tier_max_position_value_usd"] = tier_cap_usd
-            if price_hint:
-                execution_settings["tier_max_position_contracts"] = tier_cap_usd / price_hint
         effective_candidates = [
             value
             for value in (margin_cap_usd, tier_cap_usd)
@@ -298,8 +286,6 @@ class PromptBuilder:
         if effective_candidates:
             effective_cap = min(effective_candidates)
             execution_settings["effective_max_position_value_usd"] = effective_cap
-            if price_hint:
-                execution_settings["effective_max_position_contracts"] = effective_cap / price_hint
         effective_max_leverage = guardrail_max_leverage if guardrail_max_leverage and guardrail_max_leverage > 0 else None
         if effective_max_leverage is not None:
             execution_settings["max_leverage"] = effective_max_leverage
@@ -315,8 +301,6 @@ class PromptBuilder:
             if cap_candidates:
                 max_safe_notional_usd = min(max_safe_notional_usd, min(cap_candidates))
             execution_settings["max_safe_notional_usd"] = round(max_safe_notional_usd, 2)
-            if price_hint and price_hint > 0:
-                execution_settings["max_safe_contracts"] = round(max_safe_notional_usd / price_hint, 8)
         if tier_imr is not None:
             execution_settings["tier_initial_margin_ratio"] = tier_imr
         if tier_source:

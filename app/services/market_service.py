@@ -3500,7 +3500,8 @@ class MarketService:
         )
         now = time.time()
         summary = (
-            f"LLM decision {action} size={decision.get('position_size', '--')} "
+            f"LLM decision {action} "
+            f"notional_usd={decision.get('notional_usd', decision.get('position_size', '--'))} "
             f"conf={decision.get('confidence', '--')} symbol={symbol}"
         )
 
@@ -3751,61 +3752,76 @@ class MarketService:
 
         confidence_value = self._normalize_confidence(decision.get("confidence"))
         equity_pct = self._extract_float(decision.get("equity_pct"))
+        llm_notional_usd = self._extract_float(decision.get("notional_usd"))
+        # Legacy field: position_size was historically in base-token units.
+        # Kept for backward compatibility; new LLM output prefers notional_usd.
         explicit_size_hint = self._extract_float(decision.get("position_size"))
-        size_hint = explicit_size_hint
-        equity_pct_size_hint = None
-        if (
-            equity_pct is not None
-            and equity_pct > 0
-            and equity_pct <= 1
-            and account_equity is not None
-            and account_equity > 0
-            and last_price
-            and last_price > 0
-        ):
-            target_notional = account_equity * equity_pct
-            equity_pct_size_hint = target_notional / last_price if last_price else None
-        if (
-            explicit_size_hint
-            and explicit_size_hint > 0
-            and equity_pct_size_hint
-            and equity_pct_size_hint > 0
-        ):
-            larger = max(explicit_size_hint, equity_pct_size_hint)
-            smaller = min(explicit_size_hint, equity_pct_size_hint)
-            if smaller > 0:
-                ratio = larger / smaller
-                if ratio >= 2.0:  # warn when the suggestions diverge wildly (>= 2x)
-                    self._record_execution_feedback(
-                        symbol,
-                        "LLM equity_pct disagrees with position_size",
-                        level="warning",
-                        meta={
-                            "position_size": explicit_size_hint,
-                            "equity_pct_size": equity_pct_size_hint,
-                            "equity_pct": equity_pct,
-                            "account_equity": account_equity,
-                            "last_price": last_price,
-                            "ratio": ratio,
-                        },
-                    )
-        if (size_hint is None or size_hint <= 0) and equity_pct_size_hint and equity_pct_size_hint > 0:
-            size_hint = equity_pct_size_hint
-        target_leverage: float | None = None
-        raw_size = self._compute_leverage_adjusted_size(
-            size_hint=size_hint,
-            account_equity=account_equity,
-            last_price=last_price,
-            min_leverage=min_leverage,
-            max_leverage=max_leverage,
-            confidence=confidence_value,
-            confidence_gate=confidence_gate,
-        ) or 0.0
+        raw_size: float = 0.0
+
+        if llm_notional_usd and llm_notional_usd > 0 and last_price and last_price > 0:
+            # LLM expressed position as a dollar amount — convert directly to
+            # base-token units and skip the leverage-scaling path entirely.  All
+            # downstream guardrail caps still apply via raw_size × last_price.
+            raw_size = llm_notional_usd / last_price
+            self._emit_debug(
+                f"{symbol} sizing from LLM notional_usd={llm_notional_usd:.2f} "
+                f"→ raw_size={raw_size:.6f} base-tokens"
+            )
+        else:
+            size_hint = explicit_size_hint
+            equity_pct_size_hint = None
+            if (
+                equity_pct is not None
+                and equity_pct > 0
+                and equity_pct <= 1
+                and account_equity is not None
+                and account_equity > 0
+                and last_price
+                and last_price > 0
+            ):
+                target_notional = account_equity * equity_pct
+                equity_pct_size_hint = target_notional / last_price if last_price else None
+            if (
+                explicit_size_hint
+                and explicit_size_hint > 0
+                and equity_pct_size_hint
+                and equity_pct_size_hint > 0
+            ):
+                larger = max(explicit_size_hint, equity_pct_size_hint)
+                smaller = min(explicit_size_hint, equity_pct_size_hint)
+                if smaller > 0:
+                    ratio = larger / smaller
+                    if ratio >= 2.0:
+                        self._record_execution_feedback(
+                            symbol,
+                            "LLM equity_pct disagrees with position_size",
+                            level="warning",
+                            meta={
+                                "position_size": explicit_size_hint,
+                                "equity_pct_size": equity_pct_size_hint,
+                                "equity_pct": equity_pct,
+                                "account_equity": account_equity,
+                                "last_price": last_price,
+                                "ratio": ratio,
+                            },
+                        )
+            if (size_hint is None or size_hint <= 0) and equity_pct_size_hint and equity_pct_size_hint > 0:
+                size_hint = equity_pct_size_hint
+            raw_size = self._compute_leverage_adjusted_size(
+                size_hint=size_hint,
+                account_equity=account_equity,
+                last_price=last_price,
+                min_leverage=min_leverage,
+                max_leverage=max_leverage,
+                confidence=confidence_value,
+                confidence_gate=confidence_gate,
+            ) or 0.0
         if raw_size <= 0:
             self._emit_debug(
                 f"Execution skipped for {symbol}: unable to derive valid position size"
             )
             return False
+        target_leverage: float | None = None
 
         def _extract_quote_balances(
             balances: dict[str, Any] | None,
