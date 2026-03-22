@@ -4,6 +4,8 @@ import time
 from collections import deque
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -73,6 +75,20 @@ class _UTCFormatter(logging.Formatter):
     converter = time.gmtime
 
 
+class LogLinesHandler(logging.Handler):
+    """Append fully-formatted log lines to an in-memory deque for the Debug page."""
+
+    def __init__(self, lines: deque) -> None:
+        super().__init__()
+        self._lines = lines
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            self._lines.append(self.format(record))
+        except Exception:  # pragma: no cover - defensive
+            pass
+
+
 def _create_lifespan(enable_background_services: bool):
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -84,9 +100,7 @@ def _create_lifespan(enable_background_services: bool):
         app.state.backend_events = deque(maxlen=2000)
         app.state.frontend_events = deque(maxlen=1000)
         app.state.websocket_events = deque(maxlen=1000)
-        app.state.backend_log_buffer = deque(maxlen=2000)
-        app.state.frontend_log_buffer = deque(maxlen=1000)
-        app.state.websocket_log_buffer = deque(maxlen=1000)
+        app.state.log_lines = deque(maxlen=5000)
 
         data_log_markers = (
             "api/v5/account/balance",
@@ -140,6 +154,31 @@ def _create_lifespan(enable_background_services: bool):
         if backend_handler not in root_logger.handlers:
             root_logger.addHandler(backend_handler)
             attached_loggers.append(root_logger)
+        # In-memory log lines — populated at emit time, always current
+        _lines_handler = LogLinesHandler(app.state.log_lines)
+        _lines_handler.setLevel(logging.DEBUG)
+        _lines_handler.setFormatter(utc_formatter)
+        root_logger.addHandler(_lines_handler)
+        app.state.log_lines_handler = _lines_handler
+        # Rotating file handler — persistent logs across restarts
+        try:
+            _log_dir = Path("logs")
+            _log_dir.mkdir(exist_ok=True)
+            _file_handler = RotatingFileHandler(
+                _log_dir / "app.log",
+                maxBytes=5 * 1024 * 1024,
+                backupCount=5,
+                encoding="utf-8",
+            )
+            _file_handler.setLevel(logging.DEBUG)
+            _file_handler.setFormatter(utc_formatter)
+            root_logger.addHandler(_file_handler)
+            app.state.log_file_handler = _file_handler
+            app.state.log_file_path = str(_log_dir / "app.log")
+        except Exception as _exc:
+            logger.warning("Failed to set up rotating log file: %s", _exc)
+            app.state.log_file_handler = None
+            app.state.log_file_path = None
         for name, level in logger_levels.items():
             logging.getLogger(name).setLevel(level)
         app.state.backend_log_handler = backend_handler
@@ -387,6 +426,14 @@ def _create_lifespan(enable_background_services: bool):
                     except (ValueError, AttributeError):
                         continue
                 handler.close()
+            for _attr in ("log_lines_handler", "log_file_handler"):
+                _h = getattr(app.state, _attr, None)
+                if _h:
+                    try:
+                        logging.getLogger().removeHandler(_h)
+                        _h.close()
+                    except Exception:
+                        pass
             scheduler = getattr(app.state, "prompt_scheduler", None)
             if scheduler:
                 await scheduler.stop()
@@ -426,6 +473,15 @@ def create_app(enable_background_services: bool | None = None) -> FastAPI:
             logger.error("Failed to fetch trades: %s", exc)
             return JSONResponse({"detail": "trades unavailable"}, status_code=503)
         return JSONResponse({"items": items}, status_code=200)
+
+    @app.get("/api/logs")
+    async def get_logs(lines: int = 500, filter: str = "") -> JSONResponse:
+        all_lines: list[str] = list(getattr(app.state, "log_lines", []))
+        if filter:
+            fl = filter.lower()
+            all_lines = [ln for ln in all_lines if fl in ln.lower()]
+        tail = all_lines[-lines:]
+        return JSONResponse({"lines": tail, "total": len(all_lines)})
 
     @app.get("/llm/prompt")
     async def llm_prompt(

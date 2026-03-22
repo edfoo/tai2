@@ -2709,132 +2709,103 @@ def register_pages(app: FastAPI) -> None:
             ui.label(f"Active Prompt Version: {active_version}").classes(
                 "text-sm font-semibold text-slate-600"
             )
-            with ui.column().classes(
-                "w-full gap-4"
-            ):
+            with ui.column().classes("w-full gap-4"):
+                # ── Application Logs ──────────────────────────────────────────────
                 with ui.card().classes(
                     "w-full p-4 gap-2 bg-slate-50 border border-slate-200 shadow-sm"
                 ):
-                    ui.label("Backend Logs").classes("text-lg font-semibold")
-                    ui.label("Engine + scheduler diagnostics").classes("text-xs text-slate-500")
-                    backend_log = (
+                    with ui.row().classes("w-full items-center justify-between flex-wrap gap-2"):
+                        with ui.column().classes("gap-0"):
+                            ui.label("Application Logs").classes("text-lg font-semibold")
+                            log_path = getattr(app.state, "log_file_path", None)
+                            caption = f"→ {log_path}" if log_path else "in-memory only"
+                            ui.label(caption).classes("text-xs text-slate-500 font-mono")
+                        with ui.row().classes("items-center gap-2 flex-wrap"):
+                            filter_input = (
+                                ui.input(placeholder="Filter…")
+                                .props("dense outlined clearable")
+                                .classes("w-48")
+                            )
+                            level_select = (
+                                ui.select(
+                                    ["all", "debug", "info", "warning", "error"],
+                                    value="all",
+                                    label="Level",
+                                )
+                                .props("dense outlined")
+                                .classes("w-28")
+                            )
+                    app_log = (
                         ui.log(max_lines=2000)
-                        .classes(
-                            "w-full font-mono text-xs bg-slate-900/90 text-white rounded-xl"
-                        )
-                        .style("min-height: 32rem; max-height: 32rem; overflow-y: auto;")
+                        .classes("w-full font-mono text-xs bg-slate-900/90 text-white rounded-xl")
+                        .style("min-height: 42rem; max-height: 42rem; overflow-y: auto;")
                     )
+                # ── WebSocket Events ──────────────────────────────────────────────
                 with ui.card().classes(
                     "w-full p-4 gap-2 bg-slate-50 border border-slate-200 shadow-sm"
                 ):
-                    with ui.row().classes("w-full items-center justify-between"):
-                        ui.label("Frontend Logs").classes("text-lg font-semibold")
-                        ui.button(
-                            "Emit Event",
-                            icon="bolt",
-                            on_click=lambda: app.state.frontend_events.append("Frontend heartbeat triggered"),
-                        ).props("outlined dense")
-                    ui.label("UI level actions + notifications").classes("text-xs text-slate-500")
-                    frontend_log = ui.log(max_lines=1000).classes(
-                        "w-full h-64 font-mono text-xs bg-slate-900/90 text-white rounded-xl"
-                    )
-                with ui.card().classes(
-                    "w-full p-4 gap-2 bg-slate-50 border border-slate-200 shadow-sm"
-                ):
-                    ui.label("WebSocket Updates").classes("text-lg font-semibold")
-                    ui.label("Last snapshots streamed to clients").classes(
+                    ui.label("WebSocket Events").classes("text-lg font-semibold")
+                    ui.label("Snapshot broadcasts to connected clients").classes(
                         "text-xs text-slate-500"
                     )
-                    websocket_log = ui.log(max_lines=1000).classes(
-                        "w-full h-64 font-mono text-xs bg-slate-900/90 text-white rounded-xl"
+                    websocket_log = (
+                        ui.log(max_lines=200)
+                        .classes("w-full font-mono text-xs bg-slate-900/90 text-white rounded-xl")
+                        .style("min-height: 8rem; max-height: 8rem;")
                     )
 
-        backend_seen = {"idx": len(getattr(app.state, "backend_events", []))}
-        frontend_seen = {"idx": len(getattr(app.state, "frontend_events", []))}
-        websocket_seen = {"idx": len(getattr(app.state, "websocket_events", []))}
+        def _passes_filter(line: str) -> bool:
+            f = (filter_input.value or "").strip().lower()
+            lv = (level_select.value or "all").lower()
+            if f and f not in line.lower():
+                return False
+            if lv != "all":
+                if f"· {lv.upper()}:" not in line:
+                    return False
+            return True
 
-        for line in list(getattr(app.state, "backend_log_buffer", [])):
-            backend_log.push(line)
-        for line in list(getattr(app.state, "frontend_log_buffer", [])):
-            frontend_log.push(line)
-        for line in list(getattr(app.state, "websocket_log_buffer", [])):
-            websocket_log.push(line)
-
-        def _render_entry(entry: Any) -> str:
+        def _render_event(entry: Any) -> str:
             now_label = format_now("%H:%M:%S %Z")
             if isinstance(entry, dict):
                 message = entry.get("message") or entry.get("detail")
                 if not message:
                     message = json.dumps(entry, ensure_ascii=False)
                 ts_raw = entry.get("timestamp") or entry.get("ts")
-                if ts_raw:
-                    label = format_iso_timestamp(ts_raw, fmt="%H:%M:%S %Z")
-                else:
-                    label = now_label
+                label = format_iso_timestamp(ts_raw, fmt="%H:%M:%S %Z") if ts_raw else now_label
                 symbol = entry.get("symbol")
                 if symbol:
                     message = f"{symbol}: {message}"
                 return f"{label} · {message}"
             return f"{now_label} · {entry}"
 
-        def _looks_like_websocket(entry: Any) -> bool:
-            if isinstance(entry, dict):
-                if entry.get("source") == "websocket":
-                    return True
-                text_value = entry.get("message") or entry.get("detail")
-            else:
-                text_value = entry
-            if not isinstance(text_value, str):
-                return False
-            lowered = text_value.lower()
-            return lowered.startswith("ws ") or "websocket" in lowered
+        # Preload from the always-current in-memory log buffer
+        all_lines = list(getattr(app.state, "log_lines", []))
+        for line in all_lines:
+            if _passes_filter(line):
+                app_log.push(line)
+        log_seen = {"count": len(all_lines)}
 
-        def push_backend() -> None:
-            events = list(getattr(app.state, "backend_events", []))
-            new_events = events[backend_seen["idx"] :]
-            for entry in new_events:
-                if _looks_like_websocket(entry):
-                    rendered_ws = _render_entry(entry)
-                    websocket_log.push(rendered_ws)
-                    buffer = getattr(app.state, "websocket_log_buffer", None)
-                    if buffer is not None:
-                        buffer.append(rendered_ws)
-                    continue
-                rendered = _render_entry(entry)
-                backend_log.push(rendered)
-                buffer = getattr(app.state, "backend_log_buffer", None)
-                if buffer is not None:
-                    buffer.append(rendered)
-            backend_seen["idx"] = len(events)
+        # Preload WebSocket events
+        ws_events = list(getattr(app.state, "websocket_events", []))
+        for entry in ws_events:
+            websocket_log.push(_render_event(entry))
+        ws_seen = {"idx": len(ws_events)}
 
-        def push_frontend() -> None:
-            events = list(getattr(app.state, "frontend_events", []))
-            new_events = events[frontend_seen["idx"] :]
-            for entry in new_events:
-                rendered = _render_entry(entry)
-                frontend_log.push(rendered)
-                buffer = getattr(app.state, "frontend_log_buffer", None)
-                if buffer is not None:
-                    buffer.append(rendered)
-            frontend_seen["idx"] = len(events)
+        def refresh_logs() -> None:
+            lines = list(getattr(app.state, "log_lines", []))
+            for line in lines[log_seen["count"]:]:
+                if _passes_filter(line):
+                    app_log.push(line)
+            log_seen["count"] = len(lines)
 
-        def push_websocket() -> None:
+        def refresh_websocket() -> None:
             events = list(getattr(app.state, "websocket_events", []))
-            new_events = events[websocket_seen["idx"] :]
-            for entry in new_events:
-                rendered = _render_entry(entry)
-                websocket_log.push(rendered)
-                buffer = getattr(app.state, "websocket_log_buffer", None)
-                if buffer is not None:
-                    buffer.append(rendered)
-            websocket_seen["idx"] = len(events)
+            for entry in events[ws_seen["idx"]:]:
+                websocket_log.push(_render_event(entry))
+            ws_seen["idx"] = len(events)
 
-        ui.timer(3, push_backend)
-        ui.timer(3, push_frontend)
-        ui.timer(3, push_websocket)
-        push_backend()
-        push_frontend()
-        push_websocket()
+        ui.timer(3, refresh_logs)
+        ui.timer(3, refresh_websocket)
 
     def render_cfg_page() -> None:
         navigation("CFG")
