@@ -186,7 +186,6 @@ class PromptBuilder:
         risk_metrics = market_block.get("risk_metrics") or snapshot.get("risk_metrics") or {}
         order_book = market_block.get("order_book") or snapshot.get("order_book") or {}
         liquidations = market_block.get("liquidations") or snapshot.get("liquidations") or []
-        snapshot_health = self._build_snapshot_health(snapshot, runtime_meta)
 
         live_section = self._build_live_section(ticker, funding, open_interest, custom_metrics, order_book)
         history_section = self._build_history_section(indicators)
@@ -366,7 +365,6 @@ class PromptBuilder:
             "liquidity_context": liquidity_section,
             "derivatives_posture": derivatives_section,
             "pending_orders": pending_orders,
-            "snapshot_health": snapshot_health,
             "notes": runtime_meta.get("llm_notes"),
             "prompt_version_id": runtime_meta.get("prompt_version_id"),
             "prompt_version_name": runtime_meta.get("prompt_version_name"),

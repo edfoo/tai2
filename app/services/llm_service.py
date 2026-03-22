@@ -159,7 +159,6 @@ class LLMService:
             "derivatives_posture",
             "portfolio_heatmap",
             "pending_orders",
-            "snapshot_health_details",
         }
         removed_sections: list[str] = []
         for key in sorted(drop_keys):

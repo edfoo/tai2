@@ -175,12 +175,21 @@ class PromptScheduler:
                         return symbol, None, None, None
                 bundle, error_response = await prepare_prompt_payload(self._app, symbol=symbol)
                 if error_response:
-                    logger.debug(
-                        "Prompt scheduler skipping %s: %s",
-                        symbol,
-                        getattr(error_response, "body", b"error"),
-                    )
-                    if getattr(error_response, "status_code", None) == 423:
+                    status = getattr(error_response, "status_code", None)
+                    body = getattr(error_response, "body", b"error")
+                    if status == 503:
+                        logger.warning(
+                            "Prompt scheduler skipping %s: snapshot stale or unavailable (%s)",
+                            symbol,
+                            body,
+                        )
+                    else:
+                        logger.debug(
+                            "Prompt scheduler skipping %s: %s",
+                            symbol,
+                            body,
+                        )
+                    if status == 423:
                         self._handle_daily_loss_lock(symbol)
                     return symbol, None, None, None
                 if not bundle:
