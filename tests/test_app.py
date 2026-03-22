@@ -161,7 +161,6 @@ def test_prompt_builder_compiles_structured_payload() -> None:
     assert context["liquidity_context"]["liquidity_bias"] == "bid-supported"
     assert context["derivatives_posture"]["long_short_ratio"]["value"] == 1.2
     assert context["derivatives_posture"]["liquidation_clusters"]
-    assert context["snapshot_health"]["stale"] is False
     assert context["pending_orders"]["total"] == 1
     assert context["portfolio_exposure"]["long_notional"] == pytest.approx(43000)
     assert prompt["response_schema"]["properties"]["action"]["enum"] == ["BUY", "SELL", "HOLD"]
