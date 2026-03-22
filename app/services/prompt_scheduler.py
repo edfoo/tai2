@@ -25,9 +25,12 @@ class SchedulerConfig:
 
 class PromptScheduler:
     # Maximum wall-clock time a single _tick() is allowed to run before it is
-    # cancelled and the loop continues.  Prevents a hanging LLM / network call
-    # from blocking the scheduler indefinitely.
-    TICK_TIMEOUT_SECONDS = 240
+    # cancelled and the loop continues.  Sized to fit:
+    #   _FETCH_TIMEOUT (200s, parallel LLM gather) +
+    #   up to 2 sequential BUY/SELL executions × _EXEC_TIMEOUT (90s each) +
+    #   overhead.  Reasoning models can take 2-4 minutes so the fetch budget
+    #   is the dominant term.
+    TICK_TIMEOUT_SECONDS = 480
     # Delay before automatically restarting after an unexpected crash.
     RESTART_DELAY_SECONDS = 30
 
@@ -160,6 +163,11 @@ class PromptScheduler:
         # LLM calls are pure I/O — running them in parallel costs the same
         # wall-clock time as a single call and lets us see every decision
         # before committing any funds.
+        # Budget per symbol for LLM call + DB persist.  Must leave room for
+        # the execution phase (90s/symbol) within TICK_TIMEOUT_SECONDS (480s).
+        # Set to 200s so reasoning models (up to 180s) have margin to complete.
+        _FETCH_TIMEOUT = 200
+
         async def _fetch_decision(
             symbol: str,
         ) -> tuple[str, Any, dict[str, Any] | None, str | None]:
@@ -196,12 +204,28 @@ class PromptScheduler:
                     return symbol, None, None, None
                 decision, prompt_id = await fetch_llm_decision(self._app, bundle)
                 return symbol, bundle, decision, prompt_id
+            except asyncio.TimeoutError:
+                # Raised by the wait_for wrapper below — already logged there.
+                return symbol, None, None, None
             except Exception as exc:  # pragma: no cover - defensive
                 logger.exception("Prompt scheduler LLM fetch failed for %s: %s", symbol, exc)
                 return symbol, None, None, None
 
+        async def _fetch_decision_with_timeout(
+            symbol: str,
+        ) -> tuple[str, Any, dict[str, Any] | None, str | None]:
+            try:
+                return await asyncio.wait_for(_fetch_decision(symbol), timeout=_FETCH_TIMEOUT)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Prompt scheduler LLM fetch timed out after %ss for %s; skipping",
+                    _FETCH_TIMEOUT,
+                    symbol,
+                )
+                return symbol, None, None, None
+
         raw_results: list[tuple[str, Any, dict[str, Any] | None, str | None]] = list(
-            await asyncio.gather(*(_fetch_decision(s) for s in symbols))
+            await asyncio.gather(*(_fetch_decision_with_timeout(s) for s in symbols))
         )
         valid = [
             (sym, bundle, decision, prompt_id)

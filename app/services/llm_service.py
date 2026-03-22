@@ -6,8 +6,11 @@ import json
 import logging
 from typing import Any
 
-# Hard cap on a single OpenRouter request.
-LLM_REQUEST_TIMEOUT_SECONDS = 300
+# Hard cap on a single OpenRouter request.  Reasoning models (deepseek-r1,
+# o1, etc.) can take 2-4 minutes; non-reasoning models are typically 5-15s.
+# Must stay below PromptScheduler._FETCH_TIMEOUT (200s) so the LLM gives a
+# clean timeout error before the per-symbol gather wrapper cancels the task.
+LLM_REQUEST_TIMEOUT_SECONDS = 180
 
 from openrouter import OpenRouter, errors as openrouter_errors
 
