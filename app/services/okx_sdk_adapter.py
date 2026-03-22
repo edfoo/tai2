@@ -277,13 +277,16 @@ class OkxTradeAdapter:
         inst_type: str = "SWAP",
         inst_id: str = "",
         after: str = "",
+        before: str = "",
         limit: int = 100,
         sub_acct: str | None = None,
     ) -> Any:
         """Retrieve fill (trade) history including realized PnL for each fill.
 
         Uses ``/api/v5/trade/fills-history`` (max 90-day lookback).
-        ``after`` is the OKX Unix-ms cursor for pagination (returns fills *before* that time).
+        ``after``  – returns fills with billId **less than** (older than) the given value.
+        ``before`` – returns fills with billId **greater than** (newer than) the given value.
+        Omit both to fetch the most recent fills.
         """
         if not self._api:
             return []
@@ -292,6 +295,8 @@ class OkxTradeAdapter:
             params["instId"] = inst_id
         if after:
             params["after"] = after
+        if before:
+            params["before"] = before
         if sub_acct:
             params["subAcct"] = sub_acct
         if hasattr(self._api, "_request_with_params") and GET:

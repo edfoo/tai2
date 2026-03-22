@@ -222,8 +222,6 @@ class MarketService:
         self._screener_config: dict[str, Any] = {}
         self._screener_last_run: float = 0.0
         self._screener_selected_symbols: list[str] = []
-        # Cursor for fills-history pagination: OKX Unix-ms string (empty = from now).
-        self._fills_cursor: str = ""
         self._reconcile_task: Optional[asyncio.Task] = None
         # Notional (USD) reserved for in-flight orders, keyed by symbol.
         # Concurrent handle_llm_decision coroutines deduct these before sizing
@@ -6308,13 +6306,18 @@ class MarketService:
 
         Flow
         ----
-        1. Fetch up to 100 fills since the last cursor (most-recent-first).
+        1. Fetch the 100 most recent fills every call (no cursor — always fresh).
         2. Keep only fills where ``pnl != "0"`` — those are closing/reduce fills that carry
            actual realized profit/loss.
         3. For each such fill look up the most recent unreconciled ``executed_trades`` row for
            the same symbol whose side is the **opposite** of the fill side (the original open
            order) and update its ``pnl``, ``fee``, and ``okx_fill_id`` columns.
-        4. Advance the cursor so the next call only fetches newer fills.
+
+        Note: no cursor/pagination is used here.  OKX ``after`` moves *backwards* in time
+        (returns fills older than the given ID), so tracking it caused the reconciler to
+        drift into the past and miss new closing fills.  Instead we simply re-fetch the
+        latest 100 fills every call; the ``okx_fill_id IS NULL`` guard in
+        ``FETCH_UNRECONCILED_SQL`` ensures already-reconciled trades are never touched twice.
         """
         if not self._trade_api:
             return
@@ -6323,7 +6326,7 @@ class MarketService:
             response = await asyncio.to_thread(
                 self._trade_api.get_fills_history,
                 inst_type="SWAP",
-                after=self._fills_cursor,
+                after="",
                 limit=100,
                 sub_acct=sub_acct,
             )
@@ -6334,14 +6337,6 @@ class MarketService:
         fills = self._safe_data(response)
         if not fills:
             return
-
-        # OKX returns fills newest-first; collect the oldest Unix-ms ts as next cursor so
-        # subsequent calls fetch only fills that arrived *before* the current batch.
-        new_cursor: str = self._fills_cursor
-        for fill in fills:
-            fill_ts = str(fill.get("fillTime") or fill.get("ts") or "")
-            if fill_ts and (not new_cursor or int(fill_ts) < int(new_cursor)):
-                new_cursor = fill_ts
 
         reconciled = 0
         for fill in fills:
@@ -6401,11 +6396,6 @@ class MarketService:
 
         if reconciled:
             logger.info("Fill reconciliation: updated PnL for %d trade(s)", reconciled)
-
-        # Advance cursor to the oldest fill time seen, so the next poll requests
-        # only fills that arrived before the current batch (OKX pagination direction).
-        if new_cursor and new_cursor != self._fills_cursor:
-            self._fills_cursor = new_cursor
 
     @staticmethod
     def _build_tpsl_client_id(symbol: str) -> str:
