@@ -291,17 +291,36 @@ class LLMService:
                 if isinstance(chunk, dict) and chunk.get("type") == "output_json":
                     output = chunk.get("json")
                     if isinstance(output, dict):
-                        return output
+                        return self._unwrap_schema_envelope(output)
         text_payload = self._coerce_text(content)
         if not text_payload:
             raise ValueError("Assistant response empty")
         try:
-            return json.loads(text_payload)
+            parsed = json.loads(text_payload)
         except json.JSONDecodeError:
             block = self._extract_json_block(text_payload)
             if block is None:
                 raise
-            return block
+            parsed = block
+        if isinstance(parsed, dict):
+            return self._unwrap_schema_envelope(parsed)
+        return parsed
+
+    @staticmethod
+    def _unwrap_schema_envelope(parsed: dict[str, Any]) -> dict[str, Any]:
+        """Unwrap single-key schema-name envelopes that some models (e.g. Claude) emit.
+
+        When OpenRouter sends a ``response_format`` with ``json_schema.name = "tai2_decision"``,
+        certain models return ``{"tai2_decision": {...actual fields...}}`` rather than the
+        fields at the top level.  Detect this by checking whether the parsed dict has
+        exactly one key whose value is also a dict that contains the expected "action" field.
+        """
+        if len(parsed) == 1:
+            (only_key, inner) = next(iter(parsed.items()))
+            if isinstance(inner, dict) and "action" in inner:
+                logger.debug("Unwrapping schema envelope key '%s' from LLM response", only_key)
+                return inner
+        return parsed
 
     @staticmethod
     def _coerce_text(content: Any) -> str:
