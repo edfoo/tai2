@@ -73,8 +73,11 @@ DEFAULT_DECISION_PROMPT = (
 
     "CRITICAL SIZING RULE: context.execution.max_safe_notional_usd is the pre-computed absolute ceiling for position notional "
     "(= available_margin_usd × max_leverage, already capped by all position and tier limits). "
+    "context.execution.min_notional_usd is the exchange minimum to open a new position (typically 5 USDT for isolated margin). "
     "Express your desired position size as `notional_usd` — the USD dollar value of the position (e.g. 150.0 for a $150 position). "
     "You MUST NOT set notional_usd above max_safe_notional_usd — the exchange will reject the order regardless of equity_pct. "
+    "You MUST NOT set notional_usd below min_notional_usd — orders below this threshold are always rejected by the exchange. "
+    "If max_safe_notional_usd < min_notional_usd (e.g. insufficient free capital), you MUST choose HOLD. "
     "The bot converts your notional_usd to exchange contracts internally; you do not need to know contract sizes or multipliers. "
 
     "CRITICAL DIRECTION RULE: for a BUY, stop_loss MUST be strictly below entry price and take_profit MUST be strictly above entry price. "
@@ -108,7 +111,7 @@ RESPONSE_SCHEMA = {
         },
         "notional_usd": {
             "type": "number",
-            "description": "Dollar value of the position (e.g. 150.0 for a $150 position). Must not exceed max_safe_notional_usd.",
+            "description": "Dollar value of the position (e.g. 150.0 for a $150 position). Must be >= context.execution.min_notional_usd AND <= context.execution.max_safe_notional_usd.",
         },
         "equity_pct": {
             "type": "number",
@@ -302,6 +305,9 @@ class PromptBuilder:
             if cap_candidates:
                 max_safe_notional_usd = min(max_safe_notional_usd, min(cap_candidates))
             execution_settings["max_safe_notional_usd"] = round(max_safe_notional_usd, 2)
+        # Minimum notional required by OKX to open a new isolated-margin position.
+        # Even for cross-margin this acts as a useful sanity floor.
+        execution_settings["min_notional_usd"] = 5.0
         if tier_imr is not None:
             execution_settings["tier_initial_margin_ratio"] = tier_imr
         if tier_source:

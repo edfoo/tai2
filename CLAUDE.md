@@ -152,3 +152,6 @@ logs/
 - `get_settings()` is `@lru_cache`; changes to env vars after import have no effect
 - Postgres and Redis are both optional; all DB calls must degrade gracefully
 - The `_flipped` flag on LLM decisions means the guardrail layer reversed the action; track `_effective_action` not `action` for display
+
+## Testing
+- Tests can be run with `cd /home/eduard/projects/tai2 && poetry run pytest`

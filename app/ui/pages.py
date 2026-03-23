@@ -2869,6 +2869,8 @@ def register_pages(app: FastAPI) -> None:
         )
         config.setdefault("llm_system_prompt", DEFAULT_SYSTEM_PROMPT)
         config.setdefault("llm_decision_prompt", DEFAULT_DECISION_PROMPT)
+        config.setdefault("llm_timeout_seconds", 300)
+        config.setdefault("llm_reasoning_effort", "low")
         sanitized_system_prompt = sanitize_prompt_text(config.get("llm_system_prompt"))
         if sanitized_system_prompt is not None:
             config["llm_system_prompt"] = sanitized_system_prompt
@@ -3300,6 +3302,21 @@ def register_pages(app: FastAPI) -> None:
                 ).classes("w-full md:w-64")
                 model_cost_label = ui.label("Pricing unavailable").classes(
                     "text-xs text-slate-500"
+                )
+                llm_timeout_input = ui.number(
+                    label="LLM Timeout (seconds)",
+                    value=config.get("llm_timeout_seconds", 300),
+                    min=10,
+                    step=10,
+                ).classes("w-full md:w-48").props(
+                    "hint='Max wait for a single OpenRouter request; reasoning models may need 180-300s' persistent-hint"
+                )
+                llm_reasoning_effort_select = ui.select(
+                    options={"low": "Low (fast)", "medium": "Medium", "high": "High (thorough)"},
+                    label="Reasoning Effort",
+                    value=config.get("llm_reasoning_effort", "low"),
+                ).classes("w-full md:w-48").props(
+                    "hint='Only applies to reasoning models (deepseek-r1, o1, etc.)' persistent-hint"
                 )
                 raw_pairs = config.get("trading_pairs", ["BTC-USDT-SWAP"])
                 selected_trading_pairs: list[str] = []
@@ -4279,6 +4296,8 @@ def register_pages(app: FastAPI) -> None:
             config["llm_system_prompt"] = sanitize_prompt_text(prompt_input.value or "") or ""
             config["llm_decision_prompt"] = sanitize_prompt_text(decision_prompt_input.value or "") or ""
             config["llm_model_id"] = model_select.value
+            config["llm_timeout_seconds"] = int(llm_timeout_input.value or 300)
+            config["llm_reasoning_effort"] = llm_reasoning_effort_select.value or "low"
             timeframe_value = (
                 ta_timeframe_select_cfg.value
                 or config.get("ta_timeframe")
@@ -4529,6 +4548,8 @@ def register_pages(app: FastAPI) -> None:
             llm_service = getattr(app.state, "llm_service", None)
             if llm_service:
                 llm_service.set_model(model_select.value)
+                llm_service.set_timeout(config["llm_timeout_seconds"])
+                llm_service.set_reasoning_effort(config["llm_reasoning_effort"])
             market_service = getattr(app.state, "market_service", None)
             if market_service:
                 market_service.set_wait_for_tp_sl(config.get("wait_for_tp_sl", False))

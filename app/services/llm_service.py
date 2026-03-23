@@ -7,10 +7,10 @@ import logging
 from typing import Any
 
 # Hard cap on a single OpenRouter request.  Reasoning models (deepseek-r1,
-# o1, etc.) can take 2-4 minutes; non-reasoning models are typically 5-15s.
-# Must stay below PromptScheduler._FETCH_TIMEOUT (200s) so the LLM gives a
+# o1, etc.) can take 3-5 minutes; non-reasoning models are typically 5-15s.
+# Must stay below PromptScheduler._FETCH_TIMEOUT (320s) so the LLM gives a
 # clean timeout error before the per-symbol gather wrapper cancels the task.
-LLM_REQUEST_TIMEOUT_SECONDS = 180
+LLM_REQUEST_TIMEOUT_SECONDS = 300
 
 from openrouter import OpenRouter, errors as openrouter_errors
 
@@ -39,10 +39,21 @@ class LLMService:
         self.model_id = model_id or "openrouter/gpt-4o-mini"
         self._client: OpenRouter | None = None
         self._client_api_key: str | None = None
+        self._timeout: float = float(LLM_REQUEST_TIMEOUT_SECONDS)
+        self._reasoning_effort: str = "low"
 
     def set_model(self, model_id: str | None) -> None:
         if model_id:
             self.model_id = model_id
+
+    def set_timeout(self, seconds: float) -> None:
+        """Override the per-request LLM timeout (seconds)."""
+        self._timeout = max(10.0, float(seconds))
+
+    def set_reasoning_effort(self, effort: str) -> None:
+        """Set the reasoning effort for models that support it ('low', 'medium', 'high')."""
+        if effort in ("low", "medium", "high"):
+            self._reasoning_effort = effort
 
     def _get_client(self, api_key: str) -> OpenRouter:
         if self._client and self._client_api_key == api_key:
@@ -134,7 +145,9 @@ class LLMService:
         if isinstance(manual, dict):
             return manual
         if self._model_requires_reasoning(model_id):
-            return {"effort": "medium"}
+            # Effort is configurable via CFG page; default is 'low' to keep
+            # latency manageable for large reasoning models like deepseek-r1.
+            return {"effort": self._reasoning_effort}
         return None
 
     @staticmethod
@@ -229,11 +242,11 @@ class LLMService:
         try:
             response = await asyncio.wait_for(
                 client.chat.send_async(**request_kwargs),
-                timeout=LLM_REQUEST_TIMEOUT_SECONDS,
+                timeout=self._timeout,
             )
         except asyncio.TimeoutError:
             raise TimeoutError(
-                f"OpenRouter request timed out after {LLM_REQUEST_TIMEOUT_SECONDS:.0f}s "
+                f"OpenRouter request timed out after {self._timeout:.0f}s "
                 f"(model={model_id or request_kwargs.get('model')})"
             )
         except openrouter_errors.ChatError as exc:
