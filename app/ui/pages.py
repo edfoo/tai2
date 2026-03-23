@@ -1036,7 +1036,9 @@ def register_pages(app: FastAPI) -> None:
                     action_label = effective_action
                     if flipped:
                         action_label = f"{effective_action} (FLIPPED)"
-                    header = f"{symbol} · {action_label} · {format_llm_timestamp(entry.get('timestamp'))}"
+                    origin = decision.get("_decision_origin") or ""
+                    origin_suffix = f" ({origin})" if origin else ""
+                    header = f"{symbol} · {action_label} · {format_llm_timestamp(entry.get('timestamp'))}{origin_suffix}"
                     schema = entry.get("response_schema") or {}
                     confidence = decision.get("confidence")
                     confidence_label = (
