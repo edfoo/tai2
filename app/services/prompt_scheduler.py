@@ -152,7 +152,13 @@ class PromptScheduler:
         if not snapshot:
             logger.debug("Prompt scheduler: snapshot unavailable")
             return
-        symbols = self._resolve_symbols(snapshot)
+        # Prefer the live market_service.symbols list (always current) over the
+        # snapshot's "symbols" field, which may have been baked when fewer symbols
+        # were active (e.g. before the screener ran or before a CFG save).
+        if market_service and getattr(market_service, "symbols", None):
+            symbols: Iterable[str] = list(market_service.symbols)
+        else:
+            symbols = self._resolve_symbols(snapshot)
         if not symbols:
             logger.debug("Prompt scheduler: no symbols to evaluate")
             return
