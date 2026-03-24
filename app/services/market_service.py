@@ -4146,6 +4146,12 @@ class MarketService:
                             wallet_cap = bootstrap_budget
                 if wallet_cap and wallet_cap > 0:
                     guardrail_notional_cap = wallet_cap if guardrail_notional_cap is None else min(guardrail_notional_cap, wallet_cap)
+                    # Bootstrap mode inherently limits notional to a fraction of equity
+                    # (bootstrap_pct × quote_balance), making it structurally impossible
+                    # to reach the min_leverage threshold.  Set the override here so the
+                    # leverage guardrail proceeds rather than blocking the first seed order.
+                    if not leverage_override_reason:
+                        leverage_override_reason = "isolated-wallet-bootstrap"
                     # Do NOT cap available_margin_usd by wallet_cap / leverage here.
                     # That produces a nonsense budget (e.g. 29.50 / 10 = 2.95) which
                     # does not reflect the real usable USDT balance and confuses
