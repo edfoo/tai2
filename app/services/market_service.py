@@ -4721,6 +4721,21 @@ class MarketService:
                             "adjusted_size": adjusted_size,
                         },
                     )
+                    # If the clipped size would fall below the min_leverage
+                    # threshold, proceed anyway — the tier limit is an OKX
+                    # constraint, not a dust-trade signal.  Matches the
+                    # existing override for position-cap clipping.
+                    if (
+                        account_equity
+                        and account_equity > 0
+                        and last_price
+                        and last_price > 0
+                        and min_leverage
+                        and min_leverage > 0
+                    ):
+                        clipped_leverage = (adjusted_size * last_price) / account_equity
+                        if clipped_leverage < min_leverage:
+                            leverage_override_reason = "OKX tier margin limit"
                 raw_size = adjusted_size
         if tier_cap_limit is not None:
             if max_notional_from_margin is None or tier_cap_limit < max_notional_from_margin:

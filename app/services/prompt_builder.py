@@ -97,6 +97,9 @@ DEFAULT_EXECUTION_FEEDBACK_TTL_SECONDS = 600
 RESPONSE_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
+    # OpenAI strict mode requires every property to appear in 'required'.
+    # Optional fields use anyOf with null so the model can omit them by
+    # returning null without violating the schema.
     "properties": {
         "action": {
             "type": "string",
@@ -110,13 +113,11 @@ RESPONSE_SCHEMA = {
             "description": "Confidence value between 0 and 1",
         },
         "notional_usd": {
-            "type": "number",
+            "anyOf": [{"type": "number"}, {"type": "null"}],
             "description": "Dollar value of the position (e.g. 150.0 for a $150 position). Must be >= context.execution.min_notional_usd AND <= context.execution.max_safe_notional_usd.",
         },
         "equity_pct": {
-            "type": "number",
-            "minimum": 0,
-            "maximum": 1,
+            "anyOf": [{"type": "number", "minimum": 0, "maximum": 1}, {"type": "null"}],
             "description": "Suggested fraction of account equity to allocate (0-1)",
         },
         "rationale": {
@@ -130,27 +131,38 @@ RESPONSE_SCHEMA = {
             "description": "Normalized risk value (higher = riskier)",
         },
         "stop_loss": {
-            "type": "number",
+            "anyOf": [{"type": "number"}, {"type": "null"}],
             "description": "Stop-loss price: for BUY must be BELOW entry price; for SELL must be ABOVE entry price",
         },
         "take_profit": {
-            "type": "number",
+            "anyOf": [{"type": "number"}, {"type": "null"}],
             "description": "Take-profit price: for BUY must be ABOVE entry price; for SELL must be BELOW entry price",
         },
         "timeframe_alignment": {
-            "type": "string",
+            "anyOf": [{"type": "string"}, {"type": "null"}],
             "description": "How the decision aligns with provided timeframe",
         },
         "notes": {
-            "type": "string",
+            "anyOf": [{"type": "string"}, {"type": "null"}],
             "description": "Additional implementation notes or cautionary flags",
         },
         "tags": {
-            "type": "array",
-            "items": {"type": "string"},
+            "anyOf": [{"type": "array", "items": {"type": "string"}}, {"type": "null"}],
         },
     },
-    "required": ["action", "confidence", "rationale", "risk_score"],
+    "required": [
+        "action",
+        "confidence",
+        "notional_usd",
+        "equity_pct",
+        "rationale",
+        "risk_score",
+        "stop_loss",
+        "take_profit",
+        "timeframe_alignment",
+        "notes",
+        "tags",
+    ],
 }
 
 def _to_float(value: Any) -> Optional[float]:

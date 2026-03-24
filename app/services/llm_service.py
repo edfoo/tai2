@@ -258,9 +258,10 @@ class LLMService:
             if body:
                 logger.debug("OpenRouter error body: %s", body.strip())
             if response_format_included:
-                logger.error(
-                    "Model '%s' rejected JSON schema responses; please select a model that supports structured output.",
+                logger.warning(
+                    "Model '%s' rejected JSON schema (status=%s); will retry without structured output.",
                     model_id or request_kwargs.get("model"),
+                    exc.status_code,
                 )
             raise
         except openrouter_errors.OpenRouterError as exc:
