@@ -129,7 +129,7 @@ class PromptScheduler:
         market_service = getattr(self._app.state, "market_service", None)
         if market_service:
             try:
-                screener_fired = await market_service.run_screener_if_due()
+                screener_fired = await market_service.run_screener_if_due(force=True)
             except Exception as exc:  # pragma: no cover - network variance
                 logger.debug("Symbol screener tick failed: %s", exc)
                 screener_fired = False

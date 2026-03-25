@@ -879,20 +879,25 @@ class MarketService:
             self._emit_debug(f"Screener ticker fetch failed: {exc}")
             return []
 
-    async def run_screener_if_due(self) -> bool:
+    async def run_screener_if_due(self, *, force: bool = False) -> bool:
         """Run the symbol screener if enabled and its interval has elapsed.
 
         Scores all USDT-SWAP tickers by 24h volume (60%) and absolute momentum (40%),
         applies configured filters, then replaces the active symbol list with the
         top-N winners.  Returns True when the active symbol list was modified.
+
+        When *force* is True the interval gate is skipped — the screener runs on
+        every call regardless of when it last fired.  Use this from the prompt
+        scheduler so the active symbol list is always fresh before each LLM tick.
         """
         cfg = self._screener_config
         if not cfg or not cfg.get("enabled"):
             return False
-        interval_secs = max(300, int(cfg.get("interval_minutes") or 60) * 60)
         now = time.time()
-        if now - self._screener_last_run < interval_secs:
-            return False
+        if not force:
+            interval_secs = max(300, int(cfg.get("interval_minutes") or 60) * 60)
+            if now - self._screener_last_run < interval_secs:
+                return False
 
         tickers = await self._fetch_all_swap_tickers()
         if not tickers:
