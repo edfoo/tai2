@@ -3756,15 +3756,36 @@ class MarketService:
         explicit_size_hint = self._extract_float(decision.get("position_size"))
         raw_size: float = 0.0
 
+        llm_notional_mode = (
+            (guardrails.get("llm_notional_mode") or "post_leverage").lower()
+            if isinstance(guardrails, dict)
+            else "post_leverage"
+        )
         if llm_notional_usd and llm_notional_usd > 0 and last_price and last_price > 0:
-            # LLM expressed position as a dollar amount — convert directly to
+            # LLM expressed position size as a dollar amount — convert directly to
             # base-token units and skip the leverage-scaling path entirely.  All
             # downstream guardrail caps still apply via raw_size × last_price.
-            raw_size = llm_notional_usd / last_price
-            self._emit_debug(
-                f"{symbol} sizing from LLM notional_usd={llm_notional_usd:.2f} "
-                f"→ raw_size={raw_size:.6f} base-tokens"
-            )
+            #
+            # llm_notional_mode controls the semantic of that dollar amount:
+            #   post_leverage (default) — notional_usd IS the position notional
+            #     raw_size = notional_usd / price
+            #   pre_leverage — notional_usd is the MARGIN to commit;
+            #     the bot multiplies by max_leverage to get position notional
+            #     raw_size = notional_usd × max_leverage / price
+            if llm_notional_mode == "pre_leverage":
+                effective_leverage = max(max_leverage, 1.0) if max_leverage and max_leverage > 0 else 1.0
+                raw_size = (llm_notional_usd * effective_leverage) / last_price
+                self._emit_debug(
+                    f"{symbol} sizing from LLM margin notional_usd={llm_notional_usd:.2f} "
+                    f"(pre-leverage ×{effective_leverage:.1f}) "
+                    f"→ raw_size={raw_size:.6f} base-tokens"
+                )
+            else:
+                raw_size = llm_notional_usd / last_price
+                self._emit_debug(
+                    f"{symbol} sizing from LLM notional_usd={llm_notional_usd:.2f} "
+                    f"→ raw_size={raw_size:.6f} base-tokens"
+                )
         else:
             size_hint = explicit_size_hint
             equity_pct_size_hint = None

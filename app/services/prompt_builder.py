@@ -308,6 +308,7 @@ class PromptBuilder:
         # Pre-compute the authoritative notional ceiling so the LLM never has to
         # guess: max_safe_notional_usd = available_margin_usd × max_leverage, then
         # capped by whichever position/tier/equity limit is tightest.
+        llm_notional_mode = (guardrails.get("llm_notional_mode") or "post_leverage").lower()
         if available_margin_usd is not None and effective_max_leverage is not None and effective_max_leverage > 0:
             max_safe_notional_usd: Optional[float] = available_margin_usd * effective_max_leverage
             cap_candidates = [
@@ -316,6 +317,11 @@ class PromptBuilder:
             ]
             if cap_candidates:
                 max_safe_notional_usd = min(max_safe_notional_usd, min(cap_candidates))
+            # In pre-leverage mode the LLM expresses notional_usd as the margin
+            # to commit, not the position notional.  Divide the ceiling by
+            # max_leverage so the LLM sees a margin-denominated cap.
+            if llm_notional_mode == "pre_leverage":
+                max_safe_notional_usd = max_safe_notional_usd / effective_max_leverage
             execution_settings["max_safe_notional_usd"] = round(max_safe_notional_usd, 2)
         # Minimum notional required by OKX to open a new isolated-margin position.
         # Even for cross-margin this acts as a useful sanity floor.
@@ -402,6 +408,42 @@ class PromptBuilder:
             execution_settings["feedback_digest"] = feedback_digest
         system_prompt = sanitize_prompt_text(runtime_meta.get("llm_system_prompt") or DEFAULT_SYSTEM_PROMPT)
         decision_prompt = sanitize_prompt_text(runtime_meta.get("llm_decision_prompt") or DEFAULT_DECISION_PROMPT)
+        # When pre-leverage mode is active, patch the default sizing-rule paragraph
+        # so the LLM understands that notional_usd is the margin to commit, not the
+        # position notional.  Only applied to the default prompt; custom prompts are
+        # left unchanged (the user controls their own wording).
+        if llm_notional_mode == "pre_leverage" and not runtime_meta.get("llm_decision_prompt"):
+            _post_lev_rule = (
+                "CRITICAL SIZING RULE: context.execution.max_safe_notional_usd is the pre-computed "
+                "absolute ceiling for position notional "
+                "(= available_margin_usd \u00d7 max_leverage, already capped by all position and tier limits). "
+                "context.execution.min_notional_usd is the exchange minimum to open a new position "
+                "(typically 5 USDT for isolated margin). "
+                "Express your desired position size as `notional_usd` \u2014 the USD dollar value of the position "
+                "(e.g. 150.0 for a $150 position). "
+                "You MUST NOT set notional_usd above max_safe_notional_usd \u2014 the exchange will reject the "
+                "order regardless of equity_pct. "
+                "You MUST NOT set notional_usd below min_notional_usd \u2014 orders below this threshold are "
+                "always rejected by the exchange. "
+                "If max_safe_notional_usd < min_notional_usd (e.g. insufficient free capital), you MUST choose HOLD. "
+                "The bot converts your notional_usd to exchange contracts internally; you do not need to know "
+                "contract sizes or multipliers."
+            )
+            _pre_lev_rule = (
+                "CRITICAL SIZING RULE (PRE-LEVERAGE MODE): context.execution.max_safe_notional_usd is the "
+                "pre-computed absolute ceiling for the MARGIN you commit to this trade "
+                "(= available_margin_usd already reduced by all position and tier limits). "
+                "context.execution.min_notional_usd is the minimum margin required (typically 5 USDT). "
+                "Express your desired margin commitment as `notional_usd` \u2014 the USD amount of your own "
+                "capital to risk (e.g. 20.0 means commit $20 as margin). "
+                "The bot will automatically apply the configured leverage multiplier to derive the actual "
+                "position notional \u2014 you do NOT need to size for leverage. "
+                "You MUST NOT set notional_usd above max_safe_notional_usd or below min_notional_usd. "
+                "If max_safe_notional_usd < min_notional_usd (e.g. insufficient free capital), you MUST choose HOLD. "
+                "The bot converts your notional_usd to exchange contracts internally; you do not need to know "
+                "contract sizes or multipliers."
+            )
+            decision_prompt = decision_prompt.replace(_post_lev_rule, _pre_lev_rule)
         response_schema = self._response_schema(model_id, schema_overrides)
         prompt_block = {
             "system": (system_prompt or DEFAULT_SYSTEM_PROMPT).strip(),

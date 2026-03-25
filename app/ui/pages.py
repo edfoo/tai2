@@ -2856,6 +2856,7 @@ def register_pages(app: FastAPI) -> None:
         )
         guardrails.setdefault("symbol_position_caps", {})
         guardrails.setdefault("min_leverage_confidence_gate", 0.5)
+        guardrails.setdefault("llm_notional_mode", "post_leverage")
         guardrails.setdefault("isolated_margin_seed_usd", None)
         guardrails.setdefault("isolated_margin_max_transfer_usd", None)
         guardrails.setdefault("isolated_margin_symbol_seeds_usd", {})
@@ -3069,6 +3070,16 @@ def register_pages(app: FastAPI) -> None:
                     step=0.05,
                 ).classes("w-full md:w-48").props(
                     "hint='LLM confidence required before execution upsizes small orders' persistent-hint"
+                )
+                llm_notional_mode_select = ui.select(
+                    label="LLM Notional Mode",
+                    options={
+                        "post_leverage": "Post-leverage (LLM sets position size)",
+                        "pre_leverage": "Pre-leverage (LLM sets margin to commit)",
+                    },
+                    value=guardrails.get("llm_notional_mode", "post_leverage"),
+                ).classes("w-full md:w-64").props(
+                    "hint='Post-leverage: notional_usd is the full position value. Pre-leverage: notional_usd is the margin committed; bot applies leverage.' persistent-hint"
                 )
                 max_position_pct_input = ui.number(
                     label="Max Position % of Equity",
@@ -3956,6 +3967,7 @@ def register_pages(app: FastAPI) -> None:
             if bootstrap_pct_snapshot is not None:
                 bootstrap_pct_snapshot = min(max(bootstrap_pct_snapshot, 0.0), 1.0)
             snapshot["isolated_wallet_bootstrap_pct"] = bootstrap_pct_snapshot
+            snapshot["llm_notional_mode"] = llm_notional_mode_select.value
             return snapshot
 
         async def hydrate_execution_settings() -> None:
@@ -4476,6 +4488,7 @@ def register_pages(app: FastAPI) -> None:
                 "isolated_margin_max_transfer_usd": _safe_float(isolated_seed_max_input.value),
                 "isolated_margin_symbol_seeds_usd": _clean_isolated_seed_overrides(),
                 "isolated_wallet_bootstrap_pct": bootstrap_pct_fraction,
+                "llm_notional_mode": llm_notional_mode_select.value,
             }
             config["snapshot_max_age_seconds"] = config["guardrails"].get(
                 "snapshot_max_age_seconds",
