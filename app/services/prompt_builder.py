@@ -325,7 +325,18 @@ class PromptBuilder:
             execution_settings["max_safe_notional_usd"] = round(max_safe_notional_usd, 2)
         # Minimum notional required by OKX to open a new isolated-margin position.
         # Even for cross-margin this acts as a useful sanity floor.
-        execution_settings["min_notional_usd"] = 5.0
+        # In pre-leverage mode the LLM expresses size as margin, so scale the
+        # minimum down by max_leverage (e.g. $5 position / 5× = $1.00 margin floor).
+        _min_position_notional = 5.0
+        if (
+            llm_notional_mode == "pre_leverage"
+            and effective_max_leverage is not None
+            and effective_max_leverage > 0
+        ):
+            _min_notional_usd = round(_min_position_notional / effective_max_leverage, 2)
+        else:
+            _min_notional_usd = _min_position_notional
+        execution_settings["min_notional_usd"] = _min_notional_usd
         if tier_imr is not None:
             execution_settings["tier_initial_margin_ratio"] = tier_imr
         if tier_source:
@@ -433,7 +444,8 @@ class PromptBuilder:
                 "CRITICAL SIZING RULE (PRE-LEVERAGE MODE): context.execution.max_safe_notional_usd is the "
                 "pre-computed absolute ceiling for the MARGIN you commit to this trade "
                 "(= available_margin_usd already reduced by all position and tier limits). "
-                "context.execution.min_notional_usd is the minimum margin required (typically 5 USDT). "
+                "context.execution.min_notional_usd is the minimum margin required "
+                "(= OKX's 5 USDT position floor ÷ max_leverage; already pre-computed in the context). "
                 "Express your desired margin commitment as `notional_usd` \u2014 the USD amount of your own "
                 "capital to risk (e.g. 20.0 means commit $20 as margin). "
                 "The bot will automatically apply the configured leverage multiplier to derive the actual "
