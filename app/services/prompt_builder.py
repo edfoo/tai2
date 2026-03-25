@@ -311,17 +311,31 @@ class PromptBuilder:
         llm_notional_mode = (guardrails.get("llm_notional_mode") or "post_leverage").lower()
         if available_margin_usd is not None and effective_max_leverage is not None and effective_max_leverage > 0:
             max_safe_notional_usd: Optional[float] = available_margin_usd * effective_max_leverage
-            cap_candidates = [
-                v for v in (margin_cap_usd, tier_cap_usd, equity_cap_usd, symbol_equity_cap_usd)
-                if v is not None and v > 0
-            ]
-            if cap_candidates:
-                max_safe_notional_usd = min(max_safe_notional_usd, min(cap_candidates))
-            # In pre-leverage mode the LLM expresses notional_usd as the margin
-            # to commit, not the position notional.  Divide the ceiling by
-            # max_leverage so the LLM sees a margin-denominated cap.
             if llm_notional_mode == "pre_leverage":
+                # In pre-leverage mode the LLM commits margin; the bot multiplies by
+                # max_leverage internally.  The ceiling shown to the LLM is therefore
+                # available_margin_usd (= position ceiling / leverage).
+                # Only OKX-sourced hard limits (margin_cap_usd, tier_cap_usd) are
+                # applied here — they represent real exchange constraints that must
+                # not be breached.  Equity-percentage caps (equity_cap_usd,
+                # symbol_equity_cap_usd) are enforced by the execution layer on the
+                # resulting position notional, so they must NOT be divided by
+                # leverage here (that would collapse the margin ceiling to near-zero
+                # and force the LLM to output trivially small margin commitments).
+                hard_cap_candidates = [
+                    v for v in (margin_cap_usd, tier_cap_usd)
+                    if v is not None and v > 0
+                ]
+                if hard_cap_candidates:
+                    max_safe_notional_usd = min(max_safe_notional_usd, min(hard_cap_candidates))
                 max_safe_notional_usd = max_safe_notional_usd / effective_max_leverage
+            else:
+                cap_candidates = [
+                    v for v in (margin_cap_usd, tier_cap_usd, equity_cap_usd, symbol_equity_cap_usd)
+                    if v is not None and v > 0
+                ]
+                if cap_candidates:
+                    max_safe_notional_usd = min(max_safe_notional_usd, min(cap_candidates))
             execution_settings["max_safe_notional_usd"] = round(max_safe_notional_usd, 2)
         # Minimum notional required by OKX to open a new isolated-margin position.
         # Even for cross-margin this acts as a useful sanity floor.
@@ -424,7 +438,7 @@ class PromptBuilder:
         # position notional.  Only applied to the default prompt; custom prompts are
         # left unchanged (the user controls their own wording).
         if llm_notional_mode == "pre_leverage" and not runtime_meta.get("llm_decision_prompt"):
-            _post_lev_rule = (
+            _post_lev_rule = sanitize_prompt_text(
                 "CRITICAL SIZING RULE: context.execution.max_safe_notional_usd is the pre-computed "
                 "absolute ceiling for position notional "
                 "(= available_margin_usd \u00d7 max_leverage, already capped by all position and tier limits). "
