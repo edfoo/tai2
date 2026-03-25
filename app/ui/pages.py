@@ -435,13 +435,26 @@ def register_pages(app: FastAPI) -> None:
             with ui.row().classes("w-full gap-6 flex-col xl:flex-row xl:flex-nowrap xl:items-start"):
                 with ui.column().classes("flex-[7] w-full gap-4"):
                     header_row = ui.row().classes(
-                        "w-full justify-between items-start flex-wrap gap-4"
+                        "w-full justify-between items-center flex-wrap gap-4"
                     )
                     with header_row:
                         with ui.column().classes("gap-1"):
                             ui.label("Live Market Overview").classes("text-2xl font-bold")
                             ui.label("Account & execution snapshot").classes(
                                 "text-sm text-slate-500"
+                            )
+                        with ui.row().classes("flex-1 justify-center gap-4 flex-wrap"):
+                            balance_card = badge_stat("Account Equity", "--")
+                            position_card = badge_stat("Active Positions", "--", color="accent")
+                            openrouter_credit_card = badge_stat(
+                                "OpenRouter Credits",
+                                "--",
+                                color="info",
+                            )
+                            okx_fee_card = badge_stat(
+                                "OKX Fees",
+                                "--",
+                                color="negative",
                             )
                         with ui.column().classes("items-end gap-1"):
                             status_label["widget"] = ui.label("WS: IDLE").classes(
@@ -521,19 +534,6 @@ def register_pages(app: FastAPI) -> None:
                         )
                         risk_lock_refs["button"] = resume_button
 
-                    with ui.row().classes("w-full gap-4"):
-                        balance_card = badge_stat("Account Equity", "--")
-                        position_card = badge_stat("Active Positions", "--", color="accent")
-                        openrouter_credit_card = badge_stat(
-                            "OpenRouter Credits",
-                            "--",
-                            color="info",
-                        )
-                        okx_fee_card = badge_stat(
-                            "OKX Fees",
-                            "--",
-                            color="negative",
-                        )
                     credit_hint_label = ui.label("OpenRouter credits unavailable").classes(
                         "text-xs text-slate-500"
                     )
