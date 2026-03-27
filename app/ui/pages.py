@@ -52,6 +52,7 @@ NAV_LINKS = [
     ("ENGINE", "/engine"),
     ("HISTORY", "/history"),
     ("DEBUG", "/debug"),
+    ("PROMPT", "/prompt"),
     ("CFG", "/cfg"),
 ]
 
@@ -2833,6 +2834,381 @@ def register_pages(app: FastAPI) -> None:
         ui.timer(3, refresh_logs)
         ui.timer(3, refresh_websocket)
 
+    def render_prompt_page() -> None:
+        navigation("PROMPT")
+        wrapper = page_container()
+        config = getattr(app.state, "runtime_config", {}) or {}
+        config.setdefault("llm_system_prompt", DEFAULT_SYSTEM_PROMPT)
+        config.setdefault("llm_decision_prompt", "")
+        config.setdefault("prompt_version_name", None)
+        response_schemas = config.setdefault("llm_response_schemas", {})
+        _san_sys = sanitize_prompt_text(config.get("llm_system_prompt"))
+        if _san_sys is not None:
+            config["llm_system_prompt"] = _san_sys
+        _san_dec = sanitize_prompt_text(config.get("llm_decision_prompt"))
+        if _san_dec is not None:
+            config["llm_decision_prompt"] = _san_dec
+        prompt_versions_cache: dict[str, dict[str, Any]] = {}
+        prompt_version_options: dict[str, str] = {}
+        client = ui.context.client
+        model_metadata: dict[str, dict[str, Any]] = {item["id"]: item for item in DEFAULT_MODEL_OPTIONS}
+        current_model_id = config.get("llm_model_id") or next(iter(model_metadata), None)
+
+        def schema_to_text(model_id: str | None) -> str:
+            if not model_id:
+                return ""
+            schema = response_schemas.get(model_id)
+            if not schema:
+                return ""
+            try:
+                return json.dumps(schema, indent=2)
+            except (TypeError, ValueError):
+                return ""
+
+        _stored_decision_prompt = config.get("llm_decision_prompt") or ""
+        _initial_prompt_mode = "custom" if _stored_decision_prompt.strip() else "default"
+
+        with wrapper:
+            ui.label("Prompt Configuration").classes("text-2xl font-bold")
+            ui.label(
+                "Controls the exact text sent to the LLM on every call. "
+                "Guardrail settings live on the CFG page — save those first, then refresh the preview here."
+            ).classes("text-sm text-slate-500 mb-2")
+            with ui.row().classes("w-full justify-between items-center"):
+                ui.label("System Prompt").classes("text-sm font-medium text-slate-700")
+                ui.button(
+                    "Reset to default",
+                    icon="restart_alt",
+                    color="grey-7",
+                ).props("flat dense size=sm").on(
+                    "click",
+                    lambda: [
+                        setattr(prompt_input, "value", DEFAULT_SYSTEM_PROMPT) or prompt_input.update(),
+                        ui.notify("System prompt reset — click Save to apply", type="info"),
+                    ],
+                )
+            prompt_input = ui.textarea(
+                label="System Prompt",
+                value=config.get("llm_system_prompt", DEFAULT_SYSTEM_PROMPT),
+            ).classes("w-full h-48")
+            with ui.row().classes("w-full justify-between items-center flex-wrap gap-2"):
+                ui.label("Decision Prompt").classes("text-sm font-medium text-slate-700")
+                with ui.row().classes("gap-2 items-center"):
+                    prompt_mode_toggle = ui.toggle(
+                        {"default": "Auto-assembled", "custom": "Custom"},
+                        value=_initial_prompt_mode,
+                    ).props("dense").tooltip(
+                        "Auto-assembled: prompt is built fresh from section constants + live guardrail "
+                        "config on every LLM call. Guardrail toggles (on CFG) affect the prompt automatically. "
+                        "Custom: you control the full text — guardrail toggles will NOT auto-update it."
+                    )
+                    refresh_prompt_btn = (
+                        ui.button("Refresh preview", icon="refresh")
+                        .props("flat dense size=sm")
+                        .tooltip("Reload assembled prompt for the current saved guardrail config")
+                    )
+            decision_prompt_input = ui.textarea(
+                label="Decision Prompt",
+                value=_stored_decision_prompt if _stored_decision_prompt.strip() else DEFAULT_DECISION_PROMPT,
+            ).classes("w-full h-48")
+
+            def _apply_prompt_mode(mode: str) -> None:
+                if mode == "default":
+                    decision_prompt_input.props(add="readonly bg-color=grey-2")
+                else:
+                    decision_prompt_input.props(remove="readonly bg-color=grey-2")
+                decision_prompt_input.update()
+
+            prompt_mode_toggle.on_value_change(lambda e: _apply_prompt_mode(e.value))
+
+            async def _refresh_prompt_preview() -> None:
+                guardrails_cfg = config.get("guardrails") or {}
+                _rrr = bool(guardrails_cfg.get("require_reward_risk_ratio"))
+                _nm = (guardrails_cfg.get("llm_notional_mode") or "post_leverage").lower()
+                assembled = sanitize_prompt_text(
+                    assemble_decision_prompt(require_rr=_rrr, pre_leverage=(_nm == "pre_leverage"))
+                )
+                decision_prompt_input.value = assembled or ""
+                decision_prompt_input.update()
+                ui.notify("Decision prompt refreshed from current saved guardrails", type="positive")
+
+            refresh_prompt_btn.on("click", _refresh_prompt_preview)
+            _apply_prompt_mode(_initial_prompt_mode)
+            with ui.row().classes("w-full flex-wrap gap-4 items-end"):
+                prompt_version_select = ui.select(
+                    options=[],
+                    label="Prompt Version",
+                    with_input=False,
+                ).classes("w-full md:w-64")
+                prompt_version_select.disable()
+                delete_version_button = ui.button(
+                    icon="delete",
+                    color="negative",
+                ).props("flat dense").tooltip("Delete selected prompt version")
+                with ui.dialog() as _delete_version_dialog, ui.card().classes("p-6 gap-4"):
+                    _delete_confirm_label = ui.label("").classes("text-base font-semibold")
+                    ui.label(
+                        "This cannot be undone. Prompt runs that reference this version will keep their data."
+                    ).classes("text-sm text-slate-500")
+                    with ui.row().classes("gap-2 justify-end w-full"):
+                        ui.button("Cancel", color="grey").on(
+                            "click", lambda: _delete_version_dialog.submit(False)
+                        )
+                        ui.button("Delete", color="negative", icon="delete").on(
+                            "click", lambda: _delete_version_dialog.submit(True)
+                        )
+                prompt_version_name_input = ui.input(
+                    label="Save As New Version",
+                    placeholder="e.g., Momentum bias v2",
+                ).classes("w-full flex-1")
+            with ui.row().classes("w-full flex-wrap gap-2 items-end"):
+                prompt_version_param_input = (
+                    ui.input(
+                        label="Override query param",
+                        value="prompt_version_id=<active>",
+                    )
+                    .props("readonly outlined dense")
+                    .classes("w-full md:flex-1 font-mono text-sm")
+                )
+                copy_param_button = ui.button("Copy param", icon="content_copy")
+            ui.label("Saving with a name will create a new immutable version for A/B tests").classes(
+                "text-xs text-slate-500"
+            )
+            response_schema_input = ui.textarea(
+                label="Response Schema Override (JSON)",
+                value=schema_to_text(current_model_id),
+                placeholder="Leave blank to use default schema",
+            ).classes("w-full h-40 font-mono text-sm")
+            with ui.column().classes(
+                "w-full gap-2 mt-4 bg-slate-50/80 p-4 rounded-xl border border-slate-200"
+            ):
+                ui.label("LLM Payload Preview").classes("text-lg font-semibold")
+                ui.label(
+                    "Prompt text + context skeleton (full context built at runtime from the live market snapshot)"
+                ).classes("text-xs text-slate-500")
+                payload_preview = (
+                    ui.textarea(label="Prompt Payload", value="")
+                    .props("readonly outlined autogrow")
+                    .classes("w-full font-mono text-xs bg-white h-full")
+                    .style("min-height: 22rem; height: 100%;")
+                )
+            save_button = ui.button("Save", icon="save", color="primary")
+
+        def build_payload_preview() -> str:
+            schema_text = response_schema_input.value or ""
+            if schema_text.strip():
+                try:
+                    schema_value: Any = json.loads(schema_text)
+                except json.JSONDecodeError as exc:
+                    schema_value = f"<invalid JSON: {exc.msg} (line {exc.lineno}, col {exc.colno})>"
+            else:
+                schema_value = RESPONSE_SCHEMA
+            guardrails_preview = config.get("guardrails") or {}
+            payload = {
+                "prompt": {
+                    "system": (prompt_input.value or "").strip(),
+                    "task": (decision_prompt_input.value or "").strip(),
+                    "model": config.get("llm_model_id"),
+                    "response_schema": schema_value,
+                },
+                "context": {
+                    "[note]": "Full context built at runtime from live market snapshot",
+                    "symbol": "<active symbol>",
+                    "guardrails": guardrails_preview,
+                    "execution": {
+                        "enabled": config.get("execution_enabled", False),
+                        "trade_mode": config.get("execution_trade_mode", "cross"),
+                        "order_type": config.get("execution_order_type", "market"),
+                        "min_size": config.get("execution_min_size", 1.0),
+                    },
+                    "notes": config.get("llm_notes"),
+                    "prompt_version_id": config.get("prompt_version_id"),
+                    "prompt_version_name": config.get("prompt_version_name"),
+                },
+            }
+            return json.dumps(payload, indent=2)
+
+        def update_payload_preview() -> None:
+            payload_preview.value = build_payload_preview()
+            payload_preview.update()
+
+        for _w in [prompt_input, decision_prompt_input, response_schema_input]:
+            _w.on_value_change(lambda _: update_payload_preview())
+
+        update_payload_preview()
+
+        def update_prompt_version_param(version_id: str | None) -> None:
+            suffix = version_id or "<active>"
+            prompt_version_param_input.value = f"prompt_version_id={suffix}"
+            prompt_version_param_input.update()
+
+        def copy_prompt_version_param() -> None:
+            value = prompt_version_param_input.value or "prompt_version_id=<active>"
+            ui.run_javascript(f"navigator.clipboard.writeText({json.dumps(value)})")
+            ui.notify("Query param copied", color="positive")
+
+        copy_param_button.on("click", lambda _: copy_prompt_version_param())
+        update_prompt_version_param(config.get("prompt_version_id"))
+
+        def _set_prompt_version_value(version_id: str | None) -> None:
+            if not version_id:
+                prompt_version_select.value = None
+                prompt_version_select.update()
+                update_prompt_version_param(None)
+                return
+            for label, vid in prompt_version_options.items():
+                if vid == version_id:
+                    prompt_version_select.value = label
+                    prompt_version_select.update()
+                    update_prompt_version_param(version_id)
+                    return
+            prompt_version_select.value = None
+            prompt_version_select.update()
+            update_prompt_version_param(version_id)
+
+        async def load_prompt_versions_list() -> None:
+            try:
+                records = await fetch_prompt_versions(limit=50)
+            except Exception as exc:  # pragma: no cover - optional DB
+                ui.notify(f"Failed to load prompt versions: {exc}", color="warning")
+                return
+            prompt_versions_cache.clear()
+            prompt_version_options.clear()
+            options: list[str] = []
+            for row in records:
+                prompt_versions_cache[row["id"]] = row
+                created = row.get("created_at") or "recent"
+                label = f"{row['name']} ({created[:16]})"
+                prompt_version_options[label] = row["id"]
+                options.append(label)
+            prompt_version_select.set_options(options, value=None)
+            if options:
+                prompt_version_select.enable()
+            else:
+                prompt_version_select.disable()
+            _set_prompt_version_value(config.get("prompt_version_id"))
+
+        def apply_prompt_version(version_id: str | None) -> None:
+            record = prompt_versions_cache.get(version_id or "")
+            if not record:
+                return
+            new_system_prompt = sanitize_prompt_text(record.get("system_prompt", prompt_input.value))
+            if new_system_prompt is not None:
+                prompt_input.value = new_system_prompt
+            new_decision_prompt = sanitize_prompt_text(
+                record.get("decision_prompt", decision_prompt_input.value)
+            )
+            if new_decision_prompt is not None:
+                decision_prompt_input.value = new_decision_prompt
+                prompt_mode_toggle.value = "custom"
+                _apply_prompt_mode("custom")
+                prompt_mode_toggle.update()
+            prompt_version_name_input.value = ""
+            prompt_input.update()
+            decision_prompt_input.update()
+            prompt_version_name_input.update()
+            config["llm_system_prompt"] = sanitize_prompt_text(prompt_input.value or "") or ""
+            config["llm_decision_prompt"] = sanitize_prompt_text(decision_prompt_input.value or "") or ""
+            config["prompt_version_id"] = record.get("id")
+            config["prompt_version_name"] = record.get("name")
+            update_prompt_version_param(record.get("id"))
+            update_payload_preview()
+
+        def on_prompt_version_change(e: Any) -> None:
+            label = e.value
+            version_id = prompt_version_options.get(label)
+            if not version_id:
+                return
+            apply_prompt_version(version_id)
+
+        prompt_version_select.on_value_change(on_prompt_version_change)
+
+        async def confirm_delete_prompt_version() -> None:
+            selected_label = prompt_version_select.value
+            version_id = prompt_version_options.get(selected_label) if selected_label else None
+            if not version_id:
+                ui.notify("Select a version to delete", color="warning")
+                return
+            record = prompt_versions_cache.get(version_id)
+            version_name = record.get("name", selected_label) if record else selected_label
+            _delete_confirm_label.set_text(f'Delete prompt version "{version_name}"?')
+            confirmed = await _delete_version_dialog
+            if not confirmed:
+                return
+            try:
+                deleted = await delete_prompt_version(version_id)
+            except Exception as exc:
+                ui.notify(f"Delete failed: {exc}", color="negative")
+                return
+            if not deleted:
+                ui.notify("Version not found — already deleted?", color="warning")
+            else:
+                ui.notify(f'Deleted "{version_name}"', color="positive")
+            if config.get("prompt_version_id") == version_id:
+                config["prompt_version_id"] = None
+                config["prompt_version_name"] = None
+                update_prompt_version_param(None)
+            await load_prompt_versions_list()
+
+        delete_version_button.on("click", confirm_delete_prompt_version)
+
+        async def save_prompt_settings(event: Any | None = None) -> None:
+            config["llm_system_prompt"] = sanitize_prompt_text(prompt_input.value or "") or ""
+            if prompt_mode_toggle.value == "custom":
+                config["llm_decision_prompt"] = sanitize_prompt_text(decision_prompt_input.value or "") or ""
+            else:
+                config["llm_decision_prompt"] = ""
+            current_model = config.get("llm_model_id")
+            schema_text = response_schema_input.value or ""
+            if schema_text.strip():
+                try:
+                    response_schemas[current_model] = json.loads(schema_text)
+                except json.JSONDecodeError as exc:
+                    ui.notify(f"Response schema invalid JSON: {exc}", color="warning")
+                    return
+            else:
+                response_schemas.pop(current_model, None)
+            config["llm_response_schemas"] = response_schemas
+            version_name = (prompt_version_name_input.value or "").strip()
+            created_version_id: str | None = None
+            selected_label = prompt_version_select.value
+            selected_version_id = (
+                prompt_version_options.get(selected_label)
+                if selected_label
+                else config.get("prompt_version_id")
+            )
+            if version_name:
+                metadata = {
+                    "guardrails": config.get("guardrails"),
+                    "model_id": config.get("llm_model_id"),
+                }
+                try:
+                    created_version_id = await insert_prompt_version(
+                        name=version_name,
+                        system_prompt=config["llm_system_prompt"],
+                        decision_prompt=config["llm_decision_prompt"],
+                        metadata=metadata,
+                    )
+                    prompt_version_name_input.value = ""
+                    prompt_version_name_input.update()
+                    await load_prompt_versions_list()
+                except Exception as exc:  # pragma: no cover - db optional
+                    ui.notify(f"Failed to save prompt version: {exc}", color="warning")
+            config["prompt_version_id"] = created_version_id or selected_version_id
+            if created_version_id:
+                config["prompt_version_name"] = version_name or config.get("prompt_version_name")
+            elif selected_version_id:
+                selected_record = prompt_versions_cache.get(selected_version_id)
+                if selected_record:
+                    config["prompt_version_name"] = selected_record.get("name")
+            app.state.runtime_config = config
+            _set_prompt_version_value(config.get("prompt_version_id"))
+            ui.notify("Prompt saved", color="positive")
+            app.state.frontend_events.append("PROMPT updated")
+
+        save_button.on("click", save_prompt_settings)
+        asyncio.create_task(load_prompt_versions_list())
+
     def render_cfg_page() -> None:
         navigation("CFG")
         wrapper = page_container()
@@ -2850,7 +3226,6 @@ def register_pages(app: FastAPI) -> None:
         config.setdefault("enable_websocket", True)
         config.setdefault("frontend_timezone", DEFAULT_FRONTEND_TIMEZONE)
         config.setdefault("fallback_orders_enabled", settings.allow_fallback_orders)
-        response_schemas = config.setdefault("llm_response_schemas", {})
         guardrails = config.setdefault("guardrails", PromptBuilder._default_guardrails())
         guardrails.setdefault(
             "snapshot_max_age_seconds", config.get("snapshot_max_age_seconds")
@@ -2871,20 +3246,9 @@ def register_pages(app: FastAPI) -> None:
             "fallback_orders_enabled",
             bool(config.get("fallback_orders_enabled", settings.allow_fallback_orders)),
         )
-        config.setdefault("llm_system_prompt", DEFAULT_SYSTEM_PROMPT)
-        config.setdefault("llm_decision_prompt", DEFAULT_DECISION_PROMPT)
         config.setdefault("llm_timeout_seconds", 300)
         config.setdefault("llm_reasoning_effort", "low")
-        sanitized_system_prompt = sanitize_prompt_text(config.get("llm_system_prompt"))
-        if sanitized_system_prompt is not None:
-            config["llm_system_prompt"] = sanitized_system_prompt
-        sanitized_decision_prompt = sanitize_prompt_text(config.get("llm_decision_prompt"))
-        if sanitized_decision_prompt is not None:
-            config["llm_decision_prompt"] = sanitized_decision_prompt
         config["fallback_orders_enabled"] = bool(guardrails.get("fallback_orders_enabled", True))
-        config.setdefault("prompt_version_name", None)
-        prompt_versions_cache: dict[str, dict[str, Any]] = {}
-        prompt_version_options: dict[str, str] = {}
         client = ui.context.client
         price_cache: dict[str, tuple[float, float]] = {}
 
@@ -3022,17 +3386,6 @@ def register_pages(app: FastAPI) -> None:
                 initial_model_value,
                 {"id": initial_model_value, "label": initial_model_value, "pricing": None},
             )
-
-        def schema_to_text(model_id: str | None) -> str:
-            if not model_id:
-                return ""
-            schema = response_schemas.get(model_id)
-            if not schema:
-                return ""
-            try:
-                return json.dumps(schema, indent=2)
-            except (TypeError, ValueError):
-                return ""
 
         timeframe_default = config.get("ta_timeframe") or "4H"
         if timeframe_default not in TA_TIMEFRAME_OPTIONS:
@@ -3778,134 +4131,6 @@ def register_pages(app: FastAPI) -> None:
             ui.label(
                 "Orders are sent as market orders on OKX. Enable only on funded accounts."
             ).classes("text-xs text-rose-600")
-            ui.label("Choose all perpetual instruments to monitor").classes(
-                "text-sm text-slate-500"
-            )
-            with ui.row().classes("w-full justify-between items-center"):
-                ui.label("System Prompt").classes("text-sm font-medium text-slate-700")
-                ui.button(
-                    "Reset system prompt",
-                    icon="restart_alt",
-                    color="grey-7",
-                ).props("flat dense size=sm").on(
-                    "click",
-                    lambda: [
-                        setattr(prompt_input, "value", DEFAULT_SYSTEM_PROMPT) or prompt_input.update(),
-                        ui.notify("System prompt reset to default — click Save to apply", type="info"),
-                    ],
-                )
-            prompt_input = ui.textarea(
-                label="System Prompt",
-                value=config.get("llm_system_prompt", DEFAULT_SYSTEM_PROMPT),
-            ).classes("w-full h-48")
-            # --- Decision Prompt (mode-aware) -----------------------------------
-            # Mode "default": assembled fresh from section constants + current
-            #   guardrail config on every LLM call — no text stored in config.
-            # Mode "custom": user controls the full text; guardrail toggles will
-            #   NOT automatically update it.
-            _stored_decision_prompt = config.get("llm_decision_prompt") or ""
-            _initial_prompt_mode = "custom" if _stored_decision_prompt.strip() else "default"
-            with ui.row().classes("w-full justify-between items-center flex-wrap gap-2"):
-                ui.label("Decision Prompt").classes("text-sm font-medium text-slate-700")
-                with ui.row().classes("gap-2 items-center"):
-                    prompt_mode_toggle = ui.toggle(
-                        {"default": "Auto-assembled", "custom": "Custom"},
-                        value=_initial_prompt_mode,
-                    ).props("dense").tooltip(
-                        "Auto-assembled: prompt is built fresh from section constants + live guardrail "
-                        "config on every LLM call. Guardrail toggles affect the prompt automatically. "
-                        "Custom: you control the full text — guardrail toggles will NOT auto-update it."
-                    )
-                    refresh_prompt_btn = (
-                        ui.button("Refresh preview", icon="refresh")
-                        .props("flat dense size=sm")
-                        .tooltip("Reload assembled prompt for the current guardrail config")
-                    )
-            decision_prompt_input = ui.textarea(
-                label="Decision Prompt",
-                value=_stored_decision_prompt if _stored_decision_prompt.strip() else DEFAULT_DECISION_PROMPT,
-            ).classes("w-full h-48")
-
-            def _apply_prompt_mode(mode: str) -> None:
-                if mode == "default":
-                    decision_prompt_input.props(add="readonly bg-color=grey-2")
-                else:
-                    decision_prompt_input.props(remove="readonly bg-color=grey-2")
-                decision_prompt_input.update()
-
-            prompt_mode_toggle.on_value_change(lambda e: _apply_prompt_mode(e.value))
-
-            async def _refresh_prompt_preview() -> None:
-                guardrails_cfg = config.get("guardrails") or {}
-                _rrr = bool(guardrails_cfg.get("require_reward_risk_ratio"))
-                _nm = (guardrails_cfg.get("llm_notional_mode") or "post_leverage").lower()
-                assembled = sanitize_prompt_text(
-                    assemble_decision_prompt(require_rr=_rrr, pre_leverage=(_nm == "pre_leverage"))
-                )
-                decision_prompt_input.value = assembled or ""
-                decision_prompt_input.update()
-                ui.notify("Decision prompt preview refreshed", type="positive")
-
-            refresh_prompt_btn.on("click", _refresh_prompt_preview)
-            _apply_prompt_mode(_initial_prompt_mode)
-            with ui.row().classes("w-full flex-wrap gap-4 items-end"):
-                prompt_version_select = ui.select(
-                    options=[],
-                    label="Prompt Version",
-                    with_input=False,
-                ).classes("w-full md:w-64")
-                prompt_version_select.disable()
-                delete_version_button = ui.button(
-                    icon="delete",
-                    color="negative",
-                ).props("flat dense").tooltip("Delete selected prompt version")
-                with ui.dialog() as _delete_version_dialog, ui.card().classes("p-6 gap-4"):
-                    _delete_confirm_label = ui.label("").classes("text-base font-semibold")
-                    ui.label(
-                        "This cannot be undone. Prompt runs that reference this version will keep their data."
-                    ).classes("text-sm text-slate-500")
-                    with ui.row().classes("gap-2 justify-end w-full"):
-                        ui.button("Cancel", color="grey").on(
-                            "click", lambda: _delete_version_dialog.submit(False)
-                        )
-                        ui.button("Delete", color="negative", icon="delete").on(
-                            "click", lambda: _delete_version_dialog.submit(True)
-                        )
-                prompt_version_name_input = ui.input(
-                    label="Save As New Version",
-                    placeholder="e.g., Momentum bias v2",
-                ).classes("w-full flex-1")
-            with ui.row().classes("w-full flex-wrap gap-2 items-end"):
-                prompt_version_param_input = (
-                    ui.input(
-                        label="Override query param",
-                        value="prompt_version_id=<active>",
-                    )
-                    .props("readonly outlined dense")
-                    .classes("w-full md:flex-1 font-mono text-sm")
-                )
-                copy_param_button = ui.button("Copy param", icon="content_copy")
-            ui.label("Saving with a name will create a new immutable version for A/B tests").classes(
-                "text-xs text-slate-500"
-            )
-            response_schema_input = ui.textarea(
-                label="Response Schema Override (JSON)",
-                value=schema_to_text(initial_model_value),
-                placeholder="Leave blank to use default schema",
-            ).classes("w-full h-40 font-mono text-sm")
-            with ui.column().classes(
-                "w-full gap-2 mt-4 bg-slate-50/80 p-4 rounded-xl border border-slate-200"
-            ):
-                ui.label("LLM Payload Preview").classes("text-lg font-semibold")
-                ui.label(
-                    "Exact prompt + context skeleton sent to the LLM"
-                ).classes("text-xs text-slate-500")
-                payload_preview = (
-                    ui.textarea(label="Prompt Payload", value="")
-                    .props("readonly outlined autogrow")
-                    .classes("w-full font-mono text-xs bg-white h-full")
-                    .style("min-height: 22rem; height: 100%;")
-                )
             save_button = ui.button("Save", icon="save", color="primary")
 
         if not auto_prompt_switch.value:
@@ -4044,145 +4269,6 @@ def register_pages(app: FastAPI) -> None:
                         min_size_overrides.update(cleaned)
                         render_min_size_rows()
 
-        def build_context_structure() -> dict[str, Any]:
-            return {
-                "generated_at": "<ISO8601 timestamp from latest snapshot>",
-                "symbol": "<primary trading symbol>",
-                "timeframe": config.get("ta_timeframe") or "4H",
-                "market": {
-                    "last_price": "<float>",
-                    "bid": "<float>",
-                    "ask": "<float>",
-                    "spread": "<float>",
-                    "spread_pct": "<float>",
-                    "change_24h": "<float>",
-                    "volume_24h": "<float>",
-                    "funding_rate": "<float>",
-                    "next_funding": "<timestamp>",
-                    "open_interest": {
-                        "contracts": "<float>",
-                        "usd": "<float>",
-                    },
-                    "order_flow": {
-                        "imbalance": "<float>",
-                        "cvd": "<float>",
-                        "bid_depth": "<float>",
-                        "ask_depth": "<float>",
-                        "cvd_series": "<list>",
-                        "ofi_ratio_series": "<list>",
-                    },
-                },
-                "history": {
-                    "candles": "[[ts, open, high, low, close, volume] ... up to 120 rows]",
-                    "vwap_series": "<list>",
-                    "volume_series": "<list>",
-                    "volume_rsi_series": "<list>",
-                },
-                "indicators": {
-                    "rsi": "<dict>",
-                    "stoch_rsi": "<dict>",
-                    "macd": {
-                        "value": "<float>",
-                        "signal": "<float>",
-                        "hist": "<float>",
-                        "series": "<list>",
-                    },
-                    "bollinger_bands": "<dict>",
-                    "moving_averages": "<dict>",
-                    "adx": {
-                        "value": "<float>",
-                        "di_plus": "<float>",
-                        "di_minus": "<float>",
-                        "series": "<list>",
-                    },
-                    "obv": "<dict>",
-                    "cmf": "<dict>",
-                    "vwap": "<dict>",
-                    "atr": "<float>",
-                    "atr_pct": "<float>",
-                    "volume": "<dict>",
-                },
-                "strategy_signal": "<custom engine signal block>",
-                "risk_metrics": "<dict of real-time risk metrics>",
-                "positions": [
-                    {
-                        "symbol": "<position symbol>",
-                        "side": "LONG/SHORT",
-                        "size": "<float>",
-                        "avg_px": "<float>",
-                        "leverage": "<float>",
-                        "margin_mode": "<cross/isolated>",
-                    }
-                ],
-                "account": {
-                    "account_equity": "<float>",
-                    "total_account_value": "<float>",
-                    "total_eq_usd": "<float>",
-                },
-                "guardrails": build_guardrails_snapshot(),
-                "execution": {
-                    "enabled": config.get("execution_enabled", False),
-                    "trade_mode": config.get("execution_trade_mode", "cross"),
-                    "order_type": config.get("execution_order_type", "market"),
-                    "min_size": config.get("execution_min_size", 1.0),
-                    "min_sizes": config.get("execution_min_sizes", {}),
-                },
-                "notes": config.get("llm_notes") or "<optional runtime notes>",
-                "prompt_version_id": config.get("prompt_version_id"),
-                "prompt_version_name": config.get("prompt_version_name"),
-            }
-
-        def build_payload_preview() -> str:
-            schema_text = response_schema_input.value or ""
-            if schema_text.strip():
-                try:
-                    schema_value: Any = json.loads(schema_text)
-                except json.JSONDecodeError as exc:
-                    schema_value = f"<invalid JSON: {exc.msg} (line {exc.lineno}, col {exc.colno})>"
-            else:
-                schema_value = RESPONSE_SCHEMA
-            payload = {
-                "prompt": {
-                    "system": (prompt_input.value or "").strip(),
-                    "task": (decision_prompt_input.value or "").strip(),
-                    "model": model_select.value,
-                    "response_schema": schema_value,
-                },
-                "context": build_context_structure(),
-            }
-            return json.dumps(payload, indent=2)
-
-        def update_payload_preview() -> None:
-            payload_preview.value = build_payload_preview()
-            payload_preview.update()
-
-        def register_preview_listeners() -> None:
-            listeners = [
-                prompt_input,
-                decision_prompt_input,
-                response_schema_input,
-                max_leverage_input,
-                min_leverage_input,
-                max_position_pct_input,
-                daily_loss_limit_input,
-                min_hold_seconds_input,
-                max_trades_per_hour_input,
-                trade_window_seconds_input,
-                require_alignment_switch,
-                wait_for_tp_sl_switch,
-                fallback_orders_switch,
-                require_rr_switch,
-                require_protection_switch,
-                flip_llm_decision_switch,
-                isolated_seed_default_input,
-                isolated_seed_max_input,
-                isolated_bootstrap_pct_input,
-            ]
-            for widget in listeners:
-                widget.on_value_change(lambda _: update_payload_preview())
-
-        register_preview_listeners()
-        update_payload_preview()
         update_model_cost_label(initial_model_value)
         asyncio.create_task(hydrate_execution_settings())
 
@@ -4221,134 +4307,12 @@ def register_pages(app: FastAPI) -> None:
                 update_model_cost_label(model_select.value)
 
         def apply_model_change(model_id: str | None) -> None:
-            response_schema_input.value = schema_to_text(model_id)
-            response_schema_input.update()
-            update_payload_preview()
             update_model_cost_label(model_id)
 
         def on_model_change(e: Any) -> None:
             apply_model_change(getattr(e, "value", None))
 
         model_select.on_value_change(on_model_change)
-
-        def update_prompt_version_param(version_id: str | None) -> None:
-            suffix = version_id or "<active>"
-            prompt_version_param_input.value = f"prompt_version_id={suffix}"
-            prompt_version_param_input.update()
-
-        def copy_prompt_version_param() -> None:
-            value = prompt_version_param_input.value or "prompt_version_id=<active>"
-            ui.run_javascript(f"navigator.clipboard.writeText({json.dumps(value)})")
-            ui.notify("Query param copied", color="positive")
-
-        copy_param_button.on("click", lambda _: copy_prompt_version_param())
-        update_prompt_version_param(config.get("prompt_version_id"))
-
-        def _set_prompt_version_value(version_id: str | None) -> None:
-            if not version_id:
-                prompt_version_select.value = None
-                prompt_version_select.update()
-                update_prompt_version_param(None)
-                return
-            for label, vid in prompt_version_options.items():
-                if vid == version_id:
-                    prompt_version_select.value = label
-                    prompt_version_select.update()
-                    update_prompt_version_param(version_id)
-                    return
-            prompt_version_select.value = None
-            prompt_version_select.update()
-            update_prompt_version_param(version_id)
-
-        async def load_prompt_versions_list() -> None:
-            try:
-                records = await fetch_prompt_versions(limit=50)
-            except Exception as exc:  # pragma: no cover - optional DB
-                ui.notify(f"Failed to load prompt versions: {exc}", color="warning")
-                return
-            prompt_versions_cache.clear()
-            prompt_version_options.clear()
-            options: list[str] = []
-            for row in records:
-                prompt_versions_cache[row["id"]] = row
-                created = row.get("created_at") or "recent"
-                label = f"{row['name']} ({created[:16]})"
-                prompt_version_options[label] = row["id"]
-                options.append(label)
-            prompt_version_select.set_options(options, value=None)
-            if options:
-                prompt_version_select.enable()
-            else:
-                prompt_version_select.disable()
-            _set_prompt_version_value(config.get("prompt_version_id"))
-
-        def apply_prompt_version(version_id: str | None) -> None:
-            record = prompt_versions_cache.get(version_id or "")
-            if not record:
-                return
-            new_system_prompt = sanitize_prompt_text(record.get("system_prompt", prompt_input.value))
-            if new_system_prompt is not None:
-                prompt_input.value = new_system_prompt
-            new_decision_prompt = sanitize_prompt_text(
-                record.get("decision_prompt", decision_prompt_input.value)
-            )
-            if new_decision_prompt is not None:
-                decision_prompt_input.value = new_decision_prompt
-                # A versioned prompt is always treated as custom
-                prompt_mode_toggle.value = "custom"
-                _apply_prompt_mode("custom")
-                prompt_mode_toggle.update()
-            prompt_version_name_input.value = ""
-            prompt_input.update()
-            decision_prompt_input.update()
-            prompt_version_name_input.update()
-            config["llm_system_prompt"] = sanitize_prompt_text(prompt_input.value or "") or ""
-            config["llm_decision_prompt"] = sanitize_prompt_text(decision_prompt_input.value or "") or ""
-            config["prompt_version_id"] = record.get("id")
-            config["prompt_version_name"] = record.get("name")
-            update_prompt_version_param(record.get("id"))
-            update_payload_preview()
-
-        def on_prompt_version_change(e: Any) -> None:
-            label = e.value
-            version_id = prompt_version_options.get(label)
-            if not version_id:
-                return
-            apply_prompt_version(version_id)
-
-        prompt_version_select.on_value_change(on_prompt_version_change)
-
-        async def confirm_delete_prompt_version() -> None:
-            selected_label = prompt_version_select.value
-            version_id = prompt_version_options.get(selected_label) if selected_label else None
-            if not version_id:
-                ui.notify("Select a version to delete", color="warning")
-                return
-            record = prompt_versions_cache.get(version_id)
-            version_name = record.get("name", selected_label) if record else selected_label
-
-            # Dialog is pre-built at render time to avoid creating UI elements
-            # inside a background task (which has no NiceGUI slot context).
-            _delete_confirm_label.set_text(f'Delete prompt version "{version_name}"?')
-            confirmed = await _delete_version_dialog
-            if not confirmed:
-                return
-            try:
-                deleted = await delete_prompt_version(version_id)
-            except Exception as exc:
-                ui.notify(f"Delete failed: {exc}", color="negative")
-                return
-            if not deleted:
-                ui.notify("Version not found — already deleted?", color="warning")
-            else:
-                ui.notify(f'Deleted "{version_name}"', color="positive")
-            if config.get("prompt_version_id") == version_id:
-                config["prompt_version_id"] = None
-                config["prompt_version_name"] = None
-                update_prompt_version_param(None)
-            await load_prompt_versions_list()
-
-        delete_version_button.on("click", confirm_delete_prompt_version)
 
         async def save_settings(event: Any | None = None) -> None:
             config["poll_interval"] = int(ws_interval_input.value or 5)
@@ -4357,13 +4321,6 @@ def register_pages(app: FastAPI) -> None:
             config["execution_enabled"] = bool(execution_switch.value)
             config["wait_for_tp_sl"] = bool(wait_for_tp_sl_switch.value)
             config["fallback_orders_enabled"] = bool(fallback_orders_switch.value)
-            config["llm_system_prompt"] = sanitize_prompt_text(prompt_input.value or "") or ""
-            # In Default (auto-assembled) mode, clear the stored prompt so build()
-            # always assembles fresh from section constants + live guardrail state.
-            if prompt_mode_toggle.value == "custom":
-                config["llm_decision_prompt"] = sanitize_prompt_text(decision_prompt_input.value or "") or ""
-            else:
-                config["llm_decision_prompt"] = ""
             config["llm_model_id"] = model_select.value
             config["llm_timeout_seconds"] = int(llm_timeout_input.value or 300)
             config["llm_reasoning_effort"] = llm_reasoning_effort_select.value or "low"
@@ -4385,16 +4342,6 @@ def register_pages(app: FastAPI) -> None:
                 await save_frontend_timezone(timezone_value)
             except Exception as exc:  # pragma: no cover - optional DB
                 ui.notify(f"Failed to persist timezone: {exc}", color="warning")
-            schema_text = response_schema_input.value or ""
-            if schema_text.strip():
-                try:
-                    response_schemas[model_select.value] = json.loads(schema_text)
-                except json.JSONDecodeError as exc:
-                    ui.notify(f"Response schema invalid JSON: {exc}", color="warning")
-                    return
-            else:
-                response_schemas.pop(model_select.value, None)
-            config["llm_response_schemas"] = response_schemas
             try:
                 await save_llm_model(config["llm_model_id"])
             except Exception as exc:  # pragma: no cover - db optional
@@ -4555,38 +4502,6 @@ def register_pages(app: FastAPI) -> None:
             config["fallback_orders_enabled"] = bool(
                 config["guardrails"].get("fallback_orders_enabled", True)
             )
-            version_name = (prompt_version_name_input.value or "").strip()
-            created_version_id: str | None = None
-            selected_label = prompt_version_select.value
-            selected_version_id = (
-                prompt_version_options.get(selected_label)
-                if selected_label
-                else config.get("prompt_version_id")
-            )
-            if version_name:
-                metadata = {
-                    "guardrails": config.get("guardrails"),
-                    "model_id": model_select.value,
-                }
-                try:
-                    created_version_id = await insert_prompt_version(
-                        name=version_name,
-                        system_prompt=config["llm_system_prompt"],
-                        decision_prompt=config["llm_decision_prompt"],
-                        metadata=metadata,
-                    )
-                    prompt_version_name_input.value = ""
-                    prompt_version_name_input.update()
-                    await load_prompt_versions_list()
-                except Exception as exc:  # pragma: no cover - db optional
-                    ui.notify(f"Failed to save prompt version: {exc}", color="warning")
-            config["prompt_version_id"] = created_version_id or selected_version_id
-            if created_version_id:
-                config["prompt_version_name"] = version_name or config.get("prompt_version_name")
-            elif selected_version_id:
-                selected_record = prompt_versions_cache.get(selected_version_id)
-                if selected_record:
-                    config["prompt_version_name"] = selected_record.get("name")
             symbols: list[str] = []
             for item in selected_trading_pairs:
                 normalized = str(item).strip().upper()
@@ -4642,14 +4557,16 @@ def register_pages(app: FastAPI) -> None:
             if scheduler:
                 await scheduler.update_interval(config["auto_prompt_interval"])
                 await scheduler.set_enabled(config["auto_prompt_enabled"])
-            _set_prompt_version_value(config.get("prompt_version_id"))
             ui.notify("Configuration saved", color="positive")
             app.state.frontend_events.append("CFG updated")
 
         save_button.on("click", save_settings)
         asyncio.create_task(load_trading_pairs())
         asyncio.create_task(hydrate_model_select())
-        asyncio.create_task(load_prompt_versions_list())
+
+    @ui.page("/prompt")
+    def prompt_page() -> None:
+        render_prompt_page()
 
     @ui.page("/")
     def home() -> None:
