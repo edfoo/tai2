@@ -285,6 +285,10 @@ def _create_lifespan(enable_background_services: bool):
                             or sanitize_prompt_text(DEFAULT_DECISION_PROMPT)
                         )
                         app.state.runtime_config["prompt_version_name"] = latest_version["name"]
+                        _v_meta = latest_version.get("metadata") or {}
+                        _v_sections = _v_meta.get("prompt_sections")
+                        if _v_sections and isinstance(_v_sections, dict):
+                            app.state.runtime_config["prompt_sections"] = _v_sections
                 try:
                     stored_sub_account = await load_okx_sub_account(
                         {

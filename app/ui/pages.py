@@ -2920,7 +2920,7 @@ def register_pages(app: FastAPI) -> None:
                         with ui.expansion(_sec["label"]).classes("flex-1 text-sm font-medium"):
                             _ta = (
                                 ui.textarea(value=_current_text)
-                                .props("outlined autogrow")
+                                .props('outlined autogrow input-style="min-height: 14rem; resize: vertical;"')
                                 .classes("w-full font-mono text-xs mt-1")
                             )
                         _mod_badge = ui.badge("Modified", color="orange-9")
