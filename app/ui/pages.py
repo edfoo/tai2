@@ -3391,7 +3391,9 @@ def register_pages(app: FastAPI) -> None:
         if timeframe_default not in TA_TIMEFRAME_OPTIONS:
             timeframe_default = "4H"
         with wrapper:
-            ui.label("Engine Configuration").classes("text-2xl font-bold")
+            with ui.row().classes("w-full justify-between items-center"):
+                ui.label("Engine Configuration").classes("text-2xl font-bold")
+                save_button = ui.button("Save", icon="save", color="primary")
             ui.label("Execution Guardrails").classes("text-xl font-semibold")
             ui.label("Limits enforced before orders are placed").classes("text-sm text-slate-500")
             max_position_pct_value = _fraction_to_percent(guardrails.get("max_position_pct"))
@@ -3842,6 +3844,29 @@ def register_pages(app: FastAPI) -> None:
                 ).classes("w-full md:w-48").props(
                     "hint='Prevents dust trades; measured in contracts/base units' persistent-hint"
                 )
+                okx_env_select = ui.select(
+                    {
+                        "0": "Live (Production)",
+                        "1": "Paper / Demo",
+                    },
+                    label="OKX Environment",
+                    value=str(config.get("okx_api_flag", "0") or "0"),
+                ).classes("w-full md:w-48").props(
+                    "hint='Flag=0 targets live trading; Flag=1 targets OKX simulated trading endpoints.' persistent-hint"
+                )
+                okx_sub_account_input = ui.input(
+                    label="OKX Sub-Account",
+                    value=config.get("okx_sub_account") or "",
+                    placeholder="Leave blank for primary",
+                ).classes("w-full md:w-56").props(
+                    "hint='Orders + balances will target this sub-account' persistent-hint"
+                )
+                okx_master_routing_switch = ui.switch(
+                    "API key created on parent account",
+                    value=config.get("okx_sub_account_use_master", False),
+                ).classes("w-full md:w-64").props(
+                    "hint='Enable when using parent-account API keys that need the subAcct flag to reach this sub-account.' persistent-hint"
+                )
             with ui.column().classes("w-full gap-2"):
                 ui.label("Per-Symbol Overrides (optional)").classes("text-xs text-slate-500")
                 min_size_rows = ui.column().classes("w-full gap-2")
@@ -4105,33 +4130,9 @@ def register_pages(app: FastAPI) -> None:
                                 ui.button("Clear", on_click=clear_seed(normalized)).props("flat dense")
 
                 render_isolated_seed_rows()
-                okx_sub_account_input = ui.input(
-                    label="OKX Sub-Account",
-                    value=config.get("okx_sub_account") or "",
-                    placeholder="Leave blank for primary",
-                ).classes("w-full md:w-64").props(
-                    "hint='Orders + balances will target this sub-account' persistent-hint"
-                )
-                okx_master_routing_switch = ui.switch(
-                    "API key created on parent account",
-                    value=config.get("okx_sub_account_use_master", False),
-                ).classes("w-full md:w-64").props(
-                    "hint='Enable when using parent-account API keys that need the subAcct flag to reach this sub-account.' persistent-hint"
-                )
-                okx_env_select = ui.select(
-                    {
-                        "0": "Live (Production)",
-                        "1": "Paper / Demo",
-                    },
-                    label="OKX Environment",
-                    value=str(config.get("okx_api_flag", "0") or "0"),
-                ).classes("w-full md:w-64").props(
-                    "hint='Flag=0 targets live trading; Flag=1 targets OKX simulated trading endpoints.' persistent-hint"
-                )
             ui.label(
                 "Orders are sent as market orders on OKX. Enable only on funded accounts."
             ).classes("text-xs text-rose-600")
-            save_button = ui.button("Save", icon="save", color="primary")
 
         if not auto_prompt_switch.value:
             auto_prompt_interval_input.disable()
