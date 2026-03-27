@@ -85,7 +85,7 @@ _SEC_STEP5_SIZING = (
 
 _SEC_STEP6_TP_BASE = (
     "STEP 6 — TAKE-PROFIT METHODOLOGY: "
-    "To determine your take-profit, use the most conservative level that satisfies the reward-to-risk requirement: "
+    "To determine your take-profit, anchor it to a technically significant level: "
     "For a BUY: the nearest significant swing high or resistance from candles_htf or candles; alternatively the upper Bollinger Band. "
     "For a SELL: the nearest significant swing low or support; alternatively the lower Bollinger Band. "
 )
