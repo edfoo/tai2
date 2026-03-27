@@ -15,7 +15,8 @@ DEFAULT_SYSTEM_PROMPT = (
     "You are a professional hedge fund trader with profitability as primary goal, but with strict risk controls. "
     "Evaluate the provided snapshot using a top-down, hierarchical framework: higher-timeframe trend first, "
     "then volume/participation confirmation, then momentum timing. "
-    "Always verify existing positions and whether guardrails such as leverage caps might block an order."
+    "Always verify existing positions and whether guardrails such as leverage caps might block an order. "
+    "Respond strictly as JSON matching 'response_schema'."
 )
 
 # ---------------------------------------------------------------------------
@@ -107,7 +108,7 @@ _SEC_SIZING_RULE_POST = (
     "You MUST NOT set notional_usd above max_safe_notional_usd — the exchange will reject the order regardless of equity_pct. "
     "You MUST NOT set notional_usd below min_notional_usd — orders below this threshold are always rejected by the exchange. "
     "If max_safe_notional_usd < min_notional_usd (e.g. insufficient free capital), you MUST choose HOLD. "
-    "The bot converts your notional_usd to exchange contracts internally; you do not need to know contract sizes or multipliers. "
+    "Contract sizes and exchange multipliers are handled automatically — express only the USD dollar value. "
 )
 
 # Conditional: only included when llm_notional_mode == "pre_leverage".
@@ -119,11 +120,10 @@ _SEC_SIZING_RULE_PRE = (
     "(= OKX's 5 USDT position floor ÷ max_leverage; already pre-computed in the context). "
     "Express your desired margin commitment as `notional_usd` — the USD amount of your own "
     "capital to risk (e.g. 20.0 means commit $20 as margin). "
-    "The bot will automatically apply the configured leverage multiplier to derive the actual "
-    "position notional — you do NOT need to size for leverage. "
+    "Leverage is applied automatically to derive the full position notional — you do NOT need to size for leverage. "
     "You MUST NOT set notional_usd above max_safe_notional_usd or below min_notional_usd. "
     "If max_safe_notional_usd < min_notional_usd (e.g. insufficient free capital), you MUST choose HOLD. "
-    "The bot converts your notional_usd to exchange contracts internally; you do not need to know contract sizes or multipliers. "
+    "Contract conversion is handled automatically — express only the margin USD amount. "
 )
 
 _SEC_DIRECTION_RULE_BASE = (
@@ -141,8 +141,7 @@ _SEC_DIRECTION_RR_RULES = (
 _SEC_HOLD_GUIDANCE = (
     "Choose HOLD whenever capital constraints, fee/credit depletion, missing TP/SL, poor reward-to-risk, "
     "or low confidence (< 0.45) prevent a high-quality entry — and describe the specific blocker. "
-    "HTF contradiction alone is NOT a reason to HOLD if LTF signals are strong enough to survive the confidence penalty. "
-    "Respond strictly as JSON matching 'response_schema'."
+    "HTF contradiction alone is NOT a reason to HOLD if LTF signals are strong enough to survive the confidence penalty."
 )
 
 # ---------------------------------------------------------------------------
