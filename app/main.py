@@ -31,7 +31,12 @@ from app.db.postgres import (
 )
 from app.services.llm_service import LLMService
 from app.services.market_service import MarketService
-from app.services.prompt_builder import DEFAULT_DECISION_PROMPT, DEFAULT_SYSTEM_PROMPT, PromptBuilder
+from app.services.prompt_builder import (
+    DEFAULT_DECISION_PROMPT,
+    DEFAULT_SYSTEM_PROMPT,
+    PromptBuilder,
+    assemble_decision_prompt,
+)
 from app.services.prompt_utils import sanitize_prompt_text
 from app.services.state_service import StateService, close_redis_client, ensure_redis_connection
 from app.services.prompt_scheduler import PromptScheduler
@@ -500,6 +505,27 @@ def create_app(enable_background_services: bool | None = None) -> FastAPI:
         assert bundle is not None  # for type-checkers
         prompt_id = await persist_prompt_run(app, bundle)
         return JSONResponse({"payload": bundle.payload, "prompt_id": prompt_id}, status_code=200)
+
+    @app.get("/api/prompt/preview")
+    async def prompt_preview() -> JSONResponse:
+        """Return the assembled default decision prompt for the current guardrail config.
+
+        Used by the CFG page to populate the prompt textarea so the user always
+        sees the resolved text (no placeholders) matching their live settings.
+        """
+        runtime_meta: dict = getattr(app.state, "runtime_config", {}) or {}
+        guardrails: dict = runtime_meta.get("guardrails") or {}
+        require_rr = bool(guardrails.get("require_reward_risk_ratio"))
+        llm_notional_mode = (guardrails.get("llm_notional_mode") or "post_leverage").lower()
+        pre_leverage = llm_notional_mode == "pre_leverage"
+        assembled = sanitize_prompt_text(
+            assemble_decision_prompt(require_rr=require_rr, pre_leverage=pre_leverage)
+        )
+        return JSONResponse({
+            "decision_prompt": assembled,
+            "require_rr": require_rr,
+            "pre_leverage": pre_leverage,
+        })
 
     @app.post("/llm/execute")
     async def llm_execute(

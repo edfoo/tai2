@@ -36,6 +36,7 @@ from app.services.prompt_builder import (
     DEFAULT_SYSTEM_PROMPT,
     RESPONSE_SCHEMA,
     PromptBuilder,
+    assemble_decision_prompt,
 )
 from app.services.openrouter_service import (
     DEFAULT_MODEL_OPTIONS,
@@ -3783,25 +3784,70 @@ def register_pages(app: FastAPI) -> None:
             with ui.row().classes("w-full justify-between items-center"):
                 ui.label("System Prompt").classes("text-sm font-medium text-slate-700")
                 ui.button(
-                    "Reset to defaults",
+                    "Reset system prompt",
                     icon="restart_alt",
                     color="grey-7",
                 ).props("flat dense size=sm").on(
                     "click",
                     lambda: [
                         setattr(prompt_input, "value", DEFAULT_SYSTEM_PROMPT) or prompt_input.update(),
-                        setattr(decision_prompt_input, "value", DEFAULT_DECISION_PROMPT) or decision_prompt_input.update(),
-                        ui.notify("Prompts reset to current code defaults — click Save to apply", type="info"),
+                        ui.notify("System prompt reset to default — click Save to apply", type="info"),
                     ],
                 )
             prompt_input = ui.textarea(
                 label="System Prompt",
                 value=config.get("llm_system_prompt", DEFAULT_SYSTEM_PROMPT),
             ).classes("w-full h-48")
+            # --- Decision Prompt (mode-aware) -----------------------------------
+            # Mode "default": assembled fresh from section constants + current
+            #   guardrail config on every LLM call — no text stored in config.
+            # Mode "custom": user controls the full text; guardrail toggles will
+            #   NOT automatically update it.
+            _stored_decision_prompt = config.get("llm_decision_prompt") or ""
+            _initial_prompt_mode = "custom" if _stored_decision_prompt.strip() else "default"
+            with ui.row().classes("w-full justify-between items-center flex-wrap gap-2"):
+                ui.label("Decision Prompt").classes("text-sm font-medium text-slate-700")
+                with ui.row().classes("gap-2 items-center"):
+                    prompt_mode_toggle = ui.toggle(
+                        {"default": "Auto-assembled", "custom": "Custom"},
+                        value=_initial_prompt_mode,
+                    ).props("dense").tooltip(
+                        "Auto-assembled: prompt is built fresh from section constants + live guardrail "
+                        "config on every LLM call. Guardrail toggles affect the prompt automatically. "
+                        "Custom: you control the full text — guardrail toggles will NOT auto-update it."
+                    )
+                    refresh_prompt_btn = (
+                        ui.button("Refresh preview", icon="refresh")
+                        .props("flat dense size=sm")
+                        .tooltip("Reload assembled prompt for the current guardrail config")
+                    )
             decision_prompt_input = ui.textarea(
                 label="Decision Prompt",
-                value=config.get("llm_decision_prompt", DEFAULT_DECISION_PROMPT),
+                value=_stored_decision_prompt if _stored_decision_prompt.strip() else DEFAULT_DECISION_PROMPT,
             ).classes("w-full h-48")
+
+            def _apply_prompt_mode(mode: str) -> None:
+                if mode == "default":
+                    decision_prompt_input.props(add="readonly bg-color=grey-2")
+                else:
+                    decision_prompt_input.props(remove="readonly bg-color=grey-2")
+                decision_prompt_input.update()
+
+            prompt_mode_toggle.on_value_change(lambda e: _apply_prompt_mode(e.value))
+
+            async def _refresh_prompt_preview() -> None:
+                guardrails_cfg = config.get("guardrails") or {}
+                _rrr = bool(guardrails_cfg.get("require_reward_risk_ratio"))
+                _nm = (guardrails_cfg.get("llm_notional_mode") or "post_leverage").lower()
+                assembled = sanitize_prompt_text(
+                    assemble_decision_prompt(require_rr=_rrr, pre_leverage=(_nm == "pre_leverage"))
+                )
+                decision_prompt_input.value = assembled or ""
+                decision_prompt_input.update()
+                ui.notify("Decision prompt preview refreshed", type="positive")
+
+            refresh_prompt_btn.on("click", _refresh_prompt_preview)
+            _apply_prompt_mode(_initial_prompt_mode)
             with ui.row().classes("w-full flex-wrap gap-4 items-end"):
                 prompt_version_select = ui.select(
                     options=[],
@@ -4248,6 +4294,10 @@ def register_pages(app: FastAPI) -> None:
             )
             if new_decision_prompt is not None:
                 decision_prompt_input.value = new_decision_prompt
+                # A versioned prompt is always treated as custom
+                prompt_mode_toggle.value = "custom"
+                _apply_prompt_mode("custom")
+                prompt_mode_toggle.update()
             prompt_version_name_input.value = ""
             prompt_input.update()
             decision_prompt_input.update()
@@ -4308,7 +4358,12 @@ def register_pages(app: FastAPI) -> None:
             config["wait_for_tp_sl"] = bool(wait_for_tp_sl_switch.value)
             config["fallback_orders_enabled"] = bool(fallback_orders_switch.value)
             config["llm_system_prompt"] = sanitize_prompt_text(prompt_input.value or "") or ""
-            config["llm_decision_prompt"] = sanitize_prompt_text(decision_prompt_input.value or "") or ""
+            # In Default (auto-assembled) mode, clear the stored prompt so build()
+            # always assembles fresh from section constants + live guardrail state.
+            if prompt_mode_toggle.value == "custom":
+                config["llm_decision_prompt"] = sanitize_prompt_text(decision_prompt_input.value or "") or ""
+            else:
+                config["llm_decision_prompt"] = ""
             config["llm_model_id"] = model_select.value
             config["llm_timeout_seconds"] = int(llm_timeout_input.value or 300)
             config["llm_reasoning_effort"] = llm_reasoning_effort_select.value or "low"

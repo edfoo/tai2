@@ -18,16 +18,27 @@ DEFAULT_SYSTEM_PROMPT = (
     "Always verify existing positions and whether guardrails such as leverage caps might block an order."
 )
 
-DEFAULT_DECISION_PROMPT = (
+# ---------------------------------------------------------------------------
+# Prompt section constants — each is one logical block of the default decision
+# prompt.  PromptBuilder.build() assembles them via assemble_decision_prompt()
+# so that live guardrail state is always reflected without string-patching.
+# All sections end with a trailing space so they concatenate cleanly.
+# ---------------------------------------------------------------------------
+
+_SEC_INTRO = (
     "You will receive a JSON object under the key 'context' containing the latest market state, "
     "account/portfolio exposure (including total equity and available margin), any pending orders, and execution guardrails. "
+)
 
+_SEC_STEP1_PREFLIGHT = (
     "STEP 1 — PRE-FLIGHT CHECKS (hard-block if any fail): "
     "(a) Recommendation must comply with leverage, position size, trade limits, and max-position-percent guardrails (including symbol caps). "
     "(b) context.positions and context.pending_orders must not already contain an open or pending order in the same direction — if they do, prefer HOLD or a close/reverse. "
     "(c) Inspect context.execution.margin_health for real-time capital caps; treat context.execution_feedback (and its digest) as hard blockers that must be resolved before sizing up. "
     "Cite all pre-flight checks in your rationale. "
+)
 
+_SEC_STEP2_HTF = (
     "STEP 2 — HIGHER-TIMEFRAME TREND FILTER (confidence modifier, not a hard veto): "
     "context.history.candles_htf contains candles at context.history.timeframe_htf (same wall-clock window as context.history.candles). "
     "Both candles and candles_htf are sorted ascending (oldest first, most recent last) — no ordering check needed. "
@@ -38,13 +49,17 @@ DEFAULT_DECISION_PROMPT = (
     "  • HTF contradicts direction (e.g. BUY but ema_50 < ema_200 and price below ema_50): −0.30 confidence penalty AND cap max position size at 50% of max_safe_contracts. "
     "A counter-trend trade (HTF contradicts) is allowed only if the net confidence after penalty is ≥ 0.45; otherwise choose HOLD. "
     "FALLBACK: if context.indicators.htf is empty or context.history.candles_htf is empty, apply a flat −0.20 penalty and skip further HTF analysis. "
+)
 
+_SEC_STEP3_DIVERGENCE = (
     "STEP 3 — DIVERGENCE CHECK (strong filter): "
     "Compare context.history.candles close prices with context.history.volume_series (OBV proxy) and context.market.order_flow.cvd. "
     "If price is making higher highs but OBV/CVD is making lower highs (bearish divergence), a BUY is strongly discouraged. "
     "If price is making lower lows but OBV/CVD is making higher lows (bullish divergence), a SELL is strongly discouraged. "
     "Divergence against your proposed direction should be cited as a risk factor and typically warrants HOLD. "
+)
 
+_SEC_STEP4_SIGNALS = (
     "STEP 4 — SIGNAL HIERARCHY (for resolving conflicts): "
     "When signals conflict, weight them in this order: "
     "(1) Trend (ADX/DMI): a strong trend (ADX > 30) overrides most oscillators. "
@@ -52,7 +67,9 @@ DEFAULT_DECISION_PROMPT = (
     "(3) Momentum (MACD, RSI): use for entry timing, not primary direction. "
     "(4) Order Flow (imbalance, depth): confirms short-term liquidity but is secondary to trend and volume. "
     "If the majority of higher-ranked signals conflict, choose HOLD. "
+)
 
+_SEC_STEP5_SIZING = (
     "STEP 5 — CONFIDENCE AND SIZING: "
     "Your confidence score (0–1) reflects the proportion of signals aligning with your directional bias after applying all Step 2 penalties: "
     "0.75–1.0: HTF aligned, LTF momentum and volume confirm — full size allowed. "
@@ -63,14 +80,26 @@ DEFAULT_DECISION_PROMPT = (
     "Then apply the risk_score as a final multiplier: notional_usd = base_notional × (1 − risk_score). "
     "The risk_score (0–1) must reflect current volatility (ATR %), spread width, and proximity to major support/resistance. "
     "A higher risk_score automatically reduces final size. "
+)
 
+_SEC_STEP6_TP_BASE = (
     "STEP 6 — TAKE-PROFIT METHODOLOGY: "
     "To determine your take-profit, use the most conservative level that satisfies the reward-to-risk requirement: "
     "For a BUY: the nearest significant swing high or resistance from candles_htf or candles; alternatively the upper Bollinger Band. "
     "For a SELL: the nearest significant swing low or support; alternatively the lower Bollinger Band. "
-    "If no clear level exists within a reward-to-risk ratio >= context.guardrails.min_reward_risk_ratio (default 1.0) based on your stop distance, you MUST choose HOLD. "
-    "When existing stop-loss or take-profit levels are present, reuse or gently tune them unless you can justify a safer alternative. "
+)
 
+# Conditional: only included when require_reward_risk_ratio is True.
+_SEC_STEP6_TP_RR_RULE = (
+    "If no clear level exists within a reward-to-risk ratio >= context.guardrails.min_reward_risk_ratio "
+    "based on your stop distance, you MUST choose HOLD. "
+)
+
+_SEC_STEP6_TP_CLOSE = (
+    "When existing stop-loss or take-profit levels are present, reuse or gently tune them unless you can justify a safer alternative. "
+)
+
+_SEC_SIZING_RULE_POST = (
     "CRITICAL SIZING RULE: context.execution.max_safe_notional_usd is the pre-computed absolute ceiling for position notional "
     "(= available_margin_usd × max_leverage, already capped by all position and tier limits). "
     "context.execution.min_notional_usd is the exchange minimum to open a new position (typically 5 USDT for isolated margin). "
@@ -79,18 +108,77 @@ DEFAULT_DECISION_PROMPT = (
     "You MUST NOT set notional_usd below min_notional_usd — orders below this threshold are always rejected by the exchange. "
     "If max_safe_notional_usd < min_notional_usd (e.g. insufficient free capital), you MUST choose HOLD. "
     "The bot converts your notional_usd to exchange contracts internally; you do not need to know contract sizes or multipliers. "
+)
 
+# Conditional: only included when llm_notional_mode == "pre_leverage".
+_SEC_SIZING_RULE_PRE = (
+    "CRITICAL SIZING RULE (PRE-LEVERAGE MODE): context.execution.max_safe_notional_usd is the "
+    "pre-computed absolute ceiling for the MARGIN you commit to this trade "
+    "(= available_margin_usd already reduced by all position and tier limits). "
+    "context.execution.min_notional_usd is the minimum margin required "
+    "(= OKX's 5 USDT position floor ÷ max_leverage; already pre-computed in the context). "
+    "Express your desired margin commitment as `notional_usd` — the USD amount of your own "
+    "capital to risk (e.g. 20.0 means commit $20 as margin). "
+    "The bot will automatically apply the configured leverage multiplier to derive the actual "
+    "position notional — you do NOT need to size for leverage. "
+    "You MUST NOT set notional_usd above max_safe_notional_usd or below min_notional_usd. "
+    "If max_safe_notional_usd < min_notional_usd (e.g. insufficient free capital), you MUST choose HOLD. "
+    "The bot converts your notional_usd to exchange contracts internally; you do not need to know contract sizes or multipliers. "
+)
+
+_SEC_DIRECTION_RULE_BASE = (
     "CRITICAL DIRECTION RULE: for a BUY, stop_loss MUST be strictly below entry price and take_profit MUST be strictly above entry price. "
     "For a SELL, stop_loss MUST be strictly above entry price and take_profit MUST be strictly below entry price. "
     "A take_profit or stop_loss on the wrong side of entry will be rejected by the execution layer — choose HOLD if you cannot satisfy this constraint. "
+)
+
+# Conditional: only included when require_reward_risk_ratio is True.
+_SEC_DIRECTION_RR_RULES = (
     "The take-profit distance from entry must be at least context.guardrails.min_reward_risk_ratio times the stop-loss distance from entry. "
     "A trade where potential loss exceeds potential gain will be hard-blocked by the execution layer. "
+)
 
+_SEC_HOLD_GUIDANCE = (
     "Choose HOLD whenever capital constraints, fee/credit depletion, missing TP/SL, poor reward-to-risk, "
     "or low confidence (< 0.45) prevent a high-quality entry — and describe the specific blocker. "
     "HTF contradiction alone is NOT a reason to HOLD if LTF signals are strong enough to survive the confidence penalty. "
     "Respond strictly as JSON matching 'response_schema'."
 )
+
+
+def assemble_decision_prompt(*, require_rr: bool = False, pre_leverage: bool = False) -> str:
+    """Assemble the decision prompt from canonical section constants.
+
+    Conditional sections (R:R enforcement, pre-leverage sizing rule) are
+    included only when the corresponding guardrail/mode is active.  This is
+    the single source of truth — ``PromptBuilder.build()`` always calls this
+    so the prompt sent to the LLM always reflects the live guardrail state.
+    """
+    parts: list[str] = [
+        _SEC_INTRO,
+        _SEC_STEP1_PREFLIGHT,
+        _SEC_STEP2_HTF,
+        _SEC_STEP3_DIVERGENCE,
+        _SEC_STEP4_SIGNALS,
+        _SEC_STEP5_SIZING,
+        _SEC_STEP6_TP_BASE,
+    ]
+    if require_rr:
+        parts.append(_SEC_STEP6_TP_RR_RULE)
+    parts.append(_SEC_STEP6_TP_CLOSE)
+    parts.append(_SEC_SIZING_RULE_PRE if pre_leverage else _SEC_SIZING_RULE_POST)
+    parts.append(_SEC_DIRECTION_RULE_BASE)
+    if require_rr:
+        parts.append(_SEC_DIRECTION_RR_RULES)
+    parts.append(_SEC_HOLD_GUIDANCE)
+    return "".join(parts)
+
+
+# Baseline display constant (no R:R enforcement, post-leverage sizing).
+# Exported for the CFG page and legacy references.  The actual prompt sent
+# to the LLM is always freshly assembled in PromptBuilder.build() via
+# assemble_decision_prompt(), so guardrail state is always reflected.
+DEFAULT_DECISION_PROMPT = assemble_decision_prompt(require_rr=False, pre_leverage=False)
 
 DEFAULT_EXECUTION_FEEDBACK_TTL_SECONDS = 600
 
@@ -432,44 +520,18 @@ class PromptBuilder:
             context["execution_feedback_digest"] = feedback_digest
             execution_settings["feedback_digest"] = feedback_digest
         system_prompt = sanitize_prompt_text(runtime_meta.get("llm_system_prompt") or DEFAULT_SYSTEM_PROMPT)
-        decision_prompt = sanitize_prompt_text(runtime_meta.get("llm_decision_prompt") or DEFAULT_DECISION_PROMPT)
-        # When pre-leverage mode is active, patch the default sizing-rule paragraph
-        # so the LLM understands that notional_usd is the margin to commit, not the
-        # position notional.  Only applied to the default prompt; custom prompts are
-        # left unchanged (the user controls their own wording).
-        if llm_notional_mode == "pre_leverage" and not runtime_meta.get("llm_decision_prompt"):
-            _post_lev_rule = sanitize_prompt_text(
-                "CRITICAL SIZING RULE: context.execution.max_safe_notional_usd is the pre-computed "
-                "absolute ceiling for position notional "
-                "(= available_margin_usd \u00d7 max_leverage, already capped by all position and tier limits). "
-                "context.execution.min_notional_usd is the exchange minimum to open a new position "
-                "(typically 5 USDT for isolated margin). "
-                "Express your desired position size as `notional_usd` \u2014 the USD dollar value of the position "
-                "(e.g. 150.0 for a $150 position). "
-                "You MUST NOT set notional_usd above max_safe_notional_usd \u2014 the exchange will reject the "
-                "order regardless of equity_pct. "
-                "You MUST NOT set notional_usd below min_notional_usd \u2014 orders below this threshold are "
-                "always rejected by the exchange. "
-                "If max_safe_notional_usd < min_notional_usd (e.g. insufficient free capital), you MUST choose HOLD. "
-                "The bot converts your notional_usd to exchange contracts internally; you do not need to know "
-                "contract sizes or multipliers."
+        # Build the decision prompt.  If the user has saved a truly custom prompt,
+        # use it as-is (sanitized).  Otherwise assemble fresh from section constants
+        # so the current guardrail state is always reflected — no string-patching.
+        _require_rr = bool(guardrails.get("require_reward_risk_ratio"))
+        _pre_leverage = llm_notional_mode == "pre_leverage"
+        custom_prompt = runtime_meta.get("llm_decision_prompt")
+        if custom_prompt and custom_prompt.strip():
+            decision_prompt = sanitize_prompt_text(custom_prompt)
+        else:
+            decision_prompt = sanitize_prompt_text(
+                assemble_decision_prompt(require_rr=_require_rr, pre_leverage=_pre_leverage)
             )
-            _pre_lev_rule = (
-                "CRITICAL SIZING RULE (PRE-LEVERAGE MODE): context.execution.max_safe_notional_usd is the "
-                "pre-computed absolute ceiling for the MARGIN you commit to this trade "
-                "(= available_margin_usd already reduced by all position and tier limits). "
-                "context.execution.min_notional_usd is the minimum margin required "
-                "(= OKX's 5 USDT position floor ÷ max_leverage; already pre-computed in the context). "
-                "Express your desired margin commitment as `notional_usd` \u2014 the USD amount of your own "
-                "capital to risk (e.g. 20.0 means commit $20 as margin). "
-                "The bot will automatically apply the configured leverage multiplier to derive the actual "
-                "position notional \u2014 you do NOT need to size for leverage. "
-                "You MUST NOT set notional_usd above max_safe_notional_usd or below min_notional_usd. "
-                "If max_safe_notional_usd < min_notional_usd (e.g. insufficient free capital), you MUST choose HOLD. "
-                "The bot converts your notional_usd to exchange contracts internally; you do not need to know "
-                "contract sizes or multipliers."
-            )
-            decision_prompt = decision_prompt.replace(_post_lev_rule, _pre_lev_rule)
         response_schema = self._response_schema(model_id, schema_overrides)
         prompt_block = {
             "system": (system_prompt or DEFAULT_SYSTEM_PROMPT).strip(),
