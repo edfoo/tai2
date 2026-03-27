@@ -145,15 +145,86 @@ _SEC_HOLD_GUIDANCE = (
     "Respond strictly as JSON matching 'response_schema'."
 )
 
+# ---------------------------------------------------------------------------
+# PROMPT_SECTIONS — ordered list of all logical blocks that make up the
+# decision prompt.  Each entry has a stable ``key``, a human-readable
+# ``label``, and the module-level ``default`` text constant.  The optional
+# ``alt_default`` is used for the sizing_rule section in pre-leverage mode.
+# ---------------------------------------------------------------------------
 
-def assemble_decision_prompt(*, require_rr: bool = False, pre_leverage: bool = False) -> str:
+PROMPT_SECTIONS: list[dict[str, Any]] = [
+    {"key": "intro",            "label": "Introduction / Role",         "default": _SEC_INTRO},
+    {"key": "step1_preflight",  "label": "Step 1: Pre-flight checks",   "default": _SEC_STEP1_PREFLIGHT},
+    {"key": "step2_htf",        "label": "Step 2: HTF trend filter",    "default": _SEC_STEP2_HTF},
+    {"key": "step3_divergence", "label": "Step 3: Divergence check",    "default": _SEC_STEP3_DIVERGENCE},
+    {"key": "step4_signals",    "label": "Step 4: Signal hierarchy",    "default": _SEC_STEP4_SIGNALS},
+    {"key": "step5_sizing",     "label": "Step 5: Confidence & sizing", "default": _SEC_STEP5_SIZING},
+    {"key": "step6_tp",         "label": "Step 6: TP/SL methodology",  "default": _SEC_STEP6_TP_BASE},
+    {"key": "step6_tp_rr",      "label": "Step 6: R:R TP rule",         "default": _SEC_STEP6_TP_RR_RULE},
+    {"key": "step6_tp_close",   "label": "Step 6: TP close guidance",   "default": _SEC_STEP6_TP_CLOSE},
+    {
+        "key": "sizing_rule",
+        "label": "Sizing rule",
+        "default": _SEC_SIZING_RULE_POST,
+        "alt_default": _SEC_SIZING_RULE_PRE,
+    },
+    {"key": "direction_rule",   "label": "Direction rule",              "default": _SEC_DIRECTION_RULE_BASE},
+    {"key": "direction_rr",     "label": "Direction R:R rules",         "default": _SEC_DIRECTION_RR_RULES},
+    {"key": "hold_guidance",    "label": "HOLD guidance",               "default": _SEC_HOLD_GUIDANCE},
+]
+
+
+def default_prompt_sections(
+    *, require_rr: bool = False, pre_leverage: bool = False
+) -> "dict[str, dict]":
+    """Return the default prompt_sections config dict.
+
+    All sections enabled with no text overrides.  The R:R sections
+    (step6_tp_rr, direction_rr) default to the current ``require_rr``
+    guardrail state so the editor opens in a sensible state.
+    """
+    rr_keys = {"step6_tp_rr", "direction_rr"}
+    return {
+        sec["key"]: {
+            "enabled": (require_rr if sec["key"] in rr_keys else True),
+            "override": None,
+        }
+        for sec in PROMPT_SECTIONS
+    }
+
+
+def assemble_decision_prompt(
+    *,
+    require_rr: bool = False,
+    pre_leverage: bool = False,
+    sections_config: "dict[str, dict] | None" = None,
+) -> str:
     """Assemble the decision prompt from canonical section constants.
 
-    Conditional sections (R:R enforcement, pre-leverage sizing rule) are
-    included only when the corresponding guardrail/mode is active.  This is
-    the single source of truth — ``PromptBuilder.build()`` always calls this
-    so the prompt sent to the LLM always reflects the live guardrail state.
+    When ``sections_config`` is supplied (the per-section enable/override dict
+    stored in ``runtime_config["prompt_sections"]``), each section's enabled
+    flag and optional text override are respected.  Otherwise the legacy
+    ``require_rr`` / ``pre_leverage`` flags drive conditional section inclusion.
     """
+    if sections_config is not None:
+        parts: list[str] = []
+        for sec in PROMPT_SECTIONS:
+            key = sec["key"]
+            cfg = sections_config.get(key, {})
+            if not cfg.get("enabled", True):
+                continue
+            override = (cfg.get("override") or "").strip()
+            if override:
+                parts.append(override + " ")
+            else:
+                # sizing_rule uses alt_default when pre_leverage is active
+                if key == "sizing_rule" and pre_leverage and "alt_default" in sec:
+                    parts.append(sec["alt_default"])
+                else:
+                    parts.append(sec["default"])
+        return "".join(parts)
+
+    # Legacy path (no sections_config): assemble from guardrail flags.
     parts: list[str] = [
         _SEC_INTRO,
         _SEC_STEP1_PREFLIGHT,
@@ -525,8 +596,13 @@ class PromptBuilder:
         # so the current guardrail state is always reflected — no string-patching.
         _require_rr = bool(guardrails.get("require_reward_risk_ratio"))
         _pre_leverage = llm_notional_mode == "pre_leverage"
+        sections_config = runtime_meta.get("prompt_sections")
         custom_prompt = runtime_meta.get("llm_decision_prompt")
-        if custom_prompt and custom_prompt.strip():
+        if sections_config:
+            decision_prompt = sanitize_prompt_text(
+                assemble_decision_prompt(sections_config=sections_config, pre_leverage=_pre_leverage)
+            )
+        elif custom_prompt and custom_prompt.strip():
             decision_prompt = sanitize_prompt_text(custom_prompt)
         else:
             decision_prompt = sanitize_prompt_text(

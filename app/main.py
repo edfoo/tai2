@@ -518,9 +518,15 @@ def create_app(enable_background_services: bool | None = None) -> FastAPI:
         require_rr = bool(guardrails.get("require_reward_risk_ratio"))
         llm_notional_mode = (guardrails.get("llm_notional_mode") or "post_leverage").lower()
         pre_leverage = llm_notional_mode == "pre_leverage"
-        assembled = sanitize_prompt_text(
-            assemble_decision_prompt(require_rr=require_rr, pre_leverage=pre_leverage)
-        )
+        sections_config = runtime_meta.get("prompt_sections")
+        if sections_config:
+            assembled = sanitize_prompt_text(
+                assemble_decision_prompt(sections_config=sections_config, pre_leverage=pre_leverage)
+            )
+        else:
+            assembled = sanitize_prompt_text(
+                assemble_decision_prompt(require_rr=require_rr, pre_leverage=pre_leverage)
+            )
         return JSONResponse({
             "decision_prompt": assembled,
             "require_rr": require_rr,

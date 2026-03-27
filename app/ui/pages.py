@@ -34,9 +34,11 @@ from app.db.postgres import (
 from app.services.prompt_builder import (
     DEFAULT_DECISION_PROMPT,
     DEFAULT_SYSTEM_PROMPT,
+    PROMPT_SECTIONS,
     RESPONSE_SCHEMA,
     PromptBuilder,
     assemble_decision_prompt,
+    default_prompt_sections,
 )
 from app.services.openrouter_service import (
     DEFAULT_MODEL_OPTIONS,
@@ -2839,17 +2841,22 @@ def register_pages(app: FastAPI) -> None:
         wrapper = page_container()
         config = getattr(app.state, "runtime_config", {}) or {}
         config.setdefault("llm_system_prompt", DEFAULT_SYSTEM_PROMPT)
-        config.setdefault("llm_decision_prompt", "")
         config.setdefault("prompt_version_name", None)
         response_schemas = config.setdefault("llm_response_schemas", {})
         _san_sys = sanitize_prompt_text(config.get("llm_system_prompt"))
         if _san_sys is not None:
             config["llm_system_prompt"] = _san_sys
-        _san_dec = sanitize_prompt_text(config.get("llm_decision_prompt"))
-        if _san_dec is not None:
-            config["llm_decision_prompt"] = _san_dec
+        _guardrails_cfg = config.get("guardrails") or {}
+        _require_rr_init = bool(_guardrails_cfg.get("require_reward_risk_ratio", True))
+        _pre_leverage_init = (
+            (_guardrails_cfg.get("llm_notional_mode") or "post_leverage").lower() == "pre_leverage"
+        )
+        sections_config: dict[str, dict] = config.get("prompt_sections") or default_prompt_sections(
+            require_rr=_require_rr_init, pre_leverage=_pre_leverage_init
+        )
         prompt_versions_cache: dict[str, dict[str, Any]] = {}
         prompt_version_options: dict[str, str] = {}
+        section_widgets: dict[str, dict] = {}
         client = ui.context.client
         model_metadata: dict[str, dict[str, Any]] = {item["id"]: item for item in DEFAULT_MODEL_OPTIONS}
         current_model_id = config.get("llm_model_id") or next(iter(model_metadata), None)
@@ -2865,8 +2872,11 @@ def register_pages(app: FastAPI) -> None:
             except (TypeError, ValueError):
                 return ""
 
-        _stored_decision_prompt = config.get("llm_decision_prompt") or ""
-        _initial_prompt_mode = "custom" if _stored_decision_prompt.strip() else "default"
+
+        def _get_sec_default(sec: dict) -> str:
+            if sec.get("alt_default") and _pre_leverage_init:
+                return sec["alt_default"]
+            return sec["default"]
 
         with wrapper:
             ui.label("Prompt Configuration").classes("text-2xl font-bold")
@@ -2891,49 +2901,42 @@ def register_pages(app: FastAPI) -> None:
                 label="System Prompt",
                 value=config.get("llm_system_prompt", DEFAULT_SYSTEM_PROMPT),
             ).classes("w-full h-48")
-            with ui.row().classes("w-full justify-between items-center flex-wrap gap-2"):
-                ui.label("Decision Prompt").classes("text-sm font-medium text-slate-700")
-                with ui.row().classes("gap-2 items-center"):
-                    prompt_mode_toggle = ui.toggle(
-                        {"default": "Auto-assembled", "custom": "Custom"},
-                        value=_initial_prompt_mode,
-                    ).props("dense").tooltip(
-                        "Auto-assembled: prompt is built fresh from section constants + live guardrail "
-                        "config on every LLM call. Guardrail toggles (on CFG) affect the prompt automatically. "
-                        "Custom: you control the full text — guardrail toggles will NOT auto-update it."
-                    )
-                    refresh_prompt_btn = (
-                        ui.button("Refresh preview", icon="refresh")
-                        .props("flat dense size=sm")
-                        .tooltip("Reload assembled prompt for the current saved guardrail config")
-                    )
-            decision_prompt_input = ui.textarea(
-                label="Decision Prompt",
-                value=_stored_decision_prompt if _stored_decision_prompt.strip() else DEFAULT_DECISION_PROMPT,
-            ).classes("w-full h-48")
-
-            def _apply_prompt_mode(mode: str) -> None:
-                if mode == "default":
-                    decision_prompt_input.props(add="readonly bg-color=grey-2")
-                else:
-                    decision_prompt_input.props(remove="readonly bg-color=grey-2")
-                decision_prompt_input.update()
-
-            prompt_mode_toggle.on_value_change(lambda e: _apply_prompt_mode(e.value))
-
-            async def _refresh_prompt_preview() -> None:
-                guardrails_cfg = config.get("guardrails") or {}
-                _rrr = bool(guardrails_cfg.get("require_reward_risk_ratio"))
-                _nm = (guardrails_cfg.get("llm_notional_mode") or "post_leverage").lower()
-                assembled = sanitize_prompt_text(
-                    assemble_decision_prompt(require_rr=_rrr, pre_leverage=(_nm == "pre_leverage"))
+            ui.separator().classes("my-2")
+            with ui.row().classes("w-full justify-between items-center mb-1"):
+                ui.label("Decision Prompt — Sections").classes("text-sm font-medium text-slate-700")
+                ui.label("Toggle sections on/off; optionally edit text per section.").classes(
+                    "text-xs text-slate-500"
                 )
-                decision_prompt_input.value = assembled or ""
-                decision_prompt_input.update()
-                ui.notify("Decision prompt refreshed from current saved guardrails", type="positive")
-
-            refresh_prompt_btn.on("click", _refresh_prompt_preview)
-            _apply_prompt_mode(_initial_prompt_mode)
+            for _sec in PROMPT_SECTIONS:
+                _key = _sec["key"]
+                _sec_state = sections_config.get(_key, {})
+                _enabled = bool(_sec_state.get("enabled", True))
+                _override = (_sec_state.get("override") or "").strip()
+                _default_text = _get_sec_default(_sec)
+                _current_text = _override if _override else _default_text
+                with ui.card().classes("w-full rounded-lg border border-slate-200 mb-1"):
+                    with ui.row().classes("w-full items-center gap-2 flex-nowrap"):
+                        _sw = ui.switch(value=_enabled).props("dense color=primary")
+                        with ui.expansion(_sec["label"]).classes("flex-1 text-sm font-medium"):
+                            _ta = (
+                                ui.textarea(value=_current_text)
+                                .props("outlined autogrow")
+                                .classes("w-full font-mono text-xs mt-1")
+                            )
+                        _mod_badge = ui.badge("Modified", color="orange-9")
+                        _mod_badge.set_visibility(bool(_override))
+                        _rst = (
+                            ui.button(icon="restart_alt")
+                            .props("flat dense size=sm")
+                            .tooltip("Reset to default text")
+                        )
+                section_widgets[_key] = {
+                    "switch": _sw,
+                    "textarea": _ta,
+                    "modified_badge": _mod_badge,
+                    "reset_btn": _rst,
+                    "default_text": _default_text,
+                }
             with ui.row().classes("w-full flex-wrap gap-4 items-end"):
                 prompt_version_select = ui.select(
                     options=[],
@@ -2982,60 +2985,62 @@ def register_pages(app: FastAPI) -> None:
             with ui.column().classes(
                 "w-full gap-2 mt-4 bg-slate-50/80 p-4 rounded-xl border border-slate-200"
             ):
-                ui.label("LLM Payload Preview").classes("text-lg font-semibold")
+                ui.label("Decision Prompt Preview").classes("text-lg font-semibold")
                 ui.label(
-                    "Prompt text + context skeleton (full context built at runtime from the live market snapshot)"
+                    "Read-only assembled decision prompt as it will be sent to the LLM"
                 ).classes("text-xs text-slate-500")
                 payload_preview = (
-                    ui.textarea(label="Prompt Payload", value="")
+                    ui.textarea(label="Decision Prompt", value="")
                     .props("readonly outlined autogrow")
                     .classes("w-full font-mono text-xs bg-white h-full")
-                    .style("min-height: 22rem; height: 100%;")
+                    .style("min-height: 16rem; height: 100%;")
                 )
             save_button = ui.button("Save", icon="save", color="primary")
 
-        def build_payload_preview() -> str:
-            schema_text = response_schema_input.value or ""
-            if schema_text.strip():
-                try:
-                    schema_value: Any = json.loads(schema_text)
-                except json.JSONDecodeError as exc:
-                    schema_value = f"<invalid JSON: {exc.msg} (line {exc.lineno}, col {exc.colno})>"
-            else:
-                schema_value = RESPONSE_SCHEMA
-            guardrails_preview = config.get("guardrails") or {}
-            payload = {
-                "prompt": {
-                    "system": (prompt_input.value or "").strip(),
-                    "task": (decision_prompt_input.value or "").strip(),
-                    "model": config.get("llm_model_id"),
-                    "response_schema": schema_value,
-                },
-                "context": {
-                    "[note]": "Full context built at runtime from live market snapshot",
-                    "symbol": "<active symbol>",
-                    "guardrails": guardrails_preview,
-                    "execution": {
-                        "enabled": config.get("execution_enabled", False),
-                        "trade_mode": config.get("execution_trade_mode", "cross"),
-                        "order_type": config.get("execution_order_type", "market"),
-                        "min_size": config.get("execution_min_size", 1.0),
-                    },
-                    "notes": config.get("llm_notes"),
-                    "prompt_version_id": config.get("prompt_version_id"),
-                    "prompt_version_name": config.get("prompt_version_name"),
-                },
-            }
-            return json.dumps(payload, indent=2)
+        def _assemble_sections_preview() -> str:
+            parts: list[str] = []
+            for _sec in PROMPT_SECTIONS:
+                _key = _sec["key"]
+                _w = section_widgets.get(_key)
+                if not _w or not bool(_w["switch"].value):
+                    continue
+                text = (_w["textarea"].value or "").strip()
+                if text:
+                    parts.append(text + " ")
+            return "".join(parts)
 
-        def update_payload_preview() -> None:
-            payload_preview.value = build_payload_preview()
+        def _assemble_and_update_preview() -> None:
+            payload_preview.value = _assemble_sections_preview()
             payload_preview.update()
 
-        for _w in [prompt_input, decision_prompt_input, response_schema_input]:
-            _w.on_value_change(lambda _: update_payload_preview())
+        def _make_section_callbacks(key: str) -> tuple:
+            def _on_text_change(e: Any) -> None:
+                _w = section_widgets[key]
+                _is_mod = (e.value or "").strip() != _w["default_text"].strip()
+                _w["modified_badge"].set_visibility(_is_mod)
+                _w["modified_badge"].update()
+                _assemble_and_update_preview()
 
-        update_payload_preview()
+            def _on_reset(_: Any) -> None:
+                _w = section_widgets[key]
+                _w["textarea"].value = _w["default_text"]
+                _w["textarea"].update()
+                _w["modified_badge"].set_visibility(False)
+                _w["modified_badge"].update()
+                _assemble_and_update_preview()
+
+            return _on_text_change, _on_reset
+
+        for _key, _w in section_widgets.items():
+            _on_change, _on_reset = _make_section_callbacks(_key)
+            _w["textarea"].on_value_change(_on_change)
+            _w["switch"].on_value_change(lambda _: _assemble_and_update_preview())
+            _w["reset_btn"].on("click", _on_reset)
+
+        for _w2 in [prompt_input, response_schema_input]:
+            _w2.on_value_change(lambda _: _assemble_and_update_preview())
+
+        _assemble_and_update_preview()
 
         def update_prompt_version_param(version_id: str | None) -> None:
             suffix = version_id or "<active>"
@@ -3095,24 +3100,30 @@ def register_pages(app: FastAPI) -> None:
             new_system_prompt = sanitize_prompt_text(record.get("system_prompt", prompt_input.value))
             if new_system_prompt is not None:
                 prompt_input.value = new_system_prompt
-            new_decision_prompt = sanitize_prompt_text(
-                record.get("decision_prompt", decision_prompt_input.value)
-            )
-            if new_decision_prompt is not None:
-                decision_prompt_input.value = new_decision_prompt
-                prompt_mode_toggle.value = "custom"
-                _apply_prompt_mode("custom")
-                prompt_mode_toggle.update()
+                prompt_input.update()
+            meta = record.get("metadata") or {}
+            version_sections = meta.get("prompt_sections")
+            if version_sections and isinstance(version_sections, dict):
+                for _key, _w in section_widgets.items():
+                    sec_state = version_sections.get(_key, {})
+                    _w["switch"].value = bool(sec_state.get("enabled", True))
+                    _w["switch"].update()
+                    _override = (sec_state.get("override") or "").strip()
+                    _w["textarea"].value = _override if _override else _w["default_text"]
+                    _w["textarea"].update()
+                    _w["modified_badge"].set_visibility(bool(_override))
+                    _w["modified_badge"].update()
+            else:
+                ui.notify(
+                    "Legacy version — only system prompt applied; sections unchanged.", type="info"
+                )
             prompt_version_name_input.value = ""
-            prompt_input.update()
-            decision_prompt_input.update()
             prompt_version_name_input.update()
             config["llm_system_prompt"] = sanitize_prompt_text(prompt_input.value or "") or ""
-            config["llm_decision_prompt"] = sanitize_prompt_text(decision_prompt_input.value or "") or ""
             config["prompt_version_id"] = record.get("id")
             config["prompt_version_name"] = record.get("name")
             update_prompt_version_param(record.get("id"))
-            update_payload_preview()
+            _assemble_and_update_preview()
 
         def on_prompt_version_change(e: Any) -> None:
             label = e.value
@@ -3154,10 +3165,14 @@ def register_pages(app: FastAPI) -> None:
 
         async def save_prompt_settings(event: Any | None = None) -> None:
             config["llm_system_prompt"] = sanitize_prompt_text(prompt_input.value or "") or ""
-            if prompt_mode_toggle.value == "custom":
-                config["llm_decision_prompt"] = sanitize_prompt_text(decision_prompt_input.value or "") or ""
-            else:
-                config["llm_decision_prompt"] = ""
+            saved_sections: dict[str, dict] = {}
+            for _key, _w in section_widgets.items():
+                _default = _w["default_text"]
+                _current = (_w["textarea"].value or "").strip()
+                _override: str | None = _current if _current != _default.strip() else None
+                saved_sections[_key] = {"enabled": bool(_w["switch"].value), "override": _override}
+            config["prompt_sections"] = saved_sections
+            config["llm_decision_prompt"] = ""  # clear legacy custom prompt
             current_model = config.get("llm_model_id")
             schema_text = response_schema_input.value or ""
             if schema_text.strip():
@@ -3178,15 +3193,17 @@ def register_pages(app: FastAPI) -> None:
                 else config.get("prompt_version_id")
             )
             if version_name:
+                assembled_decision = _assemble_sections_preview()
                 metadata = {
                     "guardrails": config.get("guardrails"),
                     "model_id": config.get("llm_model_id"),
+                    "prompt_sections": saved_sections,
                 }
                 try:
                     created_version_id = await insert_prompt_version(
                         name=version_name,
                         system_prompt=config["llm_system_prompt"],
-                        decision_prompt=config["llm_decision_prompt"],
+                        decision_prompt=assembled_decision,
                         metadata=metadata,
                     )
                     prompt_version_name_input.value = ""
