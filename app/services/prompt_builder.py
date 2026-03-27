@@ -129,7 +129,7 @@ _SEC_SIZING_RULE_PRE = (
 _SEC_DIRECTION_RULE_BASE = (
     "CRITICAL DIRECTION RULE: for a BUY, stop_loss MUST be strictly below entry price and take_profit MUST be strictly above entry price. "
     "For a SELL, stop_loss MUST be strictly above entry price and take_profit MUST be strictly below entry price. "
-    "A take_profit or stop_loss on the wrong side of entry will be rejected by the execution layer — choose HOLD if you cannot satisfy this constraint. "
+    "A take_profit or stop_loss on the wrong side of entry will be rejected by the execution layer. "
 )
 
 # Conditional: only included when require_reward_risk_ratio is True.
