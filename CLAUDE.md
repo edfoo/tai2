@@ -41,6 +41,8 @@ SNAPSHOT_MAX_AGE_SECONDS  # max staleness before LLM calls are blocked (default 
 
 ## Running tests
 ```bash
+poetry run pytest tests/ -q
+# or directly via the venv
 .venv/bin/python -m pytest tests/ -q
 ```
 All tests must pass (currently 69). Failures beyond the 0 pre-existing ones are regressions.
