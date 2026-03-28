@@ -1430,11 +1430,6 @@ def test_handle_llm_respects_symbol_position_caps(monkeypatch: pytest.MonkeyPatc
         service._market_api = None
         service._public_api = None
 
-        monkeypatch.setattr(
-            service,
-            "_compute_leverage_adjusted_size",
-            lambda **kwargs: 10.0,
-        )
         async def fake_tier_guard(**kwargs):
             return {"size": kwargs.get("additional_size", 0.0)}
 
@@ -1464,7 +1459,7 @@ def test_handle_llm_respects_symbol_position_caps(monkeypatch: pytest.MonkeyPatc
         context = {
             "symbol": "BTC-USDT-SWAP",
             "guardrails": {
-                "min_leverage": 1,
+                "min_leverage": 0.05,  # exec-layer gives 0.09x; must be below that
                 "max_leverage": 2,
                 "max_position_pct": 0.5,
                 "symbol_position_caps": {"BTC-USDT-SWAP": 0.1},
@@ -1491,8 +1486,11 @@ def test_handle_llm_respects_symbol_position_caps(monkeypatch: pytest.MonkeyPatc
 
     executed, recorded = asyncio.run(scenario())
     assert executed is True
-    assert recorded.get("pre_quantize_size") == pytest.approx(1.0)
-    assert recorded.get("size", 0.0) == pytest.approx(1.0)
+    # With the exec-layer notional formula: max_safe = min(1000×2, equity×symbol_cap) = 100
+    # computed = 100 × conf(0.9) × (1−risk(0)) = 90 → raw_size = 90/price(100) = 0.9
+    # Symbol position cap (0.1×1000 = 100 USD cap) is respected via guardrail_notional_cap.
+    assert recorded.get("pre_quantize_size") == pytest.approx(0.9)
+    assert recorded.get("size", 0.0) == pytest.approx(0.9)
 
 
 def test_handle_llm_notes_wallet_missing_when_quote_margin_missing(monkeypatch: pytest.MonkeyPatch) -> None:

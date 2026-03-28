@@ -87,11 +87,11 @@ _SEC_STEP5_SIZING = (
     "< 0.45: too many conflicts — you MUST recommend HOLD. "
     "The risk_score (0–1) reflects current volatility (ATR %), spread width, and proximity to major support/resistance. "
     "Higher risk_score = more risk = significantly smaller position. "
-    "IMPORTANT — EXECUTION LAYER SIZING: The execution layer auto-computes "
-    "notional_usd = max_safe_notional_usd × confidence × (1 − risk_score). "
-    "You MUST still output a notional_usd within [min_notional_usd, max_safe_notional_usd] so the schema validates — "
-    "set it to max_safe_notional_usd × confidence × (1 − risk_score) rounded to 2 decimal places. "
-    "Your confidence and risk_score are the authoritative sizing inputs; do NOT try to second-guess the formula. "
+    "The execution layer derives position size from your confidence and risk_score: "
+    "notional = max_safe_notional_usd × confidence × (1 − risk_score). "
+    "Focus exclusively on direction and signal quality — do NOT output a dollar amount. "
+    "If context.execution.max_safe_notional_usd < context.execution.min_notional_usd "
+    "(insufficient free capital), you MUST choose HOLD. "
 )
 
 _SEC_STEP6_TP_BASE = (
@@ -114,29 +114,23 @@ _SEC_STEP6_TP_CLOSE = (
 )
 
 _SEC_SIZING_RULE_POST = (
-    "CRITICAL SIZING RULE: context.execution.max_safe_notional_usd is the pre-computed absolute ceiling for position notional "
-    "(= available_margin_usd × max_leverage, already capped by all position and tier limits). "
-    "context.execution.min_notional_usd is the exchange minimum to open a new position (typically 5 USDT for isolated margin). "
-    "Express your desired position size as `notional_usd` — the USD dollar value of the position (e.g. 150.0 for a $150 position). "
-    "You MUST NOT set notional_usd above max_safe_notional_usd — the exchange will reject the order regardless of equity_pct. "
-    "You MUST NOT set notional_usd below min_notional_usd — orders below this threshold are always rejected by the exchange. "
-    "If max_safe_notional_usd < min_notional_usd (e.g. insufficient free capital), you MUST choose HOLD. "
-    "Contract sizes and exchange multipliers are handled automatically — express only the USD dollar value. "
+    "SIZING CONTEXT (execution layer owns all arithmetic): "
+    "context.execution.max_safe_notional_usd and context.execution.min_notional_usd are provided for reference only. "
+    "The execution layer computes the final position size from your confidence and risk_score — "
+    "you do NOT output a dollar amount. "
+    "If context.execution.max_safe_notional_usd < context.execution.min_notional_usd "
+    "(insufficient free capital), you MUST choose HOLD regardless of signal quality. "
+    "Contract sizes and exchange multipliers are handled automatically. "
 )
 
 # Conditional: only included when llm_notional_mode == "pre_leverage".
 _SEC_SIZING_RULE_PRE = (
-    "CRITICAL SIZING RULE (PRE-LEVERAGE MODE): context.execution.max_safe_notional_usd is the "
-    "pre-computed absolute ceiling for the MARGIN you commit to this trade "
-    "(= available_margin_usd already reduced by all position and tier limits). "
-    "context.execution.min_notional_usd is the minimum margin required "
-    "(= OKX's 5 USDT position floor ÷ max_leverage; already pre-computed in the context). "
-    "Express your desired margin commitment as `notional_usd` — the USD amount of your own "
-    "capital to risk (e.g. 20.0 means commit $20 as margin). "
-    "Leverage is applied automatically to derive the full position notional — you do NOT need to size for leverage. "
-    "You MUST NOT set notional_usd above max_safe_notional_usd or below min_notional_usd. "
-    "If max_safe_notional_usd < min_notional_usd (e.g. insufficient free capital), you MUST choose HOLD. "
-    "Contract conversion is handled automatically — express only the margin USD amount. "
+    "SIZING CONTEXT — PRE-LEVERAGE MODE (execution layer owns all arithmetic): "
+    "context.execution.max_safe_notional_usd is the ceiling for the MARGIN you can commit; "
+    "context.execution.min_notional_usd is the minimum margin required. "
+    "These are provided for reference only — the execution layer computes the final margin commitment "
+    "from your confidence and risk_score; you do NOT output a dollar amount. "
+    "If context.execution.max_safe_notional_usd < context.execution.min_notional_usd, you MUST choose HOLD. "
 )
 
 _SEC_DIRECTION_RULE_BASE = (
@@ -309,15 +303,7 @@ RESPONSE_SCHEMA = {
             "type": "number",
             "minimum": 0,
             "maximum": 1,
-            "description": "Confidence value between 0 and 1",
-        },
-        "notional_usd": {
-            "anyOf": [{"type": "number"}, {"type": "null"}],
-            "description": "Dollar value of the position (e.g. 150.0 for a $150 position). Must be >= context.execution.min_notional_usd AND <= context.execution.max_safe_notional_usd.",
-        },
-        "equity_pct": {
-            "anyOf": [{"type": "number", "minimum": 0, "maximum": 1}, {"type": "null"}],
-            "description": "Suggested fraction of account equity to allocate (0-1)",
+            "description": "Directional conviction (0–1): how strongly the signal set supports the chosen direction, after applying all timeframe-alignment penalties. The execution layer uses this to scale position size.",
         },
         "rationale": {
             "type": "string",
@@ -327,7 +313,7 @@ RESPONSE_SCHEMA = {
             "type": "number",
             "minimum": 0,
             "maximum": 1,
-            "description": "Normalized risk value (higher = riskier)",
+            "description": "Setup risk (0–1): reflects volatility (ATR %), spread width, and proximity to key support/resistance. Higher = riskier = smaller position. The execution layer uses this to scale position size.",
         },
         "stop_loss": {
             "anyOf": [{"type": "number"}, {"type": "null"}],
@@ -352,8 +338,6 @@ RESPONSE_SCHEMA = {
     "required": [
         "action",
         "confidence",
-        "notional_usd",
-        "equity_pct",
         "rationale",
         "risk_score",
         "stop_loss",

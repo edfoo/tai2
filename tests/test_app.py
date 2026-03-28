@@ -357,8 +357,11 @@ def test_llm_prompt_endpoint_uses_builder(monkeypatch) -> None:
     assert body["prompt_id"] == "prompt-1"
     assert recorded["symbol"] == "BTC-USDT-SWAP"
     assert recorded["timeframe"] == "4H"
-    # equity_pct field should be present in schema for the model
-    assert "equity_pct" in body["payload"]["response_schema"]["properties"]
+    # confidence and risk_score should always be in schema (execution layer uses them for sizing)
+    assert "confidence" in body["payload"]["response_schema"]["properties"]
+    assert "risk_score" in body["payload"]["response_schema"]["properties"]
+    # notional_usd is no longer in the schema — execution layer owns the arithmetic
+    assert "notional_usd" not in body["payload"]["response_schema"]["properties"]
 
 
 def test_llm_prompt_endpoint_blocks_stale_snapshot() -> None:

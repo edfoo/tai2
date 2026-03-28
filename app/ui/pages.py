@@ -3436,13 +3436,13 @@ def register_pages(app: FastAPI) -> None:
                     "hint='Confidence-scaling floor applied before execution' persistent-hint"
                 )
                 min_leverage_conf_gate_input = ui.number(
-                    label="Min Leverage Confidence Gate",
+                    label="Conviction Floor",
                     value=guardrails.get("min_leverage_confidence_gate", 0.5),
                     min=0,
                     max=1,
                     step=0.05,
                 ).classes("w-full md:w-48").props(
-                    "hint='LLM confidence required before execution upsizes small orders' persistent-hint"
+                    "hint='Confidence threshold below which BUY/SELL is hard-blocked and converted to HOLD (all execution paths)' persistent-hint"
                 )
                 llm_notional_mode_select = ui.select(
                     label="LLM Notional Mode",
