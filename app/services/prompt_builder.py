@@ -689,8 +689,31 @@ class PromptBuilder:
         oi_value_ccy = _to_float(open_interest.get("oiCcy"))
         bid_depth = sum(_to_float(level[1]) or 0.0 for level in (order_book.get("bids") or [])[:5])
         ask_depth = sum(_to_float(level[1]) or 0.0 for level in (order_book.get("asks") or [])[:5])
+        # Zero bid depth almost certainly means a stale/failed order-book snapshot;
+        # pass None instead of 0 so the model doesn't reason from bad liquidity data.
+        order_book_stale = bid_depth == 0.0
         ofi = custom_metrics.get("order_flow_imbalance")
         cvd = custom_metrics.get("cumulative_volume_delta")
+        _ofi_ratio = custom_metrics.get("ofi_ratio_series")
+        _ofi_ratio_trimmed = (
+            _ofi_ratio[-20:]
+            if isinstance(_ofi_ratio, list) and len(_ofi_ratio) >= 3
+            else None
+        )
+        order_flow: dict[str, Any] = {
+            "imbalance": ofi,
+            "cvd": cvd,
+            "bid_depth": None if order_book_stale else bid_depth,
+            "ask_depth": None if order_book_stale else ask_depth,
+            "cvd_series": custom_metrics.get("cvd_series"),
+        }
+        # Only include ofi_ratio_series when there are enough data points to show a
+        # trend.  Omit the key entirely (rather than null) when unavailable so the
+        # model doesn't reserve attention on an absent field.
+        if _ofi_ratio_trimmed is not None:
+            order_flow["ofi_ratio_series"] = _ofi_ratio_trimmed
+        if order_book_stale:
+            order_flow["order_book_note"] = "stale: bid_depth was zero at snapshot time"
         return {
             "last_price": last_price,
             "bid": bid,
@@ -705,23 +728,22 @@ class PromptBuilder:
                 "contracts": oi_value,
                 "base_tokens": oi_value_ccy,
             },
-            "order_flow": {
-                "imbalance": ofi,
-                "cvd": cvd,
-                "bid_depth": bid_depth,
-                "ask_depth": ask_depth,
-                "cvd_series": custom_metrics.get("cvd_series"),
-                # Only include ofi_ratio_series when there are enough data points to
-                # show a trend (a single-element series is noise, not signal).
-                "ofi_ratio_series": (
-                    ofi_ratio_series
-                    if (ofi_ratio_series := custom_metrics.get("ofi_ratio_series"))
-                    and isinstance(ofi_ratio_series, list)
-                    and len(ofi_ratio_series) >= 3
-                    else None
-                ),
-            },
+            "order_flow": order_flow,
         }
+
+    @staticmethod
+    def _trim_series(series: Any, n: int) -> Any:
+        """Return the last *n* elements of *series* as a plain list.
+
+        Handles lists, numpy arrays, pandas Series, and other sliceable
+        sequence types.  Returns None when the input is None or not sliceable.
+        """
+        if series is None:
+            return None
+        try:
+            return list(series[-n:])
+        except (TypeError, KeyError):
+            return None
 
     @staticmethod
     def _normalize_htf_candles(raw: list[Any]) -> list[dict[str, Any]]:
@@ -1000,15 +1022,21 @@ class PromptBuilder:
     def _build_history_section(self, indicators: dict[str, Any]) -> dict[str, Any]:
         ohlcv_rows = indicators.get("ohlcv") or []
         trimmed = ohlcv_rows[-self.max_candles :]
-        _series_tail = 15  # keep only the most recent N values for auxiliary series
+        candle_count = len(trimmed)  # align all auxiliary series to this length
+        _series_tail = 15  # shorter tail for indicator series not tied to candles
         raw_vwap_series = indicators.get("vwap_series")
         raw_volume_series = (indicators.get("volume") or {}).get("series")
         raw_vol_rsi_series = indicators.get("volume_rsi_series")
+
         section: dict[str, Any] = {
             "candles": trimmed,
-            "vwap_series": raw_vwap_series[-_series_tail:] if isinstance(raw_vwap_series, list) else raw_vwap_series,
-            "volume_series": raw_volume_series[-_series_tail:] if isinstance(raw_volume_series, list) else raw_volume_series,
-            "volume_rsi_series": raw_vol_rsi_series[-_series_tail:] if isinstance(raw_vol_rsi_series, list) else raw_vol_rsi_series,
+            # vwap_series tracks per-candle VWAP — align to candle count so indices match
+            "vwap_series": self._trim_series(raw_vwap_series, candle_count),
+            # volume_series is a duplicate of the volume column in each candle row;
+            # trim to candle_count so they stay in sync (avoids the mismatch where
+            # the series has 190+ values but candles has only 50).
+            "volume_series": self._trim_series(raw_volume_series, candle_count),
+            "volume_rsi_series": self._trim_series(raw_vol_rsi_series, _series_tail),
         }
         ohlcv_htf = indicators.get("ohlcv_htf")
         htf_bar = indicators.get("ohlcv_htf_bar")
@@ -1053,12 +1081,12 @@ class PromptBuilder:
             "obv": {
                 "value": obv.get("value"),
                 # Keep a short tail so the model can confirm obv_trend if needed
-                "series": raw_obv_series[-_series_tail:] if isinstance(raw_obv_series, list) else None,
+                "series": self._trim_series(raw_obv_series, _series_tail),
             },
             "cmf": {
                 "value": cmf.get("value"),
                 # Keep a short tail for divergence spot-check
-                "series": raw_cmf_series[-_series_tail:] if isinstance(raw_cmf_series, list) else None,
+                "series": self._trim_series(raw_cmf_series, _series_tail),
             },
             "vwap": indicators.get("vwap"),
             "atr": indicators.get("atr"),
@@ -1255,7 +1283,21 @@ class PromptBuilder:
         elif current_rate is not None and previous_rate is not None:
             funding_delta = current_rate - previous_rate
 
-        long_short = custom_metrics.get("market_long_short_ratio") or {}
+        long_short_raw = custom_metrics.get("market_long_short_ratio") or {}
+        # Trim the L/S ratio series to the last 20 values — enough to determine
+        # trend direction (rising/declining for 10+ periods) without wasting tokens
+        # on the full 200-candle history.
+        _ls_series = long_short_raw.get("series")
+        long_short: dict[str, Any] = {
+            k: v for k, v in long_short_raw.items() if k != "series"
+        }
+        if isinstance(_ls_series, list) and _ls_series:
+            long_short["series"] = _ls_series[-20:]
+        elif _ls_series is not None:
+            try:
+                long_short["series"] = list(_ls_series[-20:])
+            except (TypeError, KeyError):
+                pass  # drop unsliceable series entirely
         ls_value = _to_float(long_short.get("value"))
         if ls_value is None:
             ls_bias = "balanced"
