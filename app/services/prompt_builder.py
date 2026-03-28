@@ -47,8 +47,8 @@ _SEC_STEP2_HTF = (
     "Score the HTF alignment with your proposed direction: "
     "  • Strong alignment (ema_50/ema_200 agree AND adx.value > 25 with correct DI): +0.0 penalty (full confidence allowed). "
     "  • Weak/neutral HTF (ema_50 ≈ ema_200, low ADX, or ambiguous): −0.15 confidence penalty. "
-    "  • HTF contradicts direction (e.g. BUY but ema_50 < ema_200 and price below ema_50): −0.30 confidence penalty AND cap max position size at 50% of max_safe_contracts. "
-    "A counter-trend trade (HTF contradicts) is allowed only if the net confidence after penalty is ≥ 0.45; otherwise choose HOLD. "
+    "  • HTF contradicts direction (e.g. BUY but ema_50 < ema_200 and price below ema_50): −0.30 confidence penalty AND reduce confidence by a further ×0.7 to encode the counter-trend size reduction (execution layer derives notional from confidence). "
+    "A counter-trend trade (HTF contradicts) is allowed only if the net confidence after all penalties is ≥ 0.45; otherwise choose HOLD. "
     "FALLBACK: if context.indicators.htf is empty or context.history.candles_htf is empty, apply a flat −0.20 penalty and skip further HTF analysis. "
 )
 
@@ -73,7 +73,7 @@ _SEC_STEP4_SIGNALS = (
     "(4) Order Flow (imbalance, depth): confirms short-term liquidity but is secondary to trend and volume. "
     "If the majority of higher-ranked signals conflict, choose HOLD. "
     "RSI/STOCH RSI EXIT CLAUSE: if context.market_signals.rsi_zone is 'overbought' and you propose a BUY, "
-    "do NOT veto the trade if ADX > 30 and DI+ dominates — instead cap notional_usd at 75% of max_safe_notional_usd "
+    "do NOT veto the trade if ADX > 30 and DI+ dominates — instead add ≥0.25 to risk_score (the execution layer will reduce size proportionally) "
     "and shift to a limit order placed at the nearest LTF support level from context.market_signals.swing_low_ltf. "
     "Document this adjustment explicitly in 'notes'. "
 )
@@ -81,21 +81,26 @@ _SEC_STEP4_SIGNALS = (
 _SEC_STEP5_SIZING = (
     "STEP 5 — CONFIDENCE AND SIZING: "
     "Your confidence score (0–1) reflects the proportion of signals aligning with your directional bias after applying all Step 2 penalties: "
-    "0.75–1.0: HTF aligned, LTF momentum and volume confirm — full size allowed. "
-    "0.55–0.75: HTF neutral or mildly opposed, but LTF signals are clear — reduce size proportionally. "
-    "0.45–0.55: meaningful conflicts (e.g. strong counter-trend trade) — trade at ≤50% max_safe_notional_usd only if R:R is compelling. "
+    "0.75–1.0: HTF aligned, LTF momentum and volume confirm — full size. "
+    "0.55–0.75: HTF neutral or mildly opposed, but LTF signals are clear — proportionally reduced size. "
+    "0.45–0.55: meaningful conflicts — small size only if R:R is compelling. "
     "< 0.45: too many conflicts — you MUST recommend HOLD. "
-    "Base position sizing: base_notional = max_safe_notional_usd × confidence (then apply the 50% HTF-counter-trend cap if triggered in Step 2). "
-    "Then apply the risk_score as a final multiplier: notional_usd = base_notional × (1 − risk_score). "
-    "The risk_score (0–1) must reflect current volatility (ATR %), spread width, and proximity to major support/resistance. "
-    "A higher risk_score automatically reduces final size. "
+    "The risk_score (0–1) reflects current volatility (ATR %), spread width, and proximity to major support/resistance. "
+    "Higher risk_score = more risk = significantly smaller position. "
+    "IMPORTANT — EXECUTION LAYER SIZING: The execution layer auto-computes "
+    "notional_usd = max_safe_notional_usd × confidence × (1 − risk_score). "
+    "You MUST still output a notional_usd within [min_notional_usd, max_safe_notional_usd] so the schema validates — "
+    "set it to max_safe_notional_usd × confidence × (1 − risk_score) rounded to 2 decimal places. "
+    "Your confidence and risk_score are the authoritative sizing inputs; do NOT try to second-guess the formula. "
 )
 
 _SEC_STEP6_TP_BASE = (
     "STEP 6 — TAKE-PROFIT METHODOLOGY: "
-    "To determine your take-profit, anchor it to a technically significant level: "
-    "For a BUY: the nearest significant swing high or resistance from candles_htf or candles; alternatively the upper Bollinger Band. "
-    "For a SELL: the nearest significant swing low or support; alternatively the lower Bollinger Band. "
+    "To determine your take-profit, anchor it to a technically significant level. "
+    "For a BUY: use context.market_signals.swing_high_htf (pre-computed HTF swing highs) as the primary target; "
+    "fall back to swing_high_ltf or the upper Bollinger Band if no HTF swing is available. "
+    "For a SELL: use context.market_signals.swing_low_htf as the primary target; "
+    "fall back to swing_low_ltf or the lower Bollinger Band. "
 )
 
 # Conditional: only included when require_reward_risk_ratio is True.
@@ -722,7 +727,15 @@ class PromptBuilder:
                 "bid_depth": bid_depth,
                 "ask_depth": ask_depth,
                 "cvd_series": custom_metrics.get("cvd_series"),
-                "ofi_ratio_series": custom_metrics.get("ofi_ratio_series"),
+                # Only include ofi_ratio_series when there are enough data points to
+                # show a trend (a single-element series is noise, not signal).
+                "ofi_ratio_series": (
+                    ofi_ratio_series
+                    if (ofi_ratio_series := custom_metrics.get("ofi_ratio_series"))
+                    and isinstance(ofi_ratio_series, list)
+                    and len(ofi_ratio_series) >= 3
+                    else None
+                ),
             },
         }
 
@@ -829,9 +842,16 @@ class PromptBuilder:
 
     @staticmethod
     def _compute_cvd_trend(cvd_series: list[Any] | None, n: int = 5) -> str:
-        """Summarize recent CVD direction over last n periods.
+        """Summarize recent CVD direction and momentum slope.
 
-        Returns e.g. "net_positive_last_5", "net_negative_last_5", "flat_last_5".
+        Returns compound labels that describe both the net direction and whether
+        it is accelerating or reversing, e.g.:
+          net_positive_rising    — CVD positive and still climbing (bullish & accelerating)
+          net_positive_declining — CVD positive but losing momentum (potential topping)
+          net_negative_declining — CVD negative and deepening (bearish & worsening)
+          net_negative_recovering— CVD negative but last period reversed (bearish easing)
+          flat_stable            — no meaningful net movement
+          unknown                — insufficient data
         """
         if not cvd_series or len(cvd_series) < 2:
             return "unknown"
@@ -841,13 +861,20 @@ class PromptBuilder:
             return "unknown"
         if len(tail) < 2:
             return "unknown"
-        net = tail[-1] - tail[0]
-        label = f"last_{len(tail)}"
-        if net > 0:
-            return f"net_positive_{label}"
-        if net < 0:
-            return f"net_negative_{label}"
-        return f"flat_{label}"
+        net_change = tail[-1] - tail[0]
+        # Recent slope: last period vs preceding period.
+        recent_slope = tail[-1] - tail[-2] if len(tail) >= 2 else 0.0
+        # Noise floor: require at least 1% of the first-period absolute value to avoid
+        # labelling de-minimis moves.
+        abs_threshold = max(abs(tail[0]) * 0.01, 1e-9)
+        if abs(net_change) <= abs_threshold:
+            return "flat_stable"
+        if net_change > 0:
+            # Net buying over the window — determine if still rising or starting to fall.
+            return "net_positive_rising" if recent_slope >= 0 else "net_positive_declining"
+        else:
+            # Net selling over the window — determine if deepening or recovering.
+            return "net_negative_declining" if recent_slope <= 0 else "net_negative_recovering"
 
     @staticmethod
     def _compute_price_vs_vwap(last_price: float | None, vwap: float | None) -> str:
@@ -929,8 +956,11 @@ class PromptBuilder:
         Fields injected into ``context.market_signals``:
           swing_high_ltf   — last 3 significant pivot highs (price + ts)
           swing_low_ltf    — last 3 significant pivot lows  (price + ts)
+          swing_high_htf   — last 3 significant HTF pivot highs (price + ts)
+          swing_low_htf    — last 3 significant HTF pivot lows  (price + ts)
           obv_trend        — rising / falling / diverging_bearish / diverging_bullish
-          cvd_trend        — net_positive_last_N / net_negative_last_N / flat_last_N
+          cvd_trend        — net_positive_rising / net_positive_declining /
+                             net_negative_declining / net_negative_recovering / flat_stable
           price_vs_vwap    — above / below / at
           rsi_zone         — overbought / oversold / neutral
           market_regime    — trending_up / trending_down / ranging /
@@ -957,7 +987,12 @@ class PromptBuilder:
                 for v in cvd_series_raw
             ]
 
+        # HTF candles for swing pivot computation
+        htf_candles_raw = indicators.get("ohlcv_htf") or []
+        htf_candles: list[dict[str, Any]] = self._normalize_htf_candles(htf_candles_raw) if htf_candles_raw else []
+
         swing_highs, swing_lows = self._compute_swing_pivots(candles)
+        swing_highs_htf, swing_lows_htf = self._compute_swing_pivots(htf_candles, n_pivots=3, window=3)
         obv_trend = self._compute_obv_trend(obv_series, candles)
         cvd_trend = self._compute_cvd_trend(cvd_series)
         price_vs_vwap = self._compute_price_vs_vwap(last_price, vwap)
@@ -969,6 +1004,8 @@ class PromptBuilder:
         return {
             "swing_high_ltf": swing_highs or None,
             "swing_low_ltf": swing_lows or None,
+            "swing_high_htf": swing_highs_htf or None,
+            "swing_low_htf": swing_lows_htf or None,
             "obv_trend": obv_trend,
             "cvd_trend": cvd_trend,
             "price_vs_vwap": price_vs_vwap,
@@ -979,11 +1016,15 @@ class PromptBuilder:
     def _build_history_section(self, indicators: dict[str, Any]) -> dict[str, Any]:
         ohlcv_rows = indicators.get("ohlcv") or []
         trimmed = ohlcv_rows[-self.max_candles :]
+        _series_tail = 15  # keep only the most recent N values for auxiliary series
+        raw_vwap_series = indicators.get("vwap_series")
+        raw_volume_series = (indicators.get("volume") or {}).get("series")
+        raw_vol_rsi_series = indicators.get("volume_rsi_series")
         section: dict[str, Any] = {
             "candles": trimmed,
-            "vwap_series": indicators.get("vwap_series"),
-            "volume_series": (indicators.get("volume") or {}).get("series"),
-            "volume_rsi_series": indicators.get("volume_rsi_series"),
+            "vwap_series": raw_vwap_series[-_series_tail:] if isinstance(raw_vwap_series, list) else raw_vwap_series,
+            "volume_series": raw_volume_series[-_series_tail:] if isinstance(raw_volume_series, list) else raw_volume_series,
+            "volume_rsi_series": raw_vol_rsi_series[-_series_tail:] if isinstance(raw_vol_rsi_series, list) else raw_vol_rsi_series,
         }
         ohlcv_htf = indicators.get("ohlcv_htf")
         htf_bar = indicators.get("ohlcv_htf_bar")
@@ -1005,6 +1046,9 @@ class PromptBuilder:
         adx = indicators.get("adx") or {}
         obv = indicators.get("obv") or {}
         cmf = indicators.get("cmf") or {}
+        _series_tail = 15  # retain only a short tail; full series are pre-summarised in market_signals
+        raw_obv_series = obv.get("series")
+        raw_cmf_series = cmf.get("series")
         return {
             "rsi": rsi,
             "stoch_rsi": stoch,
@@ -1012,7 +1056,7 @@ class PromptBuilder:
                 "value": macd.get("value"),
                 "signal": macd.get("signal"),
                 "hist": macd.get("hist"),
-                "series": macd.get("series"),
+                # Series dropped — scalar value/signal/hist are sufficient for decisions
             },
             "bollinger_bands": bb,
             "moving_averages": ma,
@@ -1020,15 +1064,17 @@ class PromptBuilder:
                 "value": adx.get("value"),
                 "di_plus": adx.get("di_plus"),
                 "di_minus": adx.get("di_minus"),
-                "series": adx.get("series"),
+                # Series dropped — adx scalar + DI values are sufficient
             },
             "obv": {
                 "value": obv.get("value"),
-                "series": obv.get("series"),
+                # Keep a short tail so the model can confirm obv_trend if needed
+                "series": raw_obv_series[-_series_tail:] if isinstance(raw_obv_series, list) else None,
             },
             "cmf": {
                 "value": cmf.get("value"),
-                "series": cmf.get("series"),
+                # Keep a short tail for divergence spot-check
+                "series": raw_cmf_series[-_series_tail:] if isinstance(raw_cmf_series, list) else None,
             },
             "vwap": indicators.get("vwap"),
             "atr": indicators.get("atr"),

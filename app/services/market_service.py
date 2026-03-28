@@ -3761,11 +3761,48 @@ class MarketService:
         explicit_size_hint = self._extract_float(decision.get("position_size"))
         raw_size: float = 0.0
 
+        # -----------------------------------------------------------------------
+        # Execution-layer sizing override.
+        # Rather than trusting the LLM to perform the arithmetic correctly (which
+        # introduces per-call variance), compute notional deterministically:
+        #   notional = max_safe × confidence × (1 − risk_score)
+        # where max_safe = available_margin × max_leverage, capped by any active
+        # guardrail_notional_cap.  Only applied when the LLM already provided
+        # notional_usd (new-style decisions).  Legacy decisions that rely on
+        # position_size / equity_pct / _compute_leverage_adjusted_size are
+        # left untouched (llm_notional_usd remains None and falls into the else
+        # branch below).
+        # -----------------------------------------------------------------------
+        risk_score_value = max(
+            0.0, min(1.0, self._extract_float(decision.get("risk_score")) or 0.0)
+        )
         llm_notional_mode = (
             (guardrails.get("llm_notional_mode") or "post_leverage").lower()
             if isinstance(guardrails, dict)
             else "post_leverage"
         )
+        if (
+            llm_notional_usd is not None  # only when LLM already set the field
+            and llm_notional_usd > 0
+            and confidence_value > 0
+            and available_margin_usd is not None
+            and available_margin_usd > 0
+            and max_leverage > 0
+            and llm_notional_mode != "pre_leverage"  # pre-leverage semantics differ
+        ):
+            _max_safe = available_margin_usd * max_leverage
+            if guardrail_notional_cap and guardrail_notional_cap > 0:
+                _max_safe = min(_max_safe, guardrail_notional_cap)
+            _computed = round(_max_safe * confidence_value * (1.0 - risk_score_value), 2)
+            if _computed > 0:
+                if llm_notional_usd is not None and abs(llm_notional_usd - _computed) > 0.01:
+                    self._emit_debug(
+                        f"{symbol} notional override: LLM={llm_notional_usd:.2f} "
+                        f"→ exec_layer={_computed:.2f} "
+                        f"(max_safe={_max_safe:.2f} × conf={confidence_value:.2f} "
+                        f"× (1−risk={risk_score_value:.2f}))"
+                    )
+                llm_notional_usd = _computed
         if llm_notional_usd and llm_notional_usd > 0 and last_price and last_price > 0:
             # LLM expressed position size as a dollar amount — convert directly to
             # base-token units and skip the leverage-scaling path entirely.  All
