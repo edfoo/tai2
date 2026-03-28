@@ -53,11 +53,15 @@ _SEC_STEP2_HTF = (
 )
 
 _SEC_STEP3_DIVERGENCE = (
-    "STEP 3 — DIVERGENCE CHECK (strong filter): "
-    "Compare context.history.candles close prices with context.history.volume_series (OBV proxy) and context.market.order_flow.cvd. "
-    "If price is making higher highs but OBV/CVD is making lower highs (bearish divergence), a BUY is strongly discouraged. "
-    "If price is making lower lows but OBV/CVD is making higher lows (bullish divergence), a SELL is strongly discouraged. "
+    "STEP 3 — DIVERGENCE & POSITIONING CHECK (strong filter): "
+    "context.market_signals.obv_trend and context.market_signals.cvd_trend are pre-computed — use them as the primary signal. "
+    "If obv_trend is 'diverging_bearish' (price rising, OBV falling), a BUY is strongly discouraged. "
+    "If obv_trend is 'diverging_bullish' (price falling, OBV rising), a SELL is strongly discouraged. "
     "Divergence against your proposed direction should be cited as a risk factor and typically warrants HOLD. "
+    "L/S RATIO TREND: context.derivatives_posture.long_short_ratio contains the current value plus any series. "
+    "If the L/S ratio has been declining for 10+ periods while price rises, treat it as a bullish short-squeeze setup and add +0.05 confidence. "
+    "If the L/S ratio has been rising for 10+ periods while price falls, treat it as a bearish capitulation setup and add +0.05 confidence to a SELL. "
+    "Do NOT pass the raw L/S series in your rationale — summarise the trend direction only (e.g. 'L/S declining 12 periods → squeeze bias'). "
 )
 
 _SEC_STEP4_SIGNALS = (
@@ -68,6 +72,10 @@ _SEC_STEP4_SIGNALS = (
     "(3) Momentum (MACD, RSI): use for entry timing, not primary direction. "
     "(4) Order Flow (imbalance, depth): confirms short-term liquidity but is secondary to trend and volume. "
     "If the majority of higher-ranked signals conflict, choose HOLD. "
+    "RSI/STOCH RSI EXIT CLAUSE: if context.market_signals.rsi_zone is 'overbought' and you propose a BUY, "
+    "do NOT veto the trade if ADX > 30 and DI+ dominates — instead cap notional_usd at 75% of max_safe_notional_usd "
+    "and shift to a limit order placed at the nearest LTF support level from context.market_signals.swing_low_ltf. "
+    "Document this adjustment explicitly in 'notes'. "
 )
 
 _SEC_STEP5_SIZING = (
@@ -144,6 +152,30 @@ _SEC_HOLD_GUIDANCE = (
     "HTF contradiction alone is NOT a reason to HOLD if LTF signals are strong enough to survive the confidence penalty."
 )
 
+_SEC_STEP_STRATEGY = (
+    "STRATEGY ARCHETYPES — prefer one of the following when signals are ambiguous: "
+    "(A) Trend-continuation after consolidation: enter after a spike-and-base pattern when price holds above VWAP, "
+    "ADX stays elevated (> 25), and DI+ dominates. Confirm with OBV rising or CVD net positive. "
+    "Use a limit order at the nearest LTF support for better fill. "
+    "(B) Mean-reversion in bullish HTF context: use an uptrending HTF as macro backdrop; wait for RSI to pull back to "
+    "50–55 on the LTF before entering long — this avoids chasing overbought conditions and improves R:R. "
+    "(C) Funding-rate fade: when funding is deeply negative (shorts overcrowded, rate < −0.05%) and the HTF is bullish, "
+    "lean long on any LTF pullback — the overcrowded-shorts squeeze is a well-documented crypto-perps edge. "
+    "State which archetype you are using in your rationale. "
+)
+
+_SEC_STEP_REGIME = (
+    "MARKET REGIME RULES — use context.market_signals.market_regime to adjust behaviour: "
+    "trending_up: prefer trend-continuation entries (Archetype A); RSI/Stoch RSI overbought reduces size but does NOT veto "
+    "a trade if ADX > 30 and DI+ dominates — shift instead to a limit order at the nearest support. "
+    "trending_down: prefer SELL or HOLD; no BUY unless strong HTF bullish divergence with high volume. "
+    "ranging: prefer mean-reversion (Archetype B); apply a flat −0.10 confidence penalty; tighten stops to ATR×1.0. "
+    "post_spike_consolidation: prefer HOLD or a reduced-size BUY only on a confirmed support hold; wait for ADX to "
+    "re-expand above 25 before sizing up. "
+    "breakdown: strong SELL bias or HOLD; do not BUY unless HTF shows compelling bullish divergence. "
+    "unknown: treat as ranging and apply the −0.10 penalty. "
+)
+
 # ---------------------------------------------------------------------------
 # PROMPT_SECTIONS — ordered list of all logical blocks that make up the
 # decision prompt.  Each entry has a stable ``key``, a human-readable
@@ -156,8 +188,10 @@ PROMPT_SECTIONS: list[dict[str, Any]] = [
     {"key": "step1_preflight",  "label": "Step 1: Pre-flight checks",   "default": _SEC_STEP1_PREFLIGHT},
     {"key": "step2_htf",        "label": "Step 2: HTF trend filter",    "default": _SEC_STEP2_HTF},
     {"key": "step3_divergence", "label": "Step 3: Divergence check",    "default": _SEC_STEP3_DIVERGENCE},
-    {"key": "step4_signals",    "label": "Step 4: Signal hierarchy",    "default": _SEC_STEP4_SIGNALS},
-    {"key": "step5_sizing",     "label": "Step 5: Confidence & sizing", "default": _SEC_STEP5_SIZING},
+    {"key": "step4_signals",        "label": "Step 4: Signal hierarchy",    "default": _SEC_STEP4_SIGNALS},
+    {"key": "strategy_archetypes",  "label": "Strategy archetypes",         "default": _SEC_STEP_STRATEGY},
+    {"key": "regime_rules",         "label": "Market regime rules",         "default": _SEC_STEP_REGIME},
+    {"key": "step5_sizing",         "label": "Step 5: Confidence & sizing", "default": _SEC_STEP5_SIZING},
     {"key": "step6_tp",         "label": "Step 6: TP/SL methodology",  "default": _SEC_STEP6_TP_BASE},
     {"key": "step6_tp_rr",      "label": "Step 6: R:R TP rule",         "default": _SEC_STEP6_TP_RR_RULE},
     {"key": "step6_tp_close",   "label": "Step 6: TP close guidance",   "default": _SEC_STEP6_TP_CLOSE},
@@ -230,6 +264,8 @@ def assemble_decision_prompt(
         _SEC_STEP2_HTF,
         _SEC_STEP3_DIVERGENCE,
         _SEC_STEP4_SIGNALS,
+        _SEC_STEP_STRATEGY,
+        _SEC_STEP_REGIME,
         _SEC_STEP5_SIZING,
         _SEC_STEP6_TP_BASE,
     ]
@@ -344,7 +380,8 @@ class PromptBuilder:
 
     snapshot: dict[str, Any] | None
     metadata: Optional[dict[str, Any]] = None
-    max_candles: int = 120
+    max_candles: int = 50
+    max_htf_candles: int = 25
     _cache_symbol: Optional[str] = field(init=False, default=None)
 
     def build(self, *, symbol: str | None = None, timeframe: str | None = None) -> dict[str, Any]:
@@ -365,6 +402,8 @@ class PromptBuilder:
         live_section = self._build_live_section(ticker, funding, open_interest, custom_metrics, order_book)
         history_section = self._build_history_section(indicators)
         indicator_section = self._build_indicator_section(indicators)
+        ltf_candles: list[dict[str, Any]] = history_section.get("candles") or []
+        market_signals = self._build_market_signals(indicators, live_section, ltf_candles)
         positions_section = self._build_positions_section(snapshot.get("positions") or [])
         account_section = self._build_account_section(snapshot, resolved_symbol)
         execution_limits = self._resolve_execution_limits(snapshot, resolved_symbol)
@@ -580,6 +619,7 @@ class PromptBuilder:
             "execution": execution_settings,
             "fee_availability": fee_window_summary,
             "credit_availability": credit_availability,
+            "market_signals": market_signals,
         }
         if risk_locks:
             context["risk_locks"] = risk_locks
@@ -711,6 +751,231 @@ class PromptBuilder:
         result.sort(key=lambda c: c["ts"])
         return result
 
+    # ------------------------------------------------------------------
+    # Pre-computed signal helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _compute_swing_pivots(
+        candles: list[dict[str, Any]],
+        n_pivots: int = 3,
+        window: int = 5,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Identify the last n_pivots swing highs and lows from OHLCV candles.
+
+        A swing high at index i: high[i] > all highs in [i-window, i) and (i, i+window].
+        A swing low  at index i: low[i]  < all lows  in [i-window, i) and (i, i+window].
+        Returns (swing_highs, swing_lows) — last n_pivots of each, newest last.
+        """
+        highs_out: list[dict[str, Any]] = []
+        lows_out: list[dict[str, Any]] = []
+        n = len(candles)
+        for i in range(window, n - window):
+            try:
+                h = float(candles[i].get("high") or candles[i].get("close") or 0)
+                l = float(candles[i].get("low") or candles[i].get("close") or 0)
+            except (ValueError, TypeError):
+                continue
+            pre_h = [float(candles[j].get("high") or candles[j].get("close") or 0)
+                     for j in range(i - window, i)]
+            post_h = [float(candles[j].get("high") or candles[j].get("close") or 0)
+                      for j in range(i + 1, i + window + 1)]
+            if pre_h and post_h and h > max(pre_h) and h > max(post_h):
+                highs_out.append({"price": h, "ts": candles[i].get("ts"), "bar_index": i})
+            pre_l = [float(candles[j].get("low") or candles[j].get("close") or h)
+                     for j in range(i - window, i)]
+            post_l = [float(candles[j].get("low") or candles[j].get("close") or h)
+                      for j in range(i + 1, i + window + 1)]
+            if pre_l and post_l and l < min(pre_l) and l < min(post_l):
+                lows_out.append({"price": l, "ts": candles[i].get("ts"), "bar_index": i})
+        return highs_out[-n_pivots:], lows_out[-n_pivots:]
+
+    @staticmethod
+    def _compute_obv_trend(
+        obv_series: list[Any] | None,
+        candles: list[dict[str, Any]],
+        n: int = 10,
+    ) -> str:
+        """Classify OBV trend relative to price direction.
+
+        Returns: "rising" | "falling" | "diverging_bearish" | "diverging_bullish" | "unknown".
+        diverging_bearish = price rising but OBV falling (distribution).
+        diverging_bullish = price falling but OBV rising (accumulation).
+        """
+        if not obv_series or len(obv_series) < 2:
+            return "unknown"
+        tail_obv = obv_series[-n:]
+        try:
+            obv_rising = float(tail_obv[-1]) > float(tail_obv[0])
+        except (ValueError, TypeError):
+            return "unknown"
+        price_rising: bool | None = None
+        if candles and len(candles) >= 2:
+            closes = [c.get("close") for c in candles[-n:] if c.get("close") is not None]
+            if len(closes) >= 2:
+                try:
+                    price_rising = float(closes[-1]) > float(closes[0])
+                except (ValueError, TypeError):
+                    pass
+        if price_rising is None:
+            return "rising" if obv_rising else "falling"
+        if obv_rising and price_rising:
+            return "rising"
+        if not obv_rising and not price_rising:
+            return "falling"
+        if price_rising and not obv_rising:
+            return "diverging_bearish"
+        return "diverging_bullish"
+
+    @staticmethod
+    def _compute_cvd_trend(cvd_series: list[Any] | None, n: int = 5) -> str:
+        """Summarize recent CVD direction over last n periods.
+
+        Returns e.g. "net_positive_last_5", "net_negative_last_5", "flat_last_5".
+        """
+        if not cvd_series or len(cvd_series) < 2:
+            return "unknown"
+        try:
+            tail = [float(v) for v in cvd_series[-n:] if v is not None]
+        except (ValueError, TypeError):
+            return "unknown"
+        if len(tail) < 2:
+            return "unknown"
+        net = tail[-1] - tail[0]
+        label = f"last_{len(tail)}"
+        if net > 0:
+            return f"net_positive_{label}"
+        if net < 0:
+            return f"net_negative_{label}"
+        return f"flat_{label}"
+
+    @staticmethod
+    def _compute_price_vs_vwap(last_price: float | None, vwap: float | None) -> str:
+        """Return 'above', 'below', 'at', or 'unknown'."""
+        if last_price is None or vwap is None:
+            return "unknown"
+        if last_price > vwap:
+            return "above"
+        if last_price < vwap:
+            return "below"
+        return "at"
+
+    @staticmethod
+    def _compute_rsi_zone(
+        rsi: float | None,
+        overbought: float = 70.0,
+        oversold: float = 30.0,
+    ) -> str:
+        """Classify RSI into 'overbought', 'oversold', or 'neutral'."""
+        if rsi is None:
+            return "unknown"
+        if rsi >= overbought:
+            return "overbought"
+        if rsi <= oversold:
+            return "oversold"
+        return "neutral"
+
+    @staticmethod
+    def _compute_market_regime(
+        adx_value: float | None,
+        di_plus: float | None,
+        di_minus: float | None,
+        price: float | None,
+        vwap: float | None,
+        obv_series: list[Any] | None,
+        n: int = 10,
+    ) -> str:
+        """Classify the current market regime.
+
+        trending_up          ADX > 25 AND DI+ > DI-
+        trending_down        ADX > 25 AND DI- > DI+  (gentle bear)
+        breakdown            ADX > 20 AND DI- > DI+ AND price < VWAP AND OBV falling
+        ranging              ADX < 20
+        post_spike_consolidation  20 <= ADX <= 25 AND |DI+ - DI-| <= 5
+        """
+        if adx_value is None:
+            return "unknown"
+        if adx_value < 20:
+            return "ranging"
+        if 20 <= adx_value <= 25:
+            if di_plus is not None and di_minus is not None and abs(di_plus - di_minus) <= 5:
+                return "post_spike_consolidation"
+        if adx_value > 20 and di_plus is not None and di_minus is not None:
+            if di_plus > di_minus:
+                return "trending_up"
+            # DI- dominates — check for true breakdown vs mild downtrend
+            obv_falling = False
+            if obv_series and len(obv_series) >= 2:
+                tail = obv_series[-n:]
+                try:
+                    obv_falling = float(tail[-1]) < float(tail[0])
+                except (ValueError, TypeError):
+                    pass
+            price_below_vwap = price is not None and vwap is not None and price < vwap
+            if obv_falling and price_below_vwap:
+                return "breakdown"
+            return "trending_down"
+        return "unknown"
+
+    def _build_market_signals(
+        self,
+        indicators: dict[str, Any],
+        live_section: dict[str, Any],
+        candles: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Pre-compute key signals so the LLM receives labelled summaries
+        rather than raw series it must interpret from scratch.
+
+        Fields injected into ``context.market_signals``:
+          swing_high_ltf   — last 3 significant pivot highs (price + ts)
+          swing_low_ltf    — last 3 significant pivot lows  (price + ts)
+          obv_trend        — rising / falling / diverging_bearish / diverging_bullish
+          cvd_trend        — net_positive_last_N / net_negative_last_N / flat_last_N
+          price_vs_vwap    — above / below / at
+          rsi_zone         — overbought / oversold / neutral
+          market_regime    — trending_up / trending_down / ranging /
+                             post_spike_consolidation / breakdown
+        """
+        obv_block = indicators.get("obv") or {}
+        adx_block = indicators.get("adx") or {}
+        order_flow = live_section.get("order_flow") or {}
+
+        last_price = _to_float(live_section.get("last_price"))
+        vwap = _to_float(indicators.get("vwap"))
+        rsi = _to_float(indicators.get("rsi"))
+        adx_value = _to_float(adx_block.get("value"))
+        di_plus = _to_float(adx_block.get("di_plus"))
+        di_minus = _to_float(adx_block.get("di_minus"))
+        obv_series: list[Any] = obv_block.get("series") or []
+
+        # CVD series — list of scalars or list of {value: ...} dicts
+        cvd_series_raw: Any = order_flow.get("cvd_series")
+        cvd_series: list[Any] | None = None
+        if isinstance(cvd_series_raw, list):
+            cvd_series = [
+                (v.get("value") if isinstance(v, dict) else v)
+                for v in cvd_series_raw
+            ]
+
+        swing_highs, swing_lows = self._compute_swing_pivots(candles)
+        obv_trend = self._compute_obv_trend(obv_series, candles)
+        cvd_trend = self._compute_cvd_trend(cvd_series)
+        price_vs_vwap = self._compute_price_vs_vwap(last_price, vwap)
+        rsi_zone = self._compute_rsi_zone(rsi)
+        market_regime = self._compute_market_regime(
+            adx_value, di_plus, di_minus, last_price, vwap, obv_series
+        )
+
+        return {
+            "swing_high_ltf": swing_highs or None,
+            "swing_low_ltf": swing_lows or None,
+            "obv_trend": obv_trend,
+            "cvd_trend": cvd_trend,
+            "price_vs_vwap": price_vs_vwap,
+            "rsi_zone": rsi_zone,
+            "market_regime": market_regime,
+        }
+
     def _build_history_section(self, indicators: dict[str, Any]) -> dict[str, Any]:
         ohlcv_rows = indicators.get("ohlcv") or []
         trimmed = ohlcv_rows[-self.max_candles :]
@@ -723,10 +988,10 @@ class PromptBuilder:
         ohlcv_htf = indicators.get("ohlcv_htf")
         htf_bar = indicators.get("ohlcv_htf_bar")
         if ohlcv_htf:
-            # Fetch 200 candles for indicator accuracy; only send the last 50 to the LLM
+            # Fetch 200 candles for indicator accuracy; only send the last max_htf_candles to the LLM
             # (enough to identify swing highs/lows and TP levels, saves significant tokens).
             htf_normalized = self._normalize_htf_candles(ohlcv_htf)
-            section["candles_htf"] = htf_normalized[-50:]
+            section["candles_htf"] = htf_normalized[-self.max_htf_candles :]
         if htf_bar:
             section["timeframe_htf"] = htf_bar
         return section
