@@ -5035,6 +5035,10 @@ class MarketService:
             if attachments_take_profit or attachments_stop_loss:
                 await self._cancel_position_protection(symbol)
                 if last_price and last_price > 0:
+                    _adjust_tp_enabled = bool(guardrails.get("adjust_invalid_tp", False))
+                    _adjust_tp_pct_okx = self._extract_float(guardrails.get("adjust_invalid_tp_pct")) or 0.10
+                    _adjust_tp_lev = max(target_leverage or 1.0, 1.0)
+                    _adjust_tp_pct = _adjust_tp_pct_okx / _adjust_tp_lev
                     attachments_take_profit = self._drop_conflicting_target(
                         symbol=symbol,
                         action=action,
@@ -5042,6 +5046,7 @@ class MarketService:
                         reference_price=last_price,
                         kind="take-profit",
                         stage="pre-order attachment",
+                        adjust_pct=_adjust_tp_pct if _adjust_tp_enabled else None,
                     )
                     attachments_stop_loss = self._drop_conflicting_target(
                         symbol=symbol,
@@ -5261,6 +5266,10 @@ class MarketService:
                 existing_target=stop_loss_price,
                 ratio_hint=stop_loss_ratio,
             )
+        _adjust_tp_enabled = bool(guardrails.get("adjust_invalid_tp", False))
+        _adjust_tp_pct_okx = self._extract_float(guardrails.get("adjust_invalid_tp_pct")) or 0.10
+        _adjust_tp_lev = max(target_leverage or 1.0, 1.0)
+        _adjust_tp_pct = _adjust_tp_pct_okx / _adjust_tp_lev
         take_profit_price = self._drop_conflicting_target(
             symbol=symbol,
             action=action,
@@ -5268,6 +5277,7 @@ class MarketService:
             reference_price=reference_for_protection,
             kind="take-profit",
             stage="post-fill",
+            adjust_pct=_adjust_tp_pct if _adjust_tp_enabled else None,
         )
         stop_loss_price = self._drop_conflicting_target(
             symbol=symbol,
@@ -5846,8 +5856,15 @@ class MarketService:
         reference_price: float | None,
         kind: str,
         stage: str,
+        adjust_pct: float | None = None,
     ) -> float | None:
-        """Drop or adjust TP/SL targets that violate OKX constraints relative to entry price."""
+        """Drop or adjust TP/SL targets that violate OKX constraints relative to entry price.
+
+        When *adjust_pct* is provided (a positive fraction, e.g. 0.015 = 1.5 %) and the
+        target cannot be nudged by a minimum tick offset, a meaningful fallback take-profit
+        is computed at ``reference_price * (1 ± adjust_pct)`` rather than returning None.
+        The adjustment only applies to take-profit targets; stop-loss is never auto-adjusted.
+        """
         if not self._target_conflicts_with_price(
             action,
             target=target,
@@ -5895,6 +5912,38 @@ class MarketService:
                 },
             )
             return adjusted_target
+        # ── Pct-based fallback for invalid take-profit ────────────────────────
+        if kind == "take-profit" and adjust_pct and adjust_pct > 0:
+            pct_candidate = reference_price * (1.0 + adjust_pct) if prefer_up else reference_price * (1.0 - adjust_pct)
+            if pct_candidate and pct_candidate > 0:
+                pct_adjusted = self._quantize_price(symbol, pct_candidate, prefer_up=prefer_up)
+                if pct_adjusted and not self._target_conflicts_with_price(
+                    action,
+                    target=pct_adjusted,
+                    reference_price=reference_price,
+                    kind=kind,
+                ):
+                    direction = "above" if prefer_up else "below"
+                    message = (
+                        f"{symbol} {kind} replaced from invalid {target:.6f} to {pct_adjusted:.6f} {stage}: "
+                        f"computed {adjust_pct * 100:.2f}% {direction} entry price {reference_price:.6f}"
+                    )
+                    self._emit_debug(message)
+                    self._record_execution_feedback(
+                        symbol,
+                        message,
+                        level="info",
+                        meta={
+                            "stage": stage,
+                            "kind": kind,
+                            "original_target": target,
+                            "adjusted_target": pct_adjusted,
+                            "reference_price": reference_price,
+                            "action": action,
+                            "adjust_pct": adjust_pct,
+                        },
+                    )
+                    return pct_adjusted
         direction = "above" if prefer_up else "below"
         message = (
             f"{symbol} {kind} {target:.6f} invalid {stage}: must be {direction} entry price {reference_price:.6f}"

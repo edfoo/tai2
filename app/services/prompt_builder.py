@@ -1828,6 +1828,8 @@ class PromptBuilder:
             "isolated_wallet_bootstrap_pct": None,
             "min_reward_risk_ratio": None,
             "require_reward_risk_ratio": False,
+            "adjust_invalid_tp": False,
+            "adjust_invalid_tp_pct": 0.10,
         }
 
     @staticmethod

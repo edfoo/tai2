@@ -3525,6 +3525,20 @@ def register_pages(app: FastAPI) -> None:
             ).classes("mt-2").props(
                 "hint='Block any new entry order that has no stop-loss; prevents unprotected positions' persistent-hint"
             )
+            with ui.row().classes("w-full flex-wrap gap-4 items-start mt-2"):
+                adjust_invalid_tp_switch = ui.switch(
+                    "Adjust Invalid TP",
+                    value=guardrails.get("adjust_invalid_tp", False),
+                ).props(
+                    "hint='When the LLM supplies a TP on the wrong side of entry, replace it with the configured % offset rather than dropping it' persistent-hint"
+                )
+                adjust_invalid_tp_pct_input = ui.number(
+                    label="Adjust TP %",
+                    value=guardrails.get("adjust_invalid_tp_pct", 0.10) * 100,
+                    min=0.1, max=200.0, step=0.5, format="%.1f",
+                ).classes("w-full md:w-36").props(
+                    "hint='Fallback TP target as OKX Floating PnL % (divided by leverage to get entry-price distance)' persistent-hint suffix='%'"
+                )
             flip_llm_decision_switch = ui.switch(
                 "Flip LLM Decision",
                 value=guardrails.get("flip_llm_decision", False),
@@ -4243,6 +4257,8 @@ def register_pages(app: FastAPI) -> None:
                 "require_reward_risk_ratio": bool(require_rr_switch.value),
                 "require_protection": bool(require_protection_switch.value),
                 "flip_llm_decision": bool(flip_llm_decision_switch.value),
+                "adjust_invalid_tp": bool(adjust_invalid_tp_switch.value),
+                "adjust_invalid_tp_pct": (_safe_float(adjust_invalid_tp_pct_input.value) or 10.0) / 100,
                 "snapshot_max_age_seconds": _safe_int(snapshot_max_age_input.value)
                 or config.get("snapshot_max_age_seconds"),
             }
@@ -4490,6 +4506,8 @@ def register_pages(app: FastAPI) -> None:
                 "require_reward_risk_ratio": bool(require_rr_switch.value),
                 "require_protection": bool(require_protection_switch.value),
                 "flip_llm_decision": bool(flip_llm_decision_switch.value),
+                "adjust_invalid_tp": bool(adjust_invalid_tp_switch.value),
+                "adjust_invalid_tp_pct": (_safe_float(adjust_invalid_tp_pct_input.value) or 10.0) / 100,
                 "snapshot_max_age_seconds": _coerce(
                     snapshot_max_age_input.value,
                     config.get("snapshot_max_age_seconds", settings.snapshot_max_age_seconds),
