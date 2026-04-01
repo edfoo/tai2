@@ -3495,56 +3495,57 @@ def register_pages(app: FastAPI) -> None:
                 ).classes("w-full md:w-48").props(
                     "hint='Window used for trade limit and activity metrics' persistent-hint"
                 )
-            require_alignment_switch = ui.switch(
-                "Require Position Alignment",
-                value=guardrails.get("require_position_alignment", True),
-            ).classes("mt-2").props(
-                "hint='Blocks conflicting orders unless an opposite signal closes the position' persistent-hint"
-            )
-            wait_for_tp_sl_switch = ui.switch(
-                "Wait for TP/SL to Hit",
-                value=guardrails.get("wait_for_tp_sl", False),
-            ).classes("mt-2").props(
-                "hint='When enabled, opposing signals are ignored until the current position\'s TP or SL executes' persistent-hint"
-            )
-            fallback_orders_switch = ui.switch(
-                "Allow Fallback Orders",
-                value=config.get("fallback_orders_enabled", settings.allow_fallback_orders),
-            ).classes("mt-2").props(
-                "hint='Permit heuristic backup trades when LLM calls fail; disable to ignore fallback orders entirely' persistent-hint"
-            )
-            require_rr_switch = ui.switch(
-                "Require Min Reward-to-Risk Ratio (≥ 1)",
-                value=guardrails.get("require_reward_risk_ratio", True),
-            ).classes("mt-2").props(
-                "hint='When enabled, entries where take-profit distance is less than stop-loss distance are hard-blocked' persistent-hint"
-            )
-            require_protection_switch = ui.switch(
-                "Require TP/SL Protection on Entry",
-                value=guardrails.get("require_protection", True),
-            ).classes("mt-2").props(
-                "hint='Block any new entry order that has no stop-loss; prevents unprotected positions' persistent-hint"
-            )
-            with ui.row().classes("w-full flex-wrap gap-4 items-start mt-2"):
-                adjust_invalid_tp_switch = ui.switch(
-                    "Adjust Invalid TP",
-                    value=guardrails.get("adjust_invalid_tp", False),
+            with ui.grid(columns=3).classes("w-full gap-x-8 gap-y-4 mt-2"):
+                require_alignment_switch = ui.switch(
+                    "Require Position Alignment",
+                    value=guardrails.get("require_position_alignment", True),
                 ).props(
-                    "hint='When the LLM supplies a TP on the wrong side of entry, replace it with the configured % offset rather than dropping it' persistent-hint"
+                    "hint='Blocks conflicting orders unless an opposite signal closes the position' persistent-hint"
                 )
-                adjust_invalid_tp_pct_input = ui.number(
-                    label="Adjust TP %",
-                    value=guardrails.get("adjust_invalid_tp_pct", 0.10) * 100,
-                    min=0.1, max=200.0, step=0.5, format="%.1f",
-                ).classes("w-full md:w-36").props(
-                    "hint='Fallback TP target as OKX Floating PnL % (divided by leverage to get entry-price distance)' persistent-hint suffix='%'"
+                wait_for_tp_sl_switch = ui.switch(
+                    "Wait for TP/SL to Hit",
+                    value=guardrails.get("wait_for_tp_sl", False),
+                ).props(
+                    "hint='When enabled, opposing signals are ignored until the current position\'s TP or SL executes' persistent-hint"
                 )
-            flip_llm_decision_switch = ui.switch(
-                "Flip LLM Decision",
-                value=guardrails.get("flip_llm_decision", False),
-            ).classes("mt-2").props(
-                "hint='Invert the LLM\'s SIDE and swap TP/SL before opening the trade; useful for contrarian testing' persistent-hint"
-            )
+                fallback_orders_switch = ui.switch(
+                    "Allow Fallback Orders",
+                    value=config.get("fallback_orders_enabled", settings.allow_fallback_orders),
+                ).props(
+                    "hint='Permit heuristic backup trades when LLM calls fail; disable to ignore fallback orders entirely' persistent-hint"
+                )
+                require_rr_switch = ui.switch(
+                    "Require Min Reward-to-Risk Ratio (≥ 1)",
+                    value=guardrails.get("require_reward_risk_ratio", True),
+                ).props(
+                    "hint='When enabled, entries where take-profit distance is less than stop-loss distance are hard-blocked' persistent-hint"
+                )
+                require_protection_switch = ui.switch(
+                    "Require TP/SL Protection on Entry",
+                    value=guardrails.get("require_protection", True),
+                ).props(
+                    "hint='Block any new entry order that has no stop-loss; prevents unprotected positions' persistent-hint"
+                )
+                flip_llm_decision_switch = ui.switch(
+                    "Flip LLM Decision",
+                    value=guardrails.get("flip_llm_decision", False),
+                ).props(
+                    "hint='Invert the LLM\'s SIDE and swap TP/SL before opening the trade; useful for contrarian testing' persistent-hint"
+                )
+                with ui.row().classes("items-center gap-4 col-span-full md:col-span-1"):
+                    adjust_invalid_tp_switch = ui.switch(
+                        "Adjust Invalid TP",
+                        value=guardrails.get("adjust_invalid_tp", False),
+                    ).props(
+                        "hint='When the LLM supplies a TP on the wrong side of entry, replace it with the configured % offset rather than dropping it' persistent-hint"
+                    )
+                    adjust_invalid_tp_pct_input = ui.number(
+                        label="Adjust TP %",
+                        value=guardrails.get("adjust_invalid_tp_pct", 0.10) * 100,
+                        min=0.1, max=200.0, step=0.5, format="%.1f",
+                    ).classes("w-28").props(
+                        "hint='Fallback TP target as OKX Floating PnL % (divided by leverage to get entry-price distance)' persistent-hint suffix='%'"
+                    )
             snapshot_max_age_input = ui.number(
                 label="Snapshot Max Age (sec)",
                 value=config.get(
