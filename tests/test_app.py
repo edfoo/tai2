@@ -87,6 +87,7 @@ def _sample_snapshot() -> dict:
                     "fundingRate": "0.0001",
                     "nextFundingRate": "0.0002",
                     "fundingTime": _iso_timestamp(now + timedelta(hours=4)),
+                    "nextFundingTime": _iso_timestamp(now + timedelta(hours=8)),
                 },
                 "open_interest": {"oi": "1000", "oiCcy": "43000000"},
                 "custom_metrics": {
@@ -111,8 +112,8 @@ def _sample_snapshot() -> dict:
                     "reason": "RSI oversold",
                 },
                 "order_book": {
-                    "bids": [["42990", "20"], ["42980", "10"]],
-                    "asks": [["43010", "15"], ["43020", "5"]],
+                    "bids": [["42990", "200"], ["42980", "100"], ["42970", "80"]],
+                    "asks": [["43010", "150"], ["43020", "50"], ["43030", "30"]],
                 },
                 "indicators": {
                     "rsi": 45,

@@ -91,12 +91,21 @@ _SEC_STEP3_DIVERGENCE = (
     "CVD UNKNOWN RULE: if cvd_trend is 'unknown', apply −0.05 confidence and explicitly note in rationale that order-flow confirmation is absent. "
     "ZERO DEPTH FALLBACK: if context.market.order_flow.bid_depth or ask_depth is 0 or null, "
     "treat order_flow imbalance as unreliable; apply −0.05 confidence penalty and note 'incomplete depth data' in rationale. "
+    "THIN BOOK RULE: if context.market.order_flow.order_book_note starts with 'thin:', "
+    "the entire order-flow block (imbalance, depth, liquidity_bias) is unreliable. "
+    "Apply −0.10 confidence penalty (subsumes the −0.05 zero-depth penalty) and note 'thin order book' in rationale. "
     "SLIPPAGE ABSENT RULE: if context.liquidity_context.estimated_slippage_bps is null, "
     "estimate slippage from spread_pct × 2 as a conservative proxy for risk_score computation, and note this assumption. "
+    "If context.liquidity_context.slippage_note is present, it means the system has already provided a conservative "
+    "estimate due to degraded data — use the provided value and add it to risk_score considerations. "
     "L/S RATIO TREND: context.derivatives_posture.long_short_ratio contains the current value plus any series. "
     "If the L/S ratio has been declining for 10+ periods while price rises, treat it as a bullish short-squeeze setup and add +0.05 confidence. "
     "If the L/S ratio has been rising for 10+ periods while price falls, treat it as a bearish capitulation setup and add +0.05 confidence to a SELL. "
     "L/S DATA ABSENT: if long_short_ratio data is missing but funding is below −0.15%, treat this as partial Archetype C confirmation only — add +0.03 instead of +0.05 and note the missing L/S data as a risk factor in rationale. "
+    "L/S SERIES STALE: if context.derivatives_posture.long_short_ratio.series_stale is true, "
+    "the series timestamps are outdated (series_age_hours shows how old). The current L/S value may be fresh, "
+    "but the trend direction cannot be reliably assessed. Treat the L/S series as absent for trend-based signals "
+    "and rely on the current value only. Note the staleness in rationale. "
     "Do NOT pass the raw L/S series in your rationale — summarise the trend direction only (e.g. 'L/S declining 12 periods → squeeze bias'). "
 )
 
@@ -149,6 +158,12 @@ _SEC_STEP6_TP_BASE = (
     "fall back to swing_high_ltf or the upper Bollinger Band if no HTF swing is available. "
     "For a SELL: use context.market_signals.swing_low_htf as the primary target; "
     "fall back to swing_low_ltf or the lower Bollinger Band. "
+    "SWING EXHAUSTION: if context.market_signals.swing_high_exhaustion or swing_low_exhaustion is present, "
+    "the price has moved beyond most available swing references. In that case: "
+    "(a) For BUY: consider using the upper Bollinger Band, a round-number level, or a fixed ATR-multiple target (e.g. entry + 2×ATR) instead. "
+    "(b) For SELL: consider using the lower Bollinger Band or entry − 2×ATR. "
+    "(c) Increase risk_score by +0.10 to account for the lack of proven resistance/support targets. "
+    "Note the exhaustion in rationale. "
 )
 
 # Conditional: only included when require_reward_risk_ratio is True.
@@ -222,6 +237,10 @@ _SEC_STEP_STRATEGY = (
 
 _SEC_STEP_REGIME = (
     "MARKET REGIME RULES — use context.market_signals.market_regime to adjust behaviour: "
+    "REGIME CONFIDENCE: if context.market_signals.market_regime_confidence is 'weakening', "
+    "the regime label may be stale — a sharp reversal candle on high volume has occurred. "
+    "Check context.market_signals.regime_note for details. Add +0.10 to risk_score and consider "
+    "the regime one tier less bullish/bearish than labelled (e.g. treat 'trending_up' as 'post_spike_consolidation'). "
     "trending_up: prefer trend-continuation entries (Archetype A); RSI/Stoch RSI overbought reduces size but does NOT veto "
     "a trade if ADX > 30 and DI+ dominates — shift instead to a limit order at the nearest support. "
     "trending_down: prefer SELL or HOLD; no BUY unless strong HTF bullish divergence with high volume. "
@@ -455,7 +474,8 @@ class PromptBuilder:
 
         live_section = self._build_live_section(ticker, funding, open_interest, custom_metrics, order_book)
         history_section = self._build_history_section(indicators)
-        indicator_section = self._build_indicator_section(indicators)
+        _last_price_for_htf = _to_float(live_section.get("last_price"))
+        indicator_section = self._build_indicator_section(indicators, last_price=_last_price_for_htf)
         ltf_candles: list[dict[str, Any]] = history_section.get("candles") or []
         # 2.1 — change_24h_pct fallback: compute from candle data when the ticker doesn't supply it.
         if live_section.get("change_24h_pct") is None and len(ltf_candles) >= 2:
@@ -488,8 +508,16 @@ class PromptBuilder:
         }
         if price_hint is not None:
             execution_settings["price_reference"] = price_hint
+        # 6.3 — Always include symbol_rules so the model can reference
+        # tick_size for TP/SL level placement.  Fall back to min_size when the
+        # full instrument spec isn't available.
         if instrument_spec:
             execution_settings["symbol_rules"] = instrument_spec
+        else:
+            _fallback_rules: dict[str, Any] = {}
+            if min_size_value is not None:
+                _fallback_rules["min_size"] = min_size_value
+            execution_settings["symbol_rules"] = _fallback_rules
         account_equity_usd = _to_float(account_section.get("account_equity")) or _to_float(
             account_section.get("total_eq_usd")
         )
@@ -646,7 +674,7 @@ class PromptBuilder:
         schema_overrides = runtime_meta.get("llm_response_schemas") or {}
         timeframe_value = timeframe or runtime_meta.get("ta_timeframe") or snapshot.get("timeframe") or "4H"
         trend_section = self._build_trend_confirmation(indicators, ticker, timeframe_value)
-        liquidity_section = self._build_liquidity_profile(live_section, indicators, ticker)
+        liquidity_section = self._build_liquidity_profile(live_section, ticker)
         derivatives_section = self._build_derivatives_posture(funding, custom_metrics, liquidations)
         fee_window_summary = self._build_fee_window_summary(account_section)
         credit_availability = self._build_credit_availability()
@@ -789,9 +817,12 @@ class PromptBuilder:
         oi_value_ccy = _to_float(open_interest.get("oiCcy"))
         bid_depth = sum(_to_float(level[1]) or 0.0 for level in (order_book.get("bids") or [])[:5])
         ask_depth = sum(_to_float(level[1]) or 0.0 for level in (order_book.get("asks") or [])[:5])
-        # Zero bid depth almost certainly means a stale/failed order-book snapshot;
-        # pass None instead of 0 so the model doesn't reason from bad liquidity data.
-        order_book_stale = bid_depth == 0.0
+        # 8.1 — Detect degraded order-book data.  Zero on *either* side is stale;
+        # near-zero on *both* sides (< 50 contracts) means the entire depth
+        # snapshot is too thin to reason from.  Both flags are surfaced.
+        _MIN_DEPTH_CONTRACTS = 50
+        order_book_stale = bid_depth == 0.0 or ask_depth == 0.0
+        order_book_thin = bid_depth < _MIN_DEPTH_CONTRACTS and ask_depth < _MIN_DEPTH_CONTRACTS
         ofi = custom_metrics.get("order_flow_imbalance")
         cvd = custom_metrics.get("cumulative_volume_delta")
         _ofi_ratio = custom_metrics.get("ofi_ratio_series")
@@ -819,7 +850,19 @@ class PromptBuilder:
         if _ofi_ratio_trimmed is not None:
             order_flow["ofi_ratio_series"] = _ofi_ratio_trimmed
         if order_book_stale:
-            order_flow["order_book_note"] = "stale: bid_depth was zero at snapshot time"
+            _note_parts = []
+            if bid_depth == 0.0:
+                _note_parts.append("bid_depth was zero at snapshot time")
+            if ask_depth == 0.0:
+                _note_parts.append("ask_depth was zero at snapshot time")
+            if order_book_thin and not (bid_depth == 0.0 and ask_depth == 0.0):
+                _note_parts.append(f"near-zero depth (bid={bid_depth:.0f}, ask={ask_depth:.0f})")
+            order_flow["order_book_note"] = "stale: " + "; ".join(_note_parts)
+        elif order_book_thin:
+            order_flow["order_book_note"] = (
+                f"thin: bid_depth={bid_depth:.0f}, ask_depth={ask_depth:.0f} "
+                f"(both < {_MIN_DEPTH_CONTRACTS} contracts); order flow unreliable"
+            )
         return {
             "last_price": last_price,
             "bid": bid,
@@ -974,6 +1017,12 @@ class PromptBuilder:
         # Determine expected direction from the label.
         rising_labels = {"rising", "diverging_bullish", "net_positive_rising", "net_negative_recovering"}
         falling_labels = {"falling", "diverging_bearish", "net_positive_declining", "net_negative_declining"}
+        # 6.2 — "flat_stable" means the data exists but shows no directional
+        # movement.  Return "weak" (not "unknown") so the model knows the series
+        # *was* evaluated but doesn't carry conviction.
+        flat_labels = {"flat_stable"}
+        if label in flat_labels:
+            return "weak"
         if label in rising_labels:
             expected_rising = True
         elif label in falling_labels:
@@ -1198,6 +1247,44 @@ class PromptBuilder:
             adx_value, di_plus, di_minus, last_price, vwap, obv_series
         )
 
+        # 8.8 — Regime confidence: detect when the last completed candle
+        # contradicts the regime label (e.g. a −4% candle while regime says
+        # "trending_up").  Computes the percentage move of the penultimate
+        # candle and its volume relative to the average.
+        regime_confidence: str | None = None
+        regime_note: str | None = None
+        if len(candles) >= 3:
+            # Use the penultimate candle (last *completed*); the final candle
+            # may still be forming.
+            _rc_candle = candles[-2]
+            _rc_open = _to_float(_rc_candle.get("open"))
+            _rc_close = _to_float(_rc_candle.get("close"))
+            _rc_vol = _to_float(_rc_candle.get("volume"))
+            # Average volume across earlier candles
+            _rc_vols = [_to_float(c.get("volume")) for c in candles[:-1] if _to_float(c.get("volume")) is not None and _to_float(c.get("volume")) > 0]
+            _rc_avg_vol = sum(_rc_vols) / len(_rc_vols) if _rc_vols else None
+            if _rc_open and _rc_open > 0 and _rc_close is not None:
+                _rc_pct = (_rc_close - _rc_open) / _rc_open * 100
+                _rc_vol_ratio = (_rc_vol / _rc_avg_vol) if (_rc_vol and _rc_avg_vol and _rc_avg_vol > 0) else None
+                # A sharp candle (> 3%) on elevated volume (> 2× avg) that
+                # opposes the regime label signals weakening confidence.
+                _regime_bullish = market_regime in ("trending_up",)
+                _regime_bearish = market_regime in ("trending_down", "breakdown")
+                if (
+                    abs(_rc_pct) > 3.0
+                    and _rc_vol_ratio is not None
+                    and _rc_vol_ratio > 2.0
+                    and (
+                        (_regime_bullish and _rc_pct < -3.0)
+                        or (_regime_bearish and _rc_pct > 3.0)
+                    )
+                ):
+                    regime_confidence = "weakening"
+                    regime_note = (
+                        f"last completed candle {_rc_pct:+.1f}% on "
+                        f"{_rc_vol_ratio:.1f}x avg volume; trend integrity questionable"
+                    )
+
         # 2.10 — Pre-flag Archetype C eligibility so the model doesn't have to
         # compare funding rate against the −0.05% threshold itself.
         funding_rate = _to_float(live_section.get("funding_rate"))
@@ -1205,7 +1292,48 @@ class PromptBuilder:
         if funding_rate is not None and funding_rate < -0.0005:  # −0.05%
             funding_archetype_c = True
 
-        return {
+        # 6.4 — Swing exhaustion: flag when current price has exceeded most
+        # available swing references, leaving the model with limited TP anchors.
+        swing_high_exhaustion: str | None = None
+        swing_low_exhaustion: str | None = None
+        if last_price is not None:
+            # 9.5-struct — Use structured format for swing exhaustion so
+            # the model can easily access remaining reference levels.
+            all_highs = (swing_highs or []) + (swing_highs_htf or [])
+            highs_above = [s for s in all_highs if _to_float(s.get("price")) is not None and _to_float(s["price"]) > last_price]
+            if all_highs and len(highs_above) <= 1:
+                _remaining = [_to_float(s["price"]) for s in highs_above]
+                if not highs_above:
+                    swing_high_exhaustion = {
+                        "active": True,
+                        "remaining_above": [],
+                        "note": "price above ALL recent swing highs; no upside reference levels available",
+                    }
+                else:
+                    swing_high_exhaustion = {
+                        "active": True,
+                        "remaining_above": _remaining,
+                        "note": f"price above most swing highs; only {_remaining[0]} remains above",
+                    }
+
+            all_lows = (swing_lows or []) + (swing_lows_htf or [])
+            lows_below = [s for s in all_lows if _to_float(s.get("price")) is not None and _to_float(s["price"]) < last_price]
+            if all_lows and len(lows_below) <= 1:
+                _remaining_below = [_to_float(s["price"]) for s in lows_below]
+                if not lows_below:
+                    swing_low_exhaustion = {
+                        "active": True,
+                        "remaining_below": [],
+                        "note": "price below ALL recent swing lows; no downside reference levels available",
+                    }
+                else:
+                    swing_low_exhaustion = {
+                        "active": True,
+                        "remaining_below": _remaining_below,
+                        "note": f"price below most swing lows; only {_remaining_below[0]} remains below",
+                    }
+
+        result: dict[str, Any] = {
             "swing_high_ltf": swing_highs or None,
             "swing_low_ltf": swing_lows or None,
             "swing_high_htf": swing_highs_htf or None,
@@ -1219,6 +1347,15 @@ class PromptBuilder:
             "market_regime": market_regime,
             "funding_archetype_c_eligible": funding_archetype_c,
         }
+        # 9.6 — Always include regime_confidence and regime_note so the
+        # model can check the fields without null-handling.
+        result["market_regime_confidence"] = regime_confidence or "stable"
+        result["regime_note"] = regime_note
+        if swing_high_exhaustion:
+            result["swing_high_exhaustion"] = swing_high_exhaustion
+        if swing_low_exhaustion:
+            result["swing_low_exhaustion"] = swing_low_exhaustion
+        return result
 
     def _build_history_section(self, indicators: dict[str, Any]) -> dict[str, Any]:
         ohlcv_rows = indicators.get("ohlcv") or []
@@ -1226,17 +1363,15 @@ class PromptBuilder:
         candle_count = len(trimmed)  # align all auxiliary series to this length
         _series_tail = 15  # shorter tail for indicator series not tied to candles
         raw_vwap_series = indicators.get("vwap_series")
-        raw_volume_series = (indicators.get("volume") or {}).get("series")
         raw_vol_rsi_series = indicators.get("volume_rsi_series")
 
         section: dict[str, Any] = {
             "candles": trimmed,
             # vwap_series tracks per-candle VWAP — align to candle count so indices match
             "vwap_series": self._trim_series(raw_vwap_series, candle_count),
-            # volume_series is a duplicate of the volume column in each candle row;
-            # trim to candle_count so they stay in sync (avoids the mismatch where
-            # the series has 190+ values but candles has only 50).
-            "volume_series": self._trim_series(raw_volume_series, candle_count),
+            # 7.2 — volume_series removed: each candle row already contains its
+            # volume value, so the standalone series was a pure duplicate
+            # (~200 tokens).  Volume RSI is kept separately below.
             "volume_rsi_series": self._trim_series(raw_vol_rsi_series, _series_tail),
         }
         ohlcv_htf = indicators.get("ohlcv_htf")
@@ -1250,7 +1385,9 @@ class PromptBuilder:
             section["timeframe_htf"] = htf_bar
         return section
 
-    def _build_indicator_section(self, indicators: dict[str, Any]) -> dict[str, Any]:
+    def _build_indicator_section(
+        self, indicators: dict[str, Any], *, last_price: float | None = None,
+    ) -> dict[str, Any]:
         macd = indicators.get("macd") or {}
         rsi = indicators.get("rsi")
         stoch = indicators.get("stoch_rsi") or {}
@@ -1296,10 +1433,15 @@ class PromptBuilder:
             # volume and Volume RSI is in history.volume_rsi_series.  Keep only
             # the scalar summaries (last, average) to save ~200 tokens.
             "volume": self._strip_volume_series(indicators.get("volume")),
-            "htf": self._build_htf_indicator_section(indicators),
+            "htf": self._build_htf_indicator_section(indicators, last_price=last_price),
         }
 
-    def _build_htf_indicator_section(self, indicators: dict[str, Any]) -> dict[str, Any]:
+    def _build_htf_indicator_section(
+        self,
+        indicators: dict[str, Any],
+        *,
+        last_price: float | None = None,
+    ) -> dict[str, Any]:
         """Extract key HTF indicators from pre-computed htf_indicators bundle."""
         htf = indicators.get("htf_indicators") or {}
         if not htf:
@@ -1307,16 +1449,45 @@ class PromptBuilder:
         adx = htf.get("adx") or {}
         ma = htf.get("moving_averages") or {}
         bb = htf.get("bollinger_bands") or {}
+        ema_50 = _to_float(ma.get("ema_50"))
+        ema_200 = _to_float(ma.get("ema_200"))
+        ma_section: dict[str, Any] = {
+            "ema_50": ema_50,
+            "ema_200": ema_200,
+        }
+        # 9.5 — EMA convergence indicator: when EMAs are in a bearish cross
+        # but converging, the "bearish" bias label is technically correct but
+        # increasingly misleading.  Surface the gap and direction so the model
+        # can contextualise lagging EMA signals.
+        if ema_50 is not None and ema_200 is not None and ema_200 > 0:
+            _gap_pct = round(abs(ema_50 - ema_200) / ema_200 * 100, 2)
+            # Infer narrowing: if price sits on the side of the faster EMA
+            # that pulls it toward the slower one, the gap will close.
+            _narrowing: bool | None = None
+            if last_price is not None:
+                if ema_50 < ema_200:
+                    # Bearish cross — price above EMA50 pulls it up → narrowing
+                    _narrowing = last_price > ema_50
+                else:
+                    # Bullish cross — price below EMA50 pulls it down → narrowing
+                    _narrowing = last_price < ema_50
+            _conv: dict[str, Any] = {
+                "gap_pct": _gap_pct,
+                "narrowing": _narrowing,
+            }
+            if _narrowing and _gap_pct < 15:
+                _bias_label = "bearish" if ema_50 < ema_200 else "bullish"
+                _conv["note"] = (
+                    f"EMA50 rapidly approaching EMA200; {_bias_label} cross may reverse soon"
+                )
+            ma_section["ema_convergence"] = _conv
         return {
             "adx": {
                 "value": adx.get("value"),
                 "di_plus": adx.get("di_plus"),
                 "di_minus": adx.get("di_minus"),
             },
-            "moving_averages": {
-                "ema_50": ma.get("ema_50"),
-                "ema_200": ma.get("ema_200"),
-            },
+            "moving_averages": ma_section,
             "bollinger_bands": bb,
             "rsi": htf.get("rsi"),
             "vwap": htf.get("vwap"),
@@ -1407,7 +1578,6 @@ class PromptBuilder:
     def _build_liquidity_profile(
         self,
         market: dict[str, Any],
-        indicators: dict[str, Any],
         ticker: dict[str, Any],
     ) -> dict[str, Any]:
         order_flow = market.get("order_flow") or {}
@@ -1415,9 +1585,7 @@ class PromptBuilder:
         spread_pct = _to_float(market.get("spread_pct"))
         bid_depth = _to_float(order_flow.get("bid_depth"))
         ask_depth = _to_float(order_flow.get("ask_depth"))
-        obv_block = indicators.get("obv") or {}
-        cmf_block = indicators.get("cmf") or {}
-        volume_block = indicators.get("volume") or {}
+        _MIN_DEPTH = 50  # minimum contracts for a meaningful bias claim
         last_price = _to_float(market.get("last_price") or ticker.get("last") or ticker.get("px"))
         depth_floor = None
         if bid_depth is not None and ask_depth is not None:
@@ -1426,6 +1594,7 @@ class PromptBuilder:
         target_usd = 100000.0
         target_units = (target_usd / last_price) if last_price else None
         slippage_bps = None
+        slippage_note: str | None = None
         if (
             spread is not None
             and spread > 0
@@ -1438,21 +1607,31 @@ class PromptBuilder:
             impact_multiplier = min(max(depth_ratio, 0.1), 3.0)
             implied_move = spread * impact_multiplier
             slippage_bps = (implied_move / last_price) * 10000
+        # 8.3 — When depth is degraded (stale or thin) and no slippage could be
+        # computed, provide a conservative floor so the model has a numeric
+        # risk input instead of null (which triggers the heuristic spread_pct×2
+        # fallback that massively underestimates real slippage in thin books).
+        _ob_note = order_flow.get("order_book_note")
+        if slippage_bps is None and _ob_note:
+            slippage_bps = 50.0
+            slippage_note = "elevated estimate due to thin/stale order book"
 
         imbalance_raw = order_flow.get("imbalance")
         if isinstance(imbalance_raw, dict):
             imbalance_value = _to_float(imbalance_raw.get("net"))
         else:
             imbalance_value = _to_float(imbalance_raw)
-        # 2.4 — When depth data is stale/null, the imbalance value is meaningless.
-        # Mark liquidity_bias as "unreliable" so the model doesn't reason from bad data.
+        # 6.1 — Derive liquidity_bias from raw depth, not OFI momentum.
+        # OFI measures order-flow *change*; depth measures standing liquidity.
+        # 8.2 — Add minimum depth threshold: when both sides have trivially few
+        # contracts, no directional bias claim is meaningful.
         if bid_depth is None or ask_depth is None:
             liquidity_bias = "unreliable"
-        elif imbalance_value is None:
-            liquidity_bias = "balanced"
-        elif imbalance_value > 0:
+        elif bid_depth < _MIN_DEPTH and ask_depth < _MIN_DEPTH:
+            liquidity_bias = "thin"
+        elif bid_depth > ask_depth * 1.2:
             liquidity_bias = "bid-supported"
-        elif imbalance_value < 0:
+        elif ask_depth > bid_depth * 1.2:
             liquidity_bias = "ask-heavy"
         else:
             liquidity_bias = "balanced"
@@ -1464,17 +1643,10 @@ class PromptBuilder:
             summary_bits.append(f"~{slippage_bps:.1f} bps est. slippage for $100k")
         summary_bits.append(liquidity_bias)
 
-        return {
-            "obv": {
-                "value": _to_float(obv_block.get("value")),
-            },
-            "cmf": {
-                "value": _to_float(cmf_block.get("value")),
-            },
-            "volume": {
-                "last": _to_float(volume_block.get("last")),
-                "average": _to_float(volume_block.get("average")),
-            },
+        # 7.3 — volume last/average already lives in indicators.volume;
+        # OBV/CMF values are in indicators.obv/cmf.  Keep only the
+        # liquidity-specific fields here to avoid duplication.
+        result: dict[str, Any] = {
             "spread": spread,
             "spread_pct": spread_pct,
             "bid_depth": bid_depth,
@@ -1483,6 +1655,9 @@ class PromptBuilder:
             "liquidity_bias": liquidity_bias,
             "summary": ", ".join(summary_bits),
         }
+        if slippage_note:
+            result["slippage_note"] = slippage_note
+        return result
 
     def _build_derivatives_posture(
         self,
@@ -1524,6 +1699,27 @@ class PromptBuilder:
                     long_short["timestamps"] = _ls_timestamps[-_ls_n:]
             except (TypeError, KeyError):
                 pass  # drop unsliceable series entirely
+        # 6.5 — L/S series staleness detection: flag when the most recent
+        # timestamp in the series is more than 6 hours old so the model
+        # knows the trend direction may not reflect current positioning.
+        _ls_ts_list = long_short.get("timestamps")
+        if isinstance(_ls_ts_list, list) and _ls_ts_list:
+            try:
+                _ls_latest_ts = max(int(t) for t in _ls_ts_list if t is not None)
+                _now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+                _ls_age_hours = (_now_ms - _ls_latest_ts) / (3600 * 1000)
+                if _ls_age_hours > 6:
+                    long_short["series_stale"] = True
+                    long_short["series_age_hours"] = round(_ls_age_hours, 1)
+                    # 8.7 — If the series is extremely stale (> 24h), drop it
+                    # entirely to save ~150 tokens and prevent the model from
+                    # accidentally reasoning from 2-day-old positioning data.
+                    if _ls_age_hours > 24:
+                        long_short.pop("series", None)
+                        long_short.pop("timestamps", None)
+                        long_short["note"] = "series omitted: >24h old"
+            except (ValueError, TypeError):
+                pass
         ls_value = _to_float(long_short.get("value"))
         if ls_value is None:
             ls_bias = "balanced"
@@ -1547,13 +1743,17 @@ class PromptBuilder:
                 f"top liq {liquidation_clusters[0]['side']} @ {liquidation_clusters[0]['price']:.0f}"
             )
 
+        # 9.7 — Clarify funding timestamp semantics: "observed_at" is
+        # the settlement time of the current rate; "next_settlement" is when
+        # the next rate will be applied.  Avoids ambiguity about direction.
         return {
             "funding": {
                 "current": current_rate,
                 "next": next_rate,
                 "previous": previous_rate,
                 "delta": funding_delta,
-                "timestamp": funding.get("fundingTime"),
+                "observed_at": funding.get("fundingTime"),
+                "next_settlement": funding.get("nextFundingTime"),
             },
             "long_short_ratio": long_short,
             "liquidation_clusters": liquidation_clusters,
