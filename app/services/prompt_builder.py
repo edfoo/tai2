@@ -29,14 +29,21 @@ DEFAULT_SYSTEM_PROMPT = (
 _SEC_INTRO = (
     "You will receive a JSON object under the key 'context' containing the latest market state, "
     "account/portfolio exposure (including total equity and available margin), any pending orders, and execution guardrails. "
+    "RULE PRECEDENCE (in case of conflict): Pre-flight checks > Signal Hierarchy (Step 4) > "
+    "Regime Rules > Archetype preference > Confidence penalties. "
 )
 
 _SEC_STEP1_PREFLIGHT = (
     "STEP 1 — PRE-FLIGHT CHECKS (hard-block if any fail): "
     "(a) Recommendation must comply with leverage, position size, trade limits, and max-position-percent guardrails (including symbol caps). "
     "(b) context.positions and context.pending_orders must not already contain an open or pending order in the same direction — if they do, prefer HOLD or a close/reverse. "
-    "(c) Inspect context.execution.margin_health for real-time capital caps; treat context.execution_feedback (and its digest) as hard blockers that must be resolved before sizing up. "
-    "Cite all pre-flight checks in your rationale. "
+    "(c) Inspect context.execution.margin_health for real-time capital caps. "
+    "(d) EXECUTION FEEDBACK STALENESS RULE: context.execution_feedback and its digest are hard blockers ONLY if the rejection's snapshot is less than 2 completed candles old (i.e. < 30 minutes for a 15m chart, < 2 hours for a 1h chart). "
+    "After 2 completed candles have closed since the rejection, re-evaluate independently and note the prior rejection in rationale — it no longer hard-blocks a new entry. "
+    "If context.execution_feedback is missing or null, note 'no prior rejection feedback' and proceed — do not infer any rejection. "
+    "(e) MINIMUM HOLD TIME: positions must be held for at least context.guardrails.min_hold_seconds. "
+    "If near-term volatility (e.g. funding settlement within min_hold_seconds) could trigger a stop before the hold period expires, prefer HOLD. "
+    "Cite all pre-flight checks and whether feedback is still within its hard-block window in your rationale. "
 )
 
 _SEC_STEP2_HTF = (
@@ -47,20 +54,42 @@ _SEC_STEP2_HTF = (
     "Score the HTF alignment with your proposed direction: "
     "  • Strong alignment (ema_50/ema_200 agree AND adx.value > 25 with correct DI): +0.0 penalty (full confidence allowed). "
     "  • Weak/neutral HTF (ema_50 ≈ ema_200, low ADX, or ambiguous): −0.15 confidence penalty. "
-    "  • HTF contradicts direction (e.g. BUY but ema_50 < ema_200 and price below ema_50): −0.30 confidence penalty AND reduce confidence by a further ×0.7 to encode the counter-trend size reduction (execution layer derives notional from confidence). "
+    "  • HTF contradicts direction — apply an ADX-scaled penalty: "
+    "      − HTF ADX > 30 and contradicts: −0.30 penalty AND reduce confidence by ×0.7. "
+    "      − HTF ADX 20–30 and contradicts: −0.20 penalty AND reduce confidence by ×0.8. "
+    "      − HTF ADX < 20 and contradicts: −0.10 penalty only (trend not established, contradiction carries less weight). "
+    "PENALTY ARITHMETIC ORDER: first apply the additive penalty to the base confidence, then apply the multiplicative scaling. "
+    "Example for HTF ADX > 30 contradiction: final = (base − 0.30) × 0.7. "
+    "The ranging penalty (from regime rules) is applied independently — it stacks additively with the HTF additive penalty. "
     "A counter-trend trade (HTF contradicts) is allowed only if the net confidence after all penalties is ≥ 0.45; otherwise choose HOLD. "
+    "State the HTF ADX value and which bracket applies in your rationale. "
     "FALLBACK: if context.indicators.htf is empty or context.history.candles_htf is empty, apply a flat −0.20 penalty and skip further HTF analysis. "
 )
 
 _SEC_STEP3_DIVERGENCE = (
     "STEP 3 — DIVERGENCE & POSITIONING CHECK (strong filter): "
     "context.market_signals.obv_trend and context.market_signals.cvd_trend are pre-computed — use them as the primary signal. "
+    "OBV LABEL VERIFICATION: before relying on obv_trend, inspect the last 3–5 values of the OBV series (context.indicators.obv if present). "
+    "If the recent slope confirms the label (e.g. last 3–5 values rising and label is diverging_bullish), the signal carries full weight. "
+    "If recent values are flat or reversing against the label, treat the label as stale and reduce its weight by half. "
+    "DIVERGENCE LABEL SANITY CHECK: if obv_trend says 'diverging_X' but the actual price direction does not match the divergence definition "
+    "(i.e. 'diverging_bearish' requires price RISING + OBV FALLING; 'diverging_bullish' requires price FALLING + OBV RISING), "
+    "reclassify the signal as 'confirming' (price and OBV moving together) and note the mismatch in rationale. "
     "If obv_trend is 'diverging_bearish' (price rising, OBV falling), a BUY is strongly discouraged. "
     "If obv_trend is 'diverging_bullish' (price falling, OBV rising), a SELL is strongly discouraged. "
     "Divergence against your proposed direction should be cited as a risk factor and typically warrants HOLD. "
+    "CVD LABEL VERIFICATION: analogous to OBV verification — inspect the last 20+ values of context.market.order_flow.cvd_series. "
+    "If the recent slope contradicts the cvd_trend label (e.g. label says 'net_positive_rising' but the series shows a deep negative value and falling), "
+    "treat the label as stale and reduce its weight by half. State the observed slope vs. label in rationale. "
+    "CVD UNKNOWN RULE: if cvd_trend is 'unknown', apply −0.05 confidence and explicitly note in rationale that order-flow confirmation is absent. "
+    "ZERO DEPTH FALLBACK: if context.market.order_flow.bid_depth or ask_depth is 0 or null, "
+    "treat order_flow imbalance as unreliable; apply −0.05 confidence penalty and note 'incomplete depth data' in rationale. "
+    "SLIPPAGE ABSENT RULE: if context.liquidity_context.estimated_slippage_bps is null, "
+    "estimate slippage from spread_pct × 2 as a conservative proxy for risk_score computation, and note this assumption. "
     "L/S RATIO TREND: context.derivatives_posture.long_short_ratio contains the current value plus any series. "
     "If the L/S ratio has been declining for 10+ periods while price rises, treat it as a bullish short-squeeze setup and add +0.05 confidence. "
     "If the L/S ratio has been rising for 10+ periods while price falls, treat it as a bearish capitulation setup and add +0.05 confidence to a SELL. "
+    "L/S DATA ABSENT: if long_short_ratio data is missing but funding is below −0.15%, treat this as partial Archetype C confirmation only — add +0.03 instead of +0.05 and note the missing L/S data as a risk factor in rationale. "
     "Do NOT pass the raw L/S series in your rationale — summarise the trend direction only (e.g. 'L/S declining 12 periods → squeeze bias'). "
 )
 
@@ -72,6 +101,8 @@ _SEC_STEP4_SIGNALS = (
     "(3) Momentum (MACD, RSI): use for entry timing, not primary direction. "
     "(4) Order Flow (imbalance, depth): confirms short-term liquidity but is secondary to trend and volume. "
     "If the majority of higher-ranked signals conflict, choose HOLD. "
+    "VOLUME RSI: if context.history.volume_rsi_series is present, values above 70 indicate unusual volume expansion (confirms momentum); "
+    "values below 30 indicate volume contraction (weakens conviction). Use as a modifier within the Volume/Participation tier, not as a standalone signal. "
     "RSI/STOCH RSI EXIT CLAUSE: if context.market_signals.rsi_zone is 'overbought' and you propose a BUY, "
     "do NOT veto the trade if ADX > 30 and DI+ dominates — instead add ≥0.25 to risk_score (the execution layer will reduce size proportionally) "
     "and shift to a limit order placed at the nearest LTF support level from context.market_signals.swing_low_ltf. "
@@ -85,6 +116,12 @@ _SEC_STEP5_SIZING = (
     "0.55–0.75: HTF neutral or mildly opposed, but LTF signals are clear — proportionally reduced size. "
     "0.45–0.55: meaningful conflicts — small size only if R:R is compelling. "
     "< 0.45: too many conflicts — you MUST recommend HOLD. "
+    "REGIME-ADJUSTED FLOOR: the default minimum confidence to trade is 0.50. "
+    "This floor may be lowered to 0.45 for a reduced-size entry ONLY when ALL of the following are true: "
+    "  (i) funding rate is below −0.20%, AND "
+    "  (ii) obv_trend is 'diverging_bullish' (for a BUY) or 'diverging_bearish' (for a SELL) — confirming a squeeze setup, AND "
+    "  (iii) the archetype is Archetype C (funding-rate fade). "
+    "If invoking the lowered floor, state it explicitly in rationale: 'Regime-adjusted floor applied: 0.45'. "
     "The risk_score (0–1) reflects current volatility (ATR %), spread width, and proximity to major support/resistance. "
     "Higher risk_score = more risk = significantly smaller position. "
     "The execution layer derives position size from your confidence and risk_score: "
@@ -148,7 +185,11 @@ _SEC_DIRECTION_RR_RULES = (
 _SEC_HOLD_GUIDANCE = (
     "Choose HOLD whenever capital constraints, fee/credit depletion, missing TP/SL, poor reward-to-risk, "
     "or low confidence (< 0.45) prevent a high-quality entry — and describe the specific blocker. "
-    "HTF contradiction alone is NOT a reason to HOLD if LTF signals are strong enough to survive the confidence penalty."
+    "HTF contradiction alone is NOT a reason to HOLD if LTF signals are strong enough to survive the confidence penalty. "
+    "REGIME PRECEDENCE: regime rules adjust bias and apply confidence penalties, but they do NOT override the confidence-based sizing system. "
+    "If the regime says 'prefer HOLD' but your computed confidence for a directional trade exceeds 0.55, the trade is valid — document the regime tension in rationale. "
+    "IGNORE guardrails.flip_llm_decision — this flag is handled by the execution layer post-response. "
+    "Reason only about your intended direction; the flip is applied downstream and you must not attempt to game your output. "
 )
 
 _SEC_STEP_STRATEGY = (
@@ -168,11 +209,19 @@ _SEC_STEP_REGIME = (
     "trending_up: prefer trend-continuation entries (Archetype A); RSI/Stoch RSI overbought reduces size but does NOT veto "
     "a trade if ADX > 30 and DI+ dominates — shift instead to a limit order at the nearest support. "
     "trending_down: prefer SELL or HOLD; no BUY unless strong HTF bullish divergence with high volume. "
-    "ranging: prefer mean-reversion (Archetype B); apply a flat −0.10 confidence penalty; tighten stops to ATR×1.0. "
+    "ranging: prefer mean-reversion (Archetype B); apply a −0.10 confidence penalty by default; tighten stops to ATR×1.0. "
+    "  RANGING PENALTY OFFSET: if a dominant sub-signal is present in the trade direction, reduce the penalty to −0.05: "
+    "    − funding rate < −0.15% (shorts overcrowded, squeeze risk), OR "
+    "    − obv_trend diverges in the trade direction (e.g. diverging_bullish for a BUY). "
+    "  Both conditions together do NOT stack below −0.05; the floor for the offset is −0.05. "
+    "  State whether the offset applies and why in rationale. "
     "post_spike_consolidation: prefer HOLD or a reduced-size BUY only on a confirmed support hold; wait for ADX to "
     "re-expand above 25 before sizing up. "
     "breakdown: strong SELL bias or HOLD; do not BUY unless HTF shows compelling bullish divergence. "
-    "unknown: treat as ranging and apply the −0.10 penalty. "
+    "  BREAKDOWN STALENESS: if market_regime is 'breakdown' but the last 10+ candles show "
+    "diminishing downward momentum (higher lows, declining ATR, or volume contraction), "
+    "reclassify to 'post_spike_consolidation' and note the override in rationale. "
+    "unknown: treat as ranging and apply the −0.10 penalty (offset rules above still apply). "
 )
 
 # ---------------------------------------------------------------------------
@@ -585,10 +634,23 @@ class PromptBuilder:
         )
         feedback_digest = self._build_execution_feedback_digest(execution_feedback)
 
+        # Session context — helps the model weigh liquidity/volatility expectations
+        _utc_hour = datetime.now(timezone.utc).hour
+        if _utc_hour < 8:
+            _active_session = "Asia"
+        elif _utc_hour < 16:
+            _active_session = "EU"
+        else:
+            _active_session = "US"
+
         context = {
             "generated_at": snapshot.get("generated_at"),
             "symbol": resolved_symbol,
             "timeframe": timeframe_value,
+            "session_context": {
+                "utc_hour": _utc_hour,
+                "active_session": _active_session,
+            },
             "market": live_section,
             "history": history_section,
             "indicators": indicator_section,
@@ -612,11 +674,13 @@ class PromptBuilder:
         }
         if risk_locks:
             context["risk_locks"] = risk_locks
+        # Always include execution_feedback — even if empty — so the model
+        # doesn't have to guess whether feedback exists.
+        context["execution_feedback"] = execution_feedback or None
         if execution_feedback:
-            context["execution_feedback"] = execution_feedback
             execution_settings["recent_feedback"] = execution_feedback
+        context["execution_feedback_digest"] = feedback_digest or None
         if feedback_digest:
-            context["execution_feedback_digest"] = feedback_digest
             execution_settings["feedback_digest"] = feedback_digest
         system_prompt = sanitize_prompt_text(runtime_meta.get("llm_system_prompt") or DEFAULT_SYSTEM_PROMPT)
         # Build the decision prompt.  If the user has saved a truly custom prompt,
@@ -700,12 +764,18 @@ class PromptBuilder:
             if isinstance(_ofi_ratio, list) and len(_ofi_ratio) >= 3
             else None
         )
+        _cvd_series_raw = custom_metrics.get("cvd_series")
+        _cvd_series_trimmed = (
+            _cvd_series_raw[-30:]
+            if isinstance(_cvd_series_raw, list) and len(_cvd_series_raw) > 30
+            else _cvd_series_raw
+        )
         order_flow: dict[str, Any] = {
             "imbalance": ofi,
             "cvd": cvd,
             "bid_depth": None if order_book_stale else bid_depth,
             "ask_depth": None if order_book_stale else ask_depth,
-            "cvd_series": custom_metrics.get("cvd_series"),
+            "cvd_series": _cvd_series_trimmed,
         }
         # Only include ofi_ratio_series when there are enough data points to show a
         # trend.  Omit the key entirely (rather than null) when unavailable so the
@@ -1286,16 +1356,24 @@ class PromptBuilder:
         long_short_raw = custom_metrics.get("market_long_short_ratio") or {}
         # Trim the L/S ratio series to the last 20 values — enough to determine
         # trend direction (rising/declining for 10+ periods) without wasting tokens
-        # on the full 200-candle history.
+        # on the full 200-candle history.  Also align timestamps to the same tail
+        # length so the model can correlate data points.
         _ls_series = long_short_raw.get("series")
+        _ls_timestamps = long_short_raw.get("timestamps")
         long_short: dict[str, Any] = {
-            k: v for k, v in long_short_raw.items() if k != "series"
+            k: v for k, v in long_short_raw.items() if k not in ("series", "timestamps")
         }
+        _ls_n = 20
         if isinstance(_ls_series, list) and _ls_series:
-            long_short["series"] = _ls_series[-20:]
+            long_short["series"] = _ls_series[-_ls_n:]
+            if isinstance(_ls_timestamps, list) and _ls_timestamps:
+                long_short["timestamps"] = _ls_timestamps[-_ls_n:]
         elif _ls_series is not None:
             try:
-                long_short["series"] = list(_ls_series[-20:])
+                _ls_as_list = list(_ls_series[-_ls_n:])
+                long_short["series"] = _ls_as_list
+                if isinstance(_ls_timestamps, list) and _ls_timestamps:
+                    long_short["timestamps"] = _ls_timestamps[-_ls_n:]
             except (TypeError, KeyError):
                 pass  # drop unsliceable series entirely
         ls_value = _to_float(long_short.get("value"))
