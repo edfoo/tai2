@@ -16,7 +16,8 @@ DEFAULT_SYSTEM_PROMPT = (
     "Evaluate the provided snapshot using a top-down, hierarchical framework: higher-timeframe trend first, "
     "then volume/participation confirmation, then momentum timing. "
     "Always verify existing positions and whether guardrails such as leverage caps might block an order. "
-    "Respond strictly as JSON matching 'response_schema'."
+    "Respond with ONLY a valid JSON object matching 'response_schema'. "
+    "Do not include any text, markdown, or explanation outside the JSON."
 )
 
 # ---------------------------------------------------------------------------
@@ -63,14 +64,18 @@ _SEC_STEP2_HTF = (
     "The ranging penalty (from regime rules) is applied independently — it stacks additively with the HTF additive penalty. "
     "A counter-trend trade (HTF contradicts) is allowed only if the net confidence after all penalties is ≥ 0.45; otherwise choose HOLD. "
     "State the HTF ADX value and which bracket applies in your rationale. "
+    "HTF DI AMBIGUITY: if HTF ADX > 25 but |di_plus − di_minus| < 5, treat the HTF as weak/neutral regardless of ADX value — "
+    "the trend exists but has no clear directional bias. Apply the −0.15 weak/neutral penalty. "
     "FALLBACK: if context.indicators.htf is empty or context.history.candles_htf is empty, apply a flat −0.20 penalty and skip further HTF analysis. "
 )
 
 _SEC_STEP3_DIVERGENCE = (
     "STEP 3 — DIVERGENCE & POSITIONING CHECK (strong filter): "
     "context.market_signals.obv_trend and context.market_signals.cvd_trend are pre-computed — use them as the primary signal. "
-    "OBV LABEL VERIFICATION: before relying on obv_trend, inspect the last 3–5 values of the OBV series (context.indicators.obv if present). "
-    "If the recent slope confirms the label (e.g. last 3–5 values rising and label is diverging_bullish), the signal carries full weight. "
+    "OBV LABEL VERIFICATION: context.market_signals.obv_trend_confidence is pre-computed as 'strong', 'moderate', 'weak', or 'unknown'. "
+    "If obv_trend_confidence is 'strong', the signal carries full weight. "
+    "If 'moderate', reduce weight by one-quarter. If 'weak' or 'unknown', reduce weight by half. "
+    "You may still cross-check against the last 3–5 values of the OBV series (context.indicators.obv if present) for additional confirmation. "
     "If recent values are flat or reversing against the label, treat the label as stale and reduce its weight by half. "
     "DIVERGENCE LABEL SANITY CHECK: if obv_trend says 'diverging_X' but the actual price direction does not match the divergence definition "
     "(i.e. 'diverging_bearish' requires price RISING + OBV FALLING; 'diverging_bullish' requires price FALLING + OBV RISING), "
@@ -78,7 +83,9 @@ _SEC_STEP3_DIVERGENCE = (
     "If obv_trend is 'diverging_bearish' (price rising, OBV falling), a BUY is strongly discouraged. "
     "If obv_trend is 'diverging_bullish' (price falling, OBV rising), a SELL is strongly discouraged. "
     "Divergence against your proposed direction should be cited as a risk factor and typically warrants HOLD. "
-    "CVD LABEL VERIFICATION: analogous to OBV verification — inspect the last 20+ values of context.market.order_flow.cvd_series. "
+    "CVD LABEL VERIFICATION: context.market_signals.cvd_trend_confidence is pre-computed as 'strong', 'moderate', 'weak', or 'unknown'. "
+    "Apply the same weight adjustment as OBV: 'strong' = full weight, 'moderate' = three-quarter weight, 'weak'/'unknown' = half weight. "
+    "You may still cross-check against the last 20+ values of context.market.order_flow.cvd_series for additional confirmation. "
     "If the recent slope contradicts the cvd_trend label (e.g. label says 'net_positive_rising' but the series shows a deep negative value and falling), "
     "treat the label as stale and reduce its weight by half. State the observed slope vs. label in rationale. "
     "CVD UNKNOWN RULE: if cvd_trend is 'unknown', apply −0.05 confidence and explicitly note in rationale that order-flow confirmation is absent. "
@@ -107,6 +114,10 @@ _SEC_STEP4_SIGNALS = (
     "do NOT veto the trade if ADX > 30 and DI+ dominates — instead add ≥0.25 to risk_score (the execution layer will reduce size proportionally) "
     "and shift to a limit order placed at the nearest LTF support level from context.market_signals.swing_low_ltf. "
     "Document this adjustment explicitly in 'notes'. "
+    "OFI RATIO SERIES: if context.market.order_flow.ofi_ratio_series is present, it shows order-flow imbalance momentum per candle. "
+    "Values > 1.5 suggest aggressive directional buying; values near 0.0 suggest inactive or balanced flow. "
+    "Use within the Order Flow tier — a sustained run of high OFI values (> 1.5 for 3+ periods) in the trade direction adds modest confirmation (+0.03 confidence); "
+    "sustained near-zero values weaken order-flow confirmation. Do NOT treat OFI ratio as a standalone signal. "
 )
 
 _SEC_STEP5_SIZING = (
@@ -186,6 +197,10 @@ _SEC_HOLD_GUIDANCE = (
     "Choose HOLD whenever capital constraints, fee/credit depletion, missing TP/SL, poor reward-to-risk, "
     "or low confidence (< 0.45) prevent a high-quality entry — and describe the specific blocker. "
     "HTF contradiction alone is NOT a reason to HOLD if LTF signals are strong enough to survive the confidence penalty. "
+    "CREDIT CONSERVATION: if context.credit_availability is present and credit_availability.remaining < 10% of credit_availability.granted, "
+    "add +0.10 to risk_score to reduce position sizing and conserve remaining credit. Note 'credit conservation mode' in rationale. "
+    "SPIKE RECENCY CHECK: if the last 3 LTF candles show a cumulative move > 2× ATR on declining volume in the most recent bar, "
+    "increase risk_score by +0.15 and prefer a limit order at the nearest support rather than a market order. Note the spike recency adjustment in rationale. "
     "REGIME PRECEDENCE: regime rules adjust bias and apply confidence penalties, but they do NOT override the confidence-based sizing system. "
     "If the regime says 'prefer HOLD' but your computed confidence for a directional trade exceeds 0.55, the trade is valid — document the regime tension in rationale. "
     "IGNORE guardrails.flip_llm_decision — this flag is handled by the execution layer post-response. "
@@ -199,8 +214,9 @@ _SEC_STEP_STRATEGY = (
     "Use a limit order at the nearest LTF support for better fill. "
     "(B) Mean-reversion in bullish HTF context: use an uptrending HTF as macro backdrop; wait for RSI to pull back to "
     "50–55 on the LTF before entering long — this avoids chasing overbought conditions and improves R:R. "
-    "(C) Funding-rate fade: when funding is deeply negative (shorts overcrowded, rate < −0.05%) and the HTF is bullish, "
+    "(C) Funding-rate fade: when context.market_signals.funding_archetype_c_eligible is true (funding < −0.05%) and the HTF is bullish, "
     "lean long on any LTF pullback — the overcrowded-shorts squeeze is a well-documented crypto-perps edge. "
+    "Also check context.session_context.hours_until_funding — if funding settlement is imminent (< 2 hours), the squeeze is more acute. "
     "State which archetype you are using in your rationale. "
 )
 
@@ -441,6 +457,12 @@ class PromptBuilder:
         history_section = self._build_history_section(indicators)
         indicator_section = self._build_indicator_section(indicators)
         ltf_candles: list[dict[str, Any]] = history_section.get("candles") or []
+        # 2.1 — change_24h_pct fallback: compute from candle data when the ticker doesn't supply it.
+        if live_section.get("change_24h_pct") is None and len(ltf_candles) >= 2:
+            _first_open = _to_float(ltf_candles[0].get("open"))
+            _last_close = _to_float(ltf_candles[-1].get("close"))
+            if _first_open and _first_open > 0 and _last_close is not None:
+                live_section["change_24h_pct"] = round((_last_close - _first_open) / _first_open * 100, 2)
         market_signals = self._build_market_signals(indicators, live_section, ltf_candles)
         positions_section = self._build_positions_section(snapshot.get("positions") or [])
         account_section = self._build_account_section(snapshot, resolved_symbol)
@@ -635,13 +657,25 @@ class PromptBuilder:
         feedback_digest = self._build_execution_feedback_digest(execution_feedback)
 
         # Session context — helps the model weigh liquidity/volatility expectations
-        _utc_hour = datetime.now(timezone.utc).hour
+        _utc_now = datetime.now(timezone.utc)
+        _utc_hour = _utc_now.hour
         if _utc_hour < 8:
             _active_session = "Asia"
         elif _utc_hour < 16:
             _active_session = "EU"
         else:
             _active_session = "US"
+        # 2.12 — Enrich session context with hours_until_funding.
+        # OKX perpetual funding settlements are at 00:00, 08:00, 16:00 UTC.
+        _funding_hours = [0, 8, 16]
+        _hours_until_funding: float | None = None
+        _current_fractional_hour = _utc_hour + _utc_now.minute / 60.0
+        for fh in _funding_hours:
+            diff = fh - _current_fractional_hour
+            if diff <= 0:
+                diff += 24
+            if _hours_until_funding is None or diff < _hours_until_funding:
+                _hours_until_funding = round(diff, 1)
 
         context = {
             "generated_at": snapshot.get("generated_at"),
@@ -650,6 +684,7 @@ class PromptBuilder:
             "session_context": {
                 "utc_hour": _utc_hour,
                 "active_session": _active_session,
+                "hours_until_funding": _hours_until_funding,
             },
             "market": live_section,
             "history": history_section,
@@ -658,7 +693,6 @@ class PromptBuilder:
             "positions": positions_section,
             "account": account_section,
             "portfolio_exposure": exposure_section,
-            "portfolio_heatmap": exposure_section.get("heatmap"),
             "guardrails": guardrails,
             "trend_confirmation": trend_section,
             "liquidity_context": liquidity_section,
@@ -707,7 +741,9 @@ class PromptBuilder:
             "model": model_id,
             "response_schema": response_schema,
         }
-        return {"prompt": prompt_block, "context": context, "response_schema": response_schema}
+        # 2.5 — response_schema already lives inside prompt_block.response_schema;
+        # avoid duplicating it at the top level to save ~500 tokens per call.
+        return {"prompt": prompt_block, "context": context}
 
     def _resolve_symbol(self, symbol: str | None) -> str:
         if symbol:
@@ -745,7 +781,7 @@ class PromptBuilder:
         ask = _to_float(ticker.get("askPx") or ticker.get("ask1Px"))
         spread = (ask - bid) if ask is not None and bid is not None else None
         spread_pct = _percent(spread, last_price) if spread is not None else None
-        change_24h = _to_float(ticker.get("changeRate") or ticker.get("change24h"))
+        change_24h_pct = _to_float(ticker.get("changeRate") or ticker.get("change24h"))
         volume_24h = _to_float(ticker.get("volCcy24h") or ticker.get("vol24h"))
         funding_rate = _to_float(funding.get("fundingRate"))
         next_funding = funding.get("nextFundingTime") or funding.get("nextFundingRate")
@@ -790,7 +826,7 @@ class PromptBuilder:
             "ask": ask,
             "spread": spread,
             "spread_pct": spread_pct,
-            "change_24h": change_24h,
+            "change_24h_pct": change_24h_pct,
             "volume_24h": volume_24h,
             "funding_rate": funding_rate,
             "next_funding": next_funding,
@@ -917,8 +953,85 @@ class PromptBuilder:
         return "diverging_bullish"
 
     @staticmethod
-    def _compute_cvd_trend(cvd_series: list[Any] | None, n: int = 5) -> str:
+    def _label_confidence(series: list[Any] | None, label: str, n: int = 5) -> str:
+        """Rate how well the **last *n* values** of *series* support *label*.
+
+        Returns ``"strong"``  — last *n* values monotonically support the label.
+        Returns ``"moderate"`` — net direction supports the label but recent bars are noisy.
+        Returns ``"weak"``    — recent values contradict or are flat relative to the label.
+        Returns ``"unknown"`` — insufficient data to judge.
+        """
+        if not series or len(series) < max(n, 3):
+            return "unknown"
+        try:
+            tail = [float(v) for v in series[-n:] if v is not None]
+        except (ValueError, TypeError):
+            return "unknown"
+        if len(tail) < 3:
+            return "unknown"
+
+        net_change = tail[-1] - tail[0]
+        # Determine expected direction from the label.
+        rising_labels = {"rising", "diverging_bullish", "net_positive_rising", "net_negative_recovering"}
+        falling_labels = {"falling", "diverging_bearish", "net_positive_declining", "net_negative_declining"}
+        if label in rising_labels:
+            expected_rising = True
+        elif label in falling_labels:
+            expected_rising = False
+        else:
+            return "unknown"
+
+        net_supports = (net_change > 0) == expected_rising
+        if not net_supports:
+            return "weak"
+
+        # Check monotonicity: how many consecutive bars move in the expected direction?
+        supporting = sum(
+            1 for i in range(1, len(tail))
+            if (tail[i] > tail[i - 1]) == expected_rising
+        )
+        ratio = supporting / (len(tail) - 1)
+        if ratio >= 0.8:
+            return "strong"
+        if ratio >= 0.5:
+            return "moderate"
+        return "weak"
+
+    @staticmethod
+    def _trim_volume_block(volume: dict[str, Any] | None, max_len: int = 50) -> dict[str, Any] | None:
+        """Return a copy of the volume indicator block with its series trimmed.
+
+        The full series from the indicator engine can have ~200 values, but the
+        candle data already provides per-bar volume.  Keep at most *max_len*
+        values for Volume RSI spot-checks and save tokens.
+        """
+        if not volume or not isinstance(volume, dict):
+            return volume
+        out = dict(volume)
+        raw = out.get("series")
+        if isinstance(raw, list) and len(raw) > max_len:
+            out["series"] = raw[-max_len:]
+        return out
+
+    @staticmethod
+    def _strip_volume_series(volume: dict[str, Any] | None) -> dict[str, Any] | None:
+        """Return volume block without the ``series`` key.
+
+        Candle data already contains per-bar volume and Volume RSI lives in
+        ``history.volume_rsi_series``, so the raw series is redundant.  Keeping
+        only ``last`` and ``average`` saves ~200 tokens per call.
+        """
+        if not volume or not isinstance(volume, dict):
+            return volume
+        return {k: v for k, v in volume.items() if k != "series"}
+
+    @staticmethod
+    def _compute_cvd_trend(cvd_series: list[Any] | None, n: int = 10) -> str:
         """Summarize recent CVD direction and momentum slope.
+
+        Uses the last *n* values (default 10) to determine the directional
+        qualifier.  A wider recent window (10-15) avoids false "recovering"
+        labels when a brief mid-series bounce is followed by resumed decline.
 
         Returns compound labels that describe both the net direction and whether
         it is accelerating or reversing, e.g.:
@@ -938,8 +1051,11 @@ class PromptBuilder:
         if len(tail) < 2:
             return "unknown"
         net_change = tail[-1] - tail[0]
-        # Recent slope: last period vs preceding period.
-        recent_slope = tail[-1] - tail[-2] if len(tail) >= 2 else 0.0
+        # Recent slope: average of last 3 periods to smooth single-bar noise.
+        if len(tail) >= 4:
+            recent_slope = sum(tail[-i] - tail[-i - 1] for i in range(1, min(4, len(tail)))) / min(3, len(tail) - 1)
+        else:
+            recent_slope = tail[-1] - tail[-2]
         # Noise floor: require at least 1% of the first-period absolute value to avoid
         # labelling de-minimis moves.
         abs_threshold = max(abs(tail[0]) * 0.01, 1e-9)
@@ -1070,12 +1186,24 @@ class PromptBuilder:
         swing_highs, swing_lows = self._compute_swing_pivots(candles)
         swing_highs_htf, swing_lows_htf = self._compute_swing_pivots(htf_candles, n_pivots=3, window=3)
         obv_trend = self._compute_obv_trend(obv_series, candles)
+        # 2.2 — Add label_confidence so the model doesn't have to parse 15 numbers.
+        obv_trend_confidence = self._label_confidence(obv_series, obv_trend, n=5)
         cvd_trend = self._compute_cvd_trend(cvd_series)
+        cvd_trend_confidence = self._label_confidence(
+            cvd_series, cvd_trend, n=10
+        ) if cvd_series else "unknown"
         price_vs_vwap = self._compute_price_vs_vwap(last_price, vwap)
         rsi_zone = self._compute_rsi_zone(rsi)
         market_regime = self._compute_market_regime(
             adx_value, di_plus, di_minus, last_price, vwap, obv_series
         )
+
+        # 2.10 — Pre-flag Archetype C eligibility so the model doesn't have to
+        # compare funding rate against the −0.05% threshold itself.
+        funding_rate = _to_float(live_section.get("funding_rate"))
+        funding_archetype_c = False
+        if funding_rate is not None and funding_rate < -0.0005:  # −0.05%
+            funding_archetype_c = True
 
         return {
             "swing_high_ltf": swing_highs or None,
@@ -1083,10 +1211,13 @@ class PromptBuilder:
             "swing_high_htf": swing_highs_htf or None,
             "swing_low_htf": swing_lows_htf or None,
             "obv_trend": obv_trend,
+            "obv_trend_confidence": obv_trend_confidence,
             "cvd_trend": cvd_trend,
+            "cvd_trend_confidence": cvd_trend_confidence,
             "price_vs_vwap": price_vs_vwap,
             "rsi_zone": rsi_zone,
             "market_regime": market_regime,
+            "funding_archetype_c_eligible": funding_archetype_c,
         }
 
     def _build_history_section(self, indicators: dict[str, Any]) -> dict[str, Any]:
@@ -1161,7 +1292,10 @@ class PromptBuilder:
             "vwap": indicators.get("vwap"),
             "atr": indicators.get("atr"),
             "atr_pct": indicators.get("atr_pct"),
-            "volume": indicators.get("volume"),
+            # volume.series removed — candle data already contains per-bar
+            # volume and Volume RSI is in history.volume_rsi_series.  Keep only
+            # the scalar summaries (last, average) to save ~200 tokens.
+            "volume": self._strip_volume_series(indicators.get("volume")),
             "htf": self._build_htf_indicator_section(indicators),
         }
 
@@ -1243,6 +1377,14 @@ class PromptBuilder:
             summary_bits.append(f"EMA stack {ema_bias}")
         if price_vs_ema != "unknown":
             summary_bits.append(f"price {price_vs_ema} EMA50")
+        # Flag LTF/HTF directional conflict when short-term momentum (DI direction
+        # or price vs EMA50) diverges from longer-term EMA structure.
+        _di_bullish = (di_state == "+DI dominance")
+        _di_bearish = (di_state == "-DI dominance")
+        _ltf_bullish = _di_bullish or price_vs_ema == "above"
+        _ltf_bearish = _di_bearish or price_vs_ema == "below"
+        if (_ltf_bullish and ema_bias == "bearish") or (_ltf_bearish and ema_bias == "bullish"):
+            summary_bits.append("LTF/HTF directional conflict")
         summary = ", ".join(summary_bits) or "Trend signals unavailable"
 
         return {
@@ -1302,7 +1444,11 @@ class PromptBuilder:
             imbalance_value = _to_float(imbalance_raw.get("net"))
         else:
             imbalance_value = _to_float(imbalance_raw)
-        if imbalance_value is None:
+        # 2.4 — When depth data is stale/null, the imbalance value is meaningless.
+        # Mark liquidity_bias as "unreliable" so the model doesn't reason from bad data.
+        if bid_depth is None or ask_depth is None:
+            liquidity_bias = "unreliable"
+        elif imbalance_value is None:
             liquidity_bias = "balanced"
         elif imbalance_value > 0:
             liquidity_bias = "bid-supported"
@@ -1347,6 +1493,8 @@ class PromptBuilder:
         current_rate = _to_float(funding.get("fundingRate") or funding.get("fundRate"))
         next_rate = _to_float(funding.get("nextFundingRate"))
         previous_rate = _to_float(funding.get("prevFundingRate") or funding.get("fundingRatePrev"))
+        # 2.10 — Pre-flag Archetype C eligibility (funding < −0.05%).
+        funding_archetype_c = bool(current_rate is not None and current_rate < -0.0005)
         funding_delta = None
         if current_rate is not None and next_rate is not None:
             funding_delta = next_rate - current_rate
@@ -1410,6 +1558,7 @@ class PromptBuilder:
             "long_short_ratio": long_short,
             "liquidation_clusters": liquidation_clusters,
             "summary": ", ".join(summary_bits),
+            "funding_archetype_c_eligible": funding_archetype_c,
         }
 
     def _summarize_liquidations(self, liquidations: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1647,13 +1796,17 @@ class PromptBuilder:
         used = _to_float(usage.get("used"))
         if remaining is None and granted is None and used is None:
             return None
-        return {
+        result: dict[str, Any] = {
             "remaining": remaining,
             "granted": granted,
             "used": used,
             "currency": usage.get("currency") or "USD",
             "resets_at": usage.get("resets_at"),
         }
+        # Flag when credit is running low so the model can apply credit conservation.
+        if remaining is not None and granted is not None and granted > 0:
+            result["low_credit_warning"] = remaining < (granted * 0.10)
+        return result
 
     def _build_margin_health_section(self, execution_settings: dict[str, Any]) -> dict[str, Any] | None:
         if not execution_settings:

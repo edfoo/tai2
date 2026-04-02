@@ -358,10 +358,10 @@ def test_llm_prompt_endpoint_uses_builder(monkeypatch) -> None:
     assert recorded["symbol"] == "BTC-USDT-SWAP"
     assert recorded["timeframe"] == "4H"
     # confidence and risk_score should always be in schema (execution layer uses them for sizing)
-    assert "confidence" in body["payload"]["response_schema"]["properties"]
-    assert "risk_score" in body["payload"]["response_schema"]["properties"]
+    assert "confidence" in body["payload"]["prompt"]["response_schema"]["properties"]
+    assert "risk_score" in body["payload"]["prompt"]["response_schema"]["properties"]
     # notional_usd is no longer in the schema — execution layer owns the arithmetic
-    assert "notional_usd" not in body["payload"]["response_schema"]["properties"]
+    assert "notional_usd" not in body["payload"]["prompt"]["response_schema"]["properties"]
 
 
 def test_llm_prompt_endpoint_blocks_stale_snapshot() -> None:
