@@ -28,6 +28,7 @@ from app.db.postgres import (
     save_okx_sub_account,
     save_poll_interval,
     save_screener_config,
+    save_strategy_config,
     save_ta_timeframe,
     save_frontend_timezone,
     set_enabled_trading_pairs,
@@ -52,7 +53,7 @@ from app.ui.components import SnapshotStore, badge_stat
 NAV_LINKS = [
     ("LIVE", "/live"),
     ("TA", "/ta"),
-    ("ENGINE", "/engine"),
+    ("STRATEGY", "/strategy"),
     ("HISTORY", "/history"),
     ("DEBUG", "/debug"),
     ("PROMPT", "/prompt"),
@@ -2481,6 +2482,66 @@ def register_pages(app: FastAPI) -> None:
 
         symbol_select.on_value_change(on_symbol_change)
 
+    def render_strategy_page() -> None:
+        navigation("STRATEGY")
+        wrapper = page_container()
+        config = getattr(app.state, "runtime_config", {}) or {}
+        strategy = config.setdefault("strategy", {})
+        skimming = strategy.setdefault("skimming", {"enabled": False, "threshold_pct": 2.0})
+
+        with wrapper:
+            ui.label("Strategy").classes("text-2xl font-bold")
+            ui.label(
+                "Configure automated trading strategies that run independently of LLM decisions."
+            ).classes("text-sm text-slate-500 mb-2")
+            ui.separator().classes("w-full my-2")
+
+            with ui.card().classes("w-full rounded-lg border border-slate-200 mb-1"):
+                with ui.row().classes("w-full items-center gap-2 flex-nowrap"):
+                    skimming_switch = ui.switch(
+                        value=bool(skimming.get("enabled", False)),
+                    ).props("dense color=primary")
+                    with ui.expansion("Skimming").classes("flex-1 text-sm font-medium"):
+                        ui.label(
+                            "Automatically close a position at market price as soon as its "
+                            "unrealized PnL reaches the configured percentage in profit. "
+                            "Positions in loss are never closed by this strategy."
+                        ).classes("text-xs text-slate-500 mb-3")
+                        threshold_input = ui.number(
+                            label="Take Profit at (% PnL)",
+                            value=float(skimming.get("threshold_pct") or 2.0),
+                            min=0.01,
+                            step=0.1,
+                            precision=2,
+                        ).classes("w-48").props(
+                            "hint='Close position when unrealised PnL reaches this %' persistent-hint"
+                        )
+                    _active_badge = ui.badge("Active", color="positive").bind_visibility_from(
+                        skimming_switch, "value"
+                    )
+
+            ui.separator().classes("w-full my-4")
+            save_button = ui.button("Save", icon="save")
+
+        async def save_strategy_settings(event: Any | None = None) -> None:
+            updated_strategy = {
+                "skimming": {
+                    "enabled": bool(skimming_switch.value),
+                    "threshold_pct": float(threshold_input.value or 2.0),
+                }
+            }
+            config["strategy"] = updated_strategy
+            try:
+                await save_strategy_config(updated_strategy)
+            except Exception as exc:  # pragma: no cover - optional DB
+                ui.notify(f"Failed to persist strategy config: {exc}", color="warning")
+            market_service = getattr(app.state, "market_service", None)
+            if market_service:
+                market_service.set_strategy_config(updated_strategy)
+            ui.notify("Strategy settings saved", color="positive")
+
+        save_button.on("click", save_strategy_settings)
+
     def render_engine_page() -> None:
         navigation("ENGINE")
         wrapper = page_container()
@@ -4625,9 +4686,13 @@ def register_pages(app: FastAPI) -> None:
     def ta() -> None:
         render_ta_page()
 
+    @ui.page("/strategy")
+    def strategy() -> None:
+        render_strategy_page()
+
     @ui.page("/engine")
     def engine() -> None:
-        render_engine_page()
+        render_strategy_page()
 
     @ui.page("/history")
     def history() -> None:

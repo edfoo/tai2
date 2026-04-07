@@ -22,6 +22,7 @@ from app.db.postgres import (
     init_postgres_pool,
     load_guardrails,
     load_screener_config,
+    load_strategy_config,
     load_ta_timeframe,
     load_llm_model,
     load_execution_settings,
@@ -378,6 +379,13 @@ def _create_lifespan(enable_background_services: bool):
                 else:
                     if stored_screener:
                         app.state.runtime_config["screener"] = stored_screener
+                try:
+                    stored_strategy = await load_strategy_config()
+                except Exception as exc:  # pragma: no cover - optional
+                    logger.error("Failed to load strategy config: %s", exc)
+                else:
+                    if stored_strategy:
+                        app.state.runtime_config["strategy"] = stored_strategy
         elif not enable_background_services:
             logger.info("Background DB init disabled; skipping Postgres init")
         else:
@@ -426,6 +434,10 @@ def _create_lifespan(enable_background_services: bool):
                 stored_pi = app.state.runtime_config.get("poll_interval")
                 if stored_pi and stored_pi != market_service._poll_interval:
                     market_service.set_poll_interval(int(stored_pi))
+                # Apply any persisted strategy config (e.g. skimming)
+                stored_strategy = app.state.runtime_config.get("strategy") or {}
+                if stored_strategy:
+                    market_service.set_strategy_config(stored_strategy)
                 scheduler = PromptScheduler(
                     app,
                     default_interval=app.state.runtime_config.get("auto_prompt_interval", 300),

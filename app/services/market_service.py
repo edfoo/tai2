@@ -260,6 +260,8 @@ class MarketService:
         # automatically after BOOTSTRAP_BLOCK_SECONDS so the bot can retry later.
         self._bootstrap_blocked: dict[str, float] = {}
         self._wake_poll: asyncio.Event = asyncio.Event()
+        self._strategy_config: dict[str, Any] = {}
+        self._skimming_triggered: set[str] = set()
 
     async def start(self) -> None:
         """Launch the market snapshot poller and websocket consumers if not already running."""
@@ -994,6 +996,128 @@ class MarketService:
                 f"Hydrated {restored_protection} TP/SL entries and {restored_activity} last-trade marks from cached snapshot"
             )
 
+    def set_strategy_config(self, config: dict[str, Any]) -> None:
+        """Apply an updated strategy configuration (e.g. skimming settings)."""
+        self._strategy_config = config or {}
+        self._emit_debug(f"Strategy config updated: {self._strategy_config}")
+
+    async def _check_skimming(self) -> None:
+        """Close any open position whose unrealised PnL ratio meets the skimming threshold.
+
+        Reads positions from the in-memory snapshot that _patch_and_publish_snapshot() just
+        wrote (mirrors Redis) — no extra REST or WS fetch is needed.
+        """
+        skimming = self._strategy_config.get("skimming") or {}
+        if not skimming.get("enabled"):
+            self._emit_debug("Skimming: disabled — skipping check")
+            return
+        threshold = self._extract_float(skimming.get("threshold_pct"))
+        if threshold is None or threshold <= 0:
+            self._emit_debug(f"Skimming: invalid threshold ({skimming.get('threshold_pct')!r}) — skipping")
+            return
+        threshold_ratio = threshold / 100.0
+        snapshot = self._last_full_snapshot
+        if not snapshot:
+            self._emit_debug("Skimming: no snapshot available yet — skipping")
+            return
+        positions: list[dict[str, Any]] = snapshot.get("positions") or []
+        if not positions:
+            self._emit_debug("Skimming: snapshot has no open positions")
+            return
+        # Remove closed positions from the triggered guard set.
+        active_symbols = {str(p.get("instId", "")).upper() for p in positions if isinstance(p, dict)}
+        self._skimming_triggered &= active_symbols
+        self._emit_debug(
+            f"Skimming: checking {len(positions)} position(s), threshold={threshold:.2f}% "
+            f"({threshold_ratio:.4f}), already-triggered={self._skimming_triggered or 'none'}"
+        )
+        for pos in positions:
+            if not isinstance(pos, dict):
+                continue
+            symbol = str(pos.get("instId", "")).upper()
+            if not symbol:
+                self._emit_debug("Skimming: skipping position with no instId")
+                continue
+            if symbol in self._skimming_triggered:
+                self._emit_debug(f"Skimming: {symbol} — already triggered, awaiting close confirmation")
+                continue
+            upl_ratio = self._extract_float(pos.get("uplRatio"))
+            pos_val = self._extract_float(pos.get("pos"))
+            self._emit_debug(
+                f"Skimming: {symbol} uplRatio={upl_ratio!r} ({(upl_ratio * 100) if upl_ratio is not None else 'n/a'}%), "
+                f"threshold={threshold:.2f}%, pos={pos_val!r}, "
+                f"mgnMode={pos.get('mgnMode')!r}, posSide={pos.get('posSide')!r}"
+            )
+            if upl_ratio is None:
+                self._emit_debug(f"Skimming: {symbol} — uplRatio missing from position data, cannot evaluate")
+                continue
+            if upl_ratio < threshold_ratio:
+                self._emit_debug(
+                    f"Skimming: {symbol} — uplRatio {upl_ratio:.4%} below threshold {threshold_ratio:.4%}, no action"
+                )
+                continue
+            if not pos_val or pos_val == 0:
+                self._emit_debug(f"Skimming: {symbol} — position size is zero or missing, skipping")
+                continue
+            pos_side = str(pos.get("posSide", "")).lower()
+            trade_mode = str(pos.get("mgnMode") or "").lower() or None
+            if pos_side in ("long",):
+                close_side, effective_pos_side = "sell", "long"
+            elif pos_side in ("short",):
+                close_side, effective_pos_side = "buy", "short"
+            else:  # "net" or unset — determine direction from sign of pos
+                close_side = "sell" if pos_val > 0 else "buy"
+                effective_pos_side = None
+            contracts = abs(pos_val)
+            self._skimming_triggered.add(symbol)
+            self._emit_debug(
+                f"Skimming triggered: {symbol} uplRatio={upl_ratio:.4%} >= threshold={threshold_ratio:.4%}; "
+                f"submitting {close_side} close, contracts={contracts}, posSide={effective_pos_side!r}, tdMode={trade_mode!r}"
+            )
+            asyncio.create_task(
+                self._skim_close_position(symbol, close_side, effective_pos_side, contracts, trade_mode),
+                name=f"skim-close-{symbol}",
+            )
+
+    async def _skim_close_position(
+        self,
+        symbol: str,
+        close_side: str,
+        pos_side: str | None,
+        contracts: float,
+        trade_mode: str | None,
+    ) -> None:
+        """Submit a market reduce-only order to close a position that hit the skimming threshold."""
+        coid = self._generate_client_order_id("skim")
+        # Honor the margin mode of the position itself (isolated or cross). OKX requires the
+        # close order tdMode to match the open position.  Fall back to "cross" only if absent.
+        resolved_trade_mode = trade_mode or "cross"
+        try:
+            result = await self._submit_order(
+                symbol=symbol,
+                side=close_side,
+                pos_side=pos_side,
+                size=contracts,
+                trade_mode=resolved_trade_mode,
+                order_type="market",
+                reduce_only=True,
+                client_order_id=coid,
+                attach_algo_orders=None,
+            )
+            if result is None:
+                self._emit_debug(f"Skimming: {symbol} — trade API unavailable, will retry")
+                self._skimming_triggered.discard(symbol)
+                return
+            order_result = result[0] if isinstance(result, tuple) else result
+            if order_result:
+                self._emit_debug(f"Skimming: {symbol} close order accepted")
+            else:
+                self._emit_debug(f"Skimming: {symbol} close order rejected, will retry")
+                self._skimming_triggered.discard(symbol)
+        except Exception as exc:
+            logger.warning("Skimming close order error for %s: %s", symbol, exc)
+            self._skimming_triggered.discard(symbol)
+
     def set_poll_interval(self, seconds: int) -> None:
         """Update the REST polling cadence and matching websocket debug interval."""
         self._poll_interval = max(1, seconds)
@@ -1231,6 +1355,7 @@ class MarketService:
         snapshot = await self._build_snapshot()
         if not snapshot:
             return None
+        self._last_full_snapshot = snapshot
         await self.state_service.set_market_snapshot(snapshot)
         await self._persist_equity(snapshot)
         ticker = snapshot.get("ticker") or {}
@@ -1368,6 +1493,12 @@ class MarketService:
                 raise
             except Exception as exc:  # pragma: no cover - best-effort
                 logger.debug("Positions fast-refresh error: %s", exc)
+            try:
+                await self._check_skimming()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # pragma: no cover - best-effort
+                logger.debug("Skimming check error: %s", exc)
             await asyncio.sleep(self._positions_refresh_interval)
 
     async def _schedule_patch_publish(self) -> None:

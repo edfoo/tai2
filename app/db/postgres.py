@@ -848,6 +848,37 @@ async def load_execution_settings() -> dict[str, Any]:
     return result
 
 
+async def save_strategy_config(config: dict[str, Any]) -> None:
+    pool = await get_postgres_pool()
+    payload = json.dumps(config or {})
+    await pool.execute(
+        """
+        INSERT INTO runtime_settings (key, value, updated_at)
+        VALUES ('strategy_config', $1::jsonb, NOW())
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+        """,
+        payload,
+    )
+
+
+async def load_strategy_config() -> dict[str, Any]:
+    pool = await get_postgres_pool()
+    row = await pool.fetchrow("SELECT value FROM runtime_settings WHERE key = 'strategy_config'")
+    if not row:
+        return {}
+    value = row["value"]
+    if isinstance(value, str):
+        try:
+            parsed: Any = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+    else:
+        parsed = value
+    if isinstance(parsed, dict):
+        return parsed
+    return {}
+
+
 async def save_poll_interval(interval_seconds: int) -> None:
     pool = await get_postgres_pool()
     try:
