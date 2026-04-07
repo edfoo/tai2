@@ -26,6 +26,7 @@ from app.db.postgres import (
     save_prompt_interval,
     save_llm_model,
     save_okx_sub_account,
+    save_poll_interval,
     save_screener_config,
     save_ta_timeframe,
     save_frontend_timezone,
@@ -160,9 +161,12 @@ def register_pages(app: FastAPI) -> None:
         return format_display_datetime(datetime.now(timezone.utc), fmt=fmt)
 
     def get_refresh_interval() -> float:
-        config = getattr(app.state, "runtime_config", {}) or {}
-        interval = config.get("poll_interval", 10)
-        return max(3.0, float(interval) / 2.0)
+        # The UI refresh interval is how often the page polls Redis for a fresh
+        # snapshot — a cheap local operation.  It is intentionally decoupled from
+        # poll_interval (how often the backend does an expensive REST round-trip).
+        # A short fixed interval keeps the LIVE page responsive to private-WS
+        # patches (positions/equity) that arrive within ~300 ms of an OKX event.
+        return 3.0
 
     def _parse_timestamp(raw: str | None) -> datetime | None:
         if not raw:
@@ -4350,7 +4354,7 @@ def register_pages(app: FastAPI) -> None:
         model_select.on_value_change(on_model_change)
 
         async def save_settings(event: Any | None = None) -> None:
-            config["poll_interval"] = int(ws_interval_input.value or 5)
+            config["poll_interval"] = int(ws_interval_input.value or 180)
             config["enable_websocket"] = bool(websocket_switch.value)
             config["auto_prompt_enabled"] = bool(auto_prompt_switch.value)
             config["execution_enabled"] = bool(execution_switch.value)
@@ -4373,6 +4377,10 @@ def register_pages(app: FastAPI) -> None:
                 or DEFAULT_FRONTEND_TIMEZONE
             )
             config["frontend_timezone"] = timezone_value
+            try:
+                await save_poll_interval(config["poll_interval"])
+            except Exception as exc:  # pragma: no cover - optional DB
+                ui.notify(f"Failed to persist poll interval: {exc}", color="warning")
             try:
                 await save_frontend_timezone(timezone_value)
             except Exception as exc:  # pragma: no cover - optional DB

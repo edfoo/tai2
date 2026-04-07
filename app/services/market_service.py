@@ -71,6 +71,7 @@ try:  # pragma: no cover - import guarded for optional dependency
     import okx.TradingData as OkxTrading
     import okx.Funding as OkxFunding
     from okx.websocket.WsPublicAsync import WsPublicAsync
+    from okx.websocket.WsPrivateAsync import WsPrivateAsync
 except ImportError:  # pragma: no cover
     OkxAccount = None
     OkxTrade = None
@@ -79,6 +80,7 @@ except ImportError:  # pragma: no cover
     OkxTrading = None
     OkxFunding = None
     WsPublicAsync = None
+    WsPrivateAsync = None
 
 if WsPublicAsync is not None:  # pragma: no cover - exercised only when dependency installed
     class SafeWsPublicAsync(WsPublicAsync):
@@ -92,13 +94,29 @@ if WsPublicAsync is not None:  # pragma: no cover - exercised only when dependen
                     logger.debug("Websocket close failed", exc_info=True)
             # intentionally avoid stopping the global event loop
 
+    class SafeWsPrivateAsync(WsPrivateAsync):  # type: ignore[misc]
+        """WsPrivateAsync subclass that never stops the shared event loop on close."""
+
+        async def stop(self) -> None:  # type: ignore[override]
+            if getattr(self, "factory", None) is not None:
+                await self.factory.close()
+            if getattr(self, "websocket", None):
+                try:
+                    await self.websocket.close()
+                except Exception:
+                    logger.debug("Private WS close failed", exc_info=True)
+            # intentionally avoid stopping the global event loop
+
 
 else:  # pragma: no cover - optional dependency
     SafeWsPublicAsync = None
+    SafeWsPrivateAsync = None
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 PUBLIC_WS_URL = "wss://ws.okx.com:8443/ws/v5/public"
+PRIVATE_WS_URL_LIVE = "wss://ws.okx.com:8443/ws/v5/private"
+PRIVATE_WS_URL_DEMO = "wss://wspap.okx.com:8443/ws/v5/private?brokerId=9999"
 STABLE_CURRENCIES = {"USD", "USDT", "USDC", "USDK", "DAI"}
 FUNDING_ACCOUNT_TYPE = "6"
 TRADING_ACCOUNT_TYPE = "18"
@@ -186,6 +204,14 @@ class MarketService:
         self._poller_task: Optional[asyncio.Task] = None
         self._ws_task: Optional[asyncio.Task] = None
         self._ws_client: Optional[WsPublicAsync] = None
+        self._ws_private_task: Optional[asyncio.Task] = None
+        self._ws_private_client: Any = None  # SafeWsPrivateAsync when connected
+        self._latest_positions_raw: list[dict[str, Any]] | None = None
+        self._latest_account_raw: list[Any] | None = None
+        # Last full snapshot; used by _patch_and_publish_snapshot to avoid a
+        # full REST round-trip when the private WS delivers fresh account/position data.
+        self._last_full_snapshot: dict[str, Any] | None = None
+        self._private_ws_patch_pending: bool = False
         self._latest_order_book: dict[str, dict[str, Any]] = {}
         self._latest_depth_metrics: dict[str, list[float]] = {}
         self._latest_ticker: dict[str, dict[str, Any]] = {}
@@ -223,6 +249,8 @@ class MarketService:
         self._screener_last_run: float = 0.0
         self._screener_selected_symbols: list[str] = []
         self._reconcile_task: Optional[asyncio.Task] = None
+        self._positions_refresh_task: Optional[asyncio.Task] = None
+        self._positions_refresh_interval: int = 10  # seconds between fast position/equity refreshes
         # Notional (USD) reserved for in-flight orders, keyed by symbol.
         # Concurrent handle_llm_decision coroutines deduct these before sizing
         # so they never collectively over-commit the same USDT pool.
@@ -231,6 +259,7 @@ class MarketService:
         # 51008 retries.  Mapped to the epoch time the block was set.  Cleared
         # automatically after BOOTSTRAP_BLOCK_SECONDS so the bot can retry later.
         self._bootstrap_blocked: dict[str, float] = {}
+        self._wake_poll: asyncio.Event = asyncio.Event()
 
     async def start(self) -> None:
         """Launch the market snapshot poller and websocket consumers if not already running."""
@@ -239,7 +268,11 @@ class MarketService:
         await self._hydrate_cached_annotations()
         if self._enable_websocket:
             self._ws_task = asyncio.create_task(self._run_public_ws(), name="okx-ws")
+            self._ws_private_task = asyncio.create_task(self._run_private_ws(), name="okx-ws-private")
         self._poller_task = asyncio.create_task(self._poll_loop(), name="okx-market-poller")
+        self._positions_refresh_task = asyncio.create_task(
+            self._positions_refresh_loop(), name="okx-positions-refresh"
+        )
         logger.info("MarketService started for %s", ", ".join(self.symbols))
 
     async def stop(self) -> None:
@@ -263,6 +296,19 @@ class MarketService:
             await self._ws_client.stop()
             self._ws_client = None
             self._subscribed_symbols.clear()
+        if self._ws_private_task:
+            self._ws_private_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._ws_private_task
+            self._ws_private_task = None
+        if self._ws_private_client:
+            await self._ws_private_client.stop()
+            self._ws_private_client = None
+        if self._positions_refresh_task:
+            self._positions_refresh_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._positions_refresh_task
+            self._positions_refresh_task = None
         logger.info("MarketService stopped for %s", ", ".join(self.symbols))
 
     async def _poll_loop(self) -> None:
@@ -286,7 +332,13 @@ class MarketService:
                     raise
                 except Exception as exc:  # pragma: no cover - best-effort
                     logger.warning("Fill reconciliation error: %s", exc)
-            await asyncio.sleep(interval)
+            # Sleep for the configured interval, but allow set_poll_interval() to
+            # interrupt the wait immediately so the new cadence kicks in right away.
+            try:
+                await asyncio.wait_for(self._wake_poll.wait(), timeout=interval)
+                self._wake_poll.clear()
+            except asyncio.TimeoutError:
+                pass
 
     async def _run_public_ws(self) -> None:
         """Subscribe to public OKX feeds and stream updates into the in-memory caches."""
@@ -305,6 +357,113 @@ class MarketService:
             await self._ws_client.stop()
             self._ws_client = None
             self._subscribed_symbols.clear()
+
+    async def _run_private_ws(self) -> None:
+        """Authenticate and subscribe to private OKX feeds (account, positions)."""
+        WsPrivateClass = SafeWsPrivateAsync if SafeWsPrivateAsync is not None else None  # type: ignore[name-defined]
+        if WsPrivateClass is None:
+            logger.warning("WsPrivateAsync not available; private WS stream disabled")
+            return
+        if not (
+            self.settings.okx_api_key
+            and self.settings.okx_secret_key
+            and self.settings.okx_passphrase
+        ):
+            logger.warning("OKX credentials missing; private WS stream disabled")
+            return
+        url = PRIVATE_WS_URL_DEMO if str(self._okx_flag) == "1" else PRIVATE_WS_URL_LIVE
+        logger.info("Private WS connecting to %s", url)
+        self._ws_private_client = WsPrivateClass(
+            apiKey=self.settings.okx_api_key,
+            passphrase=self.settings.okx_passphrase,
+            secretKey=self.settings.okx_secret_key,
+            url=url,
+            useServerTime=False,
+        )
+        await self._ws_private_client.connect()
+        channels = [
+            {"channel": "account"},
+            {"channel": "positions", "instType": "SWAP"},
+        ]
+        # subscribe() performs login + 5 s wait + channel subscription internally
+        await self._ws_private_client.subscribe(channels, self._handle_private_ws_message)
+        try:
+            await self._ws_private_client.consume()
+        finally:  # pragma: no cover - network resource cleanup
+            await self._ws_private_client.stop()
+            self._ws_private_client = None
+            # Clear caches so the next poll falls back to REST
+            self._latest_positions_raw = None
+            self._latest_account_raw = None
+
+    def _handle_private_ws_message(self, message: Any) -> None:
+        """Route private WS frames into positions and account balance caches."""
+        if isinstance(message, (bytes, bytearray)):
+            try:
+                message = message.decode()
+            except Exception:  # pragma: no cover - defensive decoding
+                return
+        if isinstance(message, str):
+            try:
+                message = json.loads(message)
+            except json.JSONDecodeError:
+                return
+        if not isinstance(message, dict):
+            return
+        # Skip control frames: login acknowledgements, subscribe confirmations, pings.
+        if message.get("event"):
+            return
+        arg = message.get("arg") or {}
+        channel = arg.get("channel")
+        action = message.get("action", "snapshot")
+        data = message.get("data") or []
+        if channel == "positions" and isinstance(data, list):
+            if action == "snapshot":
+                # Full replacement — OKX sends a complete list on subscribe
+                self._latest_positions_raw = list(data)
+            elif action == "update":
+                if self._latest_positions_raw is None:
+                    self._latest_positions_raw = list(data)
+                else:
+                    # Upsert by (instId, posSide); remove positions where pos == "0"
+                    key_to_idx: dict[tuple[str, str], int] = {
+                        (str(p.get("instId", "")), str(p.get("posSide", ""))): i
+                        for i, p in enumerate(self._latest_positions_raw)
+                        if isinstance(p, dict)
+                    }
+                    updated: list[dict[str, Any] | None] = list(self._latest_positions_raw)  # type: ignore[assignment]
+                    for entry in data:
+                        if not isinstance(entry, dict):
+                            continue
+                        k = (str(entry.get("instId", "")), str(entry.get("posSide", "")))
+                        pos_val = self._extract_float(entry.get("pos"))
+                        if pos_val is not None and pos_val == 0:
+                            # Position closed — purge from cache
+                            if k in key_to_idx:
+                                updated[key_to_idx[k]] = None
+                        elif k in key_to_idx:
+                            updated[key_to_idx[k]] = entry
+                        else:
+                            updated.append(entry)
+                    self._latest_positions_raw = [p for p in updated if p is not None]  # type: ignore[misc]
+            self._emit_debug(
+                f"Private WS: positions cache updated ({len(self._latest_positions_raw)} records)",
+                mirror_logger=False,
+            )
+            if not self._private_ws_patch_pending:
+                self._private_ws_patch_pending = True
+                asyncio.create_task(
+                    self._schedule_patch_publish(), name="okx-ws-private-patch"
+                )
+        elif channel == "account" and isinstance(data, list) and data:
+            # Account channel always delivers a full snapshot of the top-level account
+            self._latest_account_raw = list(data)
+            self._emit_debug("Private WS: account balance cache updated", mirror_logger=False)
+            if not self._private_ws_patch_pending:
+                self._private_ws_patch_pending = True
+                asyncio.create_task(
+                    self._schedule_patch_publish(), name="okx-ws-private-patch"
+                )
 
     def _handle_ws_message(self, message: Any) -> None:
         """Route websocket frames into ticker/order book/liquidation caches for active symbols."""
@@ -840,6 +999,7 @@ class MarketService:
         self._poll_interval = max(1, seconds)
         self._ws_debug_interval = max(5.0, float(self._poll_interval))
         self._emit_debug(f"Poll interval updated to {self._poll_interval}s")
+        self._wake_poll.set()  # interrupt the current sleep so the new interval takes effect immediately
 
     def set_wait_for_tp_sl(self, enabled: bool) -> None:
         """Toggle the guardrail that delays new entries until TP/SL anchors exist."""
@@ -1029,6 +1189,16 @@ class MarketService:
                 await self._ws_client.stop()
                 self._ws_client = None
             self._subscribed_symbols.clear()
+            if self._ws_private_task:
+                self._ws_private_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._ws_private_task
+                self._ws_private_task = None
+            if self._ws_private_client:
+                await self._ws_private_client.stop()
+                self._ws_private_client = None
+            self._latest_positions_raw = None
+            self._latest_account_raw = None
             return
         self._emit_debug("Websocket streaming enabled; starting listener")
         if not self._poller_task:
@@ -1036,6 +1206,8 @@ class MarketService:
         if self._ws_task:
             return
         self._ws_task = asyncio.create_task(self._run_public_ws(), name="okx-ws")
+        if not self._ws_private_task or self._ws_private_task.done():
+            self._ws_private_task = asyncio.create_task(self._run_private_ws(), name="okx-ws-private")
 
     async def set_sub_account(self, value: str | None, use_master: bool | None = None) -> None:
         """Update the sub-account routing preferences and publish a fresh snapshot."""
@@ -1176,8 +1348,86 @@ class MarketService:
             logger.error("Failed to publish snapshot: %s", exc)
             return
         if snapshot:
+            self._last_full_snapshot = snapshot
             await self.state_service.set_market_snapshot(snapshot)
             await self._persist_equity(snapshot)
+
+    async def _positions_refresh_loop(self) -> None:
+        """Lightweight loop that refreshes positions, equity and ticker prices every few seconds.
+
+        This runs independently of both the 180-second full poll and the private WS
+        event callbacks, providing a reliable heartbeat so the LIVE page always shows
+        fresh data even when WebSocket events are sparse.
+        """
+        # Wait for the first full snapshot before starting to patch.
+        await asyncio.sleep(self._positions_refresh_interval)
+        while True:
+            try:
+                await self._patch_and_publish_snapshot()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # pragma: no cover - best-effort
+                logger.debug("Positions fast-refresh error: %s", exc)
+            await asyncio.sleep(self._positions_refresh_interval)
+
+    async def _schedule_patch_publish(self) -> None:
+        """Debounce helper: coalesce rapid private-WS frames before patching Redis."""
+        await asyncio.sleep(0.3)
+        await self._patch_and_publish_snapshot()
+
+    async def _patch_and_publish_snapshot(self) -> None:
+        """Republish the cached snapshot with fresh positions/account from the private WS.
+
+        This is a lightweight path that avoids a full REST round-trip for OHLCV,
+        indicators, and other market data.  It only replaces the fields that the
+        private WS channel owns: positions, account balance, and equity figures.
+        """
+        self._private_ws_patch_pending = False
+        snapshot = self._last_full_snapshot
+        if not snapshot:
+            # No baseline yet — wait for the first full poll to run.
+            return
+        try:
+            positions_raw = await self._fetch_positions()
+            positions = self._annotate_positions(positions_raw)
+            account_payload = await self._fetch_account_balance()
+            self._refresh_execution_limits_from_account(account_payload)
+        except Exception as exc:  # pragma: no cover - best-effort
+            logger.debug("Private WS snapshot patch failed: %s", exc)
+            return
+        patched = dict(snapshot)
+        patched["generated_at"] = datetime.now(timezone.utc).isoformat()
+        patched["positions"] = positions
+        patched["account"] = account_payload.get("details", [])
+        patched["account_equity"] = float(
+            account_payload.get("total_eq_usd")
+            or account_payload.get("total_equity")
+            or 0.0
+        )
+        patched["total_account_value"] = float(account_payload.get("total_account_value") or 0.0)
+        patched["total_eq_usd"] = float(account_payload.get("total_eq_usd") or 0.0)
+        patched["available_equity"] = account_payload.get("available_equity")
+        patched["available_eq_usd"] = account_payload.get("available_eq_usd")
+        patched["available_balances"] = account_payload.get("available_balances") or {}
+        if self._latest_execution_limits:
+            patched["execution_limits"] = {
+                key: dict(meta)
+                for key, meta in self._latest_execution_limits.items()
+                if isinstance(meta, dict)
+            }
+        # Inject live ticker prices so current-price and PnL columns stay fresh.
+        if self._latest_ticker and "market_data" in patched:
+            patched["market_data"] = dict(patched["market_data"])
+            for symbol, ticker in self._latest_ticker.items():
+                if symbol in patched["market_data"] and ticker:
+                    patched["market_data"][symbol] = dict(patched["market_data"][symbol])
+                    patched["market_data"][symbol]["ticker"] = ticker
+            # Also refresh the top-level ticker shortcut used by single-pair layouts.
+            primary = self.symbols[0] if self.symbols else None
+            if primary and self._latest_ticker.get(primary):
+                patched["ticker"] = self._latest_ticker[primary]
+        self._last_full_snapshot = patched
+        await self.state_service.set_market_snapshot(patched)
 
     @staticmethod
     def _normalize_symbols(symbols: list[str] | None) -> list[str]:
@@ -1387,6 +1637,17 @@ class MarketService:
 
     async def _fetch_positions(self, symbol: str | None = None) -> list[dict[str, Any]]:
         """Pull current SWAP positions from the account API, optionally filtering by instrument."""
+        # Use private WS cache when populated, unless master-key sub-account routing is
+        # active (in that case the WS connection reflects the master account, not the sub).
+        _master_routing = bool(self._sub_account and self._sub_account_use_master)
+        if self._enable_websocket and not _master_routing and self._latest_positions_raw is not None:
+            if symbol:
+                normalized_sym = symbol.upper()
+                return [
+                    p for p in self._latest_positions_raw
+                    if isinstance(p, dict) and str(p.get("instId", "")).upper() == normalized_sym
+                ]
+            return list(self._latest_positions_raw)
         if not self._account_api:
             return []
         kwargs = {"instType": "SWAP"}
@@ -1438,6 +1699,10 @@ class MarketService:
 
     async def _fetch_account_balance(self) -> dict[str, Any]:
         """Fetch account balances (respecting sub-account routing) and normalize the payload."""
+        # Use private WS cache when populated, unless master-key sub-account routing is active.
+        _master_routing = bool(self._sub_account and self._sub_account_use_master)
+        if self._enable_websocket and not _master_routing and self._latest_account_raw is not None:
+            return self._normalize_account_balances(self._latest_account_raw)
         if not self._account_api:
             return {
                 "details": [],

@@ -848,6 +848,55 @@ async def load_execution_settings() -> dict[str, Any]:
     return result
 
 
+async def save_poll_interval(interval_seconds: int) -> None:
+    pool = await get_postgres_pool()
+    try:
+        normalized = max(1, int(interval_seconds))
+    except (TypeError, ValueError):
+        normalized = 180
+    payload = json.dumps({"interval": normalized})
+    await pool.execute(
+        """
+        INSERT INTO runtime_settings (key, value, updated_at)
+        VALUES ('poll_interval', $1::jsonb, NOW())
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+        """,
+        payload,
+    )
+
+
+async def load_poll_interval(default: int | None = None) -> int | None:
+    pool = await get_postgres_pool()
+    row = await pool.fetchrow("SELECT value FROM runtime_settings WHERE key = 'poll_interval'")
+    if not row:
+        return default
+    value = row["value"]
+    if isinstance(value, str):
+        try:
+            parsed: Any = json.loads(value)
+        except json.JSONDecodeError:
+            parsed = value
+    else:
+        parsed = value
+    candidate: Any = None
+    if isinstance(parsed, dict):
+        candidate = parsed.get("interval") or parsed.get("value")
+    elif isinstance(parsed, (int, float)):
+        candidate = parsed
+    elif isinstance(parsed, str):
+        try:
+            candidate = float(parsed)
+        except ValueError:
+            candidate = None
+    if candidate is None:
+        return default
+    try:
+        normalized = int(float(candidate))
+    except (TypeError, ValueError):
+        return default
+    return normalized if normalized > 0 else default
+
+
 async def save_frontend_timezone(timezone_name: str | None) -> None:
     pool = await get_postgres_pool()
     normalized = (timezone_name or "UTC").strip() or "UTC"

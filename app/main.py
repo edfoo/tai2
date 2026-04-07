@@ -26,6 +26,7 @@ from app.db.postgres import (
     load_llm_model,
     load_execution_settings,
     load_prompt_interval,
+    load_poll_interval,
     load_okx_sub_account,
     load_frontend_timezone,
 )
@@ -344,6 +345,15 @@ def _create_lifespan(enable_background_services: bool):
                     if stored_timeframe:
                         app.state.runtime_config["ta_timeframe"] = stored_timeframe
                 try:
+                    stored_poll_interval = await load_poll_interval(
+                        app.state.runtime_config.get("poll_interval")
+                    )
+                except Exception as exc:  # pragma: no cover - optional
+                    logger.error("Failed to load poll interval: %s", exc)
+                else:
+                    if stored_poll_interval:
+                        app.state.runtime_config["poll_interval"] = int(stored_poll_interval)
+                try:
                     stored_prompt_interval = await load_prompt_interval(
                         app.state.runtime_config.get("auto_prompt_interval")
                     )
@@ -412,6 +422,10 @@ def _create_lifespan(enable_background_services: bool):
                 )
                 app.state.market_service = market_service
                 await market_service.start()
+                # Apply any DB-persisted poll interval (may differ from the .env default)
+                stored_pi = app.state.runtime_config.get("poll_interval")
+                if stored_pi and stored_pi != market_service._poll_interval:
+                    market_service.set_poll_interval(int(stored_pi))
                 scheduler = PromptScheduler(
                     app,
                     default_interval=app.state.runtime_config.get("auto_prompt_interval", 300),
