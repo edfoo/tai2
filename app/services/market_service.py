@@ -1118,6 +1118,23 @@ class MarketService:
             logger.warning("Skimming close order error for %s: %s", symbol, exc)
             self._skimming_triggered.discard(symbol)
 
+    @property
+    def ws_connection_status(self) -> tuple[bool, bool, bool]:
+        """Return (enabled, public_connected, private_connected) for the OKX WebSocket."""
+        if not self._enable_websocket:
+            return False, False, False
+        pub = (
+            self._ws_client is not None
+            and self._ws_task is not None
+            and not self._ws_task.done()
+        )
+        priv = (
+            self._ws_private_client is not None
+            and self._ws_private_task is not None
+            and not self._ws_private_task.done()
+        )
+        return True, pub, priv
+
     def set_poll_interval(self, seconds: int) -> None:
         """Update the REST polling cadence and matching websocket debug interval."""
         self._poll_interval = max(1, seconds)

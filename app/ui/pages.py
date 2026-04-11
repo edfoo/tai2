@@ -434,57 +434,75 @@ def register_pages(app: FastAPI) -> None:
                         button.enable()
                     render_risk_lock_status()
 
-        def set_ws_status(active: bool) -> None:
+        def set_ws_status(_ignored: bool = True) -> None:
             label = status_label["widget"]
             if not label:
                 return
-            label.set_text("WS: LIVE" if active else "WS: IDLE")
+            market_service = getattr(app.state, "market_service", None)
+            if market_service is None:
+                label.set_text("OKX WS: --")
+                label.style("color: #64748b")
+                return
+            enabled, pub, priv = market_service.ws_connection_status
+            if not enabled:
+                label.set_text("OKX WS: disabled")
+                label.style("color: #64748b")
+            elif pub and priv:
+                label.set_text("OKX WS: pub+priv ✓")
+                label.style("color: #16a34a")
+            elif pub:
+                label.set_text("OKX WS: pub only")
+                label.style("color: #d97706")
+            elif priv:
+                label.set_text("OKX WS: priv only")
+                label.style("color: #d97706")
+            else:
+                label.set_text("OKX WS: connecting…")
+                label.style("color: #dc2626")
 
         with wrapper:
-            with ui.row().classes("w-full gap-6 flex-col xl:flex-row xl:flex-nowrap xl:items-start"):
-                with ui.column().classes("flex-[7] w-full gap-4"):
-                    header_row = ui.row().classes(
-                        "w-full justify-between items-center flex-wrap gap-4"
-                    )
-                    with header_row:
-                        with ui.column().classes("gap-1"):
-                            ui.label("Live Market Overview").classes("text-2xl font-bold")
-                            ui.label("Account & execution snapshot").classes(
-                                "text-sm text-slate-500"
-                            )
-                        with ui.row().classes("flex-1 justify-center gap-4 flex-wrap"):
-                            balance_card = badge_stat("Account Equity", "--")
-                            position_card = badge_stat("Active Positions", "--", color="accent")
-                            openrouter_credit_card = badge_stat(
-                                "OpenRouter Credits",
-                                "--",
-                                color="info",
-                            )
-                            okx_fee_card = badge_stat(
-                                "OKX Fees",
-                                "--",
-                                color="negative",
-                            )
-                        with ui.column().classes("items-end gap-1"):
-                            status_label["widget"] = ui.label("WS: IDLE").classes(
-                                "text-xs font-semibold text-slate-500"
-                            )
-                            refresh_label["widget"] = ui.label("Last refresh: --").classes(
-                                "text-xs text-slate-500"
-                            )
-                            next_prompt_label = ui.label("Next prompt: --").classes(
-                                "text-xs text-slate-500"
-                            )
-                            notice = (
-                                ui.label("Snapshot stale")
-                                .classes("text-xs font-semibold text-red-600 uppercase tracking-wide")
-                            )
-                            notice.set_visibility(False)
-                            stale_indicator["widget"] = notice
-                            action_column = ui.column().classes(
-                                "gap-2 w-full sm:w-auto items-stretch"
-                            )
-                            with action_column:
+            with ui.column().classes("w-full gap-4"):
+                with ui.column().classes("w-full gap-4"):
+                    # ── Status bar ────────────────────────────────────────────
+                    with ui.row().classes(
+                        "w-full items-center gap-2 text-xs pb-2 border-b border-slate-100"
+                    ):
+                        status_label["widget"] = ui.label("WS: IDLE").classes(
+                            "text-xs font-semibold text-slate-500"
+                        )
+                        ui.label("|").classes("text-slate-300 select-none")
+                        refresh_label["widget"] = ui.label("Last refresh: --").classes(
+                            "text-xs text-slate-500"
+                        )
+                        ui.label("|").classes("text-slate-300 select-none")
+                        next_prompt_label = ui.label("Next prompt: --").classes(
+                            "text-xs text-slate-500"
+                        )
+                        notice = (
+                            ui.label("· Snapshot stale")
+                            .classes("text-xs font-semibold text-red-600 uppercase tracking-wide")
+                        )
+                        notice.set_visibility(False)
+                        stale_indicator["widget"] = notice
+
+                    # ── Cards + buttons (left 25%) | Equity chart (right 75%) ─
+                    with ui.row().classes("w-full gap-4 items-start"):
+                        # Left panel: 2×2 badge stats + action buttons
+                        with ui.row().classes("flex-[1] min-w-0 gap-3 items-start"):
+                            with ui.element("div").classes("grid grid-cols-2 gap-2 flex-1 min-w-0"):
+                                balance_card = badge_stat("Account Equity", "--")
+                                position_card = badge_stat("Active Positions", "--", color="accent")
+                                openrouter_credit_card = badge_stat(
+                                    "OpenRouter Credits",
+                                    "--",
+                                    color="info",
+                                )
+                                okx_fee_card = badge_stat(
+                                    "OKX Fees",
+                                    "--",
+                                    color="negative",
+                                )
+                            with ui.column().classes("gap-2 shrink-0"):
                                 refresh_btn = ui.button("Refresh Snapshot", icon="refresh")
                                 refresh_btn.classes(
                                     "text-xs bg-slate-900 text-white px-3 py-1 rounded-lg hover:bg-slate-800"
@@ -511,6 +529,62 @@ def register_pages(app: FastAPI) -> None:
                                     lambda _: asyncio.create_task(force_reset_daily_loss_lock()),
                                 )
 
+                        # Right panel: equity chart (~75%)
+                        with ui.column().classes("flex-[3] min-w-0 gap-2"):
+                            with ui.row().classes("w-full justify-between items-center"):
+                                ui.label("Total Equity").classes("text-sm font-medium text-slate-600")
+                                equity_timeframe_toggle = ui.toggle(
+                                    {6: "6h", 12: "12h", 24: "24h", 72: "3d", 168: "7d", 720: "30d"},
+                                    value=24,
+                                ).props("dense unelevated")
+                                equity_timeframe_toggle.on_value_change(
+                                    lambda e: [
+                                        equity_timeframe_hours.update({"value": float(e.value)}),
+                                        asyncio.create_task(refresh_equity_chart()),
+                                    ]
+                                )
+                            equity_chart = ui.echart(
+                                {
+                                    "tooltip": {"trigger": "axis"},
+                                    "grid": {"left": 40, "right": 20, "top": 20, "bottom": 30},
+                                    "xAxis": {
+                                        "type": "time",
+                                        "axisLabel": {
+                                            "color": "#475569",
+                                            ":formatter": (
+                                                "function(value) {"
+                                                "const date = new Date(value);"
+                                                "const hours = String(date.getHours()).padStart(2, '0');"
+                                                "const minutes = String(date.getMinutes()).padStart(2, '0');"
+                                                "if (hours === '00' && minutes === '00') {"
+                                                "const year = date.getFullYear();"
+                                                "const month = String(date.getMonth() + 1).padStart(2, '0');"
+                                                "const day = String(date.getDate()).padStart(2, '0');"
+                                                "return `${year}-${month}-${day} 00:00`;"
+                                                "}"
+                                                "return `${hours}:${minutes}`;"
+                                                "}"
+                                            ),
+                                            "hideOverlap": True,
+                                        },
+                                        "splitNumber": 6,
+                                    },
+                                    "yAxis": {"type": "value", "axisLabel": {"color": "#475569"}},
+                                    "series": [
+                                        {
+                                            "type": "line",
+                                            "name": "Total Equity",
+                                            "data": [],
+                                            "smooth": True,
+                                            "lineStyle": {"color": "#0ea5e9", "width": 2},
+                                            "areaStyle": {"color": "rgba(14,165,233,0.15)"},
+                                            "showSymbol": False,
+                                        }
+                                    ],
+                                }
+                            ).classes("w-full h-64 bg-white rounded-lg shadow")
+
+                    # ── Risk lock card (full width, below the top row) ─────────
                     lock_card = ui.card().classes(
                         "w-full p-4 gap-2 bg-rose-50/80 border border-rose-200 rounded-2xl shadow-sm"
                     )
@@ -542,68 +616,6 @@ def register_pages(app: FastAPI) -> None:
                             lambda _: asyncio.create_task(resume_prompt_scheduler()),
                         )
                         risk_lock_refs["button"] = resume_button
-
-                    credit_hint_label = ui.label("OpenRouter credits unavailable").classes(
-                        "text-xs text-slate-500"
-                    )
-                    credit_hint_label.set_visibility(False)
-                    fee_hint_label = ui.label("OKX fees unavailable").classes(
-                        "text-xs text-slate-500"
-                    )
-                    fee_hint_label.set_visibility(False)
-
-                    with ui.row().classes("w-full justify-between items-center mb-1"):
-                        ui.label("Total Equity").classes("text-sm font-medium text-slate-600")
-                        equity_timeframe_toggle = ui.toggle(
-                            {6: "6h", 12: "12h", 24: "24h", 72: "3d", 168: "7d", 720: "30d"},
-                            value=24,
-                        ).props("dense unelevated")
-                        equity_timeframe_toggle.on_value_change(
-                            lambda e: [
-                                equity_timeframe_hours.update({"value": float(e.value)}),
-                                asyncio.create_task(refresh_equity_chart()),
-                            ]
-                        )
-                    equity_chart = ui.echart(
-                        {
-                            "tooltip": {"trigger": "axis"},
-                            "grid": {"left": 40, "right": 20, "top": 20, "bottom": 30},
-                            "xAxis": {
-                                "type": "time",
-                                "axisLabel": {
-                                    "color": "#475569",
-                                    ":formatter": (
-                                        "function(value) {"
-                                        "const date = new Date(value);"
-                                        "const hours = String(date.getHours()).padStart(2, '0');"
-                                        "const minutes = String(date.getMinutes()).padStart(2, '0');"
-                                        "if (hours === '00' && minutes === '00') {"
-                                        "const year = date.getFullYear();"
-                                        "const month = String(date.getMonth() + 1).padStart(2, '0');"
-                                        "const day = String(date.getDate()).padStart(2, '0');"
-                                        "return `${year}-${month}-${day} 00:00`;"
-                                        "}"
-                                        "return `${hours}:${minutes}`;"
-                                        "}"
-                                    ),
-                                    "hideOverlap": True,
-                                },
-                                "splitNumber": 6,
-                            },
-                            "yAxis": {"type": "value", "axisLabel": {"color": "#475569"}},
-                            "series": [
-                                {
-                                    "type": "line",
-                                    "name": "Total Equity",
-                                    "data": [],
-                                    "smooth": True,
-                                    "lineStyle": {"color": "#0ea5e9", "width": 2},
-                                    "areaStyle": {"color": "rgba(14,165,233,0.15)"},
-                                    "showSymbol": False,
-                                }
-                            ],
-                        }
-                    ).classes("w-full h-64 bg-white rounded-lg shadow")
 
                     positions_table = ui.table(
                         columns=[
@@ -974,33 +986,17 @@ def register_pages(app: FastAPI) -> None:
 
                     positions_table.on("rowClick", handle_position_row_click)
 
-                with ui.column().classes("flex-[3] w-full gap-4"):
-                    with ui.card().classes(
-                        "w-full p-4 gap-3 bg-slate-50 border border-slate-200 shadow-sm"
-                    ):
-                        ui.label("LLM Insight Feed").classes("text-xl font-semibold")
-                        ui.label(
-                            "Latest response_schema guidance per tracked symbol"
-                        ).classes("text-sm text-slate-500")
-                        llm_empty_state = ui.label("No LLM interactions yet.").classes(
-                            "text-sm text-slate-400"
-                        )
-                        llm_card_container = ui.column().classes("w-full gap-3")
-
-                    with ui.card().classes(
-                        "w-full p-4 gap-3 bg-white border border-slate-200 rounded-2xl shadow-[0_18px_40px_rgba(15,23,42,0.08)]"
-                    ):
-                        ui.label("Execution Alerts").classes("text-xl font-semibold text-slate-900")
-                        ui.label(
-                            "Guardrail warnings, OKX errors, and margin tips"
-                        ).classes("text-sm text-slate-500")
-                        execution_empty_state = ui.label(
-                            "No execution feedback in the last window."
-                        ).classes("text-sm text-slate-400")
-                        execution_feed_refs["empty"] = execution_empty_state
-                        execution_feed_refs["container"] = ui.column().classes(
-                            "w-full gap-3"
-                        )
+                with ui.card().classes(
+                    "w-full p-4 gap-3 bg-slate-50 border border-slate-200 shadow-sm"
+                ):
+                    ui.label("LLM Insights & Execution Alerts").classes("text-xl font-semibold")
+                    ui.label(
+                        "Latest decisions and execution events per tracked symbol"
+                    ).classes("text-sm text-slate-500")
+                    llm_empty_state = ui.label("No LLM interactions yet.").classes(
+                        "text-sm text-slate-400"
+                    )
+                    llm_card_container = ui.column().classes("w-full gap-3")
 
         def format_llm_timestamp(raw: str | None) -> str:
             return format_iso_timestamp(raw, fmt="%H:%M:%S %Z")
@@ -1023,7 +1019,7 @@ def register_pages(app: FastAPI) -> None:
 
         _expanded_cards: set[str] = set()
 
-        def refresh_llm_cards() -> None:
+        def refresh_llm_cards(snapshot: dict[str, Any] | None = None) -> None:
             llm_card_container.clear()
             interactions = getattr(app.state, "llm_interactions", {}) or {}
             items = sorted(
@@ -1031,13 +1027,65 @@ def register_pages(app: FastAPI) -> None:
                 key=lambda entry: entry.get("timestamp") or "",
                 reverse=True,
             )
-            if not items:
+            # Group execution feedback by normalised symbol (most recent first)
+            feedback_by_symbol: dict[str, list[dict[str, Any]]] = {}
+            if snapshot:
+                fb_payload = snapshot.get("execution_feedback")
+                if isinstance(fb_payload, list):
+                    for fb_entry in reversed(fb_payload):
+                        fb_sym = str(fb_entry.get("symbol") or "--").upper()
+                        feedback_by_symbol.setdefault(fb_sym, []).append(fb_entry)
+            if not items and not feedback_by_symbol:
                 llm_empty_state.set_visibility(True)
                 return
             llm_empty_state.set_visibility(False)
+            _alert_level_classes = {
+                "error": ("bg-rose-50 border-rose-200", "text-rose-700"),
+                "warning": ("bg-amber-50 border-amber-200", "text-amber-700"),
+                "info": ("bg-sky-50 border-sky-200", "text-sky-700"),
+            }
+            # Card background/border driven by worst alert level for the symbol
+            _card_severity_classes = {
+                "error": "bg-rose-50 border-rose-300",
+                "warning": "bg-amber-50 border-amber-200",
+            }
+            _level_rank = {"error": 2, "warning": 1, "info": 0}
+
+            def _worst_alert(alerts: list[dict[str, Any]]) -> tuple[str, str | None]:
+                """Return (worst_level, message_of_worst) across all alerts."""
+                worst_rank = -1
+                worst_level = "none"
+                worst_msg: str | None = None
+                for a in alerts:
+                    lvl = str(a.get("level") or "info").lower()
+                    rank = _level_rank.get(lvl, 0)
+                    if rank > worst_rank:
+                        worst_rank = rank
+                        worst_level = lvl
+                        worst_msg = a.get("message") or None
+                return worst_level, worst_msg
+
+            def _render_alert_rows(alerts: list[dict[str, Any]]) -> None:
+                for alert in alerts[-4:]:
+                    level = str(alert.get("level") or "info").lower()
+                    card_cls, text_cls = _alert_level_classes.get(
+                        level, ("bg-slate-50 border-slate-200", "text-slate-600")
+                    )
+                    msg = alert.get("message") or "--"
+                    ts = format_feedback_timestamp(alert.get("timestamp"))
+                    with ui.row().classes(
+                        f"w-full items-start gap-2 px-2 py-1.5 rounded-lg border {card_cls}"
+                    ):
+                        ui.label(level.upper()).classes(
+                            f"text-[10px] font-bold shrink-0 mt-0.5 {text_cls}"
+                        )
+                        ui.label(msg).classes("text-xs flex-1 text-slate-700")
+                        ui.label(ts).classes("text-[10px] shrink-0 text-slate-500")
+
             with llm_card_container:
                 for entry in items:
                     symbol = entry.get("symbol") or "--"
+                    sym_upper = symbol.upper()
                     decision = entry.get("decision") or {}
                     original_action = (decision.get("action") or "--").upper()
                     flipped = bool(entry.get("_flipped"))
@@ -1047,7 +1095,10 @@ def register_pages(app: FastAPI) -> None:
                         action_label = f"{effective_action} (FLIPPED)"
                     origin = decision.get("_decision_origin") or ""
                     origin_suffix = f" ({origin})" if origin else ""
-                    header = f"{symbol} · {action_label} · {format_llm_timestamp(entry.get('timestamp'))}{origin_suffix}"
+                    sym_alerts = feedback_by_symbol.pop(sym_upper, [])
+                    worst_level, worst_msg = _worst_alert(sym_alerts)
+                    alert_suffix = f" ({worst_msg})" if worst_msg and worst_level in ("error", "warning") else ""
+                    header = f"{symbol} · {action_label} · {format_llm_timestamp(entry.get('timestamp'))}{origin_suffix}{alert_suffix}"
                     schema = entry.get("response_schema") or {}
                     confidence = decision.get("confidence")
                     confidence_label = (
@@ -1061,8 +1112,9 @@ def register_pages(app: FastAPI) -> None:
                         if key not in ordered_fields:
                             ordered_fields.append(key)
                     card_key = symbol
+                    card_bg = _card_severity_classes.get(worst_level, "bg-white border-slate-200")
                     card = ui.expansion(header).classes(
-                        "w-full bg-white rounded-xl border border-slate-200 shadow-sm"
+                        f"w-full {card_bg} rounded-xl border shadow-sm"
                     )
                     if card_key in _expanded_cards:
                         card.open()
@@ -1094,6 +1146,23 @@ def register_pages(app: FastAPI) -> None:
                                     )
                                     if desc:
                                         ui.label(desc).classes("text-[11px] text-slate-400")
+                        # Inline execution alerts for this symbol
+                        if sym_alerts:
+                            with ui.column().classes("w-full gap-1.5 mt-2 pt-2 border-t border-slate-200"):
+                                ui.label("Execution Alerts").classes(
+                                    "text-[11px] font-semibold uppercase tracking-wide text-slate-500"
+                                )
+                                _render_alert_rows(sym_alerts)
+                # Orphan execution alerts (symbols with feedback but no LLM interaction)
+                for sym, sym_fb_entries in sorted(feedback_by_symbol.items()):
+                    orphan_worst, orphan_msg = _worst_alert(sym_fb_entries)
+                    orphan_alert_suffix = f" ({orphan_msg})" if orphan_msg and orphan_worst in ("error", "warning") else ""
+                    orphan_bg = _card_severity_classes.get(orphan_worst, "bg-white border-slate-200")
+                    orphan_card = ui.expansion(f"{sym} · Execution Alerts{orphan_alert_suffix}").classes(
+                        f"w-full {orphan_bg} rounded-xl border shadow-sm"
+                    )
+                    with orphan_card:
+                        _render_alert_rows(sym_fb_entries)
 
         def render_execution_feedback(snapshot: dict[str, Any] | None) -> None:
             container = execution_feed_refs.get("container")
@@ -1438,9 +1507,8 @@ def register_pages(app: FastAPI) -> None:
                                     )
 
         refresh_llm_cards()
-        render_execution_feedback(last_snapshot["value"])
         render_risk_lock_status()
-        ui.timer(15, refresh_llm_cards)
+        ui.timer(15, lambda: refresh_llm_cards(last_snapshot["value"]))
 
         def _format_credit_amount(usage: dict[str, Any] | None) -> str:
             if not usage:
@@ -1489,10 +1557,10 @@ def register_pages(app: FastAPI) -> None:
             openrouter_credit_card.value_label.set_text(display_value)
             hint = _format_credit_hint(usage)
             if hint:
-                credit_hint_label.set_text(hint)
-                credit_hint_label.set_visibility(True)
+                openrouter_credit_card.hint_label.set_text(hint)
+                openrouter_credit_card.hint_label.set_visibility(True)
             else:
-                credit_hint_label.set_visibility(False)
+                openrouter_credit_card.hint_label.set_visibility(False)
 
         def _get_fee_window_hours() -> float:
             config = getattr(app.state, "runtime_config", {}) or {}
@@ -1511,17 +1579,15 @@ def register_pages(app: FastAPI) -> None:
         ) -> None:
             if error:
                 okx_fee_card.value_label.set_text("--")
-                fee_hint_label.set_text(error)
-                fee_hint_label.set_visibility(True)
+                okx_fee_card.hint_label.set_text(error)
+                okx_fee_card.hint_label.set_visibility(True)
             elif total_fee is not None:
                 okx_fee_card.value_label.set_text(f"${total_fee:,.2f}")
-                fee_hint_label.set_text(
-                    f"OKX fees · last {window_hours:g}h"
-                )
-                fee_hint_label.set_visibility(True)
+                okx_fee_card.hint_label.set_text(f"last {window_hours:g}h")
+                okx_fee_card.hint_label.set_visibility(True)
             else:
                 okx_fee_card.value_label.set_text("--")
-                fee_hint_label.set_visibility(False)
+                okx_fee_card.hint_label.set_visibility(False)
 
         async def refresh_openrouter_credits(force: bool = False) -> None:
             try:
@@ -1630,7 +1696,7 @@ def register_pages(app: FastAPI) -> None:
                 with page_client:
                     if removed and last_snapshot["value"] is not None:
                         last_snapshot["value"]["execution_feedback"] = []
-                        render_execution_feedback(last_snapshot["value"])
+                        refresh_llm_cards(last_snapshot["value"])
                     if removed:
                         ui.notify(f"Cleared {removed} feedback entries", color="positive")
                     else:
@@ -1672,7 +1738,7 @@ def register_pages(app: FastAPI) -> None:
         def update(snapshot: dict[str, Any] | None) -> None:
             last_snapshot["value"] = snapshot
             set_ws_status(snapshot is not None)
-            refresh_llm_cards()
+            refresh_llm_cards(snapshot)
             render_risk_lock_status()
             update_snapshot_health(snapshot)
             label = refresh_label["widget"]
@@ -1971,7 +2037,6 @@ def register_pages(app: FastAPI) -> None:
                         normalized_symbol = candidate
                         break
             update_position_chart(normalized_symbol)
-            render_execution_feedback(snapshot)
 
             now = time.monotonic()
             if now - equity_refresh["last"] > 30:
@@ -1991,6 +2056,7 @@ def register_pages(app: FastAPI) -> None:
         page_client.on_disconnect(_teardown_client)
         page_client.on_delete(_teardown_client)
         ui.timer(5, lambda: update_snapshot_health(last_snapshot["value"]))
+        ui.timer(5, set_ws_status)
 
         def _update_next_prompt_countdown() -> None:
             scheduler = getattr(app.state, "prompt_scheduler", None)

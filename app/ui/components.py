@@ -62,7 +62,10 @@ def badge_stat(label: str, value: Any, color: str = "primary") -> ui.element:
     with ui.card().classes("items-center justify-center p-4") as card:
         ui.label(label).classes("text-xs text-gray-500")
         value_label = ui.label(value).classes(f"text-xl font-semibold text-{color}")
+        hint_label = ui.label("").classes("text-[10px] text-slate-400 text-center")
+        hint_label.set_visibility(False)
     card.value_label = value_label  # type: ignore[attr-defined]
+    card.hint_label = hint_label  # type: ignore[attr-defined]
     return card
 
 
