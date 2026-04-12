@@ -1125,6 +1125,54 @@ async def _ensure_executed_trade_id_uuid(pool: asyncpg.Pool) -> None:
     await pool.execute("DROP SEQUENCE IF EXISTS executed_trades_id_seq")
 
 
+async def save_candle_settings(
+    fetch_limit: int,
+    snapshot_candles: int,
+    snapshot_htf_candles: int,
+) -> None:
+    pool = await get_postgres_pool()
+    payload = json.dumps(
+        {
+            "fetch_limit": max(50, int(fetch_limit)),
+            "snapshot_candles": max(10, int(snapshot_candles)),
+            "snapshot_htf_candles": max(5, int(snapshot_htf_candles)),
+        }
+    )
+    await pool.execute(
+        """
+        INSERT INTO runtime_settings (key, value, updated_at)
+        VALUES ('candle_settings', $1::jsonb, NOW())
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+        """,
+        payload,
+    )
+
+
+async def load_candle_settings() -> dict[str, Any]:
+    pool = await get_postgres_pool()
+    row = await pool.fetchrow("SELECT value FROM runtime_settings WHERE key = 'candle_settings'")
+    if not row:
+        return {}
+    value = row["value"]
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+    else:
+        parsed = value or {}
+    if not isinstance(parsed, dict):
+        return {}
+    result: dict[str, Any] = {}
+    for key, default in [("fetch_limit", 200), ("snapshot_candles", 50), ("snapshot_htf_candles", 25)]:
+        if key in parsed:
+            try:
+                result[key] = max(default // 10, int(parsed[key]))
+            except (TypeError, ValueError):
+                pass
+    return result
+
+
 __all__ = [
     "close_postgres_pool",
     "fetch_prompt_runs",

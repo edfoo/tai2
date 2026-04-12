@@ -238,6 +238,7 @@ class MarketService:
         self._available_symbols: list[str] = []
         self._instrument_specs: dict[str, dict[str, float]] = {}
         self._poll_interval = max(1, self.settings.poll_interval)
+        self._ohlcv_fetch_limit: int = 200
         self._ohlc_bar = self._normalize_bar(ohlc_bar)
         self._log_sink = log_sink or (lambda msg: None)
         self._ws_debug_interval = max(5.0, float(self._poll_interval))
@@ -343,25 +344,70 @@ class MarketService:
                 pass
 
     async def _run_public_ws(self) -> None:
-        """Subscribe to public OKX feeds and stream updates into the in-memory caches."""
+        """Subscribe to public OKX feeds and stream updates into the in-memory caches.
+
+        Runs a reconnect loop with exponential backoff so transient network errors
+        and OKX server-side disconnects do not permanently stop the feed.
+        """
         client_factory = self._websocket_factory or WsPublicAsync
         if client_factory is None:
             logger.warning("python-okx websocket modules not available; skipping public WS")
             return
-        self._ws_client = client_factory(PUBLIC_WS_URL)
-        await self._ws_client.connect()
-        channels = self._build_channel_args(self.symbols)
-        await self._ws_client.subscribe(channels, self._handle_ws_message)
-        self._subscribed_symbols = set(self.symbols)
-        try:
-            await self._ws_client.consume()
-        finally:  # pragma: no cover - network resource cleanup
-            await self._ws_client.stop()
-            self._ws_client = None
-            self._subscribed_symbols.clear()
+        delay = 5.0
+        while True:
+            try:
+                self._ws_client = client_factory(PUBLIC_WS_URL)
+                await self._ws_client.connect()
+                channels = self._build_channel_args(self.symbols)
+                await self._ws_client.subscribe(channels, self._handle_ws_message)
+                self._subscribed_symbols = set(self.symbols)
+                delay = 5.0  # reset backoff on successful connect
+                logger.info("Public WS connected and subscribed to %s", list(self._subscribed_symbols))
+
+                # OKX requires an application-level "ping" every ≤25 s or the
+                # server closes the connection.  Run a concurrent ping task.
+                async def _ping_loop(client: Any) -> None:
+                    while True:
+                        await asyncio.sleep(20)
+                        try:
+                            await client.websocket.send("ping")
+                        except Exception:
+                            break
+
+                ping_task = asyncio.create_task(_ping_loop(self._ws_client))
+                try:
+                    await self._ws_client.consume()
+                finally:
+                    ping_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await ping_task
+                    await self._ws_client.stop()
+                    self._ws_client = None
+                    self._subscribed_symbols.clear()
+
+                logger.warning("Public WS consume() returned; reconnecting in %.0fs", delay)
+            except asyncio.CancelledError:
+                logger.info("Public WS task cancelled")
+                return
+            except Exception as exc:
+                logger.warning("Public WS error (%s); reconnecting in %.0fs", exc, delay)
+                if self._ws_client is not None:
+                    try:
+                        await self._ws_client.stop()
+                    except Exception:
+                        pass
+                    self._ws_client = None
+                    self._subscribed_symbols.clear()
+
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, 120.0)  # cap at 2 minutes
 
     async def _run_private_ws(self) -> None:
-        """Authenticate and subscribe to private OKX feeds (account, positions)."""
+        """Authenticate and subscribe to private OKX feeds (account, positions).
+
+        Runs a reconnect loop with exponential backoff so transient network errors
+        and OKX server-side disconnects do not permanently stop the feed.
+        """
         WsPrivateClass = SafeWsPrivateAsync if SafeWsPrivateAsync is not None else None  # type: ignore[name-defined]
         if WsPrivateClass is None:
             logger.warning("WsPrivateAsync not available; private WS stream disabled")
@@ -374,29 +420,65 @@ class MarketService:
             logger.warning("OKX credentials missing; private WS stream disabled")
             return
         url = PRIVATE_WS_URL_DEMO if str(self._okx_flag) == "1" else PRIVATE_WS_URL_LIVE
-        logger.info("Private WS connecting to %s", url)
-        self._ws_private_client = WsPrivateClass(
-            apiKey=self.settings.okx_api_key,
-            passphrase=self.settings.okx_passphrase,
-            secretKey=self.settings.okx_secret_key,
-            url=url,
-            useServerTime=False,
-        )
-        await self._ws_private_client.connect()
-        channels = [
-            {"channel": "account"},
-            {"channel": "positions", "instType": "SWAP"},
-        ]
-        # subscribe() performs login + 5 s wait + channel subscription internally
-        await self._ws_private_client.subscribe(channels, self._handle_private_ws_message)
-        try:
-            await self._ws_private_client.consume()
-        finally:  # pragma: no cover - network resource cleanup
-            await self._ws_private_client.stop()
-            self._ws_private_client = None
-            # Clear caches so the next poll falls back to REST
-            self._latest_positions_raw = None
-            self._latest_account_raw = None
+        delay = 5.0
+        while True:
+            try:
+                logger.info("Private WS connecting to %s", url)
+                self._ws_private_client = WsPrivateClass(
+                    apiKey=self.settings.okx_api_key,
+                    passphrase=self.settings.okx_passphrase,
+                    secretKey=self.settings.okx_secret_key,
+                    url=url,
+                    useServerTime=False,
+                )
+                await self._ws_private_client.connect()
+                channels = [
+                    {"channel": "account"},
+                    {"channel": "positions", "instType": "SWAP"},
+                ]
+                # subscribe() performs login + 5 s wait + channel subscription internally
+                await self._ws_private_client.subscribe(channels, self._handle_private_ws_message)
+                delay = 5.0  # reset backoff on successful connect
+                logger.info("Private WS connected and subscribed")
+
+                # OKX requires an application-level "ping" every ≤25 s.
+                async def _ping_loop_priv(client: Any) -> None:
+                    while True:
+                        await asyncio.sleep(20)
+                        try:
+                            await client.websocket.send("ping")
+                        except Exception:
+                            break
+
+                ping_task = asyncio.create_task(_ping_loop_priv(self._ws_private_client))
+                try:
+                    await self._ws_private_client.consume()
+                finally:
+                    ping_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await ping_task
+                    await self._ws_private_client.stop()
+                    self._ws_private_client = None
+                    self._latest_positions_raw = None
+                    self._latest_account_raw = None
+
+                logger.warning("Private WS consume() returned; reconnecting in %.0fs", delay)
+            except asyncio.CancelledError:
+                logger.info("Private WS task cancelled")
+                return
+            except Exception as exc:
+                logger.warning("Private WS error (%s); reconnecting in %.0fs", exc, delay)
+                if self._ws_private_client is not None:
+                    try:
+                        await self._ws_private_client.stop()
+                    except Exception:
+                        pass
+                    self._ws_private_client = None
+                    self._latest_positions_raw = None
+                    self._latest_account_raw = None
+
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, 120.0)  # cap at 2 minutes
 
     def _handle_private_ws_message(self, message: Any) -> None:
         """Route private WS frames into positions and account balance caches."""
@@ -406,6 +488,8 @@ class MarketService:
             except Exception:  # pragma: no cover - defensive decoding
                 return
         if isinstance(message, str):
+            if message == "pong":  # OKX keepalive response — discard
+                return
             try:
                 message = json.loads(message)
             except json.JSONDecodeError:
@@ -475,6 +559,8 @@ class MarketService:
             except Exception:  # pragma: no cover - defensive decoding
                 return
         if isinstance(message, str):
+            if message == "pong":  # OKX keepalive response — discard
+                return
             try:
                 message = json.loads(message)
             except json.JSONDecodeError:
@@ -1141,6 +1227,11 @@ class MarketService:
         self._ws_debug_interval = max(5.0, float(self._poll_interval))
         self._emit_debug(f"Poll interval updated to {self._poll_interval}s")
         self._wake_poll.set()  # interrupt the current sleep so the new interval takes effect immediately
+
+    def set_ohlcv_fetch_limit(self, limit: int) -> None:
+        """Update how many OHLCV candles are fetched from OKX per poll cycle."""
+        self._ohlcv_fetch_limit = max(50, int(limit))
+        self._emit_debug(f"OHLCV fetch limit updated to {self._ohlcv_fetch_limit}")
 
     def set_wait_for_tp_sl(self, enabled: bool) -> None:
         """Toggle the guardrail that delays new entries until TP/SL anchors exist."""
@@ -1943,7 +2034,7 @@ class MarketService:
                 self._market_api.get_candlesticks,
                 instId=symbol,
                 bar=self._ohlc_bar,
-                limit=200,
+                limit=self._ohlcv_fetch_limit,
             )
         except Exception as exc:  # pragma: no cover - network failures
             logger.warning("OHLCV fetch failed for %s: %s", symbol, exc)
@@ -1957,9 +2048,10 @@ class MarketService:
 
     async def _fetch_ohlcv_htf(self, symbol: str) -> list[list[Any]]:
         """Fetch OHLCV candles at the next-higher timeframe for the same wall-clock window."""
-        htf_bar, limit = self._HTF_MAP.get(self._ohlc_bar, ("", 0))
-        if not htf_bar or limit <= 0:
+        htf_bar, _ = self._HTF_MAP.get(self._ohlc_bar, ("", 0))
+        if not htf_bar:
             return []
+        limit = self._ohlcv_fetch_limit
         cached = self._latest_ohlcv_htf.get(symbol)
         if not self._market_api:
             return cached or []
@@ -2037,7 +2129,7 @@ class MarketService:
         volume_rsi_series = ta.rsi(df["volume"], length=14)
         atr_series = ta.atr(high=df["high"], low=df["low"], close=df["close"], length=14)
         volume_avg = float(df["volume"].tail(20).mean()) if not df.empty else 0.0
-        tail_df = df.tail(200)
+        tail_df = df
         last_close = float(df["close"].iloc[-1]) if not df.empty else None
         atr_value = float(atr_series.iloc[-1]) if atr_series is not None and not atr_series.empty else None
         atr_pct = (atr_value / last_close * 100) if atr_value and last_close else None

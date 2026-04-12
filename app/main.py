@@ -30,6 +30,7 @@ from app.db.postgres import (
     load_poll_interval,
     load_okx_sub_account,
     load_frontend_timezone,
+    load_candle_settings,
 )
 from app.services.llm_service import LLMService
 from app.services.market_service import MarketService
@@ -144,7 +145,7 @@ def _create_lifespan(enable_background_services: bool):
             "uvicorn.error": logging.INFO,
             "uvicorn.access": logging.INFO,
             "uvicorn.asgi": logging.INFO,
-            "httpx": logging.INFO,
+            "httpx": logging.WARNING,
             "websockets": logging.WARNING,
             "websockets.client": logging.WARNING,
             "okx.websocket": logging.WARNING,
@@ -218,6 +219,9 @@ def _create_lifespan(enable_background_services: bool):
             "wait_for_tp_sl": False,
             "frontend_timezone": "UTC",
             "risk_locks": {},
+            "ohlcv_fetch_limit": 200,
+            "ohlcv_snapshot_candles": 96,
+            "ohlcv_snapshot_htf_candles": 48,
         }
         app.state.runtime_config["wait_for_tp_sl"] = bool(
             app.state.runtime_config["guardrails"].get("wait_for_tp_sl", False)
@@ -386,6 +390,15 @@ def _create_lifespan(enable_background_services: bool):
                 else:
                     if stored_strategy:
                         app.state.runtime_config["strategy"] = stored_strategy
+                try:
+                    stored_candle_settings = await load_candle_settings()
+                except Exception as exc:  # pragma: no cover - optional
+                    logger.error("Failed to load candle settings: %s", exc)
+                else:
+                    if stored_candle_settings:
+                        for _k, _default in [("ohlcv_fetch_limit", 200), ("ohlcv_snapshot_candles", 50), ("ohlcv_snapshot_htf_candles", 25)]:
+                            if _k in stored_candle_settings:
+                                app.state.runtime_config[_k] = stored_candle_settings[_k]
         elif not enable_background_services:
             logger.info("Background DB init disabled; skipping Postgres init")
         else:
@@ -434,6 +447,9 @@ def _create_lifespan(enable_background_services: bool):
                 stored_pi = app.state.runtime_config.get("poll_interval")
                 if stored_pi and stored_pi != market_service._poll_interval:
                     market_service.set_poll_interval(int(stored_pi))
+                # Apply persisted candle fetch limit
+                stored_fetch_limit = app.state.runtime_config.get("ohlcv_fetch_limit", 200)
+                market_service.set_ohlcv_fetch_limit(int(stored_fetch_limit))
                 # Apply any persisted strategy config (e.g. skimming)
                 stored_strategy = app.state.runtime_config.get("strategy") or {}
                 if stored_strategy:

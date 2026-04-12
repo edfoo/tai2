@@ -364,7 +364,12 @@ async def prepare_prompt_payload(
     metadata["fee_window_hours"] = fee_window_hours
     metadata["okx_fee_window_total"] = okx_fee_total
     metadata["risk_locks"] = runtime_meta.get("risk_locks")
-    builder = PromptBuilder(snapshot, metadata=metadata)
+    builder = PromptBuilder(
+        snapshot,
+        metadata=metadata,
+        max_candles=int(runtime_meta.get("ohlcv_snapshot_candles") or 96),
+        max_htf_candles=int(runtime_meta.get("ohlcv_snapshot_htf_candles") or 48),
+    )
     payload = builder.build(symbol=symbol, timeframe=timeframe)
     return PromptPayloadBundle(payload=payload, runtime_meta=runtime_meta, metadata=metadata, snapshot=snapshot), None
 

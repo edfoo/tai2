@@ -31,6 +31,8 @@ from app.db.postgres import (
     save_strategy_config,
     save_ta_timeframe,
     save_frontend_timezone,
+    save_candle_settings,
+    load_candle_settings,
     set_enabled_trading_pairs,
 )
 from app.services.prompt_builder import (
@@ -3795,6 +3797,10 @@ def register_pages(app: FastAPI) -> None:
                 ).classes("w-full md:w-48").props(
                     "hint='Disabling falls back to REST polling every interval' persistent-hint"
                 )
+                auto_prompt_switch = ui.switch(
+                    "Auto Prompt Scheduler",
+                    value=config.get("auto_prompt_enabled", False),
+                ).classes("w-full md:w-48")
                 fee_window_input = ui.number(
                     label="Fee Window (hours)",
                     value=config.get("fee_window_hours", 24.0),
@@ -3803,10 +3809,6 @@ def register_pages(app: FastAPI) -> None:
                 ).classes("w-full md:w-48").props(
                     "hint='Rolling hours of OKX fees shown on LIVE' persistent-hint"
                 )
-                auto_prompt_switch = ui.switch(
-                    "Auto Prompt Scheduler",
-                    value=config.get("auto_prompt_enabled", False),
-                ).classes("w-full md:w-48")
                 auto_prompt_interval_input = ui.number(
                     label="Prompt Interval (seconds)",
                     value=config.get("auto_prompt_interval", 300),
@@ -3850,30 +3852,60 @@ def register_pages(app: FastAPI) -> None:
                 ).classes("w-full md:w-48").props(
                     "hint='Only applies to reasoning models (deepseek-r1, o1, etc.)' persistent-hint"
                 )
-                raw_pairs = config.get("trading_pairs", ["BTC-USDT-SWAP"])
-                selected_trading_pairs: list[str] = []
-                for symbol in raw_pairs or []:
-                    normalized = str(symbol).strip().upper()
-                    if not normalized or normalized in selected_trading_pairs:
-                        continue
-                    selected_trading_pairs.append(normalized)
-                config["trading_pairs"] = selected_trading_pairs.copy()
-                trading_pair_checkboxes: dict[str, ui.checkbox] = {}
-                with ui.column().classes("w-full flex-1 gap-2"):
-                    ui.label("Enabled Trading Pairs").classes("text-xs text-slate-500")
-                    trading_pairs_select = (
-                        ui.select(
-                            options=[],
-                            label="Add trading pair",
-                            with_input=True,
-                        )
-                        .classes("w-full")
-                        .props("use-input fill-input input-debounce='0' clearable")
+            ui.separator().classes("w-full my-4")
+            ui.label("Candle settings").classes("text-sm text-slate-500")
+            with ui.row().classes("w-full flex-wrap gap-4"):
+                ohlcv_fetch_limit_input = ui.number(
+                    label="Candle Fetch Limit",
+                    value=config.get("ohlcv_fetch_limit", 200),
+                    min=50,
+                    max=300,
+                    step=10,
+                ).classes("w-full md:flex-1 md:min-w-72").props(
+                    "hint='Candles fetched from OKX per poll for both timeframes (50–300). Extra candles beyond what the LLM sees are used for indicator accuracy (e.g. EMA-200 needs 200 points).' persistent-hint"
+                )
+                ohlcv_snapshot_candles_input = ui.number(
+                    label="Analysis TF Candles to LLM",
+                    value=config.get("ohlcv_snapshot_candles", 96),
+                    min=10,
+                    max=300,
+                    step=5,
+                ).classes("w-full md:flex-1 md:min-w-72").props(
+                    "hint='Candles at the Analysis Timeframe (e.g. 1H) included in the LLM prompt. Fewer = cheaper; more = better pattern context.' persistent-hint"
+                )
+                ohlcv_snapshot_htf_candles_input = ui.number(
+                    label="Higher TF Candles to LLM",
+                    value=config.get("ohlcv_snapshot_htf_candles", 48),
+                    min=5,
+                    max=300,
+                    step=5,
+                ).classes("w-full md:flex-1 md:min-w-72").props(
+                    "hint='Candles at the auto-selected higher timeframe (e.g. 4H when Analysis TF is 1H) included in the LLM prompt for trend context.' persistent-hint"
+                )
+            raw_pairs = config.get("trading_pairs", ["BTC-USDT-SWAP"])
+            selected_trading_pairs: list[str] = []
+            for symbol in raw_pairs or []:
+                normalized = str(symbol).strip().upper()
+                if not normalized or normalized in selected_trading_pairs:
+                    continue
+                selected_trading_pairs.append(normalized)
+            config["trading_pairs"] = selected_trading_pairs.copy()
+            trading_pair_checkboxes: dict[str, ui.checkbox] = {}
+            with ui.column().classes("w-full flex-1 gap-2"):
+                ui.label("Enabled Trading Pairs").classes("text-xs text-slate-500")
+                trading_pairs_select = (
+                    ui.select(
+                        options=[],
+                        label="Add trading pair",
+                        with_input=True,
                     )
-                    trading_pairs_select.disable()
-                    trading_pairs_list = ui.column().classes(
-                        "w-full gap-2 rounded-xl border border-slate-200 bg-slate-50/70 p-3"
-                    )
+                    .classes("w-full")
+                    .props("use-input fill-input input-debounce='0' clearable")
+                )
+                trading_pairs_select.disable()
+                trading_pairs_list = ui.column().classes(
+                    "w-full gap-2 rounded-xl border border-slate-200 bg-slate-50/70 p-3"
+                )
 
             def _normalize_trading_pair(symbol: Any) -> str | None:
                 if symbol is None:
@@ -4438,6 +4470,27 @@ def register_pages(app: FastAPI) -> None:
         update_model_cost_label(initial_model_value)
         asyncio.create_task(hydrate_execution_settings())
 
+        async def hydrate_candle_settings() -> None:
+            try:
+                stored = await load_candle_settings()
+            except Exception:  # pragma: no cover - optional DB
+                return
+            if not stored:
+                return
+            with client:
+                for key, widget in [
+                    ("fetch_limit", ohlcv_fetch_limit_input),
+                    ("snapshot_candles", ohlcv_snapshot_candles_input),
+                    ("snapshot_htf_candles", ohlcv_snapshot_htf_candles_input),
+                ]:
+                    val = stored.get(key)
+                    if val is not None:
+                        config[f"ohlcv_{key}"] = int(val)
+                        widget.value = int(val)
+                        widget.update()
+
+        asyncio.create_task(hydrate_candle_settings())
+
         async def load_trading_pairs() -> None:
             market_service = getattr(app.state, "market_service", None)
             pairs = config.get("trading_pairs", ["BTC-USDT-SWAP"])
@@ -4482,6 +4535,9 @@ def register_pages(app: FastAPI) -> None:
 
         async def save_settings(event: Any | None = None) -> None:
             config["poll_interval"] = int(ws_interval_input.value or 180)
+            config["ohlcv_fetch_limit"] = max(50, int(ohlcv_fetch_limit_input.value or 200))
+            config["ohlcv_snapshot_candles"] = max(10, int(ohlcv_snapshot_candles_input.value or 50))
+            config["ohlcv_snapshot_htf_candles"] = max(5, int(ohlcv_snapshot_htf_candles_input.value or 25))
             config["enable_websocket"] = bool(websocket_switch.value)
             config["auto_prompt_enabled"] = bool(auto_prompt_switch.value)
             config["execution_enabled"] = bool(execution_switch.value)
@@ -4508,6 +4564,14 @@ def register_pages(app: FastAPI) -> None:
                 await save_poll_interval(config["poll_interval"])
             except Exception as exc:  # pragma: no cover - optional DB
                 ui.notify(f"Failed to persist poll interval: {exc}", color="warning")
+            try:
+                await save_candle_settings(
+                    config["ohlcv_fetch_limit"],
+                    config["ohlcv_snapshot_candles"],
+                    config["ohlcv_snapshot_htf_candles"],
+                )
+            except Exception as exc:  # pragma: no cover - optional DB
+                ui.notify(f"Failed to persist candle settings: {exc}", color="warning")
             try:
                 await save_frontend_timezone(timezone_value)
             except Exception as exc:  # pragma: no cover - optional DB
@@ -4719,6 +4783,7 @@ def register_pages(app: FastAPI) -> None:
                 )
                 await market_service.set_ohlc_bar(config["ta_timeframe"])
                 market_service.set_poll_interval(config["poll_interval"])
+                market_service.set_ohlcv_fetch_limit(config["ohlcv_fetch_limit"])
                 await market_service.set_websocket_enabled(config.get("enable_websocket", True))
                 await market_service.update_symbols(symbols)
             try:
