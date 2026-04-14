@@ -1654,6 +1654,9 @@ class MarketService:
                 for key, meta in self._latest_execution_limits.items()
                 if isinstance(meta, dict)
             }
+        # Always carry the latest feedback so the UI reflects entries generated
+        # since the last full snapshot build (execution_limits gets the same treatment).
+        patched["execution_feedback"] = list(self._execution_feedback)
         # Inject live ticker prices so current-price and PnL columns stay fresh.
         if self._latest_ticker and "market_data" in patched:
             patched["market_data"] = dict(patched["market_data"])
@@ -2664,9 +2667,18 @@ class MarketService:
                     meta_suffix = f" meta={json.dumps(meta, default=str)}"
                 except Exception:
                     meta_suffix = f" meta={meta}"
-            self._emit_debug(
-                f"Execution feedback ({level}) {symbol}: {message}{meta_suffix}"
-            )
+            _log_msg = f"Execution feedback ({level}) {symbol}: {message}{meta_suffix}"
+            # Use the appropriate Python log level so this always appears in the
+            # log file even when debug output is suppressed (e.g. --log-level warning).
+            if level == "error":
+                logger.error(_log_msg)
+            else:
+                logger.warning(_log_msg)
+            # Also echo to the debug sink (backend_events / Debug page).
+            try:
+                self._log_sink(_log_msg)
+            except Exception:  # pragma: no cover - defensive
+                pass
 
     def record_execution_feedback(
         self,
@@ -4057,6 +4069,12 @@ class MarketService:
                     self._emit_debug(
                         f"Wait-for-TP/SL guard blocked {action} for {symbol}: protection active"
                     )
+                    self._record_execution_feedback(
+                        symbol,
+                        f"Blocked: wait-for-TP/SL guard active; existing protection prevents {action}",
+                        level="warning",
+                        meta={"current_side": current_side, "action": action},
+                    )
                     return False
 
         if require_alignment and not self._transition_allowed(current_side, action):
@@ -4064,6 +4082,12 @@ class MarketService:
                 f"Guardrail blocked {action} for {symbol}: current side={current_side}"
             )
             self._decision_state[symbol] = {"action": current_side, "timestamp": now}
+            self._record_execution_feedback(
+                symbol,
+                f"Blocked by position-alignment guardrail: {action} not allowed while {current_side}",
+                level="warning",
+                meta={"current_side": current_side, "action": action},
+            )
             return False
 
         last_decision = self._decision_state.get(symbol)
@@ -4074,6 +4098,12 @@ class MarketService:
                 self._emit_debug(
                     f"Guardrail cooldown active for {symbol}; skipping {action} ({remaining:.0f}s left)"
                 )
+                self._record_execution_feedback(
+                    symbol,
+                    f"Blocked by cooldown guardrail: {action} requires {cooldown_seconds}s between trades ({remaining:.0f}s remaining)",
+                    level="warning",
+                    meta={"cooldown_seconds": cooldown_seconds, "remaining_seconds": remaining, "action": action},
+                )
                 return False
 
         history = self._recent_trades.setdefault(symbol, deque())
@@ -4081,6 +4111,12 @@ class MarketService:
         if trade_limit > 0 and len(history) >= trade_limit:
             self._emit_debug(
                 f"Guardrail trade limit hit for {symbol}; skipping {action}"
+            )
+            self._record_execution_feedback(
+                symbol,
+                f"Blocked by trade-rate guardrail: {action} exceeds {trade_limit} trades per {trade_window}s window",
+                level="warning",
+                meta={"trade_limit": trade_limit, "trade_window_seconds": trade_window, "action": action},
             )
             return False
 
@@ -4092,9 +4128,21 @@ class MarketService:
         execution_enabled = bool(execution_cfg.get("enabled"))
         if not execution_enabled:
             self._emit_debug(f"Execution disabled for {symbol}; skipping OKX order")
+            self._record_execution_feedback(
+                symbol,
+                f"Execution is disabled — {action} decision recorded but no order placed (enable execution in CFG)",
+                level="warning",
+                meta={"action": action},
+            )
             return False
         if not self._trade_api:
             self._emit_debug("Trade API unavailable; cannot execute decision")
+            self._record_execution_feedback(
+                symbol,
+                "Trade API unavailable; cannot place order (check OKX API credentials)",
+                level="error",
+                meta={"action": action},
+            )
             return False
         instrument_spec = self._instrument_specs.get(symbol) or {}
         execution_trade_mode = execution_cfg.get("trade_mode") or "isolated"
@@ -4403,6 +4451,12 @@ class MarketService:
         if raw_size <= 0:
             self._emit_debug(
                 f"Execution skipped for {symbol}: unable to derive valid position size"
+            )
+            self._record_execution_feedback(
+                symbol,
+                "Blocked: could not compute a valid position size (check notional_usd, equity, and leverage config)",
+                level="warning",
+                meta={"action": action, "last_price": last_price, "account_equity": account_equity},
             )
             return False
         target_leverage: float | None = None
@@ -5414,15 +5468,33 @@ class MarketService:
             self._emit_debug(
                 f"Execution skipped for {symbol}: computed size {raw_size:.6f} below minimum {min_size}"
             )
+            self._record_execution_feedback(
+                symbol,
+                f"Blocked: computed size {raw_size:.6f} is below instrument minimum {min_size} (too little capital or notional too small)",
+                level="warning",
+                meta={"raw_size": raw_size, "min_size": min_size, "action": action},
+            )
             return False
 
         quantized_size = self._quantize_order_size(symbol, raw_size)
         if quantized_size is None or quantized_size <= 0:
             self._emit_debug(f"Execution skipped for {symbol}: size {raw_size:.6f} below lot size")
+            self._record_execution_feedback(
+                symbol,
+                f"Blocked: size {raw_size:.6f} rounds to zero after lot-size quantization (too small to place)",
+                level="warning",
+                meta={"raw_size": raw_size, "action": action},
+            )
             return False
         if quantized_size < min_size:
             self._emit_debug(
                 f"Execution skipped for {symbol}: quantized size {quantized_size:.6f} below minimum {min_size}"
+            )
+            self._record_execution_feedback(
+                symbol,
+                f"Blocked: quantized size {quantized_size:.6f} is below instrument minimum {min_size}",
+                level="warning",
+                meta={"quantized_size": quantized_size, "min_size": min_size, "action": action},
             )
             return False
         raw_size = quantized_size

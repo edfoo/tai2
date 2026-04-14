@@ -155,10 +155,19 @@ def test_prompt_builder_compiles_structured_payload() -> None:
 
     assert context["symbol"] == "BTC-USDT-SWAP"
     assert context["timeframe"] == "1H"
-    assert context["market"]["spread"] == 10.0
-    assert len(context["history"]["candles"]) == 1  # trimmed to max_candles
+    # spread is now in liquidity_context only (deduped from market)
+    assert context["liquidity_context"]["spread"] == 10.0
+    assert "spread" not in context["market"]
+    # Raw candles are stripped from LLM context — all indicators are pre-computed
+    assert "candles" not in context["history"]
+    assert "candles_htf" not in context["history"]
     assert context["positions"][0]["side"] == "LONG"
-    assert context["trend_confirmation"]["moving_averages"]["bias"] == "bullish"
+    # trend_confirmation removed — ADX/EMA already in context.indicators
+    assert "trend_confirmation" not in context
+    assert context["indicators"]["moving_averages"]["ema_50"] > context["indicators"]["moving_averages"]["ema_200"]
+    # pre_computed_modifiers should be present
+    assert "pre_computed_modifiers" in context
+    assert "capital_sufficient" in context["pre_computed_modifiers"]
     assert context["liquidity_context"]["liquidity_bias"] == "bid-supported"
     assert context["derivatives_posture"]["long_short_ratio"]["value"] == 1.2
     assert context["derivatives_posture"]["liquidation_clusters"]
@@ -195,26 +204,13 @@ def test_prompt_builder_respects_live_execution_limits() -> None:
 
     payload = builder.build(symbol="BTC-USDT-SWAP", timeframe="1H")
     execution_block = payload["context"]["execution"]
-    expected_equity_cap = 5678.9 * 0.2
-    expected_symbol_equity_cap = 5678.9 * symbol_cap_pct
-    expected_effective_cap = 9876.5
 
-    assert execution_block["available_margin_usd"] == pytest.approx(1234.5)
-    assert execution_block["account_equity_usd"] == pytest.approx(5678.9)
-    assert execution_block["max_equity_allocation_usd"] == pytest.approx(expected_equity_cap)
-    assert execution_block["margin_max_position_value_usd"] == pytest.approx(9876.5)
-    assert execution_block["symbol_max_position_pct"] == pytest.approx(symbol_cap_pct)
-    assert execution_block["symbol_max_equity_allocation_usd"] == pytest.approx(expected_symbol_equity_cap)
-    assert execution_block["effective_max_position_value_usd"] == pytest.approx(expected_effective_cap)
     assert execution_block["max_leverage"] == pytest.approx(4.5)
-    assert execution_block["live_margin_snapshot"]["updated_at"] == updated_at
-    assert execution_block["live_margin_snapshot"]["quote_currency"] == "USDT"
-    assert execution_block["live_margin_snapshot"]["quote_available_usd"] == pytest.approx(1100.0)
-    assert execution_block["live_margin_snapshot"]["quote_cash_usd"] == pytest.approx(1000.0)
-    assert execution_block["margin_health"]["limiting_factor"] == "margin"
-    assert execution_block["margin_health"]["equity_cap_usd"] == pytest.approx(expected_equity_cap)
-    assert execution_block["margin_health"]["symbol_equity_cap_usd"] == pytest.approx(expected_symbol_equity_cap)
-    assert execution_block["margin_health"]["effective_cap_usd"] == pytest.approx(expected_effective_cap)
+    # max_safe_notional = min(1234.5 * 4.5=5555.25, min(9876.5, 5678.9*0.2=1135.78, 5678.9*0.05=283.945)) = 283.945
+    assert execution_block["max_safe_notional_usd"] == pytest.approx(283.95, abs=0.01)
+    assert "margin_summary" in execution_block
+    # Symbol cap accessible via guardrails
+    assert payload["context"]["guardrails"]["symbol_position_caps"]["BTC-USDT-SWAP"] == pytest.approx(symbol_cap_pct)
 
 
 def test_prompt_builder_applies_caps_per_symbol() -> None:
@@ -238,15 +234,13 @@ def test_prompt_builder_applies_caps_per_symbol() -> None:
 
     btc_execution = btc_payload["context"]["execution"]
     eth_execution = eth_payload["context"]["execution"]
-    equity = snapshot["account_equity"]
     leverage = metadata["guardrails"]["max_leverage"]
 
-    assert btc_execution["symbol_max_position_pct"] == pytest.approx(0.1)
-    assert eth_execution["symbol_max_position_pct"] == pytest.approx(0.2)
-    assert btc_execution["symbol_max_equity_allocation_usd"] == pytest.approx(equity * 0.1)
-    assert eth_execution["symbol_max_equity_allocation_usd"] == pytest.approx(equity * 0.2)
-    assert btc_execution["max_equity_allocation_usd"] == pytest.approx(equity * 0.5)
-    assert eth_execution["max_equity_allocation_usd"] == pytest.approx(equity * 0.5)
+    # Symbol caps are in guardrails, not duplicated in execution block
+    assert btc_payload["context"]["guardrails"]["symbol_position_caps"]["BTC-USDT-SWAP"] == pytest.approx(0.1)
+    assert eth_payload["context"]["guardrails"]["symbol_position_caps"]["ETH-USDT-SWAP"] == pytest.approx(0.2)
+    assert btc_execution["max_leverage"] == pytest.approx(leverage)
+    assert eth_execution["max_leverage"] == pytest.approx(leverage)
 
 
 def test_prompt_builder_includes_margin_health_and_feedback_digest() -> None:
@@ -288,10 +282,10 @@ def test_prompt_builder_includes_margin_health_and_feedback_digest() -> None:
     payload = builder.build(symbol="BTC-USDT-SWAP", timeframe="1H")
     context = payload["context"]
     execution_block = context["execution"]
-    margin_health = execution_block["margin_health"]
-    assert margin_health["limiting_factor"] == "margin"
-    assert margin_health["effective_cap_usd"] == pytest.approx(15000.0)
-    assert margin_health["equity_cap_usd"] == pytest.approx(1000.0)
+    # margin_summary replaces margin_health; cap fields removed from execution block
+    assert "margin_summary" in execution_block
+    # max_safe_notional = min(8000*4=32000, min(15000, 50000, 10000*0.1=1000)) = 1000
+    assert execution_block["max_safe_notional_usd"] == pytest.approx(1000.0, abs=0.01)
     feedback_digest = execution_block["feedback_digest"]
     assert feedback_digest["counts"]["warning"] == 1
     assert feedback_digest["latest"]["message"] == "Submitted test order"

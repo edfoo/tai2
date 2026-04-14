@@ -10,6 +10,13 @@ from app.services.prompt_utils import sanitize_prompt_text
 
 logger = logging.getLogger(__name__)
 
+# Keys whose values should NOT be rounded even if they are floats (timestamps, IDs, etc.)
+_ROUND_FLOAT_SKIP_KEYS: frozenset[str] = frozenset({
+    "ts", "timestamp", "generated_at", "updated_at", "observed_at",
+    "next_funding", "next_settlement", "resets_at", "locked_at",
+    "fundingTime", "nextFundingTime", "series_age_hours",
+})
+
 
 DEFAULT_SYSTEM_PROMPT = (
     "You are a professional hedge fund trader with profitability as primary goal, but with strict risk controls. "
@@ -35,47 +42,34 @@ _SEC_INTRO = (
 )
 
 _SEC_STEP1_PREFLIGHT = (
-    "STEP 1 — PRE-FLIGHT CHECKS (hard-block if any fail): "
-    "(a) Recommendation must comply with leverage, position size, trade limits, and max-position-percent guardrails (including symbol caps). "
-    "(b) context.positions and context.pending_orders must not already contain an open or pending order in the same direction — if they do, prefer HOLD or a close/reverse. "
-    "(c) Inspect context.execution.margin_health for real-time capital caps. "
-    "(d) EXECUTION FEEDBACK STALENESS RULE: context.execution_feedback and its digest are hard blockers ONLY if the rejection's snapshot is less than 2 completed candles old (i.e. < 30 minutes for a 15m chart, < 2 hours for a 1h chart). "
-    "After 2 completed candles have closed since the rejection, re-evaluate independently and note the prior rejection in rationale — it no longer hard-blocks a new entry. "
-    "If context.execution_feedback is missing or null, note 'no prior rejection feedback' and proceed — do not infer any rejection. "
-    "(e) MINIMUM HOLD TIME: positions must be held for at least context.guardrails.min_hold_seconds. "
-    "If near-term volatility (e.g. funding settlement within min_hold_seconds) could trigger a stop before the hold period expires, prefer HOLD. "
-    "Cite all pre-flight checks and whether feedback is still within its hard-block window in your rationale. "
+    "STEP 1 — PRE-FLIGHT: context.pre_computed_modifiers.pre_flight_passed confirms that capital is sufficient to enter. "
+    "If execution_feedback_blocks is true, prefer HOLD. "
+    "If has_existing_position or has_pending_order is true in your proposed direction, prefer HOLD or close/reverse instead. "
+    "If portfolio_overexposed is true (net exposure > 100% of equity), add +0.10 to risk_score and note concentration risk in rationale. "
+    "MINIMUM HOLD TIME: positions must be held for at least context.guardrails.min_hold_seconds; "
+    "if near-term volatility (e.g. funding settlement within min_hold_seconds) could trigger a stop before the hold period expires, prefer HOLD. "
+    "Cite pre-flight status in rationale. "
 )
 
 _SEC_STEP2_HTF = (
-    "STEP 2 — HIGHER-TIMEFRAME TREND FILTER (confidence modifier, not a hard veto): "
-    "context.history.candles_htf contains candles at context.history.timeframe_htf (same wall-clock window as context.history.candles). "
-    "Both candles and candles_htf are sorted ascending (oldest first, most recent last) — no ordering check needed. "
-    "context.indicators.htf contains pre-computed HTF indicators: adx (value/di_plus/di_minus), moving_averages (ema_50/ema_200), bollinger_bands, rsi, vwap. "
-    "Score the HTF alignment with your proposed direction: "
-    "  • Strong alignment (ema_50/ema_200 agree AND adx.value > 25 with correct DI): +0.0 penalty (full confidence allowed). "
-    "  • Weak/neutral HTF (ema_50 ≈ ema_200, low ADX, or ambiguous): −0.15 confidence penalty. "
-    "  • HTF contradicts direction — apply an ADX-scaled penalty: "
-    "      − HTF ADX > 30 and contradicts: −0.30 penalty AND reduce confidence by ×0.7. "
-    "      − HTF ADX 20–30 and contradicts: −0.20 penalty AND reduce confidence by ×0.8. "
-    "      − HTF ADX < 20 and contradicts: −0.10 penalty only (trend not established, contradiction carries less weight). "
-    "PENALTY ARITHMETIC ORDER: first apply the additive penalty to the base confidence, then apply the multiplicative scaling. "
-    "Example for HTF ADX > 30 contradiction: final = (base − 0.30) × 0.7. "
-    "The ranging penalty (from regime rules) is applied independently — it stacks additively with the HTF additive penalty. "
-    "A counter-trend trade (HTF contradicts) is allowed only if the net confidence after all penalties is ≥ 0.45; otherwise choose HOLD. "
-    "State the HTF ADX value and which bracket applies in your rationale. "
-    "HTF DI AMBIGUITY: if HTF ADX > 25 but |di_plus − di_minus| < 5, treat the HTF as weak/neutral regardless of ADX value — "
-    "the trend exists but has no clear directional bias. Apply the −0.15 weak/neutral penalty. "
-    "FALLBACK: if context.indicators.htf is empty or context.history.candles_htf is empty, apply a flat −0.20 penalty and skip further HTF analysis. "
+    "STEP 2 — HTF TREND FILTER (confidence modifier, not a hard veto): "
+    "context.pre_computed_modifiers provides pre-computed HTF alignment and penalty values. "
+    "htf_alignment_class gives the HTF bias: 'bullish', 'bearish', or 'neutral'/'unavailable' when weak or no data. "
+    "If your direction aligns with htf_alignment_class (bullish→BUY, bearish→SELL): apply htf_align_penalty to base confidence. "
+    "If your direction contradicts htf_alignment_class: apply htf_contradict_additive to base confidence, then multiply by htf_contradict_multiplicative. "
+    "htf_contradict_bracket labels the ADX-based severity bracket for rationale. "
+    "PENALTY ARITHMETIC ORDER: first apply the additive penalty to base confidence, then apply the multiplicative scaling. "
+    "The ranging penalty (from regime rules) stacks additively with htf_contradict_additive. "
+    "A counter-trend trade is allowed only if net confidence after all penalties ≥ 0.45; otherwise HOLD. "
+    "State htf_alignment_class, htf_adx, and htf_contradict_bracket (if contradicting) in rationale. "
 )
 
 _SEC_STEP3_DIVERGENCE = (
     "STEP 3 — DIVERGENCE & POSITIONING CHECK (strong filter): "
     "context.market_signals.obv_trend and context.market_signals.cvd_trend are pre-computed — use them as the primary signal. "
     "OBV LABEL VERIFICATION: context.market_signals.obv_trend_confidence is pre-computed as 'strong', 'moderate', 'weak', or 'unknown'. "
-    "If obv_trend_confidence is 'strong', the signal carries full weight. "
-    "If 'moderate', reduce weight by one-quarter. If 'weak' or 'unknown', reduce weight by half. "
-    "You may still cross-check against the last 3–5 values of the OBV series (context.indicators.obv if present) for additional confirmation. "
+    "Use pre_computed_modifiers.obv_effective_weight (1.0=strong, 0.75=moderate, 0.5=weak/unknown) to scale OBV signal strength. "
+    "You may still cross-check against the last 5 values of the OBV series (context.indicators.obv if present) for additional confirmation. "
     "If recent values are flat or reversing against the label, treat the label as stale and reduce its weight by half. "
     "DIVERGENCE LABEL SANITY CHECK: if obv_trend says 'diverging_X' but the actual price direction does not match the divergence definition "
     "(i.e. 'diverging_bearish' requires price RISING + OBV FALLING; 'diverging_bullish' requires price FALLING + OBV RISING), "
@@ -84,29 +78,23 @@ _SEC_STEP3_DIVERGENCE = (
     "If obv_trend is 'diverging_bullish' (price falling, OBV rising), a SELL is strongly discouraged. "
     "Divergence against your proposed direction should be cited as a risk factor and typically warrants HOLD. "
     "CVD LABEL VERIFICATION: context.market_signals.cvd_trend_confidence is pre-computed as 'strong', 'moderate', 'weak', or 'unknown'. "
-    "Apply the same weight adjustment as OBV: 'strong' = full weight, 'moderate' = three-quarter weight, 'weak'/'unknown' = half weight. "
-    "You may still cross-check against the last 20+ values of context.market.order_flow.cvd_series for additional confirmation. "
+    "Use pre_computed_modifiers.cvd_effective_weight similarly to scale CVD signal strength. "
+    "You may still cross-check against the last 5 values of context.market.order_flow.cvd_series for additional confirmation. "
     "If the recent slope contradicts the cvd_trend label (e.g. label says 'net_positive_rising' but the series shows a deep negative value and falling), "
     "treat the label as stale and reduce its weight by half. State the observed slope vs. label in rationale. "
     "CVD UNKNOWN RULE: if cvd_trend is 'unknown', apply −0.05 confidence and explicitly note in rationale that order-flow confirmation is absent. "
-    "ZERO DEPTH FALLBACK: if context.market.order_flow.bid_depth or ask_depth is 0 or null, "
-    "treat order_flow imbalance as unreliable; apply −0.05 confidence penalty and note 'incomplete depth data' in rationale. "
-    "THIN BOOK RULE: if context.market.order_flow.order_book_note starts with 'thin:', "
-    "the entire order-flow block (imbalance, depth, liquidity_bias) is unreliable. "
-    "Apply −0.10 confidence penalty (subsumes the −0.05 zero-depth penalty) and note 'thin order book' in rationale. "
+    "ORDER FLOW RELIABILITY: if pre_computed_modifiers.order_flow_reliable is false, "
+    "apply pre_computed_modifiers.order_flow_penalty to confidence and note 'unreliable order flow' in rationale. "
     "SLIPPAGE ABSENT RULE: if context.liquidity_context.estimated_slippage_bps is null, "
     "estimate slippage from spread_pct × 2 as a conservative proxy for risk_score computation, and note this assumption. "
     "If context.liquidity_context.slippage_note is present, it means the system has already provided a conservative "
     "estimate due to degraded data — use the provided value and add it to risk_score considerations. "
-    "L/S RATIO TREND: context.derivatives_posture.long_short_ratio contains the current value plus any series. "
-    "If the L/S ratio has been declining for 10+ periods while price rises, treat it as a bullish short-squeeze setup and add +0.05 confidence. "
-    "If the L/S ratio has been rising for 10+ periods while price falls, treat it as a bearish capitulation setup and add +0.05 confidence to a SELL. "
-    "L/S DATA ABSENT: if long_short_ratio data is missing but funding is below −0.15%, treat this as partial Archetype C confirmation only — add +0.03 instead of +0.05 and note the missing L/S data as a risk factor in rationale. "
-    "L/S SERIES STALE: if context.derivatives_posture.long_short_ratio.series_stale is true, "
-    "the series timestamps are outdated (series_age_hours shows how old). The current L/S value may be fresh, "
-    "but the trend direction cannot be reliably assessed. Treat the L/S series as absent for trend-based signals "
-    "and rely on the current value only. Note the staleness in rationale. "
-    "Do NOT pass the raw L/S series in your rationale — summarise the trend direction only (e.g. 'L/S declining 12 periods → squeeze bias'). "
+    "L/S RATIO: use pre_computed_modifiers.ls_signal for positioning context. "
+    "'squeeze_candidate' → add ls_confidence_add to BUY confidence (price should also be rising); "
+    "'pressure_candidate' → add ls_confidence_add to SELL confidence. "
+    "If ls_signal is 'stale_series', 'absent', or 'insufficient_data', use pre_computed_modifiers.ls_current_value for directional bias only (null means no L/S data available). "
+    "If ls_signal is 'absent' and ls_confidence_add > 0, partial Archetype C applies (funding below −0.15%). "
+    "Do NOT reproduce the L/S series in rationale — state ls_signal and bias direction only. "
 )
 
 _SEC_STEP4_SIGNALS = (
@@ -144,11 +132,10 @@ _SEC_STEP5_SIZING = (
     "If invoking the lowered floor, state it explicitly in rationale: 'Regime-adjusted floor applied: 0.45'. "
     "The risk_score (0–1) reflects current volatility (ATR %), spread width, and proximity to major support/resistance. "
     "Higher risk_score = more risk = significantly smaller position. "
-    "The execution layer derives position size from your confidence and risk_score: "
-    "notional = max_safe_notional_usd × confidence × (1 − risk_score). "
-    "Focus exclusively on direction and signal quality — do NOT output a dollar amount. "
-    "If context.execution.max_safe_notional_usd < context.execution.min_notional_usd "
-    "(insufficient free capital), you MUST choose HOLD. "
+    "The execution layer sizes positions from your confidence and risk_score "
+    "(notional = max_safe_notional_usd × confidence × (1 − risk_score)). "
+    "context.execution.max_safe_notional_usd and min_notional_usd are provided for reference — do NOT output a dollar amount. "
+    "If pre_computed_modifiers.capital_sufficient is false, you MUST choose HOLD. "
 )
 
 _SEC_STEP6_TP_BASE = (
@@ -177,23 +164,13 @@ _SEC_STEP6_TP_CLOSE = (
 )
 
 _SEC_SIZING_RULE_POST = (
-    "SIZING CONTEXT (execution layer owns all arithmetic): "
-    "context.execution.max_safe_notional_usd and context.execution.min_notional_usd are provided for reference only. "
-    "The execution layer computes the final position size from your confidence and risk_score — "
-    "you do NOT output a dollar amount. "
-    "If context.execution.max_safe_notional_usd < context.execution.min_notional_usd "
-    "(insufficient free capital), you MUST choose HOLD regardless of signal quality. "
-    "Contract sizes and exchange multipliers are handled automatically. "
+    "Contract sizes and exchange multipliers are handled automatically by the execution layer. "
 )
 
 # Conditional: only included when llm_notional_mode == "pre_leverage".
 _SEC_SIZING_RULE_PRE = (
-    "SIZING CONTEXT — PRE-LEVERAGE MODE (execution layer owns all arithmetic): "
-    "context.execution.max_safe_notional_usd is the ceiling for the MARGIN you can commit; "
-    "context.execution.min_notional_usd is the minimum margin required. "
-    "These are provided for reference only — the execution layer computes the final margin commitment "
-    "from your confidence and risk_score; you do NOT output a dollar amount. "
-    "If context.execution.max_safe_notional_usd < context.execution.min_notional_usd, you MUST choose HOLD. "
+    "PRE-LEVERAGE MODE: context.execution.max_safe_notional_usd is the MARGIN ceiling (bot multiplies by max_leverage internally). "
+    "Contract multipliers are handled automatically. "
 )
 
 _SEC_DIRECTION_RULE_BASE = (
@@ -212,14 +189,12 @@ _SEC_HOLD_GUIDANCE = (
     "Choose HOLD whenever capital constraints, fee/credit depletion, missing TP/SL, poor reward-to-risk, "
     "or low confidence (< 0.45) prevent a high-quality entry — and describe the specific blocker. "
     "HTF contradiction alone is NOT a reason to HOLD if LTF signals are strong enough to survive the confidence penalty. "
-    "CREDIT CONSERVATION: if context.credit_availability is present and credit_availability.remaining < 10% of credit_availability.granted, "
-    "add +0.10 to risk_score to reduce position sizing and conserve remaining credit. Note 'credit conservation mode' in rationale. "
-    "SPIKE RECENCY CHECK: if the last 3 LTF candles show a cumulative move > 2× ATR on declining volume in the most recent bar, "
-    "increase risk_score by +0.15 and prefer a limit order at the nearest support rather than a market order. Note the spike recency adjustment in rationale. "
+    "CREDIT CONSERVATION: if context.pre_computed_modifiers.credit_conservation is true, "
+    "add context.pre_computed_modifiers.credit_risk_add to risk_score. Note 'credit conservation mode' in rationale. "
+    "SPIKE RECENCY CHECK: if context.pre_computed_modifiers.spike_recency is true, "
+    "increase risk_score by context.pre_computed_modifiers.spike_risk_add and prefer a limit order at the nearest support. Note the spike recency adjustment in rationale. "
     "REGIME PRECEDENCE: regime rules adjust bias and apply confidence penalties, but they do NOT override the confidence-based sizing system. "
     "If the regime says 'prefer HOLD' but your computed confidence for a directional trade exceeds 0.55, the trade is valid — document the regime tension in rationale. "
-    "IGNORE guardrails.flip_llm_decision — this flag is handled by the execution layer post-response. "
-    "Reason only about your intended direction; the flip is applied downstream and you must not attempt to game your output. "
 )
 
 _SEC_STEP_STRATEGY = (
@@ -229,7 +204,7 @@ _SEC_STEP_STRATEGY = (
     "Use a limit order at the nearest LTF support for better fill. "
     "(B) Mean-reversion in bullish HTF context: use an uptrending HTF as macro backdrop; wait for RSI to pull back to "
     "50–55 on the LTF before entering long — this avoids chasing overbought conditions and improves R:R. "
-    "(C) Funding-rate fade: when context.market_signals.funding_archetype_c_eligible is true (funding < −0.05%) and the HTF is bullish, "
+    "(C) Funding-rate fade: when context.pre_computed_modifiers.archetype_c_eligible is true (funding < −0.05%) and the HTF is bullish, "
     "lean long on any LTF pullback — the overcrowded-shorts squeeze is a well-documented crypto-perps edge. "
     "Also check context.session_context.hours_until_funding — if funding settlement is imminent (< 2 hours), the squeeze is more acute. "
     "State which archetype you are using in your rationale. "
@@ -253,9 +228,8 @@ _SEC_STEP_REGIME = (
     "post_spike_consolidation: prefer HOLD or a reduced-size BUY only on a confirmed support hold; wait for ADX to "
     "re-expand above 25 before sizing up. "
     "breakdown: strong SELL bias or HOLD; do not BUY unless HTF shows compelling bullish divergence. "
-    "  BREAKDOWN STALENESS: if market_regime is 'breakdown' but the last 10+ candles show "
-    "diminishing downward momentum (higher lows, declining ATR, or volume contraction), "
-    "reclassify to 'post_spike_consolidation' and note the override in rationale. "
+    "  BREAKDOWN STALENESS: if context.pre_computed_modifiers.regime_reclassification is set, "
+    "use that regime instead of 'breakdown' and note the override in rationale. "
     "unknown: treat as ranging and apply the −0.10 penalty (offset rules above still apply). "
 )
 
@@ -300,9 +274,10 @@ def default_prompt_sections(
     guardrail state so the editor opens in a sensible state.
     """
     rr_keys = {"step6_tp_rr", "direction_rr"}
+    _off_by_default = {"direction_rule"}
     return {
         sec["key"]: {
-            "enabled": (require_rr if sec["key"] in rr_keys else True),
+            "enabled": (require_rr if sec["key"] in rr_keys else sec["key"] not in _off_by_default),
             "override": None,
         }
         for sec in PROMPT_SECTIONS
@@ -356,7 +331,6 @@ def assemble_decision_prompt(
         parts.append(_SEC_STEP6_TP_RR_RULE)
     parts.append(_SEC_STEP6_TP_CLOSE)
     parts.append(_SEC_SIZING_RULE_PRE if pre_leverage else _SEC_SIZING_RULE_POST)
-    parts.append(_SEC_DIRECTION_RULE_BASE)
     if require_rr:
         parts.append(_SEC_DIRECTION_RR_RULES)
     parts.append(_SEC_HOLD_GUIDANCE)
@@ -473,10 +447,12 @@ class PromptBuilder:
         liquidations = market_block.get("liquidations") or snapshot.get("liquidations") or []
 
         live_section = self._build_live_section(ticker, funding, open_interest, custom_metrics, order_book)
+        # Extract LTF candles for internal computations (not sent to LLM — all indicators pre-computed)
+        _ohlcv_raw = indicators.get("ohlcv") or []
+        ltf_candles: list[dict[str, Any]] = _ohlcv_raw[-self.max_candles:]
         history_section = self._build_history_section(indicators)
         _last_price_for_htf = _to_float(live_section.get("last_price"))
         indicator_section = self._build_indicator_section(indicators, last_price=_last_price_for_htf)
-        ltf_candles: list[dict[str, Any]] = history_section.get("candles") or []
         # 2.1 — change_24h_pct fallback: compute from candle data when the ticker doesn't supply it.
         if live_section.get("change_24h_pct") is None and len(ltf_candles) >= 2:
             _first_open = _to_float(ltf_candles[0].get("open"))
@@ -500,12 +476,8 @@ class PromptBuilder:
         spec_min_size = instrument_spec.get("min_size") if instrument_spec else None
         min_size_value = spec_min_size if spec_min_size is not None else runtime_min_size
         price_hint = self._resolve_last_price(live_section)
-        execution_settings = {
-            "enabled": bool(runtime_meta.get("execution_enabled")),
-            "trade_mode": runtime_meta.get("execution_trade_mode") or "cross",
-            "order_type": runtime_meta.get("execution_order_type") or "market",
-            "min_size": min_size_value,
-        }
+        execution_settings: dict[str, Any] = {}
+        execution_settings["enabled"] = bool(runtime_meta.get("execution_enabled", False))
         if price_hint is not None:
             execution_settings["price_reference"] = price_hint
         # 6.3 — Always include symbol_rules so the model can reference
@@ -640,40 +612,16 @@ class PromptBuilder:
             execution_settings["tier_initial_margin_ratio"] = tier_imr
         if tier_source:
             execution_settings["tier_source"] = tier_source
-        live_snapshot: dict[str, Any] = {}
-        if live_available_margin is not None:
-            live_snapshot["available_margin_usd"] = live_available_margin
-        if live_account_equity is not None:
-            live_snapshot["account_equity_usd"] = live_account_equity
-        if live_max_leverage is not None:
-            live_snapshot["max_leverage"] = live_max_leverage
-        if margin_cap_usd is not None:
-            live_snapshot["max_notional_usd"] = margin_cap_usd
-        if tier_cap_usd is not None:
-            live_snapshot["tier_max_notional_usd"] = tier_cap_usd
-        if tier_imr is not None:
-            live_snapshot["tier_initial_margin_ratio"] = tier_imr
-        if tier_source:
-            live_snapshot["tier_source"] = tier_source
-        if quote_available_override is not None:
-            live_snapshot["quote_available_usd"] = quote_available_override
-        if quote_cash_override is not None:
-            live_snapshot["quote_cash_usd"] = quote_cash_override
-        quote_currency_override = execution_limits.get("quote_currency")
-        if quote_currency_override:
-            live_snapshot["quote_currency"] = quote_currency_override
-        for key in ("source", "updated_at"):
-            value = execution_limits.get(key)
-            if value:
-                live_snapshot[key] = value
-        if live_snapshot:
-            execution_settings["live_margin_snapshot"] = live_snapshot
+        # Pass updated_at temporarily so _build_margin_health_section can assess data freshness
+        _exec_updated_at = execution_limits.get("updated_at")
+        if _exec_updated_at:
+            execution_settings["updated_at"] = _exec_updated_at
         margin_health = self._build_margin_health_section(execution_settings)
-        if margin_health:
-            execution_settings["margin_health"] = margin_health
+        if margin_health and margin_health.get("summary"):
+            execution_settings["margin_summary"] = margin_health["summary"]
         schema_overrides = runtime_meta.get("llm_response_schemas") or {}
         timeframe_value = timeframe or runtime_meta.get("ta_timeframe") or snapshot.get("timeframe") or "4H"
-        trend_section = self._build_trend_confirmation(indicators, ticker, timeframe_value)
+        # trend_section intentionally omitted from context; adx/EMA already in indicators
         liquidity_section = self._build_liquidity_profile(live_section, ticker)
         derivatives_section = self._build_derivatives_posture(funding, custom_metrics, liquidations)
         fee_window_summary = self._build_fee_window_summary(account_section)
@@ -705,8 +653,55 @@ class PromptBuilder:
             if _hours_until_funding is None or diff < _hours_until_funding:
                 _hours_until_funding = round(diff, 1)
 
+        # Pre-compute deterministic flags so the LLM reads results, not instructions
+        # on how to calculate them.  Requires ltf_candles — computed above internally.
+        pre_computed_modifiers = self._build_pre_computed_modifiers(
+            indicators, indicator_section, market_signals, execution_settings,
+            execution_feedback, ltf_candles, credit_availability, live_section,
+            derivatives_section,
+            positions_section=positions_section,
+            pending_orders=pending_orders,
+            resolved_symbol=resolved_symbol,
+        )
+        # Flag portfolio over-exposure so the LLM can weight concentration risk.
+        _net_pct = _to_float(exposure_section.get("net_pct_of_equity"))
+        if _net_pct is not None and abs(_net_pct) > 100:
+            pre_computed_modifiers["portfolio_overexposed"] = True
+            pre_computed_modifiers["portfolio_overexposure_pct"] = round(_net_pct, 1)
+
+        # Deduplication: strip market fields already present in liquidity_context
+        live_section.pop("spread", None)
+        live_section.pop("spread_pct", None)
+        live_section.pop("funding_rate", None)  # duplicated in derivatives_posture.funding.current
+        _order_flow_mut = live_section.get("order_flow")
+        if isinstance(_order_flow_mut, dict):
+            _order_flow_mut.pop("bid_depth", None)
+            _order_flow_mut.pop("ask_depth", None)
+            _order_flow_mut.pop("order_book_note", None)
+        # Strip funding_archetype_c_eligible from market_signals (now in pre_computed_modifiers)
+        market_signals.pop("funding_archetype_c_eligible", None)
+        # Slim long_short_ratio: keep only value (series/metadata already consumed by ls_signal);
+        # omit the key entirely when value is absent to avoid an empty {} confusing the LLM.
+        _lsr = derivatives_section.get("long_short_ratio")
+        if isinstance(_lsr, dict):
+            _lsr_value = _lsr.get("value")
+            if _lsr_value is not None:
+                derivatives_section["long_short_ratio"] = {"value": _lsr_value}
+            else:
+                derivatives_section.pop("long_short_ratio", None)
+        # Slim down execution block: remove internal cap fields not needed by the LLM
+        for _k in (
+            "available_margin_usd", "account_equity_usd",
+            "max_equity_allocation_usd", "max_position_pct",
+            "symbol_max_position_pct", "symbol_max_equity_allocation_usd",
+            "margin_max_position_value_usd", "tier_max_position_value_usd",
+            "effective_max_position_value_usd", "tier_initial_margin_ratio", "tier_source",
+            "updated_at",
+        ):
+            execution_settings.pop(_k, None)
+
+        _symbol_positions = [p for p in positions_section if p.get("symbol") == resolved_symbol]
         context = {
-            "generated_at": snapshot.get("generated_at"),
             "symbol": resolved_symbol,
             "timeframe": timeframe_value,
             "session_context": {
@@ -717,34 +712,36 @@ class PromptBuilder:
             "market": live_section,
             "history": history_section,
             "indicators": indicator_section,
-            "risk_metrics": risk_metrics,
-            "positions": positions_section,
-            "account": account_section,
-            "portfolio_exposure": exposure_section,
-            "guardrails": guardrails,
-            "trend_confirmation": trend_section,
+            "portfolio_exposure": {k: v for k, v in exposure_section.items() if k != "heatmap"},
+            # strip execution-layer-only guardrail keys before sending to LLM
+            "guardrails": self._strip_guardrails_for_llm(guardrails),
             "liquidity_context": liquidity_section,
             "derivatives_posture": derivatives_section,
             "pending_orders": pending_orders,
-            "notes": runtime_meta.get("llm_notes"),
-            "prompt_version_id": runtime_meta.get("prompt_version_id"),
-            "prompt_version_name": runtime_meta.get("prompt_version_name"),
             "execution": execution_settings,
-            "fee_availability": fee_window_summary,
-            "credit_availability": credit_availability,
             "market_signals": market_signals,
+            "credit_availability": credit_availability,
+            "pre_computed_modifiers": pre_computed_modifiers,
         }
+        _llm_notes = runtime_meta.get("llm_notes")
+        if _llm_notes:
+            context["notes"] = _llm_notes
+        if _symbol_positions:
+            context["positions"] = _symbol_positions
         if risk_locks:
-            context["risk_locks"] = risk_locks
-        # Always include execution_feedback — even if empty — so the model
-        # doesn't have to guess whether feedback exists.
-        context["execution_feedback"] = execution_feedback or None
+            _dl_lock = risk_locks.get("daily_loss") or {}
+            if bool(_dl_lock.get("active", False)):
+                context["risk_locks"] = {"daily_loss_active": True}
         if execution_feedback:
+            context["execution_feedback"] = execution_feedback
             execution_settings["recent_feedback"] = execution_feedback
-        context["execution_feedback_digest"] = feedback_digest or None
         if feedback_digest:
+            context["execution_feedback_digest"] = feedback_digest
             execution_settings["feedback_digest"] = feedback_digest
+        # Round all float values to contextually appropriate precision to save tokens
+        context = self._round_floats(context)
         system_prompt = sanitize_prompt_text(runtime_meta.get("llm_system_prompt") or DEFAULT_SYSTEM_PROMPT)
+
         # Build the decision prompt.  If the user has saved a truly custom prompt,
         # use it as-is (sanitized).  Otherwise assemble fresh from section constants
         # so the current guardrail state is always reflected — no string-patching.
@@ -827,14 +824,14 @@ class PromptBuilder:
         cvd = custom_metrics.get("cumulative_volume_delta")
         _ofi_ratio = custom_metrics.get("ofi_ratio_series")
         _ofi_ratio_trimmed = (
-            _ofi_ratio[-20:]
+            _ofi_ratio[-5:]
             if isinstance(_ofi_ratio, list) and len(_ofi_ratio) >= 3
             else None
         )
         _cvd_series_raw = custom_metrics.get("cvd_series")
         _cvd_series_trimmed = (
-            _cvd_series_raw[-30:]
-            if isinstance(_cvd_series_raw, list) and len(_cvd_series_raw) > 30
+            _cvd_series_raw[-5:]
+            if isinstance(_cvd_series_raw, list) and len(_cvd_series_raw) > 5
             else _cvd_series_raw
         )
         order_flow: dict[str, Any] = {
@@ -865,18 +862,11 @@ class PromptBuilder:
             )
         return {
             "last_price": last_price,
-            "bid": bid,
-            "ask": ask,
             "spread": spread,
             "spread_pct": spread_pct,
             "change_24h_pct": change_24h_pct,
             "volume_24h": volume_24h,
             "funding_rate": funding_rate,
-            "next_funding": next_funding,
-            "open_interest": {
-                "contracts": oi_value,
-                "base_tokens": oi_value_ccy,
-            },
             "order_flow": order_flow,
         }
 
@@ -949,13 +939,13 @@ class PromptBuilder:
             post_h = [float(candles[j].get("high") or candles[j].get("close") or 0)
                       for j in range(i + 1, i + window + 1)]
             if pre_h and post_h and h > max(pre_h) and h > max(post_h):
-                highs_out.append({"price": h, "ts": candles[i].get("ts"), "bar_index": i})
+                highs_out.append({"price": h, "bar_index": i})
             pre_l = [float(candles[j].get("low") or candles[j].get("close") or h)
                      for j in range(i - window, i)]
             post_l = [float(candles[j].get("low") or candles[j].get("close") or h)
                       for j in range(i + 1, i + window + 1)]
             if pre_l and post_l and l < min(pre_l) and l < min(post_l):
-                lows_out.append({"price": l, "ts": candles[i].get("ts"), "bar_index": i})
+                lows_out.append({"price": l, "bar_index": i})
         return highs_out[-n_pivots:], lows_out[-n_pivots:]
 
     @staticmethod
@@ -977,12 +967,33 @@ class PromptBuilder:
             obv_rising = float(tail_obv[-1]) > float(tail_obv[0])
         except (ValueError, TypeError):
             return "unknown"
+        # Short-term sanity check: verify the last 5 values agree with the n-bar
+        # direction. If not, the trend has recently reversed — prefer the recent
+        # direction so the label matches what the LLM sees in the trimmed series.
+        _recent_n = min(5, len(tail_obv))
+        if _recent_n >= 2:
+            try:
+                _recent_rising = float(tail_obv[-1]) > float(tail_obv[-_recent_n])
+                if _recent_rising != obv_rising:
+                    obv_rising = _recent_rising
+            except (ValueError, TypeError):
+                pass
         price_rising: bool | None = None
         if candles and len(candles) >= 2:
             closes = [c.get("close") for c in candles[-n:] if c.get("close") is not None]
             if len(closes) >= 2:
                 try:
                     price_rising = float(closes[-1]) > float(closes[0])
+                except (ValueError, TypeError):
+                    pass
+            # Short-term sanity check for price direction: if the last 5 closes
+            # contradict the n-bar direction, prefer the recent direction so the
+            # divergence label matches what the LLM sees in the trimmed series.
+            if price_rising is not None and len(closes) >= 5:
+                try:
+                    _recent_price_rising = float(closes[-1]) > float(closes[-5])
+                    if _recent_price_rising != price_rising:
+                        price_rising = _recent_price_rising
                 except (ValueError, TypeError):
                     pass
         if price_rising is None:
@@ -1004,7 +1015,7 @@ class PromptBuilder:
         Returns ``"weak"``    — recent values contradict or are flat relative to the label.
         Returns ``"unknown"`` — insufficient data to judge.
         """
-        if not series or len(series) < max(n, 3):
+        if not series or len(series) < 3:
             return "unknown"
         try:
             tail = [float(v) for v in series[-n:] if v is not None]
@@ -1358,29 +1369,20 @@ class PromptBuilder:
         return result
 
     def _build_history_section(self, indicators: dict[str, Any]) -> dict[str, Any]:
-        ohlcv_rows = indicators.get("ohlcv") or []
-        trimmed = ohlcv_rows[-self.max_candles :]
-        candle_count = len(trimmed)  # align all auxiliary series to this length
-        _series_tail = 15  # shorter tail for indicator series not tied to candles
+        # Raw LTF/HTF candle arrays are NOT sent to the LLM — all indicators are
+        # pre-computed.  We only send short tails of the auxiliary series that
+        # the prompt explicitly asks the LLM to spot-check (~5 values each).
+        _series_tail = 5  # last 5 values for OBV/CVD spot-check (prompt says "last 3–5")
         raw_vwap_series = indicators.get("vwap_series")
         raw_vol_rsi_series = indicators.get("volume_rsi_series")
 
         section: dict[str, Any] = {
-            "candles": trimmed,
-            # vwap_series tracks per-candle VWAP — align to candle count so indices match
-            "vwap_series": self._trim_series(raw_vwap_series, candle_count),
-            # 7.2 — volume_series removed: each candle row already contains its
-            # volume value, so the standalone series was a pure duplicate
-            # (~200 tokens).  Volume RSI is kept separately below.
+            # vwap_series: keep a short tail so the model can judge recent VWAP slope
+            "vwap_series": self._trim_series(raw_vwap_series, _series_tail),
+            # volume_rsi_series: modifier signal — last 5 values are sufficient
             "volume_rsi_series": self._trim_series(raw_vol_rsi_series, _series_tail),
         }
-        ohlcv_htf = indicators.get("ohlcv_htf")
         htf_bar = indicators.get("ohlcv_htf_bar")
-        if ohlcv_htf:
-            # Fetch 200 candles for indicator accuracy; only send the last max_htf_candles to the LLM
-            # (enough to identify swing highs/lows and TP levels, saves significant tokens).
-            htf_normalized = self._normalize_htf_candles(ohlcv_htf)
-            section["candles_htf"] = htf_normalized[-self.max_htf_candles :]
         if htf_bar:
             section["timeframe_htf"] = htf_bar
         return section
@@ -1396,7 +1398,7 @@ class PromptBuilder:
         adx = indicators.get("adx") or {}
         obv = indicators.get("obv") or {}
         cmf = indicators.get("cmf") or {}
-        _series_tail = 15  # retain only a short tail; full series are pre-summarised in market_signals
+        _series_tail = 5  # retain only a short tail; full series are pre-summarised in market_signals
         raw_obv_series = obv.get("series")
         raw_cmf_series = cmf.get("series")
         return {
@@ -1743,23 +1745,22 @@ class PromptBuilder:
                 f"top liq {liquidation_clusters[0]['side']} @ {liquidation_clusters[0]['price']:.0f}"
             )
 
-        # 9.7 — Clarify funding timestamp semantics: "observed_at" is
-        # the settlement time of the current rate; "next_settlement" is when
-        # the next rate will be applied.  Avoids ambiguity about direction.
-        return {
-            "funding": {
-                "current": current_rate,
-                "next": next_rate,
-                "previous": previous_rate,
-                "delta": funding_delta,
-                "observed_at": funding.get("fundingTime"),
-                "next_settlement": funding.get("nextFundingTime"),
-            },
+        # 9.7 — Slim funding block: only include non-null values; remove metadata timestamps.
+        _funding_result: dict[str, Any] = {"current": current_rate}
+        if next_rate is not None:
+            _funding_result["next"] = next_rate
+        if previous_rate is not None:
+            _funding_result["previous"] = previous_rate
+        if funding_delta is not None:
+            _funding_result["delta"] = funding_delta
+        result: dict[str, Any] = {
+            "funding": _funding_result,
             "long_short_ratio": long_short,
-            "liquidation_clusters": liquidation_clusters,
             "summary": ", ".join(summary_bits),
-            "funding_archetype_c_eligible": funding_archetype_c,
         }
+        if liquidation_clusters:
+            result["liquidation_clusters"] = liquidation_clusters
+        return result
 
     def _summarize_liquidations(self, liquidations: list[dict[str, Any]]) -> list[dict[str, Any]]:
         clusters: list[dict[str, Any]] = []
@@ -1959,8 +1960,8 @@ class PromptBuilder:
         heatmap.sort(key=lambda item: item.get("notional") or 0, reverse=True)
         heatmap_trimmed = heatmap[:12]
         return {
-            "long_notional": long_notional if long_notional else None,
-            "short_notional": short_notional if short_notional else None,
+            "long_notional": long_notional,
+            "short_notional": short_notional,
             "net_exposure": net_exposure if (long_notional or short_notional) else None,
             "net_pct_of_equity": net_pct,
             "summary": ", ".join(summary_bits),
@@ -1999,9 +2000,6 @@ class PromptBuilder:
         result: dict[str, Any] = {
             "remaining": remaining,
             "granted": granted,
-            "used": used,
-            "currency": usage.get("currency") or "USD",
-            "resets_at": usage.get("resets_at"),
         }
         # Flag when credit is running low so the model can apply credit conservation.
         if remaining is not None and granted is not None and granted > 0:
@@ -2195,7 +2193,7 @@ class PromptBuilder:
 
     def _build_pending_orders(self, orders: list[dict[str, Any]]) -> dict[str, Any]:
         if not orders:
-            return {"total": 0, "by_side": {}, "open": []}
+            return {"total": 0}
         formatted: list[dict[str, Any]] = []
         counts: dict[str, int] = {}
         for order in orders[:20]:
@@ -2219,6 +2217,337 @@ class PromptBuilder:
             "by_side": counts,
             "open": formatted,
         }
+
+    # ------------------------------------------------------------------
+    # New helper methods: pre-computed modifiers, guardrail stripping,
+    # numeric rounding
+    # ------------------------------------------------------------------
+
+    def _build_pre_computed_modifiers(
+        self,
+        indicators: dict[str, Any],
+        indicator_section: dict[str, Any],
+        market_signals: dict[str, Any],
+        execution_settings: dict[str, Any],
+        execution_feedback: list[dict[str, Any]] | None,
+        ltf_candles: list[dict[str, Any]],
+        credit_availability: dict[str, Any] | None,
+        live_section: dict[str, Any],
+        derivatives_section: dict[str, Any],
+        *,
+        positions_section: list[dict[str, Any]] | None = None,
+        pending_orders: dict[str, Any] | None = None,
+        resolved_symbol: str | None = None,
+    ) -> dict[str, Any]:
+        """Pre-compute deterministic flags/penalties so the LLM reads results,
+        not instructions on how to calculate them."""
+
+        # HTF state
+        htf = indicator_section.get("htf") or {}
+        htf_adx_block = htf.get("adx") or {}
+        htf_ma_block = htf.get("moving_averages") or {}
+        htf_adx_val = _to_float(htf_adx_block.get("value"))
+        htf_ema50 = _to_float(htf_ma_block.get("ema_50"))
+        htf_ema200 = _to_float(htf_ma_block.get("ema_200"))
+        htf_di_plus = _to_float(htf_adx_block.get("di_plus"))
+        htf_di_minus = _to_float(htf_adx_block.get("di_minus"))
+        htf_available = bool(htf and htf_adx_val is not None)
+        htf_strong = htf_adx_val is not None and htf_adx_val > 25
+        _htf_di_clear = (
+            htf_di_plus is not None
+            and htf_di_minus is not None
+            and abs(htf_di_plus - htf_di_minus) > 5
+        )
+        _dmi_bullish = _htf_di_clear and (htf_di_plus or 0) > (htf_di_minus or 0)
+        _dmi_bearish = _htf_di_clear and (htf_di_minus or 0) > (htf_di_plus or 0)
+
+        # EMA gap and narrowing direction — used to resolve EMA/DMI conflicts.
+        # Narrowing is inferred from price position relative to EMA50:
+        #   EMA50 < EMA200 (bearish cross): price above EMA50 pulls it up → gap closes
+        #   EMA50 > EMA200 (bullish cross): price below EMA50 pulls it down → gap closes
+        _ema_gap_pct: float | None = (
+            abs(htf_ema50 - htf_ema200) / htf_ema200 * 100
+            if htf_ema50 is not None and htf_ema200 is not None and htf_ema200 != 0
+            else None
+        )
+        _last_price_htf = _to_float(live_section.get("last_price"))
+        _ema_narrowing: bool | None = None
+        if htf_ema50 is not None and htf_ema200 is not None and _last_price_htf is not None:
+            if htf_ema50 < htf_ema200:
+                _ema_narrowing = _last_price_htf > htf_ema50
+            else:
+                _ema_narrowing = _last_price_htf < htf_ema50
+
+        # Unified EMA + DMI classification:
+        #   ADX < 25 → neutral regardless of EMA ordering
+        #   EMA agrees with DMI (or DMI ambiguous) → follow EMA
+        #   EMA contradicts DMI AND gap < 2% AND narrowing → DMI wins (EMA is lagging)
+        #   EMA contradicts DMI AND (gap ≥ 2% OR widening) → neutral (genuine conflict)
+        #   EMA200 missing → DMI fallback if strong + clear; else unknown
+        if htf_ema50 is not None and htf_ema200 is not None:
+            if not htf_strong:
+                htf_trend_direction = "neutral"
+            elif htf_ema50 > htf_ema200:
+                if not _dmi_bearish:
+                    htf_trend_direction = "bullish"
+                else:
+                    _gap_small = _ema_gap_pct is not None and _ema_gap_pct < 2.0
+                    if _gap_small and bool(_ema_narrowing):
+                        htf_trend_direction = "bearish"  # EMA lagging; DMI has flipped
+                    else:
+                        htf_trend_direction = "neutral"  # genuine conflict, wide gap
+            elif htf_ema50 < htf_ema200:
+                if not _dmi_bullish:
+                    htf_trend_direction = "bearish"
+                else:
+                    _gap_small = _ema_gap_pct is not None and _ema_gap_pct < 2.0
+                    if _gap_small and bool(_ema_narrowing):
+                        htf_trend_direction = "bullish"  # EMA lagging; DMI has flipped
+                    else:
+                        htf_trend_direction = "neutral"  # genuine conflict, wide gap
+            else:
+                htf_trend_direction = "neutral"  # EMA50 == EMA200
+        elif htf_strong and _htf_di_clear:
+            # DMI fallback: EMA200 missing but ADX is strong and DI clearly indicates direction.
+            htf_trend_direction = "bullish" if _dmi_bullish else "bearish"
+        else:
+            htf_trend_direction = "unknown"
+
+        # HTF alignment class and pre-computed penalty values
+        if not htf_available:
+            htf_alignment_class = "unavailable"
+            htf_align_penalty: float = -0.20
+            htf_contradict_additive: float = -0.20
+            htf_contradict_multiplicative: float = 1.0
+            htf_contradict_bracket = "no HTF data"
+        elif htf_trend_direction in ("neutral", "unknown"):
+            htf_alignment_class = "neutral"
+            htf_align_penalty = -0.15
+            htf_contradict_additive = -0.15
+            htf_contradict_multiplicative = 1.0
+            htf_contradict_bracket = "weak/neutral ADX" if not htf_strong else "EMA/DMI conflict or insufficient data"
+        else:
+            htf_alignment_class = htf_trend_direction  # "bullish" or "bearish"
+            htf_align_penalty = 0.0
+            if htf_adx_val > 30:
+                htf_contradict_additive = -0.30
+                htf_contradict_multiplicative = 0.7
+                htf_contradict_bracket = "strong (ADX > 30)"
+            elif htf_adx_val >= 20:
+                htf_contradict_additive = -0.20
+                htf_contradict_multiplicative = 0.8
+                htf_contradict_bracket = "moderate (ADX 20–30)"
+            else:
+                htf_contradict_additive = -0.10
+                htf_contradict_multiplicative = 1.0
+                htf_contradict_bracket = "weak (ADX < 20)"
+
+        # OBV/CVD effective weights (map confidence labels to numeric weights)
+        _weight_map = {"strong": 1.0, "moderate": 0.75, "weak": 0.5, "unknown": 0.5}
+        obv_effective_weight = _weight_map.get(
+            str(market_signals.get("obv_trend_confidence") or "unknown"), 0.5
+        )
+        cvd_effective_weight = _weight_map.get(
+            str(market_signals.get("cvd_trend_confidence") or "unknown"), 0.5
+        )
+
+        # Order-flow reliability (thin or stale order book)
+        order_flow = live_section.get("order_flow") or {}
+        ob_note = str(order_flow.get("order_book_note") or "")
+        order_flow_reliable = not (ob_note.startswith("thin:") or ob_note.startswith("stale:"))
+
+        # Order-flow penalty (pre-computed from order_book_note)
+        order_flow_penalty: float = 0.0
+        if not order_flow_reliable:
+            order_flow_penalty = -0.10 if ob_note.startswith("thin:") else -0.05
+
+        # Credit conservation
+        credit_conservation = False
+        credit_risk_add = 0.0
+        if credit_availability and isinstance(credit_availability, dict):
+            remaining = _to_float(credit_availability.get("remaining"))
+            granted = _to_float(credit_availability.get("granted"))
+            if remaining is not None and granted is not None and granted > 0:
+                if remaining < granted * 0.10:
+                    credit_conservation = True
+                    credit_risk_add = 0.10
+
+        # Capital sufficiency
+        max_safe = _to_float(execution_settings.get("max_safe_notional_usd"))
+        min_notional = _to_float(execution_settings.get("min_notional_usd"))
+        if max_safe is not None and min_notional is not None:
+            capital_sufficient = max_safe >= min_notional
+        else:
+            capital_sufficient = True  # optimistic when we can't determine
+
+        # Pre-flight flags (visible to LLM as bool; execution layer does the hard checks)
+        pre_flight_passed = capital_sufficient
+        execution_feedback_blocks = False  # The execution layer checks timing; always False here
+        _positions = positions_section or []
+        _pending = pending_orders or {}
+        has_existing_position = (
+            any(
+                p.get("symbol") == resolved_symbol and float(p.get("size") or 0) != 0
+                for p in _positions
+            )
+            if resolved_symbol else False
+        )
+        has_pending_order = bool(
+            _pending.get("total", 0) > 0
+            and resolved_symbol is not None
+            and any(o.get("symbol") == resolved_symbol for o in (_pending.get("open") or []))
+        )
+
+        # Spike recency (computed from LTF candles before they are stripped from context)
+        spike_recency = False
+        spike_risk_add = 0.0
+        atr_val = _to_float(indicators.get("atr"))
+        if ltf_candles and len(ltf_candles) >= 3 and atr_val and atr_val > 0:
+            last_3 = ltf_candles[-3:]
+            moves: list[float] = []
+            vols: list[float] = []
+            for c in last_3:
+                open_ = _to_float(c.get("open"))
+                close_ = _to_float(c.get("close"))
+                vol_ = _to_float(c.get("volume"))
+                if open_ is not None and close_ is not None:
+                    moves.append(abs(close_ - open_))
+                if vol_ is not None:
+                    vols.append(vol_)
+            if sum(moves) > 2 * atr_val and len(vols) >= 2 and vols[-1] < vols[-2]:
+                spike_recency = True
+                spike_risk_add = 0.15
+
+        # Regime reclassification: breakdown with diminishing momentum → post_spike_consolidation
+        regime_reclassification: str | None = None
+        market_regime = market_signals.get("market_regime")
+        if market_regime == "breakdown" and ltf_candles and len(ltf_candles) >= 10:
+            last_10 = ltf_candles[-10:]
+            lows = [v for v in (_to_float(c.get("low")) for c in last_10) if v is not None]
+            if len(lows) >= 4:
+                higher_low_count = sum(1 for i in range(1, len(lows)) if lows[i] > lows[i - 1])
+                ranges_early = [
+                    abs((_to_float(c.get("high")) or 0.0) - (_to_float(c.get("low")) or 0.0))
+                    for c in last_10[:5]
+                ]
+                ranges_late = [
+                    abs((_to_float(c.get("high")) or 0.0) - (_to_float(c.get("low")) or 0.0))
+                    for c in last_10[5:]
+                ]
+                avg_early = sum(ranges_early) / len(ranges_early) if ranges_early else 0.0
+                avg_late = sum(ranges_late) / len(ranges_late) if ranges_late else 0.0
+                if (
+                    higher_low_count >= len(lows) // 2
+                    and avg_early > 0
+                    and avg_late < avg_early * 0.8
+                ):
+                    regime_reclassification = "post_spike_consolidation"
+
+        # L/S ratio signal pre-computation
+        ls = derivatives_section.get("long_short_ratio") or {}
+        ls_value = _to_float(ls.get("value"))
+        ls_series_raw = ls.get("series") if not ls.get("series_stale") else None
+        ls_confidence_add: float = 0.0
+        if ls_value is None:
+            ls_signal = "absent"
+        elif not isinstance(ls_series_raw, list) or len(ls_series_raw) < 10:
+            ls_signal = "stale_series" if ls.get("series_stale") else "insufficient_data"
+        else:
+            _ls_tail = [_to_float(v) for v in ls_series_raw[-10:] if _to_float(v) is not None]
+            if len(_ls_tail) >= 2 and _ls_tail[-1] < _ls_tail[0]:
+                ls_signal = "squeeze_candidate"
+                ls_confidence_add = 0.05
+            elif len(_ls_tail) >= 2:
+                ls_signal = "pressure_candidate"
+                ls_confidence_add = 0.05
+            else:
+                ls_signal = "insufficient_data"
+        # Funding fallback for absent L/S: funding < -0.15% → partial Archetype C
+        if ls_signal == "absent":
+            _funding_rate_live = _to_float(live_section.get("funding_rate"))
+            if _funding_rate_live is not None and _funding_rate_live < -0.0015:
+                ls_confidence_add = 0.03
+
+        # Archetype C eligibility (funding < -0.05%)
+        archetype_c_eligible = bool(market_signals.get("funding_archetype_c_eligible"))
+
+        result: dict[str, Any] = {
+            "htf_available": htf_available,
+            "htf_adx": htf_adx_val,
+            "htf_alignment_class": htf_alignment_class,
+            "htf_align_penalty": htf_align_penalty,
+            "htf_contradict_additive": htf_contradict_additive,
+            "htf_contradict_multiplicative": htf_contradict_multiplicative,
+            "htf_contradict_bracket": htf_contradict_bracket,
+            "obv_effective_weight": obv_effective_weight,
+            "cvd_effective_weight": cvd_effective_weight,
+            "order_flow_reliable": order_flow_reliable,
+            "order_flow_penalty": order_flow_penalty,
+            "credit_conservation": credit_conservation,
+            "credit_risk_add": credit_risk_add,
+            "capital_sufficient": capital_sufficient,
+            "pre_flight_passed": pre_flight_passed,
+            "execution_feedback_blocks": execution_feedback_blocks,
+            "has_existing_position": has_existing_position,
+            "has_pending_order": has_pending_order,
+            "spike_recency": spike_recency,
+            "spike_risk_add": spike_risk_add,
+            "ls_signal": ls_signal,
+            "ls_current_value": ls_value,
+            "ls_confidence_add": ls_confidence_add,
+            "archetype_c_eligible": archetype_c_eligible,
+        }
+        if regime_reclassification:
+            result["regime_reclassification"] = regime_reclassification
+        return result
+
+    @staticmethod
+    def _strip_guardrails_for_llm(guardrails: dict[str, Any]) -> dict[str, Any]:
+        """Return only guardrail fields the LLM needs; strip execution-layer internals."""
+        _LLM_GUARDRAIL_KEYS = {
+            "max_leverage",
+            "max_position_pct",
+            "symbol_position_caps",
+            "min_hold_seconds",
+            "min_reward_risk_ratio",
+            "require_reward_risk_ratio",
+            "max_trades_per_hour",
+            "daily_loss_limit_pct",
+            "risk_model",
+        }
+        return {k: v for k, v in guardrails.items() if k in _LLM_GUARDRAIL_KEYS}
+
+    @staticmethod
+    def _round_floats(obj: Any, *, _depth: int = 0, _key: str = "") -> Any:
+        """Recursively round float values to contextually appropriate precision.
+
+        Timestamp-like keys (ts, timestamp, generated_at, …) are skipped.
+        Stops at depth 8 to guard against pathological nesting.
+        """
+        if _depth > 8 or _key in _ROUND_FLOAT_SKIP_KEYS:
+            return obj
+        if isinstance(obj, float):
+            ax = abs(obj)
+            if ax >= 10_000:
+                return round(obj, 2)
+            if ax >= 100:
+                return round(obj, 3)
+            if ax >= 1:
+                return round(obj, 4)
+            if ax >= 0.001:
+                return round(obj, 6)
+            return round(obj, 8)
+        if isinstance(obj, dict):
+            return {
+                k: PromptBuilder._round_floats(v, _depth=_depth + 1, _key=k)
+                for k, v in obj.items()
+            }
+        if isinstance(obj, list):
+            return [
+                PromptBuilder._round_floats(item, _depth=_depth + 1, _key=_key)
+                for item in obj
+            ]
+        return obj
 
     @staticmethod
     def _parse_timestamp(value: Any) -> Optional[datetime]:
