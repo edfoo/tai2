@@ -5121,6 +5121,25 @@ class MarketService:
             else:  # SELL
                 tp_dist = last_price - take_profit_price
                 sl_dist = stop_loss_price - last_price
+            if sl_dist > 0 and tp_dist <= 0:
+                # TP is on the wrong side of entry — emit a directional message
+                # rather than a confusing "R:R below minimum" one.
+                self._record_execution_feedback(
+                    symbol,
+                    f"Blocked: take-profit {take_profit_price:.6f} is on the wrong side of entry {last_price:.6f} for {action}",
+                    level="warning",
+                    meta={
+                        "guardrail": "min_reward_risk_ratio",
+                        "action": action,
+                        "last_price": last_price,
+                        "take_profit_price": take_profit_price,
+                        "stop_loss_price": stop_loss_price,
+                    },
+                )
+                self._emit_debug(
+                    f"Execution skipped for {symbol}: TP {take_profit_price} wrong side of entry {last_price} for {action}"
+                )
+                return False
             if sl_dist > 0 and tp_dist / sl_dist < min_rr:
                 rr_actual = tp_dist / sl_dist
                 self._record_execution_feedback(
@@ -6285,8 +6304,8 @@ class MarketService:
                 if symbol:
                     self._record_execution_feedback(
                         symbol,
-                        f"LLM take-profit {take_profit:.6f} rejected: BUY requires TP above entry {reference_price:.6f}",
-                        level="warning",
+                        f"TP {take_profit:.6f} dropped (BUY requires TP above entry {reference_price:.6f}); trade will proceed without TP",
+                        level="info",
                         meta={
                             "action": action,
                             "take_profit": take_profit,
@@ -6301,8 +6320,8 @@ class MarketService:
                 if symbol:
                     self._record_execution_feedback(
                         symbol,
-                        f"LLM take-profit {take_profit:.6f} rejected: SELL requires TP below entry {reference_price:.6f}",
-                        level="warning",
+                        f"TP {take_profit:.6f} dropped (SELL requires TP below entry {reference_price:.6f}); trade will proceed without TP",
+                        level="info",
                         meta={
                             "action": action,
                             "take_profit": take_profit,
