@@ -4367,6 +4367,18 @@ class MarketService:
             if guardrail_notional_cap and guardrail_notional_cap > 0:
                 _max_safe = min(_max_safe, guardrail_notional_cap)
             _computed = round(_max_safe * confidence_value * (1.0 - risk_score_value), 2)
+            # Apply min_leverage floor: when confidence is at/above the gate the
+            # position must be sized to at least available_margin × min_leverage.
+            if min_leverage > 0 and confidence_value >= confidence_gate:
+                _min_notional = available_margin_usd * min_leverage
+                if guardrail_notional_cap and guardrail_notional_cap > 0:
+                    _min_notional = min(_min_notional, guardrail_notional_cap)
+                if _min_notional > 0 and _computed < _min_notional:
+                    self._emit_debug(
+                        f"{symbol} notional floored by min_leverage={min_leverage:.2f}: "
+                        f"{_computed:.2f} → {round(_min_notional, 2):.2f}"
+                    )
+                    _computed = round(_min_notional, 2)
             if _computed > 0:
                 self._emit_debug(
                     f"{symbol} notional (exec_layer): "
@@ -5512,8 +5524,13 @@ class MarketService:
             target_leverage = achieved_leverage
             if achieved_leverage < min_leverage:
                 if leverage_override_reason:
+                    # Proceed despite low achieved leverage, but still request
+                    # min_leverage on OKX so the instrument is correctly configured
+                    # (e.g., bootstrap trades must pre-set the leverage even if the
+                    # seed notional is smaller than min_leverage × equity).
+                    target_leverage = min_leverage
                     self._emit_debug(
-                        f"{symbol} leverage {achieved_leverage:.2f}x below minimum {min_leverage:.2f}x but proceeding due to {leverage_override_reason}"
+                        f"{symbol} leverage {achieved_leverage:.2f}x below minimum {min_leverage:.2f}x but proceeding due to {leverage_override_reason}; setting OKX leverage to {min_leverage:.2f}x"
                     )
                 else:
                     self._emit_debug(
@@ -5531,11 +5548,6 @@ class MarketService:
                             "leverage_override_reason": leverage_override_reason,
                         },
                     )
-                    if leverage_override_reason:
-                        self._emit_debug(
-                            f"Proceeding despite leverage gap due to {leverage_override_reason}"
-                        )
-                        return True
                     return False
         if not reduce_only and (target_leverage is None or target_leverage <= 0) and account_equity and account_equity > 0 and last_price and last_price > 0:
             target_leverage = (raw_size * last_price) / account_equity
@@ -6749,6 +6761,52 @@ class MarketService:
 
         self._isolated_leverage_cache[cache_key] = target_leverage
 
+    async def _ensure_cross_leverage_setting(
+        self,
+        *,
+        symbol: str,
+        leverage: float | None,
+    ) -> None:
+        """Call the account API to set leverage for cross-margin orders."""
+        if not self._account_api:
+            return
+        setter = getattr(self._account_api, "set_leverage", None)
+        if setter is None:
+            return
+        target_leverage = self._extract_float(leverage)
+        if not target_leverage or target_leverage <= 0:
+            return
+        target_leverage = max(1.0, float(target_leverage))
+        cache_key = self._leverage_cache_key(symbol, "cross")
+        cached_value = self._isolated_leverage_cache.get(cache_key)
+        if cached_value is not None and abs(cached_value - target_leverage) <= 1e-3:
+            return
+        payload: dict[str, Any] = {
+            "instId": symbol,
+            "lever": self._format_leverage(target_leverage),
+            "mgnMode": "cross",
+        }
+        if self._sub_account and self._sub_account_use_master:
+            payload["subAcct"] = self._sub_account
+        self._emit_debug(
+            f"Setting cross leverage for {symbol} -> {target_leverage:.2f}x"
+        )
+        try:
+            resp = await asyncio.to_thread(setter, **payload)
+        except Exception as exc:
+            self._emit_debug(f"Failed to set cross leverage for {symbol}: {exc}")
+            return
+        if isinstance(resp, dict) and str(resp.get("code", "1")) == "0":
+            self._isolated_leverage_cache[cache_key] = target_leverage
+        else:
+            self._emit_debug(f"set-cross-leverage rejected for {symbol}: {resp}")
+            self._record_execution_feedback(
+                symbol,
+                "Failed to set cross leverage",
+                level="warning",
+                meta={"requested_leverage": target_leverage, "response": resp},
+            )
+
     async def _submit_order(
         self,
         *,
@@ -6803,6 +6861,11 @@ class MarketService:
                 symbol=symbol,
                 pos_side=pos_side,
                 dual_side_mode=dual_side_mode,
+                leverage=leverage,
+            )
+        elif trade_mode == "cross" and not reduce_only:
+            await self._ensure_cross_leverage_setting(
+                symbol=symbol,
                 leverage=leverage,
             )
         while True:

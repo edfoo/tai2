@@ -478,6 +478,8 @@ class PromptBuilder:
         price_hint = self._resolve_last_price(live_section)
         execution_settings: dict[str, Any] = {}
         execution_settings["enabled"] = bool(runtime_meta.get("execution_enabled", False))
+        execution_settings["trade_mode"] = runtime_meta.get("execution_trade_mode") or "isolated"
+        execution_settings["order_type"] = runtime_meta.get("execution_order_type") or "market"
         if price_hint is not None:
             execution_settings["price_reference"] = price_hint
         # 6.3 — Always include symbol_rules so the model can reference
@@ -2506,6 +2508,8 @@ class PromptBuilder:
         """Return only guardrail fields the LLM needs; strip execution-layer internals."""
         _LLM_GUARDRAIL_KEYS = {
             "max_leverage",
+            "min_leverage",
+            "min_leverage_confidence_gate",
             "max_position_pct",
             "symbol_position_caps",
             "min_hold_seconds",
