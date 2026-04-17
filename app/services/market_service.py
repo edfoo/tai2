@@ -1102,6 +1102,8 @@ class MarketService:
             self._emit_debug(f"Skimming: invalid threshold ({skimming.get('threshold_pct')!r}) — skipping")
             return
         threshold_ratio = threshold / 100.0
+        sl_pct = self._extract_float(skimming.get("stop_loss_pct"))
+        sl_ratio = (-abs(sl_pct) / 100.0) if (sl_pct is not None and sl_pct > 0) else None
         snapshot = self._last_full_snapshot
         if not snapshot:
             self._emit_debug("Skimming: no snapshot available yet — skipping")
@@ -1115,7 +1117,7 @@ class MarketService:
         self._skimming_triggered &= active_symbols
         self._emit_debug(
             f"Skimming: checking {len(positions)} position(s), threshold={threshold:.2f}% "
-            f"({threshold_ratio:.4f}), already-triggered={self._skimming_triggered or 'none'}"
+            f"({threshold_ratio:.4f}), sl_ratio={sl_ratio}, already-triggered={self._skimming_triggered or 'none'}"
         )
         for pos in positions:
             if not isinstance(pos, dict):
@@ -1131,17 +1133,23 @@ class MarketService:
             pos_val = self._extract_float(pos.get("pos"))
             self._emit_debug(
                 f"Skimming: {symbol} uplRatio={upl_ratio!r} ({(upl_ratio * 100) if upl_ratio is not None else 'n/a'}%), "
-                f"threshold={threshold:.2f}%, pos={pos_val!r}, "
+                f"threshold={threshold:.2f}%, sl_pct={sl_pct!r}, pos={pos_val!r}, "
                 f"mgnMode={pos.get('mgnMode')!r}, posSide={pos.get('posSide')!r}"
             )
             if upl_ratio is None:
                 self._emit_debug(f"Skimming: {symbol} — uplRatio missing from position data, cannot evaluate")
                 continue
-            if upl_ratio < threshold_ratio:
+            hit_tp = upl_ratio >= threshold_ratio
+            hit_sl = sl_ratio is not None and upl_ratio <= sl_ratio
+            if not hit_tp and not hit_sl:
                 self._emit_debug(
+                    f"Skimming: {symbol} — uplRatio {upl_ratio:.4%} within range "
+                    f"[{sl_ratio:.4%} .. {threshold_ratio:.4%}], no action"
+                    if sl_ratio is not None else
                     f"Skimming: {symbol} — uplRatio {upl_ratio:.4%} below threshold {threshold_ratio:.4%}, no action"
                 )
                 continue
+            trigger_reason = "TP" if hit_tp else "SL"
             if not pos_val or pos_val == 0:
                 self._emit_debug(f"Skimming: {symbol} — position size is zero or missing, skipping")
                 continue
@@ -1157,7 +1165,8 @@ class MarketService:
             contracts = abs(pos_val)
             self._skimming_triggered.add(symbol)
             self._emit_debug(
-                f"Skimming triggered: {symbol} uplRatio={upl_ratio:.4%} >= threshold={threshold_ratio:.4%}; "
+                f"Skimming {trigger_reason} triggered: {symbol} uplRatio={upl_ratio:.4%} "
+                f"({'>='+str(round(threshold_ratio*100,4))+'%' if hit_tp else '<='+str(round(sl_ratio*100,4))+'%'}); "
                 f"submitting {close_side} close, contracts={contracts}, posSide={effective_pos_side!r}, tdMode={trade_mode!r}"
             )
             asyncio.create_task(

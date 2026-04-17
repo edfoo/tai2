@@ -2555,7 +2555,7 @@ def register_pages(app: FastAPI) -> None:
         wrapper = page_container()
         config = getattr(app.state, "runtime_config", {}) or {}
         strategy = config.setdefault("strategy", {})
-        skimming = strategy.setdefault("skimming", {"enabled": False, "threshold_pct": 2.0})
+        skimming = strategy.setdefault("skimming", {"enabled": False, "threshold_pct": 2.0, "stop_loss_pct": None})
 
         with wrapper:
             ui.label("Strategy").classes("text-2xl font-bold")
@@ -2572,18 +2572,29 @@ def register_pages(app: FastAPI) -> None:
                     with ui.expansion("Skimming").classes("flex-1 text-sm font-medium"):
                         ui.label(
                             "Automatically close a position at market price as soon as its "
-                            "unrealized PnL reaches the configured percentage in profit. "
-                            "Positions in loss are never closed by this strategy."
+                            "unrealized PnL reaches the configured percentage threshold. "
+                            "Set a Stop Loss % to also exit losing positions automatically."
                         ).classes("text-xs text-slate-500 mb-3")
-                        threshold_input = ui.number(
-                            label="Take Profit at (% PnL)",
-                            value=float(skimming.get("threshold_pct") or 2.0),
-                            min=0.01,
-                            step=0.1,
-                            precision=2,
-                        ).classes("w-48").props(
-                            "hint='Close position when unrealised PnL reaches this %' persistent-hint"
-                        )
+                        with ui.row().classes("gap-4 items-start"):
+                            threshold_input = ui.number(
+                                label="Take Profit at (% PnL)",
+                                value=float(skimming.get("threshold_pct") or 2.0),
+                                min=0.01,
+                                step=0.1,
+                                precision=2,
+                            ).classes("w-48").props(
+                                "hint='Close when PnL reaches this % profit' persistent-hint"
+                            )
+                            _sl_raw = skimming.get("stop_loss_pct")
+                            stop_loss_input = ui.number(
+                                label="Stop Loss at (% PnL)",
+                                value=float(_sl_raw) if _sl_raw is not None else None,
+                                min=0.01,
+                                step=0.1,
+                                precision=2,
+                            ).classes("w-48").props(
+                                "hint='Close when PnL drops below this % loss (leave blank to disable)' persistent-hint clearable stack-label"
+                            )
                     _active_badge = ui.badge("Active", color="positive").bind_visibility_from(
                         skimming_switch, "value"
                     )
@@ -2592,10 +2603,12 @@ def register_pages(app: FastAPI) -> None:
             save_button = ui.button("Save", icon="save")
 
         async def save_strategy_settings(event: Any | None = None) -> None:
+            _sl_val = stop_loss_input.value
             updated_strategy = {
                 "skimming": {
                     "enabled": bool(skimming_switch.value),
                     "threshold_pct": float(threshold_input.value or 2.0),
+                    "stop_loss_pct": float(_sl_val) if _sl_val not in (None, "") else None,
                 }
             }
             config["strategy"] = updated_strategy
