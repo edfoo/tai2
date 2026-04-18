@@ -1808,7 +1808,8 @@ def register_pages(app: FastAPI) -> None:
                         pass
                     try:
                         if tp_usd is not None:
-                            tp_bits.append(f"${float(tp_usd):.0f}")
+                            _v = float(tp_usd)
+                            tp_bits.append("$" + f"{_v:.2f}".rstrip("0").rstrip("."))
                     except (TypeError, ValueError):
                         pass
                     try:
@@ -1818,7 +1819,8 @@ def register_pages(app: FastAPI) -> None:
                         pass
                     try:
                         if sl_usd is not None:
-                            sl_bits.append(f"${float(sl_usd):.0f}")
+                            _v = float(sl_usd)
+                            sl_bits.append("$" + f"{_v:.2f}".rstrip("0").rstrip("."))
                     except (TypeError, ValueError):
                         pass
                     if tp_bits:
