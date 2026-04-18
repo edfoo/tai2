@@ -283,6 +283,14 @@ def register_pages(app: FastAPI) -> None:
             "button": None,
         }
         resume_lock_state = {"busy": False}
+        strategy_status_refs: dict[str, Any] = {
+            "skimming_row": None,
+            "skimming_badge": None,
+            "skimming_detail": None,
+            "shotgun_row": None,
+            "shotgun_badge": None,
+            "shotgun_detail": None,
+        }
 
         def _format_pct(value: Any) -> str:
             try:
@@ -530,6 +538,26 @@ def register_pages(app: FastAPI) -> None:
                                     "click",
                                     lambda _: asyncio.create_task(force_reset_daily_loss_lock()),
                                 )
+                                ui.separator().classes("my-1")
+                                ui.label("Active Strategies").classes(
+                                    "text-xs font-semibold text-slate-500 uppercase tracking-wide"
+                                )
+                                with ui.row().classes("items-center gap-1") as _sg_skim_row:
+                                    strategy_status_refs["skimming_row"] = _sg_skim_row
+                                    strategy_status_refs["skimming_badge"] = ui.badge(
+                                        "Skimming", color="grey"
+                                    ).props("rounded")
+                                    strategy_status_refs["skimming_detail"] = ui.label("").classes(
+                                        "text-xs text-slate-500"
+                                    )
+                                with ui.row().classes("items-center gap-1") as _sg_shot_row:
+                                    strategy_status_refs["shotgun_row"] = _sg_shot_row
+                                    strategy_status_refs["shotgun_badge"] = ui.badge(
+                                        "Shotgun", color="grey"
+                                    ).props("rounded")
+                                    strategy_status_refs["shotgun_detail"] = ui.label("").classes(
+                                        "text-xs text-slate-500"
+                                    )
 
                         # Right panel: equity chart (~75%)
                         with ui.column().classes("flex-[3] min-w-0 gap-2"):
@@ -1726,6 +1754,88 @@ def register_pages(app: FastAPI) -> None:
                 lambda _: asyncio.create_task(trigger_clear_feedback()),
             )
 
+        def render_strategy_status() -> None:
+            config = getattr(app.state, "runtime_config", {}) or {}
+            strategy = config.get("strategy") or {}
+
+            skim = strategy.get("skimming") or {}
+            skim_enabled = bool(skim.get("enabled"))
+            skim_badge = strategy_status_refs.get("skimming_badge")
+            skim_detail = strategy_status_refs.get("skimming_detail")
+            if skim_badge:
+                if skim_enabled:
+                    skim_badge.props("color=positive rounded")
+                    tp = skim.get("threshold_pct")
+                    sl = skim.get("stop_loss_pct")
+                    parts: list[str] = []
+                    if tp is not None:
+                        try:
+                            parts.append(f"TP {float(tp):.1f}%")
+                        except (TypeError, ValueError):
+                            pass
+                    if sl is not None:
+                        try:
+                            parts.append(f"SL {float(sl):.1f}%")
+                        except (TypeError, ValueError):
+                            pass
+                    detail_text = " · ".join(parts) if parts else ""
+                else:
+                    skim_badge.props("color=grey rounded")
+                    detail_text = ""
+            else:
+                detail_text = ""
+            if skim_detail:
+                skim_detail.set_text(detail_text)
+
+            shot = strategy.get("shotgun") or {}
+            shot_enabled = bool(shot.get("enabled"))
+            shot_badge = strategy_status_refs.get("shotgun_badge")
+            shot_detail = strategy_status_refs.get("shotgun_detail")
+            if shot_badge:
+                if shot_enabled:
+                    shot_badge.props("color=positive rounded")
+                    tp_pct = shot.get("tp_pct")
+                    tp_usd = shot.get("tp_usd")
+                    sl_pct = shot.get("sl_pct")
+                    sl_usd = shot.get("sl_usd")
+                    shot_parts: list[str] = []
+                    tp_bits: list[str] = []
+                    sl_bits: list[str] = []
+                    try:
+                        if tp_pct is not None:
+                            tp_bits.append(f"{float(tp_pct):.1f}%")
+                    except (TypeError, ValueError):
+                        pass
+                    try:
+                        if tp_usd is not None:
+                            tp_bits.append(f"${float(tp_usd):.0f}")
+                    except (TypeError, ValueError):
+                        pass
+                    try:
+                        if sl_pct is not None:
+                            sl_bits.append(f"{float(sl_pct):.1f}%")
+                    except (TypeError, ValueError):
+                        pass
+                    try:
+                        if sl_usd is not None:
+                            sl_bits.append(f"${float(sl_usd):.0f}")
+                    except (TypeError, ValueError):
+                        pass
+                    if tp_bits:
+                        shot_parts.append("TP " + "/".join(tp_bits))
+                    if sl_bits:
+                        shot_parts.append("SL " + "/".join(sl_bits))
+                    if bool(shot.get("close_only_negative")):
+                        shot_parts.append("-PnL only")
+                    shot_detail_text = " · ".join(shot_parts) if shot_parts else ""
+                else:
+                    shot_badge.props("color=grey rounded")
+                    shot_detail_text = ""
+            else:
+                shot_detail_text = ""
+            if shot_detail:
+                shot_detail.set_text(shot_detail_text)
+
         def update_snapshot_health(snapshot: dict[str, Any] | None) -> None:
             notice = stale_indicator.get("widget")
             if not notice:
@@ -1742,6 +1852,7 @@ def register_pages(app: FastAPI) -> None:
             set_ws_status(snapshot is not None)
             refresh_llm_cards(snapshot)
             render_risk_lock_status()
+            render_strategy_status()
             update_snapshot_health(snapshot)
             label = refresh_label["widget"]
             if label:
@@ -2057,7 +2168,7 @@ def register_pages(app: FastAPI) -> None:
 
         page_client.on_disconnect(_teardown_client)
         page_client.on_delete(_teardown_client)
-        ui.timer(5, lambda: update_snapshot_health(last_snapshot["value"]))
+        ui.timer(5, lambda: [update_snapshot_health(last_snapshot["value"]), render_strategy_status()])
         ui.timer(5, set_ws_status)
 
         def _update_next_prompt_countdown() -> None:
