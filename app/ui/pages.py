@@ -2678,9 +2678,9 @@ def register_pages(app: FastAPI) -> None:
                                 "When ON: SL closes only positions with negative PnL. "
                                 "When OFF: SL closes all open positions."
                             ).classes("text-xs text-slate-500")
-                _active_badge_sg = ui.badge("Active", color="positive").bind_visibility_from(
-                    shotgun_switch, "value"
-                )
+                    _active_badge_sg = ui.badge("Active", color="positive").bind_visibility_from(
+                        shotgun_switch, "value"
+                    )
 
             ui.separator().classes("w-full my-4")
             save_button = ui.button("Save", icon="save")
