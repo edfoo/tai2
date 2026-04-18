@@ -1118,7 +1118,13 @@ class MarketService:
             self._emit_debug("Skimming: snapshot has no open positions")
             return
         # Remove closed positions from the triggered guard set.
-        active_symbols = {str(p.get("instId", "")).upper() for p in positions if isinstance(p, dict)}
+        # Only count symbols with a non-zero pos — OKX transiently returns pos=0 rows
+        # for recently-closed positions which would otherwise keep the guard stuck forever.
+        active_symbols = {
+            str(p.get("instId", "")).upper()
+            for p in positions
+            if isinstance(p, dict) and self._extract_float(p.get("pos"))
+        }
         self._skimming_triggered &= active_symbols
         self._emit_debug(
             f"Skimming: checking {len(positions)} position(s), threshold={threshold:.2f}% "
