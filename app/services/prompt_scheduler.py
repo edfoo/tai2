@@ -165,6 +165,16 @@ class PromptScheduler:
         # Refresh once — _build_snapshot covers all symbols in one pass.
         await self._refresh_snapshot(reason="scheduler")
 
+        # Record the post-refresh equity as the Shotgun strategy baseline for
+        # this cycle.  _check_shotgun() will compare live equity against this
+        # anchor every 10 s until the next scheduler tick resets it.
+        if market_service:
+            _snap_after = await state_service.get_market_snapshot() if state_service else None
+            if _snap_after:
+                _baseline_eq = float(_snap_after.get("account_equity") or 0.0)
+                if _baseline_eq > 0:
+                    market_service.record_shotgun_baseline(_baseline_eq)
+
         # ── Phase 1: ask the LLM for ALL symbols concurrently ─────────────
         # LLM calls are pure I/O — running them in parallel costs the same
         # wall-clock time as a single call and lets us see every decision

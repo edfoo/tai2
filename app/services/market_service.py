@@ -263,6 +263,11 @@ class MarketService:
         self._wake_poll: asyncio.Event = asyncio.Event()
         self._strategy_config: dict[str, Any] = {}
         self._skimming_triggered: set[str] = set()
+        # Shotgun strategy: equity baseline captured at each prompt run.
+        # _check_shotgun() compares current equity against this anchor and
+        # closes all (or only losing) positions when a TP/SL threshold is hit.
+        self._shotgun_baseline_equity: float | None = None
+        self._shotgun_fired: bool = False
 
     async def start(self) -> None:
         """Launch the market snapshot poller and websocket consumers if not already running."""
@@ -1213,6 +1218,131 @@ class MarketService:
             logger.warning("Skimming close order error for %s: %s", symbol, exc)
             self._skimming_triggered.discard(symbol)
 
+    # ── Shotgun strategy ──────────────────────────────────────────────────────
+
+    def record_shotgun_baseline(self, equity: float) -> None:
+        """Capture the equity anchor at the start of each prompt-scheduler cycle.
+
+        Called by the prompt scheduler immediately after refreshing the snapshot.
+        Resets ``_shotgun_fired`` so the strategy can trigger once per cycle.
+        """
+        if equity <= 0:
+            return
+        self._shotgun_baseline_equity = float(equity)
+        self._shotgun_fired = False
+        self._emit_debug(f"Shotgun: baseline equity set to {equity:.4f} USDT")
+
+    async def _check_shotgun(self) -> None:
+        """Close positions when total account equity has moved past configured TP/SL thresholds.
+
+        Compares ``account_equity`` in the in-memory snapshot against
+        ``_shotgun_baseline_equity`` (set at the last prompt-scheduler run).
+        Fires at most once per scheduler cycle (guarded by ``_shotgun_fired``).
+
+        Config keys (under strategy.shotgun):
+          enabled            – bool, must be True
+          tp_pct             – float | None, close ALL when equity gained ≥ this %
+          tp_usd             – float | None, close ALL when equity gained ≥ this USDT
+          sl_pct             – float | None, close when equity dropped ≥ this %
+          sl_usd             – float | None, close when equity dropped ≥ this USDT
+          close_only_negative – bool (default False), on SL: close only positions
+                               with uplRatio < 0 instead of all positions
+        """
+        shotgun = self._strategy_config.get("shotgun") or {}
+        if not shotgun.get("enabled"):
+            return
+        if self._shotgun_fired:
+            return
+        if self._shotgun_baseline_equity is None:
+            self._emit_debug("Shotgun: no baseline equity recorded yet — skipping")
+            return
+
+        snapshot = self._last_full_snapshot
+        if not snapshot:
+            return
+        current_equity = self._extract_float(snapshot.get("account_equity"))
+        if current_equity is None:
+            return
+
+        baseline = self._shotgun_baseline_equity
+        delta_usd = current_equity - baseline
+        delta_pct = (delta_usd / baseline * 100.0) if baseline > 0 else 0.0
+
+        tp_pct = self._extract_float(shotgun.get("tp_pct"))
+        tp_usd = self._extract_float(shotgun.get("tp_usd"))
+        sl_pct = self._extract_float(shotgun.get("sl_pct"))
+        sl_usd = self._extract_float(shotgun.get("sl_usd"))
+        close_only_negative = bool(shotgun.get("close_only_negative", False))
+
+        self._emit_debug(
+            f"Shotgun: equity baseline={baseline:.4f} current={current_equity:.4f} "
+            f"delta={delta_usd:+.4f} USDT ({delta_pct:+.4f}%); "
+            f"tp_pct={tp_pct} tp_usd={tp_usd} sl_pct={sl_pct} sl_usd={sl_usd} "
+            f"close_only_negative={close_only_negative}"
+        )
+
+        hit_tp = (tp_pct is not None and delta_pct >= tp_pct) or (
+            tp_usd is not None and delta_usd >= tp_usd
+        )
+        hit_sl = (sl_pct is not None and delta_pct <= -abs(sl_pct)) or (
+            sl_usd is not None and delta_usd <= -abs(sl_usd)
+        )
+
+        if not hit_tp and not hit_sl:
+            return
+
+        trigger_reason = "TP" if hit_tp else "SL"
+        positions: list[dict[str, Any]] = snapshot.get("positions") or []
+        if not positions:
+            self._emit_debug(f"Shotgun {trigger_reason}: no open positions to close")
+            self._shotgun_fired = True
+            return
+
+        self._shotgun_fired = True
+        self._emit_debug(
+            f"Shotgun {trigger_reason} triggered: delta={delta_usd:+.4f} USDT ({delta_pct:+.4f}%); "
+            f"closing {'negative-PnL' if (hit_sl and close_only_negative) else 'all'} positions"
+        )
+
+        for pos in positions:
+            if not isinstance(pos, dict):
+                continue
+            symbol = str(pos.get("instId", "")).upper()
+            if not symbol:
+                continue
+            pos_val = self._extract_float(pos.get("pos"))
+            if not pos_val or pos_val == 0:
+                continue
+
+            # SL + close_only_negative: skip positions with positive unrealized PnL
+            if hit_sl and close_only_negative:
+                upl_ratio = self._extract_float(pos.get("uplRatio"))
+                if upl_ratio is not None and upl_ratio >= 0:
+                    self._emit_debug(
+                        f"Shotgun SL: skipping {symbol} (uplRatio={upl_ratio:.4%} ≥ 0, close_only_negative=True)"
+                    )
+                    continue
+
+            pos_side = str(pos.get("posSide", "")).lower()
+            trade_mode = str(pos.get("mgnMode") or "").lower() or None
+            if pos_side == "long":
+                close_side, effective_pos_side = "sell", "long"
+            elif pos_side == "short":
+                close_side, effective_pos_side = "buy", "short"
+            else:
+                close_side = "sell" if (pos_val > 0) else "buy"
+                effective_pos_side = None
+
+            contracts = abs(pos_val)
+            self._emit_debug(
+                f"Shotgun {trigger_reason}: closing {symbol} side={close_side} "
+                f"contracts={contracts} posSide={effective_pos_side!r}"
+            )
+            asyncio.create_task(
+                self._skim_close_position(symbol, close_side, effective_pos_side, contracts, trade_mode),
+                name=f"shotgun-close-{symbol}",
+            )
+
     @property
     def ws_connection_status(self) -> tuple[bool, bool, bool]:
         """Return (enabled, public_connected, private_connected) for the OKX WebSocket."""
@@ -1616,6 +1746,12 @@ class MarketService:
                 raise
             except Exception as exc:  # pragma: no cover - best-effort
                 logger.debug("Skimming check error: %s", exc)
+            try:
+                await self._check_shotgun()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # pragma: no cover - best-effort
+                logger.debug("Shotgun check error: %s", exc)
             await asyncio.sleep(self._positions_refresh_interval)
 
     async def _schedule_patch_publish(self) -> None:

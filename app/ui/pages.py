@@ -2556,6 +2556,14 @@ def register_pages(app: FastAPI) -> None:
         config = getattr(app.state, "runtime_config", {}) or {}
         strategy = config.setdefault("strategy", {})
         skimming = strategy.setdefault("skimming", {"enabled": False, "threshold_pct": 2.0, "stop_loss_pct": None})
+        shotgun = strategy.setdefault("shotgun", {
+            "enabled": False,
+            "tp_pct": None,
+            "tp_usd": None,
+            "sl_pct": None,
+            "sl_usd": None,
+            "close_only_negative": False,
+        })
 
         with wrapper:
             ui.label("Strategy").classes("text-2xl font-bold")
@@ -2599,17 +2607,104 @@ def register_pages(app: FastAPI) -> None:
                         skimming_switch, "value"
                     )
 
+            with ui.card().classes("w-full rounded-lg border border-slate-200 mb-1"):
+                with ui.row().classes("w-full items-center gap-2 flex-nowrap"):
+                    shotgun_switch = ui.switch(
+                        value=bool(shotgun.get("enabled", False)),
+                    ).props("dense color=primary")
+                    with ui.expansion("Shotgun").classes("flex-1 text-sm font-medium"):
+                        ui.label(
+                            "Close positions when total account equity has moved past a configured "
+                            "threshold since the last prompt run. "
+                            "Take Profit closes ALL open positions. "
+                            "Stop Loss behaviour is controlled by the 'Close only negative trades' toggle."
+                        ).classes("text-xs text-slate-500 mb-3")
+
+                        ui.label("Take Profit").classes("text-xs font-semibold text-slate-600 mt-1")
+                        with ui.row().classes("gap-4 items-start mb-2"):
+                            _sg_tp_pct_raw = shotgun.get("tp_pct")
+                            shotgun_tp_pct = ui.number(
+                                label="TP at Total % PnL",
+                                value=float(_sg_tp_pct_raw) if _sg_tp_pct_raw is not None else None,
+                                min=0.01,
+                                step=0.1,
+                                precision=2,
+                            ).classes("w-48").props(
+                                "hint='Close ALL when equity up by this % (blank = disabled)' "
+                                "persistent-hint clearable stack-label"
+                            )
+                            _sg_tp_usd_raw = shotgun.get("tp_usd")
+                            shotgun_tp_usd = ui.number(
+                                label="TP at Total USDT Profit",
+                                value=float(_sg_tp_usd_raw) if _sg_tp_usd_raw is not None else None,
+                                min=0.01,
+                                step=1.0,
+                                precision=2,
+                            ).classes("w-48").props(
+                                "hint='Close ALL when equity up by this USDT (blank = disabled)' "
+                                "persistent-hint clearable stack-label"
+                            )
+
+                        ui.label("Stop Loss").classes("text-xs font-semibold text-slate-600 mt-1")
+                        with ui.row().classes("gap-4 items-start mb-2"):
+                            _sg_sl_pct_raw = shotgun.get("sl_pct")
+                            shotgun_sl_pct = ui.number(
+                                label="SL at Total % PnL",
+                                value=float(_sg_sl_pct_raw) if _sg_sl_pct_raw is not None else None,
+                                min=0.01,
+                                step=0.1,
+                                precision=2,
+                            ).classes("w-48").props(
+                                "hint='Trigger when equity down by this % (blank = disabled)' "
+                                "persistent-hint clearable stack-label"
+                            )
+                            _sg_sl_usd_raw = shotgun.get("sl_usd")
+                            shotgun_sl_usd = ui.number(
+                                label="SL at Total USDT Loss",
+                                value=float(_sg_sl_usd_raw) if _sg_sl_usd_raw is not None else None,
+                                min=0.01,
+                                step=1.0,
+                                precision=2,
+                            ).classes("w-48").props(
+                                "hint='Trigger when equity down by this USDT (blank = disabled)' "
+                                "persistent-hint clearable stack-label"
+                            )
+                        with ui.row().classes("items-center gap-2 mt-1"):
+                            shotgun_close_negative = ui.switch(
+                                "Close only negative trades",
+                                value=bool(shotgun.get("close_only_negative", False)),
+                            ).props("dense color=warning")
+                            ui.label(
+                                "When ON: SL closes only positions with negative PnL. "
+                                "When OFF: SL closes all open positions."
+                            ).classes("text-xs text-slate-500")
+                _active_badge_sg = ui.badge("Active", color="positive").bind_visibility_from(
+                    shotgun_switch, "value"
+                )
+
             ui.separator().classes("w-full my-4")
             save_button = ui.button("Save", icon="save")
 
         async def save_strategy_settings(event: Any | None = None) -> None:
             _sl_val = stop_loss_input.value
+            _sg_tp_pct_val = shotgun_tp_pct.value
+            _sg_tp_usd_val = shotgun_tp_usd.value
+            _sg_sl_pct_val = shotgun_sl_pct.value
+            _sg_sl_usd_val = shotgun_sl_usd.value
             updated_strategy = {
                 "skimming": {
                     "enabled": bool(skimming_switch.value),
                     "threshold_pct": float(threshold_input.value or 2.0),
                     "stop_loss_pct": float(_sl_val) if _sl_val not in (None, "") else None,
-                }
+                },
+                "shotgun": {
+                    "enabled": bool(shotgun_switch.value),
+                    "tp_pct": float(_sg_tp_pct_val) if _sg_tp_pct_val not in (None, "") else None,
+                    "tp_usd": float(_sg_tp_usd_val) if _sg_tp_usd_val not in (None, "") else None,
+                    "sl_pct": float(_sg_sl_pct_val) if _sg_sl_pct_val not in (None, "") else None,
+                    "sl_usd": float(_sg_sl_usd_val) if _sg_sl_usd_val not in (None, "") else None,
+                    "close_only_negative": bool(shotgun_close_negative.value),
+                },
             }
             config["strategy"] = updated_strategy
             try:
