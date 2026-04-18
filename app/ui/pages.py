@@ -290,6 +290,9 @@ def register_pages(app: FastAPI) -> None:
             "shotgun_row": None,
             "shotgun_badge": None,
             "shotgun_detail": None,
+            "protector_row": None,
+            "protector_badge": None,
+            "protector_detail": None,
         }
 
         def _format_pct(value: Any) -> str:
@@ -556,6 +559,14 @@ def register_pages(app: FastAPI) -> None:
                                         "Shotgun", color="grey"
                                     ).props("rounded")
                                     strategy_status_refs["shotgun_detail"] = ui.label("").classes(
+                                        "text-xs text-slate-500"
+                                    )
+                                with ui.row().classes("items-center gap-1") as _sg_prot_row:
+                                    strategy_status_refs["protector_row"] = _sg_prot_row
+                                    strategy_status_refs["protector_badge"] = ui.badge(
+                                        "Protector", color="grey"
+                                    ).props("rounded")
+                                    strategy_status_refs["protector_detail"] = ui.label("").classes(
                                         "text-xs text-slate-500"
                                     )
 
@@ -1838,6 +1849,41 @@ def register_pages(app: FastAPI) -> None:
             if shot_detail:
                 shot_detail.set_text(shot_detail_text)
 
+            prot = strategy.get("protector") or {}
+            prot_enabled = bool(prot.get("enabled"))
+            prot_badge = strategy_status_refs.get("protector_badge")
+            prot_detail = strategy_status_refs.get("protector_detail")
+            if prot_badge:
+                if prot_enabled:
+                    prot_badge.props("color=positive rounded")
+                    prot_parts: list[str] = []
+                    try:
+                        act = prot.get("activate_pct")
+                        if act is not None:
+                            prot_parts.append(f"act {float(act):.1f}%")
+                    except (TypeError, ValueError):
+                        pass
+                    try:
+                        step = prot.get("step_pct")
+                        if step is not None:
+                            prot_parts.append(f"step {float(step):.1f}%")
+                    except (TypeError, ValueError):
+                        pass
+                    try:
+                        lock = prot.get("lock_ratio")
+                        if lock is not None:
+                            prot_parts.append(f"lock {float(lock):.0%}")
+                    except (TypeError, ValueError):
+                        pass
+                    prot_detail_text = " · ".join(prot_parts) if prot_parts else ""
+                else:
+                    prot_badge.props("color=grey rounded")
+                    prot_detail_text = ""
+            else:
+                prot_detail_text = ""
+            if prot_detail:
+                prot_detail.set_text(prot_detail_text)
+
         def update_snapshot_health(snapshot: dict[str, Any] | None) -> None:
             notice = stale_indicator.get("widget")
             if not notice:
@@ -2677,6 +2723,12 @@ def register_pages(app: FastAPI) -> None:
             "sl_usd": None,
             "close_only_negative": False,
         })
+        protector = strategy.setdefault("protector", {
+            "enabled": False,
+            "activate_pct": 10.0,
+            "step_pct": 10.0,
+            "lock_ratio": 0.5,
+        })
 
         with wrapper:
             ui.label("Strategy").classes("text-2xl font-bold")
@@ -2795,6 +2847,83 @@ def register_pages(app: FastAPI) -> None:
                         shotgun_switch, "value"
                     )
 
+            with ui.card().classes("w-full rounded-lg border border-slate-200 mb-1"):
+                with ui.row().classes("w-full items-center gap-2 flex-nowrap"):
+                    protector_switch = ui.switch(
+                        value=bool(protector.get("enabled", False)),
+                    ).props("dense color=primary")
+                    with ui.expansion("Protector").classes("flex-1 text-sm font-medium"):
+                        ui.label(
+                            "Automatically ratchet the stop-loss into profit as a position's "
+                            "unrealised PnL climbs through configurable step levels. "
+                            "Only the SL is moved; the take-profit remains unchanged."
+                        ).classes("text-xs text-slate-500 mb-1")
+                        ui.label(
+                            "The lock ratio grows with each step so the SL trails price more "
+                            "tightly as profits compound: "
+                            "effective lock = 1 − (1 − lock_ratio) ÷ step_number. "
+                            "Example below uses activate 10 %, step 10 %, lock 0.5:"
+                        ).classes("text-xs text-slate-400 mb-1")
+                        ui.html(
+                            content=(
+                                "<table class='text-xs text-slate-400 mb-3 border-collapse'>"
+                                "<thead><tr>"
+                                "<th class='pr-3 text-left font-medium'>Step</th>"
+                                "<th class='pr-3 text-left font-medium'>PnL reached</th>"
+                                "<th class='pr-3 text-left font-medium'>Eff. lock</th>"
+                                "<th class='text-left font-medium'>SL placed at</th>"
+                                "</tr></thead>"
+                                "<tbody>"
+                                "<tr><td class='pr-3'>1</td><td class='pr-3'>+10 %</td><td class='pr-3'>50 %</td><td>+5 %</td></tr>"
+                                "<tr><td class='pr-3'>2</td><td class='pr-3'>+20 %</td><td class='pr-3'>75 %</td><td>+15 %</td></tr>"
+                                "<tr><td class='pr-3'>3</td><td class='pr-3'>+30 %</td><td class='pr-3'>83 %</td><td>+25 %</td></tr>"
+                                "<tr><td class='pr-3'>4</td><td class='pr-3'>+40 %</td><td class='pr-3'>88 %</td><td>+35 %</td></tr>"
+                                "<tr><td class='pr-3'>5</td><td class='pr-3'>+50 %</td><td class='pr-3'>90 %</td><td>+45 %</td></tr>"
+                                "<tr><td class='pr-3'>6</td><td class='pr-3'>+60 %</td><td class='pr-3'>92 %</td><td>+55 %</td></tr>"
+                                "<tr><td class='pr-3'>7</td><td class='pr-3'>+70 %</td><td class='pr-3'>93 %</td><td>+65 %</td></tr>"
+                                "<tr><td class='pr-3'>8</td><td class='pr-3'>+80 %</td><td class='pr-3'>94 %</td><td>+75 %</td></tr>"
+                                "<tr><td class='pr-3'>9</td><td class='pr-3'>+90 %</td><td class='pr-3'>94 %</td><td>+85 %</td></tr>"
+                                "<tr><td class='pr-3'>10</td><td class='pr-3'>+100 %</td><td class='pr-3'>95 %</td><td>+95 %</td></tr>"
+                                "</tbody></table>"
+                            ),
+                            sanitize=False,
+                        )
+                        with ui.row().classes("gap-4 items-start"):
+                            _pt_act_raw = protector.get("activate_pct")
+                            protector_activate = ui.number(
+                                label="Activate at (% PnL)",
+                                value=float(_pt_act_raw) if _pt_act_raw is not None else 10.0,
+                                min=0.1,
+                                step=1.0,
+                                precision=1,
+                            ).classes("w-48").props(
+                                "hint='Minimum uplRatio % before strategy engages' persistent-hint"
+                            )
+                            _pt_step_raw = protector.get("step_pct")
+                            protector_step = ui.number(
+                                label="Step size (% PnL)",
+                                value=float(_pt_step_raw) if _pt_step_raw is not None else 10.0,
+                                min=0.1,
+                                step=1.0,
+                                precision=1,
+                            ).classes("w-48").props(
+                                "hint='PnL % increment at which SL is re-evaluated' persistent-hint"
+                            )
+                            _pt_lock_raw = protector.get("lock_ratio")
+                            protector_lock = ui.number(
+                                label="Lock ratio (0–1)",
+                                value=float(_pt_lock_raw) if _pt_lock_raw is not None else 0.5,
+                                min=0.01,
+                                max=1.0,
+                                step=0.05,
+                                precision=2,
+                            ).classes("w-48").props(
+                                "hint='Fraction of step level locked in as SL (e.g. 0.5 = 50%)' persistent-hint"
+                            )
+                    _active_badge_prot = ui.badge("Active", color="positive").bind_visibility_from(
+                        protector_switch, "value"
+                    )
+
             ui.separator().classes("w-full my-4")
             save_button = ui.button("Save", icon="save")
 
@@ -2817,6 +2946,12 @@ def register_pages(app: FastAPI) -> None:
                     "sl_pct": float(_sg_sl_pct_val) if _sg_sl_pct_val not in (None, "") else None,
                     "sl_usd": float(_sg_sl_usd_val) if _sg_sl_usd_val not in (None, "") else None,
                     "close_only_negative": bool(shotgun_close_negative.value),
+                },
+                "protector": {
+                    "enabled": bool(protector_switch.value),
+                    "activate_pct": float(protector_activate.value or 10.0),
+                    "step_pct": float(protector_step.value or 10.0),
+                    "lock_ratio": float(protector_lock.value or 0.5),
                 },
             }
             config["strategy"] = updated_strategy

@@ -1349,6 +1349,168 @@ class MarketService:
                 name=f"shotgun-close-{symbol}",
             )
 
+    # ── Protector strategy ───────────────────────────────────────────────────
+
+    async def _check_protector(self) -> None:
+        """Ratchet each position's stop-loss into profit as unrealised PnL climbs.
+
+        Runs every ``_positions_refresh_interval`` seconds inside
+        ``_positions_refresh_loop``.  Fires an amendment task for a symbol at
+        most once at a time (guarded by ``_protector_updating``).
+
+        Config keys (under strategy.protector):
+          enabled      – bool, must be True
+          activate_pct – float, minimum uplRatio % before the strategy activates
+          step_pct     – float, PnL % increment at which SL is re-evaluated
+          lock_ratio   – float, fraction of the reached step to lock in as SL
+
+        Formula (long example, activate=10, step=10, lock=0.5):
+          uplRatio 12 % → step 1 → effective_lock=50%  → SL at entry × (1 + 5 %)
+          uplRatio 22 % → step 2 → effective_lock=75%  → SL at entry × (1 + 15 %)
+          uplRatio 32 % → step 3 → effective_lock=83%  → SL at entry × (1 + 25 %)
+        SL only ever moves in the profitable direction (ratchet).
+        effective_lock = 1 − (1 − lock_ratio) / step_number
+        """
+        protector = self._strategy_config.get("protector") or {}
+        if not protector.get("enabled"):
+            return
+        activate_pct = self._extract_float(protector.get("activate_pct"))
+        step_pct = self._extract_float(protector.get("step_pct"))
+        lock_ratio = self._extract_float(protector.get("lock_ratio"))
+        if not activate_pct or not step_pct or not lock_ratio:
+            return
+        if activate_pct <= 0 or step_pct <= 0 or lock_ratio <= 0:
+            return
+
+        snapshot = self._last_full_snapshot
+        if not snapshot:
+            return
+        positions: list[dict[str, Any]] = snapshot.get("positions") or []
+        if not positions:
+            return
+
+        for pos in positions:
+            if not isinstance(pos, dict):
+                continue
+            symbol = str(pos.get("instId", "")).upper()
+            if not symbol:
+                continue
+            if symbol in self._protector_updating:
+                continue
+            pos_val = self._extract_float(pos.get("pos"))
+            if not pos_val or pos_val == 0:
+                continue
+            upl_ratio = self._extract_float(pos.get("uplRatio"))
+            if upl_ratio is None or upl_ratio <= 0:
+                continue
+            upl_pct = upl_ratio * 100.0
+            if upl_pct < activate_pct:
+                continue
+
+            # Snap down to the nearest step boundary.
+            step_level = math.floor(upl_pct / step_pct) * step_pct
+            if step_level <= 0:
+                continue
+            # Progressive lock: at step N the effective lock ratio grows towards 1.0
+            # so the SL trails price more tightly as profits compound.
+            # Formula: effective_lock = 1 - (1 - lock_ratio) / step_number
+            # At step 1: lock_ratio (base); at step 2: midpoint; approaches 1.0.
+            step_number = step_level / step_pct  # e.g. 1.0, 2.0, 3.0 …
+            effective_lock = 1.0 - (1.0 - lock_ratio) / step_number
+            new_sl_pct = step_level * effective_lock
+
+            avg_px = self._extract_float(pos.get("avgPx"))
+            if not avg_px or avg_px <= 0:
+                continue
+
+            pos_side = str(pos.get("posSide", "")).lower()
+            if pos_side == "long" or (not pos_side and pos_val > 0):
+                new_sl_price = avg_px * (1.0 + new_sl_pct / 100.0)
+                is_long = True
+            elif pos_side == "short" or (not pos_side and pos_val < 0):
+                new_sl_price = avg_px * (1.0 - new_sl_pct / 100.0)
+                is_long = False
+            else:
+                continue
+
+            # Ratchet: only update if the new SL is strictly better than current.
+            current_protection = self._position_protection.get(symbol) or {}
+            current_sl = self._extract_float(current_protection.get("stop_loss"))
+            if current_sl is not None:
+                if is_long and new_sl_price <= current_sl:
+                    self._emit_debug(
+                        f"Protector: {symbol} SL already at {current_sl:.6f} "
+                        f"\u2265 new {new_sl_price:.6f} \u2014 no update"
+                    )
+                    continue
+                if not is_long and new_sl_price >= current_sl:
+                    self._emit_debug(
+                        f"Protector: {symbol} SL already at {current_sl:.6f} "
+                        f"\u2264 new {new_sl_price:.6f} \u2014 no update"
+                    )
+                    continue
+
+            trade_mode = str(pos.get("mgnMode") or "").lower() or "cross"
+            action = "BUY" if is_long else "SELL"
+            resolved_pos_side = pos_side if pos_side in ("long", "short") else None
+            self._emit_debug(
+                f"Protector: {symbol} uplRatio={upl_pct:.2f}% step={step_level:.1f}% "
+                f"lock={effective_lock:.2%} (base={lock_ratio:.2%}) \u2192 new SL {new_sl_pct:.2f}% above entry "
+                f"({avg_px:.6f}) = {new_sl_price:.6f}"
+            )
+            self._protector_updating.add(symbol)
+            asyncio.create_task(
+                self._protector_update_sl(
+                    symbol=symbol,
+                    new_sl_price=new_sl_price,
+                    pos_side=resolved_pos_side,
+                    trade_mode=trade_mode,
+                    action=action,
+                ),
+                name=f"protector-sl-{symbol}",
+            )
+
+    async def _protector_update_sl(
+        self,
+        *,
+        symbol: str,
+        new_sl_price: float,
+        pos_side: str | None,
+        trade_mode: str,
+        action: str,
+    ) -> None:
+        """Cancel the existing TP/SL algo and re-place it with the ratcheted SL price."""
+        symbol_key = symbol.upper()
+        try:
+            # Capture TP before cancellation removes the protection cache entry.
+            current_protection = self._position_protection.get(symbol_key) or {}
+            current_tp = self._extract_float(current_protection.get("take_profit"))
+            await self._cancel_position_protection(symbol)
+            # Brief pause so OKX registers the cancellation before the new order arrives.
+            await asyncio.sleep(0.5)
+            result = await self._place_position_protection(
+                symbol=symbol,
+                trade_mode=trade_mode,
+                action=action,
+                take_profit_price=current_tp,
+                stop_loss_price=new_sl_price,
+                dual_side_mode=bool(pos_side),
+                pos_side=pos_side,
+            )
+            if result:
+                self._emit_debug(
+                    f"Protector: {symbol_key} SL moved to {new_sl_price:.6f} "
+                    f"(tp preserved={current_tp}, algo={result.get('algo_cl_ord_id')})"
+                )
+            else:
+                self._emit_debug(
+                    f"Protector: failed to place updated SL for {symbol_key}"
+                )
+        except Exception as exc:  # pragma: no cover - network safety
+            logger.warning("Protector SL update error for %s: %s", symbol_key, exc)
+        finally:
+            self._protector_updating.discard(symbol_key)
+
     @property
     def ws_connection_status(self) -> tuple[bool, bool, bool]:
         """Return (enabled, public_connected, private_connected) for the OKX WebSocket."""
@@ -1758,6 +1920,12 @@ class MarketService:
                 raise
             except Exception as exc:  # pragma: no cover - best-effort
                 logger.debug("Shotgun check error: %s", exc)
+            try:
+                await self._check_protector()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # pragma: no cover - best-effort
+                logger.debug("Protector check error: %s", exc)
             await asyncio.sleep(self._positions_refresh_interval)
 
     async def _schedule_patch_publish(self) -> None:
