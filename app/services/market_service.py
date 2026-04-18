@@ -1134,8 +1134,11 @@ class MarketService:
             if symbol in self._skimming_triggered:
                 self._emit_debug(f"Skimming: {symbol} — already triggered, awaiting close confirmation")
                 continue
-            upl_ratio = self._extract_float(pos.get("uplRatio"))
             pos_val = self._extract_float(pos.get("pos"))
+            if not pos_val or pos_val == 0:
+                self._emit_debug(f"Skimming: {symbol} — position size is zero, skipping")
+                continue
+            upl_ratio = self._extract_float(pos.get("uplRatio"))
             self._emit_debug(
                 f"Skimming: {symbol} uplRatio={upl_ratio!r} ({(upl_ratio * 100) if upl_ratio is not None else 'n/a'}%), "
                 f"threshold={threshold:.2f}%, sl_pct={sl_pct!r}, pos={pos_val!r}, "
@@ -1155,9 +1158,6 @@ class MarketService:
                 )
                 continue
             trigger_reason = "TP" if hit_tp else "SL"
-            if not pos_val or pos_val == 0:
-                self._emit_debug(f"Skimming: {symbol} — position size is zero or missing, skipping")
-                continue
             pos_side = str(pos.get("posSide", "")).lower()
             trade_mode = str(pos.get("mgnMode") or "").lower() or None
             if pos_side in ("long",):
