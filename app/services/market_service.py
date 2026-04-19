@@ -268,6 +268,9 @@ class MarketService:
         # closes all (or only losing) positions when a TP/SL threshold is hit.
         self._shotgun_baseline_equity: float | None = None
         self._shotgun_fired: bool = False
+        # Protector strategy: tracks symbols whose SL update task is in-flight
+        # so concurrent refresh ticks don't spawn duplicate amendment tasks.
+        self._protector_updating: set[str] = set()
 
     async def start(self) -> None:
         """Launch the market snapshot poller and websocket consumers if not already running."""
