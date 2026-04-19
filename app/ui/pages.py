@@ -491,6 +491,11 @@ def register_pages(app: FastAPI) -> None:
                         next_prompt_label = ui.label("Next prompt: --").classes(
                             "text-xs text-slate-500"
                         )
+                        ui.label("|").classes("text-slate-300 select-none")
+                        prompt_elapsed_label = ui.label("").classes(
+                            "text-xs text-slate-500"
+                        )
+                        prompt_elapsed_label.set_visibility(False)
                         notice = (
                             ui.label("· Snapshot stale")
                             .classes("text-xs font-semibold text-red-600 uppercase tracking-wide")
@@ -2223,7 +2228,18 @@ def register_pages(app: FastAPI) -> None:
             scheduler = getattr(app.state, "prompt_scheduler", None)
             if scheduler is None:
                 next_prompt_label.set_text("Next prompt: --")
+                prompt_elapsed_label.set_visibility(False)
                 return
+            elapsed = getattr(scheduler, "tick_elapsed_seconds", None)
+            if elapsed is not None:
+                e_mins, e_s = divmod(int(elapsed), 60)
+                e_text = f"{e_mins}m {e_s:02d}s" if e_mins else f"{e_s}s"
+                color = "text-orange-500" if elapsed >= 120 else "text-slate-500"
+                prompt_elapsed_label.set_text(f"Running: {e_text}")
+                prompt_elapsed_label.classes(replace=f"text-xs {color}")
+                prompt_elapsed_label.set_visibility(True)
+            else:
+                prompt_elapsed_label.set_visibility(False)
             if getattr(scheduler, "is_ticking", False):
                 next_prompt_label.set_text("Next prompt: running…")
                 return

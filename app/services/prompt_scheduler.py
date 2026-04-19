@@ -43,6 +43,7 @@ class PromptScheduler:
         self._last_error: Optional[str] = None
         self._last_tick_at: float = 0.0
         self._tick_running: bool = False
+        self._tick_started_at: float = 0.0
 
     async def start(self) -> None:
         async with self._lock:
@@ -82,6 +83,13 @@ class PromptScheduler:
         return self._tick_running
 
     @property
+    def tick_elapsed_seconds(self) -> float | None:
+        """Seconds since the current tick started, or None if no tick is running."""
+        if not self._tick_running or self._tick_started_at == 0.0:
+            return None
+        return time.monotonic() - self._tick_started_at
+
+    @property
     def seconds_until_next_tick(self) -> float | None:
         """Seconds until the next scheduled tick, or None if the scheduler is not running."""
         if not self._enabled or self._task is None or self._task.done():
@@ -98,6 +106,7 @@ class PromptScheduler:
         while self._enabled:
             try:
                 self._tick_running = True
+                self._tick_started_at = time.monotonic()
                 try:
                     await asyncio.wait_for(
                         self._tick(),
