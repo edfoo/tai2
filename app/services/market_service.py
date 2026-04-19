@@ -1262,15 +1262,20 @@ class MarketService:
             return
         if self._shotgun_fired:
             return
-        if self._shotgun_baseline_equity is None:
-            self._emit_debug("Shotgun: no baseline equity recorded yet — skipping")
-            return
-
         snapshot = self._last_full_snapshot
         if not snapshot:
             return
         current_equity = self._extract_float(snapshot.get("account_equity"))
         if current_equity is None:
+            return
+
+        if self._shotgun_baseline_equity is None:
+            # Bootstrap baseline from current equity so the strategy starts
+            # tracking immediately, even before the scheduler has run a tick.
+            self._shotgun_baseline_equity = current_equity
+            self._emit_debug(
+                f"Shotgun: baseline auto-bootstrapped to {current_equity:.4f} USDT"
+            )
             return
 
         baseline = self._shotgun_baseline_equity
