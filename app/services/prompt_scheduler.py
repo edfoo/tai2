@@ -26,11 +26,11 @@ class SchedulerConfig:
 class PromptScheduler:
     # Maximum wall-clock time a single _tick() is allowed to run before it is
     # cancelled and the loop continues.  Sized to fit:
-    #   _FETCH_TIMEOUT (320s, parallel LLM gather) +
+    #   _FETCH_TIMEOUT (620s, parallel LLM gather) +
     #   up to 2 sequential BUY/SELL executions × _EXEC_TIMEOUT (90s each) +
-    #   overhead.  Reasoning models can take 3-5 minutes so the fetch budget
-    #   is the dominant term.
-    TICK_TIMEOUT_SECONDS = 660
+    #   overhead.  Slow reasoning models (e.g. Gemma 4 31B) can take up to
+    #   10 minutes so the fetch budget is the dominant term.
+    TICK_TIMEOUT_SECONDS = 800
     # Delay before automatically restarting after an unexpected crash.
     RESTART_DELAY_SECONDS = 30
 
@@ -189,9 +189,9 @@ class PromptScheduler:
         # wall-clock time as a single call and lets us see every decision
         # before committing any funds.
         # Budget per symbol for LLM call + DB persist.  Must leave room for
-        # the execution phase (90s/symbol) within TICK_TIMEOUT_SECONDS (660s).
-        # Set to 320s so reasoning models (up to 300s) have margin to complete.
-        _FETCH_TIMEOUT = 320
+        # the execution phase (90s/symbol) within TICK_TIMEOUT_SECONDS (800s).
+        # Set to 620s to accommodate slow models like Gemma 4 31B (~600s).
+        _FETCH_TIMEOUT = 620
 
         async def _fetch_decision(
             symbol: str,
