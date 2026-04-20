@@ -697,7 +697,7 @@ def register_pages(app: FastAPI) -> None:
                     positions_table.add_slot(
                         "body-cell-pnl",
                         """
-                        <q-td :props="props">
+                        <q-td :props="props" :class="props.row.symbol === 'TOTAL' ? 'border-t border-slate-300' : ''">
                             <span :class="props.row.pnl_cls">{{ props.value }}</span>
                         </q-td>
                         """,
@@ -705,8 +705,24 @@ def register_pages(app: FastAPI) -> None:
                     positions_table.add_slot(
                         "body-cell-pnl_pct",
                         """
-                        <q-td :props="props">
+                        <q-td :props="props" :class="props.row.symbol === 'TOTAL' ? 'border-t border-slate-300' : ''">
                             <span :class="props.row.pnl_pct_cls">{{ props.value }}</span>
+                        </q-td>
+                        """,
+                    )
+                    positions_table.add_slot(
+                        "body-cell-symbol",
+                        """
+                        <q-td :props="props" :class="props.row.symbol === 'TOTAL' ? 'border-t border-slate-300' : ''">
+                            <span :class="props.row.symbol === 'TOTAL' ? 'font-bold text-slate-700 uppercase tracking-wide' : ''">{{ props.value }}</span>
+                        </q-td>
+                        """,
+                    )
+                    positions_table.add_slot(
+                        "body-cell-size_usd",
+                        """
+                        <q-td :props="props" :class="props.row.symbol === 'TOTAL' ? 'border-t border-slate-300' : ''">
+                            <span :class="props.row.symbol === 'TOTAL' ? 'font-bold' : ''">{{ props.value }}</span>
                         </q-td>
                         """,
                     )
@@ -2237,6 +2253,68 @@ def register_pages(app: FastAPI) -> None:
                     "mode": mode_display,
                 }
                 rows.append(row)
+
+            if len(rows) > 1:
+                total_pnl: float | None = None
+                for r in rows:
+                    raw = r["pnl"]
+                    try:
+                        val = float(raw.replace(",", "")) if isinstance(raw, str) and raw != "--" else None
+                    except (ValueError, AttributeError):
+                        val = None
+                    if val is not None:
+                        total_pnl = (total_pnl or 0.0) + val
+
+                total_size_usd: float | None = None
+                for r in rows:
+                    raw = r["size_usd"]
+                    try:
+                        val = float(raw.replace(",", "")) if isinstance(raw, str) and raw != "--" else None
+                    except (ValueError, AttributeError):
+                        val = None
+                    if val is not None:
+                        total_size_usd = (total_size_usd or 0.0) + val
+
+                # PNL % as weighted average: sum(pnl) / sum(notional_usd) * 100
+                total_pnl_pct: float | None = None
+                if total_pnl is not None and total_size_usd and total_size_usd > 0:
+                    total_pnl_pct = (total_pnl / total_size_usd) * 100
+
+                if total_pnl is None:
+                    total_pnl_color = "text-slate-900 font-bold"
+                elif total_pnl > 0:
+                    total_pnl_color = "text-emerald-600 font-bold"
+                elif total_pnl < 0:
+                    total_pnl_color = "text-rose-600 font-bold"
+                else:
+                    total_pnl_color = "text-slate-900 font-bold"
+
+                if total_pnl_pct is None:
+                    total_pnl_pct_color = "text-slate-900 font-bold"
+                elif total_pnl_pct > 0:
+                    total_pnl_pct_color = "text-emerald-600 font-bold"
+                elif total_pnl_pct < 0:
+                    total_pnl_pct_color = "text-rose-600 font-bold"
+                else:
+                    total_pnl_pct_color = "text-slate-900 font-bold"
+
+                rows.append({
+                    "symbol": "TOTAL",
+                    "side": "",
+                    "mode": "",
+                    "size": "",
+                    "size_usd": f"{total_size_usd:,.2f}" if total_size_usd is not None else "--",
+                    "entry": "",
+                    "current": "",
+                    "tp": "",
+                    "sl": "",
+                    "last_trade": "",
+                    "pnl": f"{total_pnl:,.2f}" if total_pnl is not None else "--",
+                    "pnl_cls": total_pnl_color,
+                    "pnl_pct": f"{total_pnl_pct:,.2f}%" if total_pnl_pct is not None else "--",
+                    "pnl_pct_cls": total_pnl_pct_color,
+                    "leverage": "",
+                })
 
             positions_table.rows = rows
             positions_table.update()

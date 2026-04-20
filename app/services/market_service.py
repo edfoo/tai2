@@ -208,6 +208,10 @@ class MarketService:
         self._ws_private_client: Any = None  # SafeWsPrivateAsync when connected
         self._latest_positions_raw: list[dict[str, Any]] | None = None
         self._latest_account_raw: list[Any] | None = None
+        # Cache of the most-recent successful REST account balance fetch.
+        # Used as a fallback when the live refresh returns empty (e.g. during
+        # temporary OKX API auth glitches while the private WS is also down).
+        self._last_known_account_balance: dict[str, Any] | None = None
         # Last full snapshot; used by _patch_and_publish_snapshot to avoid a
         # full REST round-trip when the private WS delivers fresh account/position data.
         self._last_full_snapshot: dict[str, Any] | None = None
@@ -557,6 +561,9 @@ class MarketService:
         elif channel == "account" and isinstance(data, list) and data:
             # Account channel always delivers a full snapshot of the top-level account
             self._latest_account_raw = list(data)
+            _ws_balance = self._normalize_account_balances(self._latest_account_raw)
+            if _ws_balance.get("total_eq_usd", 0.0) or _ws_balance.get("total_equity", 0.0):
+                self._last_known_account_balance = _ws_balance
             self._emit_debug("Private WS: account balance cache updated", mirror_logger=False)
             if not self._private_ws_patch_pending:
                 self._private_ws_patch_pending = True
@@ -2579,8 +2586,24 @@ class MarketService:
             )
         else:
             response = await asyncio.to_thread(self._account_api.get_account_balance)
+        if isinstance(response, dict) and response.get("code") not in (None, "0", 0):
+            _err_code = response.get("code")
+            _err_msg = response.get("msg") or ""
+            logger.warning(
+                "Account balance REST API error (code=%s%s) — balance unavailable; "
+                "will use last-known-good cache if available",
+                _err_code,
+                f" {_err_msg}" if _err_msg else "",
+            )
+            if self._last_known_account_balance is not None:
+                return self._last_known_account_balance
         data = self._safe_data(response)
-        return self._normalize_account_balances(data)
+        result = self._normalize_account_balances(data)
+        # Cache if the result carries meaningful equity data so we can fall back
+        # to it when the next REST call fails.
+        if result.get("total_eq_usd", 0.0) or result.get("total_equity", 0.0):
+            self._last_known_account_balance = result
+        return result
 
     async def _fetch_order_book(self, symbol: str) -> dict[str, Any]:
         """Return the cached order book or fetch the latest depth snapshot for a symbol."""
