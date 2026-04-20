@@ -271,6 +271,11 @@ class MarketService:
         # Protector strategy: tracks symbols whose SL update task is in-flight
         # so concurrent refresh ticks don't spawn duplicate amendment tasks.
         self._protector_updating: set[str] = set()
+        # Commutator strategy: when a position's loss hits the configured threshold,
+        # close it and open the reversed side.  Tracks flips per position lifecycle
+        # (counts are cleared automatically when the symbol leaves open positions).
+        self._commutator_flip_counts: dict[str, int] = {}
+        self._commutator_flipping: set[str] = set()
 
     async def start(self) -> None:
         """Launch the market snapshot poller and websocket consumers if not already running."""
@@ -1540,6 +1545,267 @@ class MarketService:
         finally:
             self._protector_updating.discard(symbol_key)
 
+    # ── Commutator strategy ──────────────────────────────────────────────────
+
+    async def _check_commutator(self) -> None:
+        """Reverse a losing position when its unrealised PnL drops past a threshold.
+
+        Runs every ``_positions_refresh_interval`` seconds inside
+        ``_positions_refresh_loop``.  Fires a flip task for a symbol at most once
+        at a time (guarded by ``_commutator_flipping``).
+
+        Config keys (under strategy.commutator):
+          enabled               – bool, must be True
+          reverse_at_loss_pct   – float | None, flip when uplRatio ≤ -abs(X)%
+          reverse_at_loss_usd   – float | None, flip when upl ≤ -abs(X) USDT
+          max_flips             – int, max reversals (0 = close without reversing)
+          post_reversal_tp_pct  – float | None, after flip: TP at last_price ± X%
+        """
+        commutator = self._strategy_config.get("commutator") or {}
+        if not commutator.get("enabled"):
+            self._emit_debug("Commutator: disabled — skipping check")
+            return
+
+        loss_pct = self._extract_float(commutator.get("reverse_at_loss_pct"))
+        loss_usd = self._extract_float(commutator.get("reverse_at_loss_usd"))
+        max_flips_raw = commutator.get("max_flips")
+        max_flips = int(max_flips_raw) if max_flips_raw is not None else 1
+        post_tp_pct = self._extract_float(commutator.get("post_reversal_tp_pct"))
+
+        if loss_pct is None and loss_usd is None:
+            self._emit_debug(
+                "Commutator: no threshold configured "
+                "(both reverse_at_loss_pct and reverse_at_loss_usd are blank) — skipping"
+            )
+            return
+        if max_flips < 0:
+            self._emit_debug(f"Commutator: invalid max_flips ({max_flips}) — skipping")
+            return
+
+        snapshot = self._last_full_snapshot
+        if not snapshot:
+            self._emit_debug("Commutator: no snapshot available yet — skipping")
+            return
+        positions: list[dict[str, Any]] = snapshot.get("positions") or []
+        if not positions:
+            self._emit_debug("Commutator: snapshot has no open positions")
+            return
+
+        # Prune flip counts for symbols that are no longer open.
+        active_symbols = {
+            str(p.get("instId", "")).upper()
+            for p in positions
+            if isinstance(p, dict) and self._extract_float(p.get("pos"))
+        }
+        for gone in set(self._commutator_flip_counts) - active_symbols:
+            del self._commutator_flip_counts[gone]
+            self._emit_debug(f"Commutator: {gone} no longer open — flip count cleared")
+
+        self._emit_debug(
+            f"Commutator: checking {len(positions)} position(s), "
+            f"loss_pct={loss_pct}% loss_usd={loss_usd} "
+            f"max_flips={max_flips} post_tp_pct={post_tp_pct}"
+        )
+        for pos in positions:
+            if not isinstance(pos, dict):
+                continue
+            symbol = str(pos.get("instId", "")).upper()
+            if not symbol:
+                continue
+            if symbol in self._commutator_flipping:
+                self._emit_debug(f"Commutator: {symbol} flip already in-flight — skipping")
+                continue
+            pos_val = self._extract_float(pos.get("pos"))
+            if not pos_val or pos_val == 0:
+                continue
+
+            upl_ratio = self._extract_float(pos.get("uplRatio"))
+            upl_usd = self._extract_float(pos.get("upl"))
+            upl_pct = upl_ratio * 100.0 if upl_ratio is not None else None
+            flip_count = self._commutator_flip_counts.get(symbol, 0)
+            self._emit_debug(
+                f"Commutator: {symbol} uplRatio={upl_ratio!r} "
+                f"({f'{upl_pct:.2f}%' if upl_pct is not None else 'n/a'}), "
+                f"upl_usd={upl_usd!r}, flip_count={flip_count}/{max_flips}, "
+                f"posSide={pos.get('posSide')!r}"
+            )
+
+            hit_pct = loss_pct is not None and upl_pct is not None and upl_pct <= -abs(loss_pct)
+            hit_usd = loss_usd is not None and upl_usd is not None and upl_usd <= -abs(loss_usd)
+            if not hit_pct and not hit_usd:
+                continue
+
+            will_flip = flip_count < max_flips
+            trigger_reason = (
+                f"loss_pct={upl_pct:.2f}%" if hit_pct else f"upl_usd={upl_usd:.4f}"
+            )
+            self._emit_debug(
+                f"Commutator triggered: {symbol} {trigger_reason} "
+                f"flip_count={flip_count}/{max_flips} "
+                f"action={'FLIP' if will_flip else 'CLOSE'}"
+            )
+
+            pos_side = str(pos.get("posSide", "")).lower()
+            trade_mode = str(pos.get("mgnMode") or "").lower() or None
+            contracts = abs(pos_val)
+            if pos_side == "long":
+                close_side, close_pos_side = "sell", "long"
+                new_entry_side, new_entry_pos_side = "sell", "short"
+            elif pos_side == "short":
+                close_side, close_pos_side = "buy", "short"
+                new_entry_side, new_entry_pos_side = "buy", "long"
+            else:
+                # Net mode: infer from sign of pos
+                close_side = "sell" if pos_val > 0 else "buy"
+                close_pos_side = None
+                new_entry_side = close_side
+                new_entry_pos_side = None
+
+            self._commutator_flipping.add(symbol)
+            asyncio.create_task(
+                self._commutator_flip(
+                    symbol=symbol,
+                    close_side=close_side,
+                    close_pos_side=close_pos_side,
+                    new_entry_side=new_entry_side if will_flip else None,
+                    new_entry_pos_side=new_entry_pos_side if will_flip else None,
+                    contracts=contracts,
+                    trade_mode=trade_mode,
+                    post_tp_pct=post_tp_pct,
+                    flip_count=flip_count,
+                ),
+                name=f"commutator-flip-{symbol}",
+            )
+
+    async def _commutator_flip(
+        self,
+        *,
+        symbol: str,
+        close_side: str,
+        close_pos_side: str | None,
+        new_entry_side: str | None,
+        new_entry_pos_side: str | None,
+        contracts: float,
+        trade_mode: str | None,
+        post_tp_pct: float | None,
+        flip_count: int,
+    ) -> None:
+        """Close a losing position and optionally open the reversed entry.
+
+        When ``new_entry_side`` is None (max_flips exhausted) only the close
+        order is submitted and no reversal is attempted.
+        """
+        symbol_key = symbol.upper()
+        resolved_trade_mode = trade_mode or "cross"
+        try:
+            # Step 1: close existing position
+            close_coid = self._generate_client_order_id("cmtr-c")
+            close_result = await self._submit_order(
+                symbol=symbol,
+                side=close_side,
+                pos_side=close_pos_side,
+                size=contracts,
+                trade_mode=resolved_trade_mode,
+                order_type="market",
+                reduce_only=True,
+                client_order_id=close_coid,
+                attach_algo_orders=None,
+            )
+            if close_result is None:
+                self._emit_debug(
+                    f"Commutator: {symbol_key} close order failed (no trade API)"
+                )
+                return
+            close_ok = close_result[0] if isinstance(close_result, tuple) else close_result
+            if not close_ok:
+                self._emit_debug(
+                    f"Commutator: {symbol_key} close order rejected — aborting"
+                )
+                return
+            self._emit_debug(
+                f"Commutator: {symbol_key} close order submitted "
+                f"(side={close_side}, contracts={contracts})"
+            )
+
+            if new_entry_side is None:
+                # max_flips exhausted: close only, no reversal
+                self._emit_debug(
+                    f"Commutator: {symbol_key} max_flips reached — "
+                    "position closed without reversal"
+                )
+                return
+
+            # Step 2: brief pause to let OKX register the close
+            await asyncio.sleep(1.0)
+
+            # Step 3: compute post-reversal TP if configured
+            attach: list[dict[str, Any]] | None = None
+            if post_tp_pct is not None and post_tp_pct > 0:
+                ticker = self._latest_ticker.get(symbol_key) or {}
+                last_price = self._extract_float(
+                    ticker.get("last") or ticker.get("lastPr")
+                )
+                if last_price and last_price > 0:
+                    is_new_long = new_entry_pos_side == "long" or (
+                        new_entry_pos_side is None and new_entry_side == "buy"
+                    )
+                    tp_price = (
+                        last_price * (1.0 + post_tp_pct / 100.0)
+                        if is_new_long
+                        else last_price * (1.0 - post_tp_pct / 100.0)
+                    )
+                    attach = self._build_attach_algo_orders(
+                        take_profit_price=tp_price,
+                        stop_loss_price=None,
+                    )
+                    self._emit_debug(
+                        f"Commutator: {symbol_key} post-reversal TP at {tp_price:.6f} "
+                        f"({'+' if is_new_long else '-'}{post_tp_pct:.2f}% "
+                        f"from last {last_price:.6f})"
+                    )
+                else:
+                    self._emit_debug(
+                        f"Commutator: {symbol_key} cannot compute TP — "
+                        "no last price in ticker cache"
+                    )
+
+            # Step 4: open reversed position
+            entry_coid = self._generate_client_order_id("cmtr-e")
+            entry_result = await self._submit_order(
+                symbol=symbol,
+                side=new_entry_side,
+                pos_side=new_entry_pos_side,
+                size=contracts,
+                trade_mode=resolved_trade_mode,
+                order_type="market",
+                reduce_only=False,
+                client_order_id=entry_coid,
+                attach_algo_orders=attach,
+            )
+            new_flip_count = flip_count + 1
+            self._commutator_flip_counts[symbol_key] = new_flip_count
+            entry_ok = entry_result[0] if isinstance(entry_result, tuple) else entry_result
+            if entry_ok:
+                new_side_label = (
+                    "long"
+                    if new_entry_pos_side == "long" or new_entry_side == "buy"
+                    else "short"
+                )
+                self._emit_debug(
+                    f"Commutator: {symbol_key} reversed to {new_side_label} "
+                    f"(flip #{new_flip_count}, contracts={contracts}"
+                    f"{', TP attached' if attach else ''})"
+                )
+            else:
+                self._emit_debug(
+                    f"Commutator: {symbol_key} reversed-entry order rejected "
+                    f"(flip #{new_flip_count})"
+                )
+        except Exception as exc:
+            logger.warning("Commutator flip error for %s: %s", symbol_key, exc)
+        finally:
+            self._commutator_flipping.discard(symbol_key)
+
     @property
     def ws_connection_status(self) -> tuple[bool, bool, bool]:
         """Return (enabled, public_connected, private_connected) for the OKX WebSocket."""
@@ -1955,6 +2221,12 @@ class MarketService:
                 raise
             except Exception as exc:  # pragma: no cover - best-effort
                 logger.debug("Protector check error: %s", exc)
+            try:
+                await self._check_commutator()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # pragma: no cover - best-effort
+                logger.debug("Commutator check error: %s", exc)
             await asyncio.sleep(self._positions_refresh_interval)
 
     async def _schedule_patch_publish(self) -> None:

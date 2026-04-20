@@ -293,6 +293,9 @@ def register_pages(app: FastAPI) -> None:
             "protector_row": None,
             "protector_badge": None,
             "protector_detail": None,
+            "commutator_row": None,
+            "commutator_badge": None,
+            "commutator_detail": None,
         }
 
         def _format_pct(value: Any) -> str:
@@ -572,6 +575,14 @@ def register_pages(app: FastAPI) -> None:
                                         "Protector", color="grey"
                                     ).props("rounded")
                                     strategy_status_refs["protector_detail"] = ui.label("").classes(
+                                        "text-xs text-slate-500"
+                                    )
+                                with ui.row().classes("items-center gap-1") as _sg_cmtr_row:
+                                    strategy_status_refs["commutator_row"] = _sg_cmtr_row
+                                    strategy_status_refs["commutator_badge"] = ui.badge(
+                                        "Commutator", color="grey"
+                                    ).props("rounded")
+                                    strategy_status_refs["commutator_detail"] = ui.label("").classes(
                                         "text-xs text-slate-500"
                                     )
 
@@ -1889,6 +1900,41 @@ def register_pages(app: FastAPI) -> None:
             if prot_detail:
                 prot_detail.set_text(prot_detail_text)
 
+            cmtr = strategy.get("commutator") or {}
+            cmtr_enabled = bool(cmtr.get("enabled"))
+            cmtr_badge = strategy_status_refs.get("commutator_badge")
+            cmtr_detail = strategy_status_refs.get("commutator_detail")
+            if cmtr_badge:
+                if cmtr_enabled:
+                    cmtr_badge.props("color=positive rounded")
+                    cmtr_parts: list[str] = []
+                    try:
+                        rlp = cmtr.get("reverse_at_loss_pct")
+                        if rlp is not None:
+                            cmtr_parts.append(f"loss {float(rlp):.1f}%")
+                    except (TypeError, ValueError):
+                        pass
+                    try:
+                        rlu = cmtr.get("reverse_at_loss_usd")
+                        if rlu is not None:
+                            cmtr_parts.append(f"{float(rlu):.0f}$ loss")
+                    except (TypeError, ValueError):
+                        pass
+                    try:
+                        mf = cmtr.get("max_flips")
+                        if mf is not None:
+                            cmtr_parts.append(f"×{int(mf)} flips")
+                    except (TypeError, ValueError):
+                        pass
+                    cmtr_detail_text = " · ".join(cmtr_parts) if cmtr_parts else ""
+                else:
+                    cmtr_badge.props("color=grey rounded")
+                    cmtr_detail_text = ""
+            else:
+                cmtr_detail_text = ""
+            if cmtr_detail:
+                cmtr_detail.set_text(cmtr_detail_text)
+
         def update_snapshot_health(snapshot: dict[str, Any] | None) -> None:
             notice = stale_indicator.get("widget")
             if not notice:
@@ -2745,6 +2791,13 @@ def register_pages(app: FastAPI) -> None:
             "step_pct": 10.0,
             "lock_ratio": 0.5,
         })
+        commutator = strategy.setdefault("commutator", {
+            "enabled": False,
+            "reverse_at_loss_pct": None,
+            "reverse_at_loss_usd": None,
+            "max_flips": 1,
+            "post_reversal_tp_pct": None,
+        })
 
         with wrapper:
             ui.label("Strategy").classes("text-2xl font-bold")
@@ -2940,6 +2993,70 @@ def register_pages(app: FastAPI) -> None:
                         protector_switch, "value"
                     )
 
+            with ui.card().classes("w-full rounded-lg border border-slate-200 mb-1"):
+                with ui.row().classes("w-full items-center gap-2 flex-nowrap"):
+                    commutator_switch = ui.switch(
+                        value=bool(commutator.get("enabled", False)),
+                    ).props("dense color=primary")
+                    with ui.expansion("Commutator").classes("flex-1 text-sm font-medium"):
+                        ui.label(
+                            "Automatically reverse a losing position when its unrealised PnL "
+                            "drops past a configured threshold. "
+                            "The reversed position opens at market price with the same contract size. "
+                            "Use 'Post-reversal TP' to set a take-profit on the new position. "
+                            "When max flips are exhausted the position is closed without reopening."
+                        ).classes("text-xs text-slate-500 mb-3")
+                        with ui.row().classes("gap-4 items-start mb-2"):
+                            _cmtr_lp_raw = commutator.get("reverse_at_loss_pct")
+                            cmtr_loss_pct = ui.number(
+                                label="Reverse at % Loss",
+                                value=float(_cmtr_lp_raw) if _cmtr_lp_raw is not None else None,
+                                min=0.01,
+                                step=0.1,
+                                precision=2,
+                            ).classes("w-48").props(
+                                "hint='Flip when position PnL ≤ -X% (blank = disabled)' "
+                                "persistent-hint clearable stack-label"
+                            )
+                            _cmtr_lu_raw = commutator.get("reverse_at_loss_usd")
+                            cmtr_loss_usd = ui.number(
+                                label="Reverse at USDT Loss",
+                                value=float(_cmtr_lu_raw) if _cmtr_lu_raw is not None else None,
+                                min=0.01,
+                                step=1.0,
+                                precision=2,
+                            ).classes("w-48").props(
+                                "hint='Flip when unrealised loss ≥ this USDT (blank = disabled)' "
+                                "persistent-hint clearable stack-label"
+                            )
+                        with ui.row().classes("gap-4 items-start"):
+                            _cmtr_mf_raw = commutator.get("max_flips")
+                            cmtr_max_flips = ui.number(
+                                label="Number of flips",
+                                value=int(_cmtr_mf_raw) if _cmtr_mf_raw is not None else 1,
+                                min=0,
+                                max=10,
+                                step=1,
+                                precision=0,
+                            ).classes("w-48").props(
+                                "hint='Max reversals before closing (0 = close without reversing)' "
+                                "persistent-hint"
+                            )
+                            _cmtr_tp_raw = commutator.get("post_reversal_tp_pct")
+                            cmtr_post_tp = ui.number(
+                                label="Post-reversal TP (%)",
+                                value=float(_cmtr_tp_raw) if _cmtr_tp_raw is not None else None,
+                                min=0.01,
+                                step=0.1,
+                                precision=2,
+                            ).classes("w-48").props(
+                                "hint='Set TP at last_price ± X% after reversal (blank = none)' "
+                                "persistent-hint clearable stack-label"
+                            )
+                    _active_badge_cmtr = ui.badge("Active", color="positive").bind_visibility_from(
+                        commutator_switch, "value"
+                    )
+
             ui.separator().classes("w-full my-4")
             save_button = ui.button("Save", icon="save")
 
@@ -2968,6 +3085,13 @@ def register_pages(app: FastAPI) -> None:
                     "activate_pct": float(protector_activate.value or 10.0),
                     "step_pct": float(protector_step.value or 10.0),
                     "lock_ratio": float(protector_lock.value or 0.5),
+                },
+                "commutator": {
+                    "enabled": bool(commutator_switch.value),
+                    "reverse_at_loss_pct": float(cmtr_loss_pct.value) if cmtr_loss_pct.value not in (None, "") else None,
+                    "reverse_at_loss_usd": float(cmtr_loss_usd.value) if cmtr_loss_usd.value not in (None, "") else None,
+                    "max_flips": int(cmtr_max_flips.value or 1),
+                    "post_reversal_tp_pct": float(cmtr_post_tp.value) if cmtr_post_tp.value not in (None, "") else None,
                 },
             }
             config["strategy"] = updated_strategy
