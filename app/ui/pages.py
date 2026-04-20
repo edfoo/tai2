@@ -1962,6 +1962,15 @@ def register_pages(app: FastAPI) -> None:
             else:
                 notice.set_text("")
 
+        def _build_shotgun_baseline_label(current_equity: float) -> str:
+            market_service = getattr(app.state, "market_service", None)
+            baseline: float | None = getattr(market_service, "_shotgun_baseline_equity", None)
+            if baseline is None:
+                return "--"
+            diff = current_equity - baseline
+            sign = "+" if diff >= 0 else ""
+            return f"${baseline:,.2f} / {sign}{diff:,.2f}"
+
         def update(snapshot: dict[str, Any] | None) -> None:
             last_snapshot["value"] = snapshot
             set_ws_status(snapshot is not None)
@@ -2308,7 +2317,7 @@ def register_pages(app: FastAPI) -> None:
                     "current": "",
                     "tp": "",
                     "sl": "",
-                    "last_trade": "",
+                    "last_trade": _build_shotgun_baseline_label(total_equity),
                     "pnl": f"{total_pnl:,.2f}" if total_pnl is not None else "--",
                     "pnl_cls": total_pnl_color,
                     "pnl_pct": f"{total_pnl_pct:,.2f}%" if total_pnl_pct is not None else "--",
