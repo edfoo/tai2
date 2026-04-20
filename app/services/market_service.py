@@ -1381,22 +1381,37 @@ class MarketService:
         """
         protector = self._strategy_config.get("protector") or {}
         if not protector.get("enabled"):
+            self._emit_debug("Protector: disabled — skipping check")
             return
         activate_pct = self._extract_float(protector.get("activate_pct"))
         step_pct = self._extract_float(protector.get("step_pct"))
         lock_ratio = self._extract_float(protector.get("lock_ratio"))
         if not activate_pct or not step_pct or not lock_ratio:
+            self._emit_debug(
+                f"Protector: invalid config (activate_pct={activate_pct!r}, "
+                f"step_pct={step_pct!r}, lock_ratio={lock_ratio!r}) — skipping"
+            )
             return
         if activate_pct <= 0 or step_pct <= 0 or lock_ratio <= 0:
+            self._emit_debug(
+                f"Protector: config values must be > 0 "
+                f"(activate_pct={activate_pct}, step_pct={step_pct}, lock_ratio={lock_ratio}) — skipping"
+            )
             return
 
         snapshot = self._last_full_snapshot
         if not snapshot:
+            self._emit_debug("Protector: no snapshot available yet — skipping")
             return
         positions: list[dict[str, Any]] = snapshot.get("positions") or []
         if not positions:
+            self._emit_debug("Protector: snapshot has no open positions")
             return
 
+        self._emit_debug(
+            f"Protector: checking {len(positions)} position(s), "
+            f"activate_pct={activate_pct}%, step_pct={step_pct}%, lock_ratio={lock_ratio}"
+        )
         for pos in positions:
             if not isinstance(pos, dict):
                 continue
@@ -1404,14 +1419,20 @@ class MarketService:
             if not symbol:
                 continue
             if symbol in self._protector_updating:
+                self._emit_debug(f"Protector: {symbol} update already in-flight — skipping")
                 continue
             pos_val = self._extract_float(pos.get("pos"))
             if not pos_val or pos_val == 0:
                 continue
             upl_ratio = self._extract_float(pos.get("uplRatio"))
+            upl_pct = upl_ratio * 100.0 if upl_ratio is not None else None
+            self._emit_debug(
+                f"Protector: {symbol} uplRatio={upl_ratio!r} "
+                f"({f'{upl_pct:.2f}%' if upl_pct is not None else 'n/a'}), "
+                f"activate_pct={activate_pct}%, avgPx={pos.get('avgPx')!r}"
+            )
             if upl_ratio is None or upl_ratio <= 0:
                 continue
-            upl_pct = upl_ratio * 100.0
             if upl_pct < activate_pct:
                 continue
 
@@ -4275,7 +4296,13 @@ class MarketService:
             if latest_snapshot:
                 snapshot_positions = latest_snapshot.get("positions") or []
 
-        positions = context.get("positions") or snapshot_positions
+        # Prefer the live Redis snapshot positions over the (potentially stale)
+        # context positions.  With slow models (e.g. Gemma 4 31B taking ~10 min),
+        # the context was assembled before the LLM call and a position can be
+        # closed in the interim.  Using stale context positions would cause
+        # current_side to show an already-closed side, resulting in reduce_only=True
+        # being set and OKX rejecting the order with 51169.
+        positions = snapshot_positions or context.get("positions") or []
         if not positions:
             try:
                 positions = await self._fetch_positions()
