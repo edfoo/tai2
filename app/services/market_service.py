@@ -4793,7 +4793,7 @@ class MarketService:
                 meta={"action": action},
             )
             return False
-        instrument_spec = self._instrument_specs.get(symbol) or {}
+        instrument_spec = self._instrument_specs.get((symbol or "").upper()) or {}
         execution_trade_mode = execution_cfg.get("trade_mode") or "isolated"
         trade_mode = str(execution_trade_mode).lower()
         if trade_mode not in {"isolated", "cross"}:
@@ -6081,7 +6081,7 @@ class MarketService:
             tier_source="position-tiers" if tier_cap_limit is not None else None,
         )
 
-        spec = self._instrument_specs.get(symbol) or {}
+        spec = self._instrument_specs.get((symbol or "").upper()) or {}
         per_order_limit = None
         if order_type == "market":
             per_order_limit = spec.get("max_market_size") or spec.get("max_limit_size")
@@ -6418,7 +6418,11 @@ class MarketService:
                 f"(notional ≈ {okx_sz * ct_val * last_price:.4f} USDT)"
             )
         else:
-            okx_sz = raw_size
+            # ct_val == 1.0: raw_size is already in contract units.
+            # Re-quantize defensively to guard against any floating-point drift
+            # introduced by chunking, equity-clip, or downsize logic above.
+            _okx_sz_quantized = self._quantize_order_size(symbol, raw_size)
+            okx_sz = _okx_sz_quantized if (_okx_sz_quantized is not None and _okx_sz_quantized > 0) else raw_size
         if not reduce_only and raw_size and last_price and last_price > 0:
             self._pending_notional[symbol] = raw_size * last_price * _bootstrap_order_chunks
         try:
@@ -6898,8 +6902,12 @@ class MarketService:
         """Snap requested size to the instrument's lot size and enforce min order size."""
         if size is None or size <= 0:
             return None
-        spec = self._instrument_specs.get(symbol)
+        spec = self._instrument_specs.get((symbol or "").upper())
         if not spec:
+            self._emit_debug(
+                f"_quantize_order_size: no instrument spec for {symbol!r}; "
+                f"returning size unquantized — this may cause 51121 if lot_size != 1"
+            )
             return size
         lot = spec.get("lot_size") or 0.0
         min_size = spec.get("min_size") or 0.0
@@ -6916,7 +6924,7 @@ class MarketService:
         """Align a target price to the instrument's tick size, nudging up or down as requested."""
         if price is None or price <= 0:
             return None
-        spec = self._instrument_specs.get(symbol)
+        spec = self._instrument_specs.get((symbol or "").upper())
         tick = (spec or {}).get("tick_size") or 0.0
         if tick > 0:
             scaled = price / tick
@@ -7098,7 +7106,7 @@ class MarketService:
         """Compute the minimum tick/ratio offset required when nudging invalid TP/SL levels."""
         if reference_price is None or reference_price <= 0:
             return 0.0
-        spec = self._instrument_specs.get(symbol) or {}
+        spec = self._instrument_specs.get((symbol or "").upper()) or {}
         tick = spec.get("tick_size") or 0.0
         reference_component = reference_price * self.PROTECTION_MIN_OFFSET_RATIO
         offsets = [value for value in (tick, reference_component) if value and value > 0]
