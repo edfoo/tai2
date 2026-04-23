@@ -296,6 +296,9 @@ def register_pages(app: FastAPI) -> None:
             "commutator_row": None,
             "commutator_badge": None,
             "commutator_detail": None,
+            "alternator_row": None,
+            "alternator_badge": None,
+            "alternator_detail": None,
         }
 
         def _format_pct(value: Any) -> str:
@@ -583,6 +586,14 @@ def register_pages(app: FastAPI) -> None:
                                         "Commutator", color="grey"
                                     ).props("rounded")
                                     strategy_status_refs["commutator_detail"] = ui.label("").classes(
+                                        "text-xs text-slate-500"
+                                    )
+                                with ui.row().classes("items-center gap-1") as _sg_altr_row:
+                                    strategy_status_refs["alternator_row"] = _sg_altr_row
+                                    strategy_status_refs["alternator_badge"] = ui.badge(
+                                        "Alternator", color="grey"
+                                    ).props("rounded")
+                                    strategy_status_refs["alternator_detail"] = ui.label("").classes(
                                         "text-xs text-slate-500"
                                     )
 
@@ -1951,6 +1962,41 @@ def register_pages(app: FastAPI) -> None:
             if cmtr_detail:
                 cmtr_detail.set_text(cmtr_detail_text)
 
+            altr = strategy.get("alternator") or {}
+            altr_enabled = bool(altr.get("enabled"))
+            altr_badge = strategy_status_refs.get("alternator_badge")
+            altr_detail = strategy_status_refs.get("alternator_detail")
+            if altr_badge:
+                if altr_enabled:
+                    altr_badge.props("color=positive rounded")
+                    altr_parts: list[str] = []
+                    try:
+                        rpp = altr.get("reverse_at_profit_pct")
+                        if rpp is not None:
+                            altr_parts.append(f"flip @+{float(rpp):.1f}%")
+                    except (TypeError, ValueError):
+                        pass
+                    try:
+                        rlp = altr.get("restart_at_loss_pct")
+                        if rlp is not None:
+                            altr_parts.append(f"restart @-{float(rlp):.1f}%")
+                    except (TypeError, ValueError):
+                        pass
+                    try:
+                        mr = altr.get("max_reversals")
+                        if mr is not None:
+                            altr_parts.append(f"x{int(mr)} rev")
+                    except (TypeError, ValueError):
+                        pass
+                    altr_detail_text = " · ".join(altr_parts) if altr_parts else ""
+                else:
+                    altr_badge.props("color=grey rounded")
+                    altr_detail_text = ""
+            else:
+                altr_detail_text = ""
+            if altr_detail:
+                altr_detail.set_text(altr_detail_text)
+
         def update_snapshot_health(snapshot: dict[str, Any] | None) -> None:
             notice = stale_indicator.get("widget")
             if not notice:
@@ -2885,6 +2931,18 @@ def register_pages(app: FastAPI) -> None:
             "max_flips": 1,
             "post_reversal_tp_pct": None,
         })
+        alternator = strategy.setdefault("alternator", {
+            "enabled": False,
+            "reverse_at_profit_pct": None,
+            "reverse_at_profit_usd": None,
+            "max_reversals": None,
+            "restart_at_loss_pct": None,
+            "restart_at_loss_usd": None,
+            "ride_at_profit_pct": None,
+            "ride_at_profit_usd": None,
+            "stop_at_loss_pct": None,
+            "stop_at_loss_usd": None,
+        })
 
         with wrapper:
             ui.label("Strategy").classes("text-2xl font-bold")
@@ -3144,8 +3202,173 @@ def register_pages(app: FastAPI) -> None:
                         commutator_switch, "value"
                     )
 
+            with ui.card().classes("w-full rounded-lg border border-slate-200 mb-1"):
+                with ui.row().classes("w-full items-center gap-2 flex-nowrap"):
+                    alternator_switch = ui.switch(
+                        value=bool(alternator.get("enabled", False)),
+                    ).props("dense color=primary")
+                    with ui.expansion("Alternator").classes("flex-1 text-sm font-medium"):
+                        ui.label(
+                            "Oscillate between long and short using configurable profit and loss thresholds. "
+                            "When a profit threshold is hit the position is reversed; "
+                            "when a loss threshold is hit the bot flips back. "
+                            "Optionally let a winning position ride (hand it to Protector) or "
+                            "apply a hard stop-loss with no reversal. "
+                            "Mutually exclusive with Skimming and Commutator."
+                        ).classes("text-xs text-slate-500 mb-3")
+                        ui.label("Reverse at Profit").classes("text-xs font-semibold text-slate-600 mt-1")
+                        with ui.row().classes("gap-4 items-start mb-2"):
+                            _altr_rpp_raw = alternator.get("reverse_at_profit_pct")
+                            altr_rev_profit_pct = ui.number(
+                                label="Reverse at % Profit",
+                                value=float(_altr_rpp_raw) if _altr_rpp_raw is not None else None,
+                                min=0.01,
+                                step=0.1,
+                                precision=2,
+                            ).classes("w-48").props(
+                                "hint='Flip when position PnL >= +X% (blank = disabled)' "
+                                "persistent-hint clearable stack-label"
+                            )
+                            _altr_rpu_raw = alternator.get("reverse_at_profit_usd")
+                            altr_rev_profit_usd = ui.number(
+                                label="Reverse at USDT Profit",
+                                value=float(_altr_rpu_raw) if _altr_rpu_raw is not None else None,
+                                min=0.01,
+                                step=1.0,
+                                precision=2,
+                            ).classes("w-48").props(
+                                "hint='Flip when unrealised profit >= this USDT (blank = disabled)' "
+                                "persistent-hint clearable stack-label"
+                            )
+                        ui.label("Restart at Loss").classes("text-xs font-semibold text-slate-600 mt-1")
+                        with ui.row().classes("gap-4 items-start mb-2"):
+                            _altr_rlp_raw = alternator.get("restart_at_loss_pct")
+                            altr_restart_loss_pct = ui.number(
+                                label="Restart at % Loss",
+                                value=float(_altr_rlp_raw) if _altr_rlp_raw is not None else None,
+                                min=0.01,
+                                step=0.1,
+                                precision=2,
+                            ).classes("w-48").props(
+                                "hint='Flip back when position PnL <= -X% (blank = disabled)' "
+                                "persistent-hint clearable stack-label"
+                            )
+                            _altr_rlu_raw = alternator.get("restart_at_loss_usd")
+                            altr_restart_loss_usd = ui.number(
+                                label="Restart at USDT Loss",
+                                value=float(_altr_rlu_raw) if _altr_rlu_raw is not None else None,
+                                min=0.01,
+                                step=1.0,
+                                precision=2,
+                            ).classes("w-48").props(
+                                "hint='Flip back when unrealised loss >= this USDT (blank = disabled)' "
+                                "persistent-hint clearable stack-label"
+                            )
+                        ui.label("Limits").classes("text-xs font-semibold text-slate-600 mt-1")
+                        with ui.row().classes("gap-4 items-start mb-2"):
+                            _altr_mr_raw = alternator.get("max_reversals")
+                            altr_max_reversals = ui.number(
+                                label="Max reversals",
+                                value=int(_altr_mr_raw) if _altr_mr_raw is not None else None,
+                                min=0,
+                                max=20,
+                                step=1,
+                                precision=0,
+                            ).classes("w-48").props(
+                                "hint='Total flip limit (blank = unlimited)' "
+                                "persistent-hint clearable stack-label"
+                            )
+                        ui.label("Ride (hand to Protector)").classes("text-xs font-semibold text-slate-600 mt-1")
+                        with ui.row().classes("gap-4 items-start mb-2"):
+                            _altr_ride_pct_raw = alternator.get("ride_at_profit_pct")
+                            altr_ride_profit_pct = ui.number(
+                                label="Ride at % Profit",
+                                value=float(_altr_ride_pct_raw) if _altr_ride_pct_raw is not None else None,
+                                min=0.01,
+                                step=0.1,
+                                precision=2,
+                            ).classes("w-48").props(
+                                "hint='Stop reversing; hand to Protector when PnL >= +X% (blank = disabled)' "
+                                "persistent-hint clearable stack-label"
+                            )
+                            _altr_ride_usd_raw = alternator.get("ride_at_profit_usd")
+                            altr_ride_profit_usd = ui.number(
+                                label="Ride at USDT Profit",
+                                value=float(_altr_ride_usd_raw) if _altr_ride_usd_raw is not None else None,
+                                min=0.01,
+                                step=1.0,
+                                precision=2,
+                            ).classes("w-48").props(
+                                "hint='Stop reversing; hand to Protector when profit >= this USDT (blank = disabled)' "
+                                "persistent-hint clearable stack-label"
+                            )
+                        ui.label("Hard Stop (close only, no flip)").classes("text-xs font-semibold text-slate-600 mt-1")
+                        with ui.row().classes("gap-4 items-start mb-2"):
+                            _altr_slp_raw = alternator.get("stop_at_loss_pct")
+                            altr_stop_loss_pct = ui.number(
+                                label="Hard Stop at % Loss",
+                                value=float(_altr_slp_raw) if _altr_slp_raw is not None else None,
+                                min=0.01,
+                                step=0.1,
+                                precision=2,
+                            ).classes("w-48").props(
+                                "hint='Close without reversing when PnL <= -X% (blank = disabled)' "
+                                "persistent-hint clearable stack-label"
+                            )
+                            _altr_slu_raw = alternator.get("stop_at_loss_usd")
+                            altr_stop_loss_usd = ui.number(
+                                label="Hard Stop at USDT Loss",
+                                value=float(_altr_slu_raw) if _altr_slu_raw is not None else None,
+                                min=0.01,
+                                step=1.0,
+                                precision=2,
+                            ).classes("w-48").props(
+                                "hint='Close without reversing when loss >= this USDT (blank = disabled)' "
+                                "persistent-hint clearable stack-label"
+                            )
+                    _active_badge_altr = ui.badge("Active", color="positive").bind_visibility_from(
+                        alternator_switch, "value"
+                    )
+
             ui.separator().classes("w-full my-4")
             save_button = ui.button("Save", icon="save")
+
+        # ── Mutual exclusion: Skimming / Commutator / Alternator ─────────────
+        # Only one of these three can be enabled at a time.  When the user turns
+        # one ON the others are silently disabled and a notification is shown.
+        _mutex_busy: dict[str, bool] = {"flag": False}
+
+        def on_skimming_toggle(e: Any) -> None:
+            if _mutex_busy["flag"] or not e.value:
+                return
+            _mutex_busy["flag"] = True
+            alternator_switch.set_value(False)
+            _mutex_busy["flag"] = False
+            ui.notify("Alternator disabled — Skimming is now active", color="info")
+
+        def on_commutator_toggle(e: Any) -> None:
+            if _mutex_busy["flag"] or not e.value:
+                return
+            _mutex_busy["flag"] = True
+            alternator_switch.set_value(False)
+            _mutex_busy["flag"] = False
+            ui.notify("Alternator disabled — Commutator is now active", color="info")
+
+        def on_alternator_toggle(e: Any) -> None:
+            if _mutex_busy["flag"] or not e.value:
+                return
+            _mutex_busy["flag"] = True
+            skimming_switch.set_value(False)
+            commutator_switch.set_value(False)
+            _mutex_busy["flag"] = False
+            ui.notify(
+                "Commutator and Skimming disabled — Alternator is now the active position strategy",
+                color="info",
+            )
+
+        skimming_switch.on_value_change(on_skimming_toggle)
+        commutator_switch.on_value_change(on_commutator_toggle)
+        alternator_switch.on_value_change(on_alternator_toggle)
 
         async def save_strategy_settings(event: Any | None = None) -> None:
             _sl_val = stop_loss_input.value
@@ -3179,6 +3402,18 @@ def register_pages(app: FastAPI) -> None:
                     "reverse_at_loss_usd": float(cmtr_loss_usd.value) if cmtr_loss_usd.value not in (None, "") else None,
                     "max_flips": int(cmtr_max_flips.value or 1),
                     "post_reversal_tp_pct": float(cmtr_post_tp.value) if cmtr_post_tp.value not in (None, "") else None,
+                },
+                "alternator": {
+                    "enabled": bool(alternator_switch.value),
+                    "reverse_at_profit_pct": float(altr_rev_profit_pct.value) if altr_rev_profit_pct.value not in (None, "") else None,
+                    "reverse_at_profit_usd": float(altr_rev_profit_usd.value) if altr_rev_profit_usd.value not in (None, "") else None,
+                    "max_reversals": int(altr_max_reversals.value) if altr_max_reversals.value not in (None, "") else None,
+                    "restart_at_loss_pct": float(altr_restart_loss_pct.value) if altr_restart_loss_pct.value not in (None, "") else None,
+                    "restart_at_loss_usd": float(altr_restart_loss_usd.value) if altr_restart_loss_usd.value not in (None, "") else None,
+                    "ride_at_profit_pct": float(altr_ride_profit_pct.value) if altr_ride_profit_pct.value not in (None, "") else None,
+                    "ride_at_profit_usd": float(altr_ride_profit_usd.value) if altr_ride_profit_usd.value not in (None, "") else None,
+                    "stop_at_loss_pct": float(altr_stop_loss_pct.value) if altr_stop_loss_pct.value not in (None, "") else None,
+                    "stop_at_loss_usd": float(altr_stop_loss_usd.value) if altr_stop_loss_usd.value not in (None, "") else None,
                 },
             }
             config["strategy"] = updated_strategy

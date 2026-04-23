@@ -280,6 +280,11 @@ class MarketService:
         # (counts are cleared automatically when the symbol leaves open positions).
         self._commutator_flip_counts: dict[str, int] = {}
         self._commutator_flipping: set[str] = set()
+        # Alternator strategy: oscillate between long/short on profit/loss thresholds.
+        # Mutually exclusive with Skimming and Commutator.
+        self._alternator_flip_counts: dict[str, int] = {}
+        self._alternator_flipping: set[str] = set()
+        self._alternator_riding: set[str] = set()
 
     async def start(self) -> None:
         """Launch the market snapshot poller and websocket consumers if not already running."""
@@ -1117,6 +1122,8 @@ class MarketService:
         if not skimming.get("enabled"):
             self._emit_debug("Skimming: disabled — skipping check")
             return
+        if (self._strategy_config.get("alternator") or {}).get("enabled"):
+            return
         threshold = self._extract_float(skimming.get("threshold_pct"))
         if threshold is None or threshold <= 0:
             self._emit_debug(f"Skimming: invalid threshold ({skimming.get('threshold_pct')!r}) — skipping")
@@ -1572,6 +1579,8 @@ class MarketService:
         if not commutator.get("enabled"):
             self._emit_debug("Commutator: disabled — skipping check")
             return
+        if (self._strategy_config.get("alternator") or {}).get("enabled"):
+            return
 
         loss_pct = self._extract_float(commutator.get("reverse_at_loss_pct"))
         loss_usd = self._extract_float(commutator.get("reverse_at_loss_usd"))
@@ -1812,6 +1821,381 @@ class MarketService:
             logger.warning("Commutator flip error for %s: %s", symbol_key, exc)
         finally:
             self._commutator_flipping.discard(symbol_key)
+
+    # ── Alternator strategy ──────────────────────────────────────────────────
+
+    async def _check_alternator(self) -> None:
+        """Oscillate between long/short positions on profit and loss thresholds.
+
+        Runs every ``_positions_refresh_interval`` seconds inside
+        ``_positions_refresh_loop``.  Mutually exclusive with Skimming and
+        Commutator (enforced at the config layer; also checked defensively here).
+
+        Check order per position (highest priority first):
+          1. Ride condition: if profit ≥ ride threshold → hand off to Protector,
+             stop reversing for this position lifecycle.
+          2. Hard stop: if loss ≥ stop threshold → close without reversal.
+          3. Reverse at profit: if profit ≥ reverse threshold → flip side,
+             track count against max_reversals.
+          4. Restart at loss: if loss ≥ restart threshold → flip back,
+             track count against max_reversals.
+
+        Config keys (under strategy.alternator):
+          enabled                – bool, must be True
+          reverse_at_profit_pct  – float | None, flip when uplRatio ≥ X%
+          reverse_at_profit_usd  – float | None, flip when upl ≥ X USDT
+          max_reversals          – int | None, max total flips (None = unlimited)
+          restart_at_loss_pct    – float | None, flip back when uplRatio ≤ -abs(X)%
+          restart_at_loss_usd    – float | None, flip back when upl ≤ -abs(X) USDT
+          ride_at_profit_pct     – float | None, hand to Protector; stop reversing
+          ride_at_profit_usd     – float | None, same, USD basis
+          stop_at_loss_pct       – float | None, hard close, no flip
+          stop_at_loss_usd       – float | None, hard close, USD basis
+        """
+        alternator = self._strategy_config.get("alternator") or {}
+        if not alternator.get("enabled"):
+            return
+        # Defensive mutual-exclusion guard (UI enforces this, but check here too)
+        strategy = self._strategy_config
+        if (strategy.get("skimming") or {}).get("enabled") or (
+            strategy.get("commutator") or {}
+        ).get("enabled"):
+            self._emit_debug(
+                "Alternator: skipped — Skimming or Commutator is also enabled (config conflict)"
+            )
+            return
+
+        rev_profit_pct = self._extract_float(alternator.get("reverse_at_profit_pct"))
+        rev_profit_usd = self._extract_float(alternator.get("reverse_at_profit_usd"))
+        max_reversals_raw = alternator.get("max_reversals")
+        max_reversals: int | None = (
+            int(max_reversals_raw) if max_reversals_raw is not None else None
+        )
+        restart_loss_pct = self._extract_float(alternator.get("restart_at_loss_pct"))
+        restart_loss_usd = self._extract_float(alternator.get("restart_at_loss_usd"))
+        ride_profit_pct = self._extract_float(alternator.get("ride_at_profit_pct"))
+        ride_profit_usd = self._extract_float(alternator.get("ride_at_profit_usd"))
+        stop_loss_pct = self._extract_float(alternator.get("stop_at_loss_pct"))
+        stop_loss_usd = self._extract_float(alternator.get("stop_at_loss_usd"))
+
+        if (
+            rev_profit_pct is None
+            and rev_profit_usd is None
+            and restart_loss_pct is None
+            and restart_loss_usd is None
+        ):
+            self._emit_debug("Alternator: no trigger thresholds configured — skipping")
+            return
+
+        snapshot = self._last_full_snapshot
+        if not snapshot:
+            self._emit_debug("Alternator: no snapshot available yet — skipping")
+            return
+        positions: list[dict[str, Any]] = snapshot.get("positions") or []
+        if not positions:
+            self._emit_debug("Alternator: snapshot has no open positions")
+            return
+
+        # Prune state for symbols no longer open.
+        active_symbols = {
+            str(p.get("instId", "")).upper()
+            for p in positions
+            if isinstance(p, dict) and self._extract_float(p.get("pos"))
+        }
+        for gone in set(self._alternator_flip_counts) - active_symbols:
+            del self._alternator_flip_counts[gone]
+            self._emit_debug(f"Alternator: {gone} no longer open — flip count cleared")
+        self._alternator_riding &= active_symbols
+
+        self._emit_debug(
+            f"Alternator: checking {len(positions)} position(s), "
+            f"rev_profit_pct={rev_profit_pct} rev_profit_usd={rev_profit_usd} "
+            f"max_reversals={max_reversals} restart_loss_pct={restart_loss_pct} "
+            f"restart_loss_usd={restart_loss_usd} ride_profit_pct={ride_profit_pct} "
+            f"stop_loss_pct={stop_loss_pct}"
+        )
+
+        for pos in positions:
+            if not isinstance(pos, dict):
+                continue
+            symbol = str(pos.get("instId", "")).upper()
+            if not symbol:
+                continue
+            if symbol in self._alternator_flipping:
+                self._emit_debug(f"Alternator: {symbol} flip already in-flight — skipping")
+                continue
+            if symbol in self._alternator_riding:
+                self._emit_debug(f"Alternator: {symbol} handed to Protector — skipping")
+                continue
+            pos_val = self._extract_float(pos.get("pos"))
+            if not pos_val or pos_val == 0:
+                continue
+
+            upl_ratio = self._extract_float(pos.get("uplRatio"))
+            upl_usd = self._extract_float(pos.get("upl"))
+            upl_pct = upl_ratio * 100.0 if upl_ratio is not None else None
+            flip_count = self._alternator_flip_counts.get(symbol, 0)
+
+            self._emit_debug(
+                f"Alternator: {symbol} uplRatio={upl_ratio!r} "
+                f"({f'{upl_pct:.2f}%' if upl_pct is not None else 'n/a'}), "
+                f"upl_usd={upl_usd!r}, flip_count={flip_count}, "
+                f"posSide={pos.get('posSide')!r}"
+            )
+
+            pos_side = str(pos.get("posSide", "")).lower()
+            trade_mode = str(pos.get("mgnMode") or "").lower() or None
+            contracts = abs(pos_val)
+            if pos_side == "long":
+                close_side, close_pos_side = "sell", "long"
+                new_entry_side, new_entry_pos_side = "sell", "short"
+            elif pos_side == "short":
+                close_side, close_pos_side = "buy", "short"
+                new_entry_side, new_entry_pos_side = "buy", "long"
+            else:
+                # Net mode: infer from sign of pos
+                close_side = "sell" if pos_val > 0 else "buy"
+                close_pos_side = None
+                new_entry_side = "buy" if pos_val > 0 else "sell"
+                new_entry_pos_side = None
+
+            # ── Priority 1: Ride condition ────────────────────────────────────
+            hit_ride_pct = (
+                ride_profit_pct is not None
+                and upl_pct is not None
+                and upl_pct >= abs(ride_profit_pct)
+            )
+            hit_ride_usd = (
+                ride_profit_usd is not None
+                and upl_usd is not None
+                and upl_usd >= abs(ride_profit_usd)
+            )
+            if hit_ride_pct or hit_ride_usd:
+                ride_trigger = (
+                    f"upl_pct={upl_pct:.2f}% >= {abs(ride_profit_pct):.2f}%"
+                    if hit_ride_pct
+                    else f"upl_usd={upl_usd:.4f} >= {abs(ride_profit_usd):.4f}"
+                )
+                self._emit_debug(
+                    f"Alternator: {symbol} RIDE triggered ({ride_trigger}) — "
+                    "handing off to Protector, no further reversals"
+                )
+                self._alternator_riding.add(symbol)
+                continue
+
+            # ── Priority 2: Hard stop ─────────────────────────────────────────
+            hit_stop_pct = (
+                stop_loss_pct is not None
+                and upl_pct is not None
+                and upl_pct <= -abs(stop_loss_pct)
+            )
+            hit_stop_usd = (
+                stop_loss_usd is not None
+                and upl_usd is not None
+                and upl_usd <= -abs(stop_loss_usd)
+            )
+            if hit_stop_pct or hit_stop_usd:
+                stop_trigger = (
+                    f"upl_pct={upl_pct:.2f}% <= -{abs(stop_loss_pct):.2f}%"
+                    if hit_stop_pct
+                    else f"upl_usd={upl_usd:.4f} <= -{abs(stop_loss_usd):.4f}"
+                )
+                self._emit_debug(
+                    f"Alternator: {symbol} HARD STOP triggered ({stop_trigger}) — "
+                    "closing without reversal"
+                )
+                self._alternator_flipping.add(symbol)
+                asyncio.create_task(
+                    self._alternator_flip(
+                        symbol=symbol,
+                        close_side=close_side,
+                        close_pos_side=close_pos_side,
+                        new_entry_side=None,
+                        new_entry_pos_side=None,
+                        contracts=contracts,
+                        trade_mode=trade_mode,
+                        flip_count=flip_count,
+                        trigger="stop",
+                    ),
+                    name=f"alternator-flip-{symbol}",
+                )
+                continue
+
+            # ── Priority 3: Reverse at profit ─────────────────────────────────
+            hit_rev_profit_pct = (
+                rev_profit_pct is not None
+                and upl_pct is not None
+                and upl_pct >= abs(rev_profit_pct)
+            )
+            hit_rev_profit_usd = (
+                rev_profit_usd is not None
+                and upl_usd is not None
+                and upl_usd >= abs(rev_profit_usd)
+            )
+            if hit_rev_profit_pct or hit_rev_profit_usd:
+                will_flip = max_reversals is None or flip_count < max_reversals
+                rev_trigger = (
+                    f"upl_pct={upl_pct:.2f}% >= {abs(rev_profit_pct):.2f}%"
+                    if hit_rev_profit_pct
+                    else f"upl_usd={upl_usd:.4f} >= {abs(rev_profit_usd):.4f}"
+                )
+                self._emit_debug(
+                    f"Alternator: {symbol} PROFIT triggered ({rev_trigger}), "
+                    f"flip_count={flip_count} max_reversals={max_reversals} "
+                    f"action={'FLIP' if will_flip else 'CLOSE'}"
+                )
+                self._alternator_flipping.add(symbol)
+                asyncio.create_task(
+                    self._alternator_flip(
+                        symbol=symbol,
+                        close_side=close_side,
+                        close_pos_side=close_pos_side,
+                        new_entry_side=new_entry_side if will_flip else None,
+                        new_entry_pos_side=new_entry_pos_side if will_flip else None,
+                        contracts=contracts,
+                        trade_mode=trade_mode,
+                        flip_count=flip_count,
+                        trigger="profit",
+                    ),
+                    name=f"alternator-flip-{symbol}",
+                )
+                continue
+
+            # ── Priority 4: Restart at loss ───────────────────────────────────
+            hit_restart_pct = (
+                restart_loss_pct is not None
+                and upl_pct is not None
+                and upl_pct <= -abs(restart_loss_pct)
+            )
+            hit_restart_usd = (
+                restart_loss_usd is not None
+                and upl_usd is not None
+                and upl_usd <= -abs(restart_loss_usd)
+            )
+            if hit_restart_pct or hit_restart_usd:
+                will_flip = max_reversals is None or flip_count < max_reversals
+                restart_trigger = (
+                    f"upl_pct={upl_pct:.2f}% <= -{abs(restart_loss_pct):.2f}%"
+                    if hit_restart_pct
+                    else f"upl_usd={upl_usd:.4f} <= -{abs(restart_loss_usd):.4f}"
+                )
+                self._emit_debug(
+                    f"Alternator: {symbol} LOSS triggered ({restart_trigger}), "
+                    f"flip_count={flip_count} max_reversals={max_reversals} "
+                    f"action={'FLIP' if will_flip else 'CLOSE'}"
+                )
+                self._alternator_flipping.add(symbol)
+                asyncio.create_task(
+                    self._alternator_flip(
+                        symbol=symbol,
+                        close_side=close_side,
+                        close_pos_side=close_pos_side,
+                        new_entry_side=new_entry_side if will_flip else None,
+                        new_entry_pos_side=new_entry_pos_side if will_flip else None,
+                        contracts=contracts,
+                        trade_mode=trade_mode,
+                        flip_count=flip_count,
+                        trigger="loss",
+                    ),
+                    name=f"alternator-flip-{symbol}",
+                )
+
+    async def _alternator_flip(
+        self,
+        *,
+        symbol: str,
+        close_side: str,
+        close_pos_side: str | None,
+        new_entry_side: str | None,
+        new_entry_pos_side: str | None,
+        contracts: float,
+        trade_mode: str | None,
+        flip_count: int,
+        trigger: str,
+    ) -> None:
+        """Close the current position and optionally open the reversed entry.
+
+        When ``new_entry_side`` is None (hard stop or max_reversals exhausted)
+        only the close order is submitted and no reversal is attempted.
+        """
+        symbol_key = symbol.upper()
+        resolved_trade_mode = trade_mode or "cross"
+        try:
+            # Step 1: close existing position
+            close_coid = self._generate_client_order_id("altr-c")
+            close_result = await self._submit_order(
+                symbol=symbol,
+                side=close_side,
+                pos_side=close_pos_side,
+                size=contracts,
+                trade_mode=resolved_trade_mode,
+                order_type="market",
+                reduce_only=True,
+                client_order_id=close_coid,
+                attach_algo_orders=None,
+            )
+            if close_result is None:
+                self._emit_debug(
+                    f"Alternator: {symbol_key} close order failed (no trade API)"
+                )
+                return
+            close_ok = close_result[0] if isinstance(close_result, tuple) else close_result
+            if not close_ok:
+                self._emit_debug(
+                    f"Alternator: {symbol_key} close order rejected — aborting"
+                )
+                return
+            self._emit_debug(
+                f"Alternator: {symbol_key} close order submitted "
+                f"(side={close_side}, contracts={contracts}, trigger={trigger})"
+            )
+
+            if new_entry_side is None:
+                action_label = "hard stop" if trigger == "stop" else "max_reversals reached"
+                self._emit_debug(
+                    f"Alternator: {symbol_key} {action_label} — "
+                    "position closed without reversal"
+                )
+                return
+
+            # Step 2: brief pause to let OKX register the close
+            await asyncio.sleep(1.0)
+
+            # Step 3: open reversed position
+            entry_coid = self._generate_client_order_id("altr-e")
+            entry_result = await self._submit_order(
+                symbol=symbol,
+                side=new_entry_side,
+                pos_side=new_entry_pos_side,
+                size=contracts,
+                trade_mode=resolved_trade_mode,
+                order_type="market",
+                reduce_only=False,
+                client_order_id=entry_coid,
+                attach_algo_orders=None,
+            )
+            new_flip_count = flip_count + 1
+            self._alternator_flip_counts[symbol_key] = new_flip_count
+            entry_ok = entry_result[0] if isinstance(entry_result, tuple) else entry_result
+            if entry_ok:
+                new_side_label = (
+                    "long"
+                    if new_entry_pos_side == "long" or new_entry_side == "buy"
+                    else "short"
+                )
+                self._emit_debug(
+                    f"Alternator: {symbol_key} reversed to {new_side_label} "
+                    f"(flip #{new_flip_count}, trigger={trigger}, contracts={contracts})"
+                )
+            else:
+                self._emit_debug(
+                    f"Alternator: {symbol_key} reversed-entry order rejected "
+                    f"(flip #{new_flip_count}, trigger={trigger})"
+                )
+        except Exception as exc:
+            logger.warning("Alternator flip error for %s: %s", symbol_key, exc)
+        finally:
+            self._alternator_flipping.discard(symbol_key)
 
     @property
     def ws_connection_status(self) -> tuple[bool, bool, bool]:
@@ -2234,6 +2618,12 @@ class MarketService:
                 raise
             except Exception as exc:  # pragma: no cover - best-effort
                 logger.debug("Commutator check error: %s", exc)
+            try:
+                await self._check_alternator()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # pragma: no cover - best-effort
+                logger.debug("Alternator check error: %s", exc)
             await asyncio.sleep(self._positions_refresh_interval)
 
     async def _schedule_patch_publish(self) -> None:
