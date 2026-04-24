@@ -115,6 +115,21 @@ _SEC_STEP4_SIGNALS = (
     "Values > 1.5 suggest aggressive directional buying; values near 0.0 suggest inactive or balanced flow. "
     "Use within the Order Flow tier — a sustained run of high OFI values (> 1.5 for 3+ periods) in the trade direction adds modest confirmation (+0.03 confidence); "
     "sustained near-zero values weaken order-flow confirmation. Do NOT treat OFI ratio as a standalone signal. "
+    "FOOTPRINT CHART: if context.market.footprint is present, it summarises 15 minutes of live tape as a volume-at-price map. "
+    "poc_price is the price level with the highest traded volume in the window — treat it as the strongest near-term support/resistance. "
+    "value_area_high and value_area_low bound the 70 % of volume closest to the POC — price inside this band is at fair value; "
+    "a break outside the band on volume is a directional signal. "
+    "net_delta > 0 means buyers dominated the window (bullish microstructure); net_delta < 0 means sellers dominated. "
+    "delta_imbalance_zones lists up to 5 price levels with the largest single-sided imbalance: "
+    "type 'buy_pressure' = aggressive buyers at that level (support cluster); 'sell_pressure' = aggressive sellers (resistance cluster). "
+    "USAGE RULES: "
+    "(a) poc_price above last_price → overhead resistance — raise risk_score +0.05 for a BUY, or add confirmation for a SELL. "
+    "(b) poc_price below last_price → support — raise risk_score +0.05 for a SELL, or add confirmation for a BUY. "
+    "(c) A 'buy_pressure' imbalance zone within 0.3 % of proposed entry adds +0.03 confidence for a BUY; "
+    "a 'sell_pressure' zone within 0.3 % of entry adds +0.03 confidence for a SELL. "
+    "(d) net_delta confirming direction adds +0.02 confidence; net_delta opposing direction subtracts 0.02. "
+    "Do NOT cite footprint as a standalone signal — always combine with OBV/CVD and trend context. "
+    "If footprint is absent, skip these rules silently. "
 )
 
 _SEC_STEP5_SIZING = (
@@ -862,7 +877,8 @@ class PromptBuilder:
                 f"thin: bid_depth={bid_depth:.0f}, ask_depth={ask_depth:.0f} "
                 f"(both < {_MIN_DEPTH_CONTRACTS} contracts); order flow unreliable"
             )
-        return {
+        _footprint = custom_metrics.get("footprint")
+        result: dict[str, Any] = {
             "last_price": last_price,
             "spread": spread,
             "spread_pct": spread_pct,
@@ -871,6 +887,9 @@ class PromptBuilder:
             "funding_rate": funding_rate,
             "order_flow": order_flow,
         }
+        if _footprint:
+            result["footprint"] = _footprint
+        return result
 
     @staticmethod
     def _trim_series(series: Any, n: int) -> Any:

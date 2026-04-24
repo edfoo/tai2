@@ -163,6 +163,13 @@ class MarketService:
     }
     PROTECTION_MIN_OFFSET_RATIO = 0.001  # 0.1% of entry price
     TIER_CACHE_TTL_SECONDS = 600
+    # Footprint chart: sliding-window price-level volume profile.
+    # Window: how far back (seconds) to include trades in the profile.
+    # Bucket ticks: number of instrument tick_size units per price bucket
+    # (100 ticks ≈ $10 for BTC, $1 for ETH — produces ~30–60 buckets in a
+    # typical 15-minute range, which is concise enough to send to the LLM).
+    FOOTPRINT_WINDOW_SECONDS: int = 900   # 15-minute sliding window
+    FOOTPRINT_BUCKET_TICKS: int = 100     # bucket width = tick_size × 100
 
     def __init__(
         self,
@@ -227,6 +234,10 @@ class MarketService:
         self._latest_long_short_ratio: dict[str, dict[str, Any]] = {}
         self._last_long_short_fetch: dict[str, float] = {}
         self._trade_buffers: dict[str, Deque[dict[str, float]]] = {}
+        # Footprint chart: per-symbol deque of timestamped, price-tagged trades.
+        # Populated alongside _trade_buffers in _handle_ws_message.
+        # Each entry: {"ts": float (epoch s), "px": float, "vol": float, "side": float}
+        self._footprint_buffers: dict[str, Deque[dict[str, float]]] = {}
         self._decision_state: dict[str, dict[str, Any]] = {}
         self._recent_trades: dict[str, Deque[float]] = {}
         self._position_activity: dict[str, float] = {}
@@ -611,12 +622,23 @@ class MarketService:
                 self._latest_order_book[symbol] = self._normalize_order_book(entry)
             elif channel == "trades" and isinstance(entry, dict):
                 buffer = self._get_trade_buffer(symbol)
+                vol_val = float(entry.get("sz") or entry.get("vol") or 0.0)
+                side_val = 1.0 if entry.get("side") == "buy" else -1.0
                 buffer.append(
                     {
-                        "side": 1.0 if entry.get("side") == "buy" else -1.0,
-                        "volume": float(entry.get("sz") or entry.get("vol") or 0.0),
+                        "side": side_val,
+                        "volume": vol_val,
                     }
                 )
+                # Feed the footprint buffer with full price + timestamp data.
+                px_val = self._extract_float(entry.get("px"))
+                if px_val and vol_val:
+                    ts_ms = self._extract_float(entry.get("ts"))
+                    ts_epoch = (ts_ms / 1000.0) if ts_ms else time.time()
+                    fp_buf = self._get_footprint_buffer(symbol)
+                    fp_buf.append(
+                        {"ts": ts_epoch, "px": px_val, "vol": vol_val, "side": side_val}
+                    )
             elif channel == "funding-rate" and isinstance(entry, dict):
                 self._latest_funding[symbol] = entry
             elif channel == "open-interest" and isinstance(entry, dict):
@@ -2547,6 +2569,7 @@ class MarketService:
             self._latest_ohlcv.pop(symbol, None)
             self._latest_ohlcv_htf.pop(symbol, None)
             self._trade_buffers.pop(symbol, None)
+            self._footprint_buffers.pop(symbol, None)
             self._recent_trades.pop(symbol, None)
             self._decision_state.pop(symbol, None)
             self._position_activity.pop(symbol, None)
@@ -3108,17 +3131,21 @@ class MarketService:
         return cached or []
 
     def _compute_custom_metrics(self, symbol: str, order_book: dict[str, Any]) -> dict[str, Any]:
-        """Derive proprietary metrics (CVD/OFI/etc.) from cached trades and current depth."""
+        """Derive proprietary metrics (CVD/OFI/footprint/etc.) from cached trades and current depth."""
         cvd = self._calculate_cvd(symbol)
         ofi = self._calculate_ofi(symbol, order_book)
         cvd_series = self._build_cvd_series(symbol)
         ofi_ratio_series = self._latest_depth_metrics.get(symbol, [])[-200:]
-        return {
+        metrics: dict[str, Any] = {
             "cumulative_volume_delta": cvd,
             "order_flow_imbalance": ofi,
             "cvd_series": cvd_series,
             "ofi_ratio_series": ofi_ratio_series,
         }
+        footprint = self._compute_footprint(symbol)
+        if footprint:
+            metrics["footprint"] = footprint
+        return metrics
 
     @staticmethod
     def _compute_indicators(ohlcv: list[list[Any]]) -> dict[str, Any]:
@@ -3241,6 +3268,15 @@ class MarketService:
             self._trade_buffers[symbol] = buffer
         return buffer
 
+    def _get_footprint_buffer(self, symbol: str) -> Deque[dict[str, float]]:
+        """Return (and lazily create) the footprint trade buffer for a symbol."""
+        buf = self._footprint_buffers.get(symbol)
+        if buf is None:
+            # 20 000 entries holds several hours of liquid-pair traffic at burst rates.
+            buf = deque(maxlen=20000)
+            self._footprint_buffers[symbol] = buf
+        return buf
+
     def _calculate_cvd(self, symbol: str) -> float:
         """Compute the cumulative volume delta for the instrument's buffered trades."""
         value = 0.0
@@ -3260,6 +3296,131 @@ class MarketService:
             running += direction * volume
             values.append(running)
         return values[-limit:]
+
+    def _compute_footprint(self, symbol: str) -> dict[str, Any]:
+        """Build a sliding-window footprint chart profile for the given symbol.
+
+        Aggregates trades from ``_footprint_buffers`` over the last
+        ``FOOTPRINT_WINDOW_SECONDS`` seconds into price buckets of width
+        ``tick_size × FOOTPRINT_BUCKET_TICKS``.  For each bucket records the
+        ask-side volume (buy aggressor) and bid-side volume (sell aggressor).
+
+        Returns a compact dict suitable for inclusion in the LLM context:
+          poc_price           – price bucket with highest total volume
+          value_area_high/low – price range containing 70% of total volume
+          net_delta           – total (ask_vol − bid_vol) across all buckets
+          total_ask_vol       – total buy-aggressor volume in the window
+          total_bid_vol       – total sell-aggressor volume in the window
+          delta_imbalance_zones – top-5 buckets by |ask_vol − bid_vol|,
+                                  tagged "buy_pressure" or "sell_pressure"
+          window_seconds      – actual window used
+          bucket_size         – price width of each bucket
+
+        Returns ``{}`` when there is insufficient data to build a profile.
+        """
+        buf = self._footprint_buffers.get(symbol.upper()) or self._footprint_buffers.get(symbol)
+        if not buf:
+            return {}
+
+        spec = self._instrument_specs.get(symbol.upper())
+        tick_size = float((spec or {}).get("tick_size") or 0.0)
+        if tick_size <= 0:
+            return {}
+
+        bucket_size = tick_size * self.FOOTPRINT_BUCKET_TICKS
+        cutoff = time.time() - self.FOOTPRINT_WINDOW_SECONDS
+
+        # profile: bucket_index (int) -> {"ask": float, "bid": float}
+        # Using integer keys avoids floating-point drift when keying a dict.
+        profile: dict[int, dict[str, float]] = {}
+        total_ask = 0.0
+        total_bid = 0.0
+
+        for t in buf:
+            if t["ts"] < cutoff:
+                continue
+            idx = int(round(t["px"] / bucket_size))
+            vol = t["vol"]
+            entry = profile.get(idx)
+            if entry is None:
+                entry = {"ask": 0.0, "bid": 0.0}
+                profile[idx] = entry
+            if t["side"] > 0:  # buy aggressor hits the ask
+                entry["ask"] += vol
+                total_ask += vol
+            else:              # sell aggressor hits the bid
+                entry["bid"] += vol
+                total_bid += vol
+
+        if not profile:
+            return {}
+
+        total_vol = total_ask + total_bid
+
+        # ── Point of Control ──────────────────────────────────────────────────
+        poc_idx = max(profile, key=lambda i: profile[i]["ask"] + profile[i]["bid"])
+        poc_price = round(poc_idx * bucket_size, 8)
+
+        # ── Value Area (70% of total volume) expanding outward from POC ───────
+        sorted_idxs = sorted(profile.keys())
+        poc_pos = sorted_idxs.index(poc_idx)
+        va_vol = profile[poc_idx]["ask"] + profile[poc_idx]["bid"]
+        lo_pos = poc_pos
+        hi_pos = poc_pos
+        target = total_vol * 0.70
+
+        while va_vol < target:
+            can_expand_lo = lo_pos > 0
+            can_expand_hi = hi_pos < len(sorted_idxs) - 1
+            if not can_expand_lo and not can_expand_hi:
+                break
+            add_lo = (
+                (profile[sorted_idxs[lo_pos - 1]]["ask"] + profile[sorted_idxs[lo_pos - 1]]["bid"])
+                if can_expand_lo else 0.0
+            )
+            add_hi = (
+                (profile[sorted_idxs[hi_pos + 1]]["ask"] + profile[sorted_idxs[hi_pos + 1]]["bid"])
+                if can_expand_hi else 0.0
+            )
+            if add_hi >= add_lo and can_expand_hi:
+                hi_pos += 1
+                va_vol += add_hi
+            elif can_expand_lo:
+                lo_pos -= 1
+                va_vol += add_lo
+            else:
+                hi_pos += 1
+                va_vol += add_hi
+
+        vah = round(sorted_idxs[hi_pos] * bucket_size, 8)
+        val = round(sorted_idxs[lo_pos] * bucket_size, 8)
+
+        # ── Delta imbalance zones (top 5 by |ask_vol − bid_vol|) ─────────────
+        imbalances = []
+        for idx, data in profile.items():
+            delta = data["ask"] - data["bid"]
+            if delta == 0.0:
+                continue
+            imbalances.append({
+                "price": round(idx * bucket_size, 8),
+                "ask_vol": round(data["ask"], 4),
+                "bid_vol": round(data["bid"], 4),
+                "delta": round(delta, 4),
+                "type": "buy_pressure" if delta > 0 else "sell_pressure",
+            })
+        imbalances.sort(key=lambda z: -abs(z["delta"]))
+
+        return {
+            "window_seconds": self.FOOTPRINT_WINDOW_SECONDS,
+            "bucket_size": bucket_size,
+            "poc_price": poc_price,
+            "value_area_high": vah,
+            "value_area_low": val,
+            "total_ask_vol": round(total_ask, 4),
+            "total_bid_vol": round(total_bid, 4),
+            "net_delta": round(total_ask - total_bid, 4),
+            "delta_imbalance_zones": imbalances[:5],
+        }
 
     async def _fetch_long_short_ratio(self, symbol: str) -> dict[str, Any]:
         """Fetch or return cached OKX long/short ratio telemetry for the symbol."""
