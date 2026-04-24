@@ -115,22 +115,45 @@ _SEC_STEP4_SIGNALS = (
     "Values > 1.5 suggest aggressive directional buying; values near 0.0 suggest inactive or balanced flow. "
     "Use within the Order Flow tier — a sustained run of high OFI values (> 1.5 for 3+ periods) in the trade direction adds modest confirmation (+0.03 confidence); "
     "sustained near-zero values weaken order-flow confirmation. Do NOT treat OFI ratio as a standalone signal. "
-    "FOOTPRINT CHART: if context.market.footprint is present, it summarises 15 minutes of live tape as a volume-at-price map. "
-    "poc_price is the price level with the highest traded volume in the window — treat it as the strongest near-term support/resistance. "
-    "value_area_high and value_area_low bound the 70 % of volume closest to the POC — price inside this band is at fair value; "
-    "a break outside the band on volume is a directional signal. "
-    "net_delta > 0 means buyers dominated the window (bullish microstructure); net_delta < 0 means sellers dominated. "
-    "delta_imbalance_zones lists up to 5 price levels with the largest single-sided imbalance: "
-    "type 'buy_pressure' = aggressive buyers at that level (support cluster); 'sell_pressure' = aggressive sellers (resistance cluster). "
-    "USAGE RULES: "
-    "(a) poc_price above last_price → overhead resistance — raise risk_score +0.05 for a BUY, or add confirmation for a SELL. "
-    "(b) poc_price below last_price → support — raise risk_score +0.05 for a SELL, or add confirmation for a BUY. "
-    "(c) A 'buy_pressure' imbalance zone within 0.3 % of proposed entry adds +0.03 confidence for a BUY; "
-    "a 'sell_pressure' zone within 0.3 % of entry adds +0.03 confidence for a SELL. "
-    "(d) net_delta confirming direction adds +0.02 confidence; net_delta opposing direction subtracts 0.02. "
-    "Do NOT cite footprint as a standalone signal — always combine with OBV/CVD and trend context. "
-    "If footprint is absent, skip these rules silently. "
 )
+
+
+def _build_footprint_prompt_section(
+    footprint_cfg: "dict[str, Any] | None" = None,
+) -> str:
+    """Return the footprint-chart paragraph with configurable thresholds.
+
+    All four numeric thresholds are read from *footprint_cfg* (the
+    ``guardrails.footprint`` sub-dict).  Falls back to the original
+    hard-coded defaults when the dict is absent.
+    """
+    cfg = footprint_cfg or {}
+    poc_risk = cfg.get("poc_risk_delta", 0.05)
+    nd_conf = cfg.get("net_delta_confidence_delta", 0.02)
+    iz_conf = cfg.get("imbalance_zone_confidence_delta", 0.03)
+    iz_prox = cfg.get("imbalance_zone_proximity_pct", 0.3)
+    return (
+        "FOOTPRINT CHART: if context.market.footprint is present, it summarises 15 minutes of live tape as a volume-at-price map. "
+        "poc_price is the price level with the highest traded volume in the window — treat it as the strongest near-term support/resistance. "
+        "value_area_high and value_area_low bound the 70 % of volume closest to the POC — price inside this band is at fair value; "
+        "a break outside the band on volume is a directional signal. "
+        "net_delta > 0 means buyers dominated the window (bullish microstructure); net_delta < 0 means sellers dominated. "
+        "delta_imbalance_zones lists up to 5 price levels with the largest single-sided imbalance: "
+        "type 'buy_pressure' = aggressive buyers at that level (support cluster); 'sell_pressure' = aggressive sellers (resistance cluster). "
+        "USAGE RULES: "
+        f"(a) poc_price above last_price → overhead resistance — raise risk_score +{poc_risk} for a BUY, or add confirmation for a SELL. "
+        f"(b) poc_price below last_price → support — raise risk_score +{poc_risk} for a SELL, or add confirmation for a BUY. "
+        f"(c) A 'buy_pressure' imbalance zone within {iz_prox} % of proposed entry adds +{iz_conf} confidence for a BUY; "
+        f"a 'sell_pressure' zone within {iz_prox} % of entry adds +{iz_conf} confidence for a SELL. "
+        f"(d) net_delta confirming direction adds +{nd_conf} confidence; net_delta opposing direction subtracts {nd_conf}. "
+        "Do NOT cite footprint as a standalone signal — always combine with OBV/CVD and trend context. "
+        "If footprint is absent, skip these rules silently. "
+    )
+
+
+# Static default (uses hard-coded threshold values) — used by PROMPT_SECTIONS
+# and as the fallback when guardrails.footprint is absent.
+_SEC_STEP4_FOOTPRINT: str = _build_footprint_prompt_section()
 
 _SEC_STEP5_SIZING = (
     "STEP 5 — CONFIDENCE AND SIZING: "
@@ -261,6 +284,7 @@ PROMPT_SECTIONS: list[dict[str, Any]] = [
     {"key": "step2_htf",        "label": "Step 2: HTF trend filter",    "default": _SEC_STEP2_HTF},
     {"key": "step3_divergence", "label": "Step 3: Divergence check",    "default": _SEC_STEP3_DIVERGENCE},
     {"key": "step4_signals",        "label": "Step 4: Signal hierarchy",    "default": _SEC_STEP4_SIGNALS},
+    {"key": "step4_footprint",      "label": "Step 4: Footprint chart",     "default": _SEC_STEP4_FOOTPRINT},
     {"key": "strategy_archetypes",  "label": "Strategy archetypes",         "default": _SEC_STEP_STRATEGY},
     {"key": "regime_rules",         "label": "Market regime rules",         "default": _SEC_STEP_REGIME},
     {"key": "step5_sizing",         "label": "Step 5: Confidence & sizing", "default": _SEC_STEP5_SIZING},
@@ -304,6 +328,7 @@ def assemble_decision_prompt(
     require_rr: bool = False,
     pre_leverage: bool = False,
     sections_config: "dict[str, dict] | None" = None,
+    footprint_cfg: "dict[str, Any] | None" = None,
 ) -> str:
     """Assemble the decision prompt from canonical section constants.
 
@@ -323,8 +348,11 @@ def assemble_decision_prompt(
             if override:
                 parts.append(override + " ")
             else:
+                # step4_footprint uses a dynamic paragraph when footprint_cfg is present
+                if key == "step4_footprint" and footprint_cfg is not None:
+                    parts.append(_build_footprint_prompt_section(footprint_cfg))
                 # sizing_rule uses alt_default when pre_leverage is active
-                if key == "sizing_rule" and pre_leverage and "alt_default" in sec:
+                elif key == "sizing_rule" and pre_leverage and "alt_default" in sec:
                     parts.append(sec["alt_default"])
                 else:
                     parts.append(sec["default"])
@@ -337,6 +365,7 @@ def assemble_decision_prompt(
         _SEC_STEP2_HTF,
         _SEC_STEP3_DIVERGENCE,
         _SEC_STEP4_SIGNALS,
+        _build_footprint_prompt_section(footprint_cfg),
         _SEC_STEP_STRATEGY,
         _SEC_STEP_REGIME,
         _SEC_STEP5_SIZING,
@@ -766,15 +795,24 @@ class PromptBuilder:
         _pre_leverage = llm_notional_mode == "pre_leverage"
         sections_config = runtime_meta.get("prompt_sections")
         custom_prompt = runtime_meta.get("llm_decision_prompt")
+        _footprint_cfg = guardrails.get("footprint") if isinstance(guardrails.get("footprint"), dict) else None
         if sections_config:
             decision_prompt = sanitize_prompt_text(
-                assemble_decision_prompt(sections_config=sections_config, pre_leverage=_pre_leverage)
+                assemble_decision_prompt(
+                    sections_config=sections_config,
+                    pre_leverage=_pre_leverage,
+                    footprint_cfg=_footprint_cfg,
+                )
             )
         elif custom_prompt and custom_prompt.strip():
             decision_prompt = sanitize_prompt_text(custom_prompt)
         else:
             decision_prompt = sanitize_prompt_text(
-                assemble_decision_prompt(require_rr=_require_rr, pre_leverage=_pre_leverage)
+                assemble_decision_prompt(
+                    require_rr=_require_rr,
+                    pre_leverage=_pre_leverage,
+                    footprint_cfg=_footprint_cfg,
+                )
             )
         response_schema = self._response_schema(model_id, schema_overrides)
         prompt_block = {
@@ -2613,6 +2651,12 @@ class PromptBuilder:
             "require_reward_risk_ratio": False,
             "adjust_invalid_tp": False,
             "adjust_invalid_tp_pct": 0.10,
+            "footprint": {
+                "poc_risk_delta": 0.05,
+                "net_delta_confidence_delta": 0.02,
+                "imbalance_zone_confidence_delta": 0.03,
+                "imbalance_zone_proximity_pct": 0.3,
+            },
         }
 
     @staticmethod

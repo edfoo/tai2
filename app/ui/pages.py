@@ -4207,6 +4207,12 @@ def register_pages(app: FastAPI) -> None:
         guardrails.setdefault("isolated_wallet_bootstrap_pct", None)
         guardrails.setdefault("require_reward_risk_ratio", True)
         guardrails.setdefault("require_protection", True)
+        guardrails.setdefault("footprint", {
+            "poc_risk_delta": 0.05,
+            "net_delta_confidence_delta": 0.02,
+            "imbalance_zone_confidence_delta": 0.03,
+            "imbalance_zone_proximity_pct": 0.3,
+        })
         if "wait_for_tp_sl" not in config:
             config["wait_for_tp_sl"] = bool(guardrails.get("wait_for_tp_sl", False))
         guardrails.setdefault("wait_for_tp_sl", bool(config.get("wait_for_tp_sl")))
@@ -4544,6 +4550,41 @@ def register_pages(app: FastAPI) -> None:
                     step=0.5,
                 ).classes("w-full md:w-56").props(
                     "hint='When isolated wallets are missing, cap exposure to this percent of fallback margin (enter 25 for 25%)' persistent-hint"
+                )
+            ui.separator().classes("w-full my-3")
+            ui.label("Footprint Chart Modifiers").classes("text-sm font-semibold text-slate-600")
+            ui.label(
+                "Confidence and risk-score adjustments applied when the live 15-min tape footprint is available."
+            ).classes("text-xs text-slate-500")
+            _fp_cfg = guardrails.setdefault("footprint", {})
+            with ui.row().classes("w-full flex-wrap gap-4"):
+                fp_poc_risk_input = ui.number(
+                    label="POC Risk Δ",
+                    value=_fp_cfg.get("poc_risk_delta", 0.05),
+                    min=0.0, max=0.5, step=0.01, format="%.2f",
+                ).classes("w-full md:w-48").props(
+                    "hint='Added to risk_score when the Point of Control opposes trade direction' persistent-hint"
+                )
+                fp_net_delta_conf_input = ui.number(
+                    label="Net-Delta Conf Δ",
+                    value=_fp_cfg.get("net_delta_confidence_delta", 0.02),
+                    min=0.0, max=0.2, step=0.01, format="%.2f",
+                ).classes("w-full md:w-48").props(
+                    "hint='Confidence added/subtracted when net_delta agrees/disagrees with direction' persistent-hint"
+                )
+                fp_imbalance_conf_input = ui.number(
+                    label="Imbalance Zone Conf Δ",
+                    value=_fp_cfg.get("imbalance_zone_confidence_delta", 0.03),
+                    min=0.0, max=0.2, step=0.01, format="%.2f",
+                ).classes("w-full md:w-48").props(
+                    "hint='Confidence boost when a matching imbalance zone is within proximity of entry' persistent-hint"
+                )
+                fp_proximity_input = ui.number(
+                    label="Zone Proximity %",
+                    value=_fp_cfg.get("imbalance_zone_proximity_pct", 0.3),
+                    min=0.0, max=5.0, step=0.05, format="%.2f",
+                ).classes("w-full md:w-48").props(
+                    "hint='How close (as % of price) an imbalance zone must be to entry to count' persistent-hint suffix='%'"
                 )
             ui.separator().classes("w-full my-4")
             ui.label("Autonomous Symbol Screener").classes("text-sm font-semibold text-slate-600")
@@ -5255,6 +5296,12 @@ def register_pages(app: FastAPI) -> None:
                 bootstrap_pct_snapshot = min(max(bootstrap_pct_snapshot, 0.0), 1.0)
             snapshot["isolated_wallet_bootstrap_pct"] = bootstrap_pct_snapshot
             snapshot["llm_notional_mode"] = llm_notional_mode_select.value
+            snapshot["footprint"] = {
+                "poc_risk_delta": _safe_float(fp_poc_risk_input.value) if _safe_float(fp_poc_risk_input.value) is not None else 0.05,
+                "net_delta_confidence_delta": _safe_float(fp_net_delta_conf_input.value) if _safe_float(fp_net_delta_conf_input.value) is not None else 0.02,
+                "imbalance_zone_confidence_delta": _safe_float(fp_imbalance_conf_input.value) if _safe_float(fp_imbalance_conf_input.value) is not None else 0.03,
+                "imbalance_zone_proximity_pct": _safe_float(fp_proximity_input.value) if _safe_float(fp_proximity_input.value) is not None else 0.3,
+            }
             return snapshot
 
         async def hydrate_execution_settings() -> None:
@@ -5545,6 +5592,12 @@ def register_pages(app: FastAPI) -> None:
                 "isolated_margin_symbol_seeds_usd": _clean_isolated_seed_overrides(),
                 "isolated_wallet_bootstrap_pct": bootstrap_pct_fraction,
                 "llm_notional_mode": llm_notional_mode_select.value,
+                "footprint": {
+                    "poc_risk_delta": _safe_float(fp_poc_risk_input.value) if _safe_float(fp_poc_risk_input.value) is not None else 0.05,
+                    "net_delta_confidence_delta": _safe_float(fp_net_delta_conf_input.value) if _safe_float(fp_net_delta_conf_input.value) is not None else 0.02,
+                    "imbalance_zone_confidence_delta": _safe_float(fp_imbalance_conf_input.value) if _safe_float(fp_imbalance_conf_input.value) is not None else 0.03,
+                    "imbalance_zone_proximity_pct": _safe_float(fp_proximity_input.value) if _safe_float(fp_proximity_input.value) is not None else 0.3,
+                },
             }
             config["snapshot_max_age_seconds"] = config["guardrails"].get(
                 "snapshot_max_age_seconds",
