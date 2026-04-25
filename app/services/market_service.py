@@ -1980,6 +1980,8 @@ class MarketService:
         candle_position_long_max = float(alternator.get("candle_position_long_max") or 0.75)
         candle_position_short_min = float(alternator.get("candle_position_short_min") or 0.25)
         candle_position_lookback = int(alternator.get("candle_position_lookback") or 20)
+        footprint_delta_filter = bool(alternator.get("footprint_delta_filter", False))
+        footprint_delta_min_ratio = float(alternator.get("footprint_delta_min_ratio") or 0.0)
         _rev_profit_pct_static = self._extract_float(alternator.get("reverse_at_profit_pct"))
         rev_profit_pct = _rev_profit_pct_static  # may be overridden per-symbol in the loop below
         rev_profit_usd = self._extract_float(alternator.get("reverse_at_profit_usd"))
@@ -2202,6 +2204,32 @@ class MarketService:
                                     f"short_min={candle_position_short_min}) — waiting"
                                 )
                                 continue
+                        if footprint_delta_filter and will_flip and new_entry_side is not None:
+                            _fp = self._compute_footprint(symbol)
+                            _fp_ask = float(_fp.get("total_ask_vol") or 0.0)
+                            _fp_bid = float(_fp.get("total_bid_vol") or 0.0)
+                            _fp_total = _fp_ask + _fp_bid
+                            if _fp_total > 0:
+                                _fp_delta = float(_fp.get("net_delta") or 0.0)
+                                _fp_ratio = abs(_fp_delta) / _fp_total
+                                _fp_dir_conflict = (
+                                    (new_entry_side == "buy" and _fp_delta < 0)
+                                    or (new_entry_side == "sell" and _fp_delta > 0)
+                                )
+                                if _fp_dir_conflict and _fp_ratio >= footprint_delta_min_ratio:
+                                    _fp_entry_dir = "LONG" if new_entry_side == "buy" else "SHORT"
+                                    self._emit_debug(
+                                        f"Alternator: {symbol} {_fp_entry_dir} reversal blocked by "
+                                        f"footprint delta filter — net_delta={_fp_delta:+.4f} "
+                                        f"(ask={_fp_ask:.4f}, bid={_fp_bid:.4f}, "
+                                        f"ratio={_fp_ratio:.3f}) — waiting"
+                                    )
+                                    continue
+                            else:
+                                self._emit_debug(
+                                    f"Alternator: {symbol} footprint delta filter — "
+                                    "no trade data in window, skipping"
+                                )
                         self._alternator_flipping.add(symbol)
                         asyncio.create_task(
                             self._alternator_flip(
@@ -2274,6 +2302,33 @@ class MarketService:
                                     f"short_min={candle_position_short_min}) — waiting"
                                 )
                                 continue
+                        if footprint_delta_filter and will_flip and new_entry_side is not None:
+                            _fp = self._compute_footprint(symbol)
+                            _fp_ask = float(_fp.get("total_ask_vol") or 0.0)
+                            _fp_bid = float(_fp.get("total_bid_vol") or 0.0)
+                            _fp_total = _fp_ask + _fp_bid
+                            if _fp_total > 0:
+                                _fp_delta = float(_fp.get("net_delta") or 0.0)
+                                _fp_ratio = abs(_fp_delta) / _fp_total
+                                _fp_dir_conflict = (
+                                    (new_entry_side == "buy" and _fp_delta < 0)
+                                    or (new_entry_side == "sell" and _fp_delta > 0)
+                                )
+                                if _fp_dir_conflict and _fp_ratio >= footprint_delta_min_ratio:
+                                    _fp_entry_dir = "LONG" if new_entry_side == "buy" else "SHORT"
+                                    self._emit_debug(
+                                        f"Alternator: {symbol} {_fp_entry_dir} trailing reversal "
+                                        f"blocked by footprint delta filter — "
+                                        f"net_delta={_fp_delta:+.4f} "
+                                        f"(ask={_fp_ask:.4f}, bid={_fp_bid:.4f}, "
+                                        f"ratio={_fp_ratio:.3f}) — waiting"
+                                    )
+                                    continue
+                            else:
+                                self._emit_debug(
+                                    f"Alternator: {symbol} footprint delta filter — "
+                                    "no trade data in window, skipping"
+                                )
                         self._alternator_above_threshold.discard(symbol)
                         self._alternator_peak_pnl_pct.pop(symbol, None)
                         self._alternator_peak_pnl_usd.pop(symbol, None)
@@ -2339,6 +2394,32 @@ class MarketService:
                             f"short_min={candle_position_short_min}) — waiting"
                         )
                         continue
+                if footprint_delta_filter and will_flip and new_entry_side is not None:
+                    _fp = self._compute_footprint(symbol)
+                    _fp_ask = float(_fp.get("total_ask_vol") or 0.0)
+                    _fp_bid = float(_fp.get("total_bid_vol") or 0.0)
+                    _fp_total = _fp_ask + _fp_bid
+                    if _fp_total > 0:
+                        _fp_delta = float(_fp.get("net_delta") or 0.0)
+                        _fp_ratio = abs(_fp_delta) / _fp_total
+                        _fp_dir_conflict = (
+                            (new_entry_side == "buy" and _fp_delta < 0)
+                            or (new_entry_side == "sell" and _fp_delta > 0)
+                        )
+                        if _fp_dir_conflict and _fp_ratio >= footprint_delta_min_ratio:
+                            _fp_entry_dir = "LONG" if new_entry_side == "buy" else "SHORT"
+                            self._emit_debug(
+                                f"Alternator: {symbol} {_fp_entry_dir} loss-restart blocked by "
+                                f"footprint delta filter — net_delta={_fp_delta:+.4f} "
+                                f"(ask={_fp_ask:.4f}, bid={_fp_bid:.4f}, "
+                                f"ratio={_fp_ratio:.3f}) — waiting"
+                            )
+                            continue
+                    else:
+                        self._emit_debug(
+                            f"Alternator: {symbol} footprint delta filter — "
+                            "no trade data in window, skipping"
+                        )
                 self._alternator_flipping.add(symbol)
                 asyncio.create_task(
                     self._alternator_flip(
