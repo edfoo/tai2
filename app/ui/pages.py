@@ -4818,8 +4818,10 @@ def register_pages(app: FastAPI) -> None:
             ui.label("Autonomous Symbol Screener").classes("text-sm font-semibold text-slate-600")
             ui.label(
                 "When enabled, replaces the manual trading pairs list by scoring all USDT-SWAP "
-                "instruments on OKX by 24h volume (60%) and absolute price momentum (40%), "
-                "then activates the top-N symbols. The manual list is ignored while this is on."
+                "instruments on OKX using three components: volume spike ratio vs. rolling average (50%), "
+                "24h high-low oscillation range (30%), and absolute price momentum (20%). "
+                "This favours coins with unusual activity and wide ranges rather than simply the largest by volume. "
+                "The manual list is ignored while this is on."
             ).classes("text-xs text-slate-500 mb-1")
             screener_cfg = (config.get("screener") or {})
             with ui.row().classes("w-full flex-wrap gap-4 items-start"):
@@ -4869,6 +4871,14 @@ def register_pages(app: FastAPI) -> None:
                     step=0.1,
                 ).classes("w-full md:w-48").props(
                     "hint='Exclude symbols whose absolute 24h price change is below this %' persistent-hint"
+                )
+                screener_min_hl_range_input = ui.number(
+                    label="Min HL range (%)",
+                    value=float(screener_cfg.get("min_hl_range_pct") or 0.0),
+                    min=0,
+                    step=0.1,
+                ).classes("w-full md:w-48").props(
+                    "hint='Exclude symbols whose 24h high-low range is below this % of open price (0 = no filter)' persistent-hint"
                 )
             ui.separator().classes("w-full my-4")
             ui.label("Model, cadence, and prompt controls").classes("text-sm text-slate-500")
@@ -5863,6 +5873,7 @@ def register_pages(app: FastAPI) -> None:
                 "interval_minutes": max(5, _coerce(screener_interval_input.value, 60, int)),
                 "min_volume_usd": max(0.0, _coerce(screener_min_volume_input.value, 0.0, float) * 1_000_000),
                 "min_momentum_pct": max(0.0, _coerce(screener_min_momentum_input.value, 0.0, float)),
+                "min_hl_range_pct": max(0.0, _coerce(screener_min_hl_range_input.value, 0.0, float)),
             }
             app.state.runtime_config = config
             llm_service = getattr(app.state, "llm_service", None)

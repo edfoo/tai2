@@ -265,6 +265,8 @@ class MarketService:
         self._screener_config: dict[str, Any] = {}
         self._screener_last_run: float = 0.0
         self._screener_selected_symbols: list[str] = []
+        # Rolling 24h volume history for spike detection (symbol → deque of vol samples).
+        self._screener_vol_history: dict[str, deque] = {}
         self._reconcile_task: Optional[asyncio.Task] = None
         self._positions_refresh_task: Optional[asyncio.Task] = None
         self._positions_refresh_interval: int = 10  # seconds between fast position/equity refreshes
@@ -2999,9 +3001,26 @@ class MarketService:
     async def run_screener_if_due(self, *, force: bool = False) -> bool:
         """Run the symbol screener if enabled and its interval has elapsed.
 
-        Scores all USDT-SWAP tickers by 24h volume (60%) and absolute momentum (40%),
-        applies configured filters, then replaces the active symbol list with the
-        top-N winners.  Returns True when the active symbol list was modified.
+        Scores all USDT-SWAP tickers using three components:
+
+          vol_spike_ratio (50%) — current 24h volume divided by the rolling
+              average of recent 24h volumes for that symbol.  Highlights *unusual*
+              activity rather than raw market-cap size.  Falls back to normalised
+              raw volume until sufficient history has accumulated (≥2 samples).
+
+          hl_range_pct (30%) — (high24h − low24h) / open24h.  Measures the
+              oscillation amplitude over the last 24 h, which directly reflects
+              Alternator profit potential.  All fields are already present in
+              the OKX ticker response — no extra API calls required.
+
+          momentum_pct (20%) — abs((last − open24h) / open24h).  Kept as a
+              minor component for recency; downweighted because a large 24 h body
+              indicates a trending move (bad for alternation) rather than
+              volatility.  Retaining it avoids selecting flat, dead coins.
+
+        Applies configured filters (universe pattern, min volume, min momentum,
+        min HL range), then replaces the active symbol list with the top-N
+        winners.  Returns True when the active symbol list was modified.
 
         When *force* is True the interval gate is skipped — the screener runs on
         every call regardless of when it last fired.  Use this from the prompt
@@ -3025,6 +3044,8 @@ class MarketService:
         max_symbols = max(1, int(cfg.get("max_symbols") or 5))
         min_volume_usd = float(cfg.get("min_volume_usd") or 0.0)
         min_momentum_pct = float(cfg.get("min_momentum_pct") or 0.0)
+        min_hl_range_pct = float(cfg.get("min_hl_range_pct") or 0.0)
+        vol_history_window = max(2, int(cfg.get("vol_history_window") or 8))
 
         candidates: list[dict[str, Any]] = []
         for ticker in tickers:
@@ -3037,6 +3058,8 @@ class MarketService:
                 continue
             last = self._extract_float(ticker.get("last"))
             open24h = self._extract_float(ticker.get("open24h"))
+            high24h = self._extract_float(ticker.get("high24h"))
+            low24h = self._extract_float(ticker.get("low24h"))
             vol_ccy_24h = self._extract_float(ticker.get("volCcy24h"))
             if not last or last <= 0:
                 continue
@@ -3049,31 +3072,78 @@ class MarketService:
             )
             if momentum_pct < min_momentum_pct:
                 continue
+            hl_range_pct = (
+                (high24h - low24h) / open24h * 100
+                if open24h and open24h > 0 and high24h is not None and low24h is not None
+                else 0.0
+            )
+            if hl_range_pct < min_hl_range_pct:
+                continue
+            # Update rolling volume history, resizing deque if window changed.
+            hist = self._screener_vol_history.get(inst_id)
+            if hist is None or hist.maxlen != vol_history_window:
+                hist = deque(hist or [], maxlen=vol_history_window)
+                self._screener_vol_history[inst_id] = hist
+            hist.append(vol_ccy_24h)
+            # vol_spike_ratio: current vol / rolling average (needs ≥2 samples).
+            if len(hist) >= 2:
+                avg_vol = sum(hist) / len(hist)
+                vol_spike_ratio: float | None = vol_ccy_24h / avg_vol if avg_vol > 0 else 1.0
+            else:
+                vol_spike_ratio = None  # fall back to raw vol until history builds
             candidates.append(
                 {
                     "symbol": inst_id,
                     "vol_ccy_24h": vol_ccy_24h,
+                    "vol_spike_ratio": vol_spike_ratio,
+                    "hl_range_pct": hl_range_pct,
                     "momentum_pct": momentum_pct,
                 }
             )
 
         self._emit_debug(
             f"Screener: {len(candidates)} candidates from {len(tickers)} tickers "
-            f"(vol>={min_volume_usd:.0f} USD, mom>={min_momentum_pct:.2f}%)"
+            f"(vol>={min_volume_usd:.0f} USD, mom>={min_momentum_pct:.2f}%, "
+            f"hl_range>={min_hl_range_pct:.2f}%)"
         )
         if not candidates:
             self._screener_last_run = now
             return False
 
-        max_vol = max(c["vol_ccy_24h"] for c in candidates) or 1.0
-        max_mom = max(c["momentum_pct"] for c in candidates) or 1.0
+        spike_candidates = [c for c in candidates if c["vol_spike_ratio"] is not None]
+        max_spike   = max((c["vol_spike_ratio"] for c in spike_candidates), default=None) or 1.0
+        max_raw_vol = max(c["vol_ccy_24h"]  for c in candidates) or 1.0
+        max_hl      = max(c["hl_range_pct"] for c in candidates) or 1.0
+        max_mom     = max(c["momentum_pct"] for c in candidates) or 1.0
+
         for c in candidates:
-            c["score"] = (c["vol_ccy_24h"] / max_vol) * 0.6 + (c["momentum_pct"] / max_mom) * 0.4
+            if c["vol_spike_ratio"] is not None and spike_candidates:
+                norm_vol = c["vol_spike_ratio"] / max_spike
+            else:
+                norm_vol = c["vol_ccy_24h"] / max_raw_vol  # fallback until history builds
+            norm_hl  = c["hl_range_pct"] / max_hl
+            norm_mom = c["momentum_pct"] / max_mom
+            c["score"] = norm_vol * 0.5 + norm_hl * 0.3 + norm_mom * 0.2
+
         candidates.sort(key=lambda x: x["score"], reverse=True)
         selected = [c["symbol"] for c in candidates[:max_symbols]]
+
+        top_parts = []
+        for c in candidates[:max_symbols]:
+            spike_str = f"{c['vol_spike_ratio']:.2f}x" if c["vol_spike_ratio"] is not None else "n/a"
+            top_parts.append(
+                f"{c['symbol']}(score={c['score']:.3f} spike={spike_str} "
+                f"hl={c['hl_range_pct']:.2f}% mom={c['momentum_pct']:.2f}%)"
+            )
+        self._emit_debug(f"Screener selected: {selected} | {', '.join(top_parts)}")
+
         self._screener_last_run = now
         self._screener_selected_symbols = selected
-        self._emit_debug(f"Screener selected: {selected}")
+
+        # Prune vol history for symbols no longer in universe.
+        active_universe = {str(t.get("instId", "")).upper() for t in tickers if isinstance(t, dict)}
+        for gone in set(self._screener_vol_history) - active_universe:
+            del self._screener_vol_history[gone]
 
         if set(selected) == set(self.symbols):
             return False
