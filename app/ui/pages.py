@@ -2940,6 +2940,10 @@ def register_pages(app: FastAPI) -> None:
             "dynamic_threshold_lookback": 20,
             "trailing_reverse": False,
             "trailing_pullback_pct": 10.0,
+            "trailing_close": False,
+            "trailing_close_activate_pct": None,
+            "trailing_close_activate_usd": None,
+            "trailing_close_pullback_pct": 10.0,
             "candle_position_filter": False,
             "candle_position_long_max": 0.75,
             "candle_position_short_min": 0.25,
@@ -3317,6 +3321,50 @@ def register_pages(app: FastAPI) -> None:
                             ).classes("w-36").props(
                                 "hint='Reverse when PnL drops this % below its peak (e.g. 10 = reverse at 90% of peak)' persistent-hint suffix='%'"
                             ).bind_enabled_from(altr_trailing_switch, "value")
+                        ui.label("Trailing Close").classes("text-xs font-semibold text-slate-600 mt-1")
+                        ui.label(
+                            "Let profit run and close flat (no reversal) when price pulls back from the peak. "
+                            "Activate at a minimum profit level, then close when PnL drops below the pullback % of the peak."
+                        ).classes("text-xs text-slate-400 mb-1")
+                        with ui.row().classes("gap-4 items-center mb-2"):
+                            altr_trailing_close_switch = ui.switch(
+                                "Trailing Close",
+                                value=bool(alternator.get("trailing_close", False)),
+                            ).props(
+                                "hint='Close flat (no reversal) when profit pulls back from its peak — takes priority over Trailing Reverse on the profit side' persistent-hint dense color=primary"
+                            )
+                        with ui.row().classes("gap-4 items-start mb-2"):
+                            _altr_tca_pct_raw = alternator.get("trailing_close_activate_pct")
+                            altr_trailing_close_activate_pct = ui.number(
+                                label="Activate at % profit",
+                                value=float(_altr_tca_pct_raw) if _altr_tca_pct_raw is not None else None,
+                                min=0.01,
+                                step=0.1,
+                                precision=2,
+                            ).classes("w-48").props(
+                                "hint='Start trailing close once PnL >= +X% (blank = use USD threshold)' persistent-hint clearable stack-label"
+                            ).bind_enabled_from(altr_trailing_close_switch, "value")
+                            _altr_tca_usd_raw = alternator.get("trailing_close_activate_usd")
+                            altr_trailing_close_activate_usd = ui.number(
+                                label="Activate at USDT profit",
+                                value=float(_altr_tca_usd_raw) if _altr_tca_usd_raw is not None else None,
+                                min=0.01,
+                                step=1.0,
+                                precision=2,
+                            ).classes("w-48").props(
+                                "hint='Start trailing close once unrealised profit >= this USDT (blank = use % threshold)' persistent-hint clearable stack-label"
+                            ).bind_enabled_from(altr_trailing_close_switch, "value")
+                            _altr_tcpb_raw = alternator.get("trailing_close_pullback_pct", 10.0)
+                            altr_trailing_close_pullback_pct = ui.number(
+                                label="Pullback %",
+                                value=float(_altr_tcpb_raw) if _altr_tcpb_raw is not None else 10.0,
+                                min=0.1,
+                                max=100.0,
+                                step=0.5,
+                                precision=1,
+                            ).classes("w-36").props(
+                                "hint='Close when PnL drops this % below its peak (e.g. 10 = close at 90% of peak)' persistent-hint suffix='%'"
+                            ).bind_enabled_from(altr_trailing_close_switch, "value")
                         ui.label("Entry Position Filter").classes("text-xs font-semibold text-slate-600 mt-1")
                         ui.label(
                             "Blocks reversals when price is near the top of the recent range (for LONGs) "
@@ -3567,6 +3615,10 @@ def register_pages(app: FastAPI) -> None:
                     "dynamic_threshold_lookback": int(altr_dynamic_lookback.value or 20),
                     "trailing_reverse": bool(altr_trailing_switch.value),
                     "trailing_pullback_pct": float(altr_trailing_pullback_pct.value or 10.0),
+                    "trailing_close": bool(altr_trailing_close_switch.value),
+                    "trailing_close_activate_pct": float(altr_trailing_close_activate_pct.value) if altr_trailing_close_activate_pct.value not in (None, "") else None,
+                    "trailing_close_activate_usd": float(altr_trailing_close_activate_usd.value) if altr_trailing_close_activate_usd.value not in (None, "") else None,
+                    "trailing_close_pullback_pct": float(altr_trailing_close_pullback_pct.value or 10.0),
                     "candle_position_filter": bool(altr_cpf_switch.value),
                     "candle_position_long_max": float(altr_cpf_long_max.value or 0.75),
                     "candle_position_short_min": float(altr_cpf_short_min.value or 0.25),

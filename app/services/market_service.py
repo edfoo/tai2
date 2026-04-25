@@ -301,6 +301,10 @@ class MarketService:
         self._alternator_above_threshold: set[str] = set()
         self._alternator_peak_pnl_pct: dict[str, float] = {}
         self._alternator_peak_pnl_usd: dict[str, float] = {}
+        # Trailing close state: track peak PnL for flat-close on pullback.
+        self._alternator_close_above_threshold: set[str] = set()
+        self._alternator_close_peak_pnl_pct: dict[str, float] = {}
+        self._alternator_close_peak_pnl_usd: dict[str, float] = {}
         self._alternator_ws_check_pending: bool = False
         # Continuous LLM supervision (optional, controlled by alternator config).
         # The LLMService instance is injected after construction via set_llm_service().
@@ -1993,6 +1997,16 @@ class MarketService:
         footprint_delta_filter = bool(alternator.get("footprint_delta_filter", False))
         footprint_delta_min_ratio = float(alternator.get("footprint_delta_min_ratio") or 0.0)
         continuous_llm = bool(alternator.get("continuous_llm", False))
+        trailing_close = bool(alternator.get("trailing_close", False))
+        trailing_close_activate_pct = abs(
+            self._extract_float(alternator.get("trailing_close_activate_pct")) or 0.0
+        )
+        trailing_close_activate_usd = abs(
+            self._extract_float(alternator.get("trailing_close_activate_usd")) or 0.0
+        )
+        trailing_close_pullback_pct = abs(
+            self._extract_float(alternator.get("trailing_close_pullback_pct")) or 0.0
+        )
         _rev_profit_pct_static = self._extract_float(alternator.get("reverse_at_profit_pct"))
         rev_profit_pct = _rev_profit_pct_static  # may be overridden per-symbol in the loop below
         rev_profit_usd = self._extract_float(alternator.get("reverse_at_profit_usd"))
@@ -2013,6 +2027,7 @@ class MarketService:
             and restart_loss_pct is None
             and restart_loss_usd is None
             and not dynamic_threshold
+            and not trailing_close
         ):
             self._emit_debug("Alternator: no trigger thresholds configured — skipping")
             return
@@ -2041,6 +2056,15 @@ class MarketService:
             self._alternator_above_threshold.discard(gone)
             self._alternator_peak_pnl_pct.pop(gone, None)
             self._alternator_peak_pnl_usd.pop(gone, None)
+        stale_trailing_close = (
+            set(self._alternator_close_peak_pnl_pct)
+            | set(self._alternator_close_peak_pnl_usd)
+            | self._alternator_close_above_threshold
+        )
+        for gone in stale_trailing_close - active_symbols:
+            self._alternator_close_above_threshold.discard(gone)
+            self._alternator_close_peak_pnl_pct.pop(gone, None)
+            self._alternator_close_peak_pnl_usd.pop(gone, None)
 
         self._emit_debug(
             f"Alternator: checking {len(positions)} position(s), "
@@ -2249,6 +2273,94 @@ class MarketService:
                     name=f"alternator-flip-{symbol}",
                 )
                 continue
+
+            # ── Priority 2.5: Trailing close (flat exit in profit) ────────────
+            # When enabled, positive PnL is allowed to run and closes on a
+            # pullback from the peak — no reversal, just a flat close.
+            # Takes priority over Priority 3 (reverse at profit) so the two
+            # mechanisms don't compete on the profit side.
+            if trailing_close and trailing_close_pullback_pct > 0:
+                activate_close_pct = trailing_close_activate_pct if trailing_close_activate_pct > 0 else None
+                activate_close_usd = trailing_close_activate_usd if trailing_close_activate_usd > 0 else None
+                hit_close_activate_pct = (
+                    activate_close_pct is not None
+                    and upl_pct is not None
+                    and upl_pct >= activate_close_pct
+                )
+                hit_close_activate_usd = (
+                    activate_close_usd is not None
+                    and upl_usd is not None
+                    and upl_usd >= activate_close_usd
+                )
+                in_trailing_close = symbol in self._alternator_close_above_threshold
+                if hit_close_activate_pct or hit_close_activate_usd or in_trailing_close:
+                    # Mark that we are in trailing-close territory.
+                    if hit_close_activate_pct or hit_close_activate_usd:
+                        self._alternator_close_above_threshold.add(symbol)
+                    # Update peak PnL (only upward).
+                    if upl_pct is not None:
+                        self._alternator_close_peak_pnl_pct[symbol] = max(
+                            self._alternator_close_peak_pnl_pct.get(symbol, upl_pct), upl_pct
+                        )
+                    if upl_usd is not None:
+                        self._alternator_close_peak_pnl_usd[symbol] = max(
+                            self._alternator_close_peak_pnl_usd.get(symbol, upl_usd), upl_usd
+                        )
+                    # Check pullback from peak.
+                    tc_pullback_factor = 1.0 - trailing_close_pullback_pct / 100.0
+                    tc_peak_pct = self._alternator_close_peak_pnl_pct.get(symbol)
+                    tc_peak_usd = self._alternator_close_peak_pnl_usd.get(symbol)
+                    tc_pullback_by_pct = (
+                        tc_peak_pct is not None
+                        and upl_pct is not None
+                        and activate_close_pct is not None
+                        and upl_pct < tc_peak_pct * tc_pullback_factor
+                    )
+                    tc_pullback_by_usd = (
+                        tc_peak_usd is not None
+                        and upl_usd is not None
+                        and activate_close_usd is not None
+                        and upl_usd < tc_peak_usd * tc_pullback_factor
+                    )
+                    if tc_pullback_by_pct or tc_pullback_by_usd:
+                        tc_trigger = (
+                            f"upl_pct={upl_pct:.2f}% < peak {tc_peak_pct:.2f}% × {tc_pullback_factor:.3f}"
+                            if tc_pullback_by_pct
+                            else f"upl_usd={upl_usd:.4f} < peak {tc_peak_usd:.4f} × {tc_pullback_factor:.3f}"
+                        )
+                        self._emit_debug(
+                            f"Alternator: {symbol} TRAILING CLOSE triggered ({tc_trigger}) — "
+                            "closing flat (no reversal)"
+                        )
+                        # Clean up trailing-close state.
+                        self._alternator_close_above_threshold.discard(symbol)
+                        self._alternator_close_peak_pnl_pct.pop(symbol, None)
+                        self._alternator_close_peak_pnl_usd.pop(symbol, None)
+                        self._alternator_flipping.add(symbol)
+                        asyncio.create_task(
+                            self._alternator_flip(
+                                symbol=symbol,
+                                close_side=close_side,
+                                close_pos_side=close_pos_side,
+                                new_entry_side=None,
+                                new_entry_pos_side=None,
+                                contracts=contracts,
+                                trade_mode=trade_mode,
+                                flip_count=flip_count,
+                                trigger="trailing_close",
+                            ),
+                            name=f"alternator-flip-{symbol}",
+                        )
+                    else:
+                        self._emit_debug(
+                            f"Alternator: {symbol} trailing close — "
+                            f"peak_pct={tc_peak_pct!r} current_pct={upl_pct!r} "
+                            f"peak_usd={tc_peak_usd!r} current_usd={upl_usd!r} "
+                            f"pullback_needed={trailing_close_pullback_pct}% — waiting"
+                        )
+                    # Whether we fired or are still waiting, skip Priority 3 (reverse at profit)
+                    # to prevent the profit side from triggering a reversal instead of a close.
+                    continue
 
             # ── Priority 3: Reverse at profit ─────────────────────────────────
             hit_rev_profit_pct = (
