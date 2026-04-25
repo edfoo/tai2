@@ -1892,6 +1892,44 @@ class MarketService:
                 continue
         return sum(amplitudes) / len(amplitudes) if amplitudes else None
 
+    def _compute_range_position(self, symbol: str, lookback: int = 20) -> float | None:
+        """Return where the current last_price sits within the N-bar LTF closed-candle range.
+
+        Uses the last ``lookback`` *closed* LTF bars (excludes the live bar at
+        index -1).  Returns a value in [0.0, 1.0] where 0.0 = range low and
+        1.0 = range high.  Returns ``None`` when data is insufficient or the
+        range is flat.
+
+        Used by the Alternator candle-position filter to avoid entering a LONG
+        near the top of the recent range or a SHORT near the bottom.
+        """
+        candles: list[list[Any]] = self._latest_ohlcv.get(symbol) or []
+        # Exclude the live (incomplete) bar — skip index -1
+        closed = candles[:-1]
+        if len(closed) < 2:
+            return None
+        window = closed[-lookback:]
+        highs: list[float] = []
+        lows: list[float] = []
+        for c in window:
+            try:
+                highs.append(float(c[2]))
+                lows.append(float(c[3]))
+            except (IndexError, TypeError, ValueError):
+                continue
+        if not highs or not lows:
+            return None
+        range_high = max(highs)
+        range_low = min(lows)
+        if range_high <= range_low:
+            return None
+        # Use the most recent close as the reference price
+        try:
+            last_price = float(candles[-1][4])  # close of live bar ≈ current price
+        except (IndexError, TypeError, ValueError):
+            return None
+        return (last_price - range_low) / (range_high - range_low)
+
     async def _check_alternator(self) -> None:
         """Oscillate between long/short positions on profit and loss thresholds.
 
@@ -1938,6 +1976,10 @@ class MarketService:
         dynamic_threshold = bool(alternator.get("dynamic_threshold", False))
         dynamic_factor = abs(self._extract_float(alternator.get("dynamic_threshold_factor")) or 1.0)
         dynamic_lookback = int(alternator.get("dynamic_threshold_lookback") or 20)
+        candle_position_filter = bool(alternator.get("candle_position_filter", False))
+        candle_position_long_max = float(alternator.get("candle_position_long_max") or 0.75)
+        candle_position_short_min = float(alternator.get("candle_position_short_min") or 0.25)
+        candle_position_lookback = int(alternator.get("candle_position_lookback") or 20)
         _rev_profit_pct_static = self._extract_float(alternator.get("reverse_at_profit_pct"))
         rev_profit_pct = _rev_profit_pct_static  # may be overridden per-symbol in the loop below
         rev_profit_usd = self._extract_float(alternator.get("reverse_at_profit_usd"))
@@ -2145,6 +2187,21 @@ class MarketService:
                             f"flip_count={flip_count} max_reversals={max_reversals} "
                             f"action={'FLIP' if will_flip else 'CLOSE'}"
                         )
+                        if candle_position_filter and will_flip and new_entry_side is not None:
+                            _rp = self._compute_range_position(symbol, candle_position_lookback)
+                            _cpf_blocked = _rp is not None and (
+                                (new_entry_side == "buy" and _rp > candle_position_long_max)
+                                or (new_entry_side == "sell" and _rp < candle_position_short_min)
+                            )
+                            if _cpf_blocked:
+                                _cpf_dir = "LONG" if new_entry_side == "buy" else "SHORT"
+                                self._emit_debug(
+                                    f"Alternator: {symbol} {_cpf_dir} reversal blocked by "
+                                    f"candle-position filter — range_pos={_rp:.3f} "
+                                    f"(long_max={candle_position_long_max}, "
+                                    f"short_min={candle_position_short_min}) — waiting"
+                                )
+                                continue
                         self._alternator_flipping.add(symbol)
                         asyncio.create_task(
                             self._alternator_flip(
@@ -2202,6 +2259,21 @@ class MarketService:
                             f"flip_count={flip_count} max_reversals={max_reversals} "
                             f"action={'FLIP' if will_flip else 'CLOSE'}"
                         )
+                        if candle_position_filter and will_flip and new_entry_side is not None:
+                            _rp = self._compute_range_position(symbol, candle_position_lookback)
+                            _cpf_blocked = _rp is not None and (
+                                (new_entry_side == "buy" and _rp > candle_position_long_max)
+                                or (new_entry_side == "sell" and _rp < candle_position_short_min)
+                            )
+                            if _cpf_blocked:
+                                _cpf_dir = "LONG" if new_entry_side == "buy" else "SHORT"
+                                self._emit_debug(
+                                    f"Alternator: {symbol} {_cpf_dir} trailing reversal blocked by "
+                                    f"candle-position filter — range_pos={_rp:.3f} "
+                                    f"(long_max={candle_position_long_max}, "
+                                    f"short_min={candle_position_short_min}) — waiting"
+                                )
+                                continue
                         self._alternator_above_threshold.discard(symbol)
                         self._alternator_peak_pnl_pct.pop(symbol, None)
                         self._alternator_peak_pnl_usd.pop(symbol, None)
@@ -2252,6 +2324,21 @@ class MarketService:
                     f"flip_count={flip_count} max_reversals={max_reversals} "
                     f"action={'FLIP' if will_flip else 'CLOSE'}"
                 )
+                if candle_position_filter and will_flip and new_entry_side is not None:
+                    _rp = self._compute_range_position(symbol, candle_position_lookback)
+                    _cpf_blocked = _rp is not None and (
+                        (new_entry_side == "buy" and _rp > candle_position_long_max)
+                        or (new_entry_side == "sell" and _rp < candle_position_short_min)
+                    )
+                    if _cpf_blocked:
+                        _cpf_dir = "LONG" if new_entry_side == "buy" else "SHORT"
+                        self._emit_debug(
+                            f"Alternator: {symbol} {_cpf_dir} loss-restart blocked by "
+                            f"candle-position filter — range_pos={_rp:.3f} "
+                            f"(long_max={candle_position_long_max}, "
+                            f"short_min={candle_position_short_min}) — waiting"
+                        )
+                        continue
                 self._alternator_flipping.add(symbol)
                 asyncio.create_task(
                     self._alternator_flip(

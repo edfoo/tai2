@@ -2940,6 +2940,10 @@ def register_pages(app: FastAPI) -> None:
             "dynamic_threshold_lookback": 20,
             "trailing_reverse": False,
             "trailing_pullback_pct": 10.0,
+            "candle_position_filter": False,
+            "candle_position_long_max": 0.75,
+            "candle_position_short_min": 0.25,
+            "candle_position_lookback": 20,
             "max_reversals": None,
             "restart_at_loss_pct": None,
             "restart_at_loss_usd": None,
@@ -3310,6 +3314,52 @@ def register_pages(app: FastAPI) -> None:
                             ).classes("w-36").props(
                                 "hint='Reverse when PnL drops this % below its peak (e.g. 10 = reverse at 90% of peak)' persistent-hint suffix='%'"
                             ).bind_enabled_from(altr_trailing_switch, "value")
+                        ui.label("Entry Position Filter").classes("text-xs font-semibold text-slate-600 mt-1")
+                        ui.label(
+                            "Blocks reversals when price is near the top of the recent range (for LONGs) "
+                            "or near the bottom (for SHORTs), using closed LTF candles."
+                        ).classes("text-xs text-slate-400 mb-1")
+                        with ui.row().classes("gap-4 items-center mb-2"):
+                            altr_cpf_switch = ui.switch(
+                                "Candle Position Filter",
+                                value=bool(alternator.get("candle_position_filter", False)),
+                            ).props(
+                                "hint='Block reversal entries when price is at an unfavourable candle position' persistent-hint dense color=primary"
+                            )
+                            _altr_cpflb_raw = alternator.get("candle_position_lookback", 20)
+                            altr_cpf_lookback = ui.number(
+                                label="Lookback bars",
+                                value=int(_altr_cpflb_raw) if _altr_cpflb_raw is not None else 20,
+                                min=2,
+                                max=200,
+                                step=1,
+                                precision=0,
+                            ).classes("w-32").props(
+                                "hint='Number of closed LTF bars to compute range' persistent-hint"
+                            ).bind_enabled_from(altr_cpf_switch, "value")
+                        with ui.row().classes("gap-4 items-center mb-2"):
+                            _altr_cplm_raw = alternator.get("candle_position_long_max", 0.75)
+                            altr_cpf_long_max = ui.number(
+                                label="Long max (0–1)",
+                                value=float(_altr_cplm_raw) if _altr_cplm_raw is not None else 0.75,
+                                min=0.0,
+                                max=1.0,
+                                step=0.05,
+                                precision=2,
+                            ).classes("w-40").props(
+                                "hint='Block LONG reversal if range position > this (e.g. 0.75 = top 25%)' persistent-hint suffix=''"
+                            ).bind_enabled_from(altr_cpf_switch, "value")
+                            _altr_cpsm_raw = alternator.get("candle_position_short_min", 0.25)
+                            altr_cpf_short_min = ui.number(
+                                label="Short min (0–1)",
+                                value=float(_altr_cpsm_raw) if _altr_cpsm_raw is not None else 0.25,
+                                min=0.0,
+                                max=1.0,
+                                step=0.05,
+                                precision=2,
+                            ).classes("w-40").props(
+                                "hint='Block SHORT reversal if range position < this (e.g. 0.25 = bottom 25%)' persistent-hint suffix=''"
+                            ).bind_enabled_from(altr_cpf_switch, "value")
                         ui.label("Restart at Loss").classes("text-xs font-semibold text-slate-600 mt-1")
                         with ui.row().classes("gap-4 items-start mb-2"):
                             _altr_rlp_raw = alternator.get("restart_at_loss_pct")
@@ -3482,6 +3532,10 @@ def register_pages(app: FastAPI) -> None:
                     "dynamic_threshold_lookback": int(altr_dynamic_lookback.value or 20),
                     "trailing_reverse": bool(altr_trailing_switch.value),
                     "trailing_pullback_pct": float(altr_trailing_pullback_pct.value or 10.0),
+                    "candle_position_filter": bool(altr_cpf_switch.value),
+                    "candle_position_long_max": float(altr_cpf_long_max.value or 0.75),
+                    "candle_position_short_min": float(altr_cpf_short_min.value or 0.25),
+                    "candle_position_lookback": int(altr_cpf_lookback.value or 20),
                     "max_reversals": int(altr_max_reversals.value) if altr_max_reversals.value not in (None, "") else None,
                     "restart_at_loss_pct": float(altr_restart_loss_pct.value) if altr_restart_loss_pct.value not in (None, "") else None,
                     "restart_at_loss_usd": float(altr_restart_loss_usd.value) if altr_restart_loss_usd.value not in (None, "") else None,
