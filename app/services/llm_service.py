@@ -158,8 +158,10 @@ class LLMService:
         return any(token in normalized for token in _REASONING_MODEL_TOKENS)
 
     def _prepare_payload_for_model(self, payload: dict[str, Any], model_id: str | None) -> dict[str, Any]:
-        if not self._model_requires_compact_context(model_id):
-            return payload
+        # Always compact — raw series add bulk with no benefit over pre-computed labels.
+        # (Reasoning models previously had a gate here; all models now receive the
+        # same stripped context since pre_computed_modifiers/market_signals cover
+        # everything the LLM needs for direction, confidence, and risk scoring.)
         trimmed = copy.deepcopy(payload)
         context = trimmed.get("context")
         if not isinstance(context, dict):
@@ -180,32 +182,9 @@ class LLMService:
             if context.pop(key, None) is not None:
                 removed_sections.append(key)
 
-        # Compact "history": trim LTF candles to last 20 (heavy), keep HTF candles and
-        # volume_series intact (required by prompt Steps 2-5).
-        history = context.get("history")
-        if isinstance(history, dict):
-            ltf_candles = history.get("candles")
-            if isinstance(ltf_candles, list) and len(ltf_candles) > 20:
-                history["candles"] = ltf_candles[-20:]
-            vol_series = history.get("volume_series")
-            if isinstance(vol_series, list) and len(vol_series) > 60:
-                history["volume_series"] = vol_series[-60:]
-            # vwap_series and volume_rsi_series are supplementary; drop to save tokens.
-            history.pop("vwap_series", None)
-            history.pop("volume_rsi_series", None)
-
-        # Compact "indicators": trim heavy per-bar series sub-arrays to the last 20 bars.
-        # All series are kept (trimmed) — the LLM needs ADX/MACD trajectory for trend strength,
-        # and OBV/CMF series for divergence detection (prompt Step 3).
-        _SERIES_TRIM_KEYS = ("macd", "adx", "obv", "cmf")
-        indicators = context.get("indicators")
-        if isinstance(indicators, dict):
-            for _ind_key in _SERIES_TRIM_KEYS:
-                _ind_block = indicators.get(_ind_key)
-                if isinstance(_ind_block, dict):
-                    _series = _ind_block.get("series")
-                    if isinstance(_series, list) and len(_series) > 20:
-                        _ind_block["series"] = _series[-20:]
+        # Series stripping is handled at source in PromptBuilder._build_history_section
+        # and _build_indicator_section — only scalars and the OBV 5-value spot-check
+        # tail are included in the context before it reaches here.
 
         positions = self._compact_positions(context.get("positions"))
         if positions is not None:

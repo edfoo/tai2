@@ -105,8 +105,6 @@ _SEC_STEP4_SIGNALS = (
     "(3) Momentum (MACD, RSI): use for entry timing, not primary direction. "
     "(4) Order Flow (imbalance, depth): confirms short-term liquidity but is secondary to trend and volume. "
     "If the majority of higher-ranked signals conflict, choose HOLD. "
-    "VOLUME RSI: if context.history.volume_rsi_series is present, values above 70 indicate unusual volume expansion (confirms momentum); "
-    "values below 30 indicate volume contraction (weakens conviction). Use as a modifier within the Volume/Participation tier, not as a standalone signal. "
     "RSI/STOCH RSI EXIT CLAUSE: if context.market_signals.rsi_zone is 'overbought' and you propose a BUY, "
     "do NOT veto the trade if ADX > 30 and DI+ dominates — instead add ≥0.25 to risk_score (the execution layer will reduce size proportionally) "
     "and shift to a limit order placed at the nearest LTF support level from context.market_signals.swing_low_ltf. "
@@ -1429,18 +1427,9 @@ class PromptBuilder:
 
     def _build_history_section(self, indicators: dict[str, Any]) -> dict[str, Any]:
         # Raw LTF/HTF candle arrays are NOT sent to the LLM — all indicators are
-        # pre-computed.  We only send short tails of the auxiliary series that
-        # the prompt explicitly asks the LLM to spot-check (~5 values each).
-        _series_tail = 5  # last 5 values for OBV/CVD spot-check (prompt says "last 3–5")
-        raw_vwap_series = indicators.get("vwap_series")
-        raw_vol_rsi_series = indicators.get("volume_rsi_series")
-
-        section: dict[str, Any] = {
-            # vwap_series: keep a short tail so the model can judge recent VWAP slope
-            "vwap_series": self._trim_series(raw_vwap_series, _series_tail),
-            # volume_rsi_series: modifier signal — last 5 values are sufficient
-            "volume_rsi_series": self._trim_series(raw_vol_rsi_series, _series_tail),
-        }
+        # pre-computed.  vwap_series and volume_rsi_series are dropped; their
+        # directional conclusions are captured in market_signals labels.
+        section: dict[str, Any] = {}
         htf_bar = indicators.get("ohlcv_htf_bar")
         if htf_bar:
             section["timeframe_htf"] = htf_bar
@@ -1459,7 +1448,6 @@ class PromptBuilder:
         cmf = indicators.get("cmf") or {}
         _series_tail = 5  # retain only a short tail; full series are pre-summarised in market_signals
         raw_obv_series = obv.get("series")
-        raw_cmf_series = cmf.get("series")
         return {
             "rsi": rsi,
             "stoch_rsi": stoch,
@@ -1479,13 +1467,12 @@ class PromptBuilder:
             },
             "obv": {
                 "value": obv.get("value"),
-                # Keep a short tail so the model can confirm obv_trend if needed
+                # Keep a short tail so the model can confirm obv_trend direction if needed
                 "series": self._trim_series(raw_obv_series, _series_tail),
             },
             "cmf": {
                 "value": cmf.get("value"),
-                # Keep a short tail for divergence spot-check
-                "series": self._trim_series(raw_cmf_series, _series_tail),
+                # Series dropped — CMF direction is captured in market_signals labels
             },
             "vwap": indicators.get("vwap"),
             "atr": indicators.get("atr"),
