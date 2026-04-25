@@ -441,6 +441,7 @@ def _create_lifespan(enable_background_services: bool):
                 market_service.set_flip_llm_decision(
                     app.state.runtime_config.get("guardrails", {}).get("flip_llm_decision", False)
                 )
+                market_service.set_llm_service(app.state.llm_service)
                 app.state.market_service = market_service
                 await market_service.start()
                 # Apply any DB-persisted poll interval (may differ from the .env default)

@@ -2946,6 +2946,7 @@ def register_pages(app: FastAPI) -> None:
             "candle_position_lookback": 20,
             "footprint_delta_filter": False,
             "footprint_delta_min_ratio": 0.0,
+            "continuous_llm": False,
             "max_reversals": None,
             "restart_at_loss_pct": None,
             "restart_at_loss_usd": None,
@@ -3386,6 +3387,14 @@ def register_pages(app: FastAPI) -> None:
                                 "hint='Only block if |net_delta|/total_vol ≥ this (0 = any imbalance)' "
                                 "persistent-hint suffix=''"
                             ).bind_enabled_from(altr_fpd_switch, "value")
+                        ui.label("Continuous LLM Supervision").classes("text-xs font-semibold text-slate-600 mt-1")
+                        with ui.row().classes("gap-4 items-center mb-2"):
+                            altr_continuous_llm_switch = ui.switch(
+                                "Continuously call LLM",
+                                value=bool(alternator.get("continuous_llm", False)),
+                            ).props(
+                                "hint='LLM supervises live Alternator positions: can pause, close, or cap reversals based on market signals' persistent-hint dense color=primary"
+                            )
                         ui.label("Restart at Loss").classes("text-xs font-semibold text-slate-600 mt-1")
                         with ui.row().classes("gap-4 items-start mb-2"):
                             _altr_rlp_raw = alternator.get("restart_at_loss_pct")
@@ -3564,6 +3573,7 @@ def register_pages(app: FastAPI) -> None:
                     "candle_position_lookback": int(altr_cpf_lookback.value or 20),
                     "footprint_delta_filter": bool(altr_fpd_switch.value),
                     "footprint_delta_min_ratio": float(altr_fpd_min_ratio.value or 0.0),
+                    "continuous_llm": bool(altr_continuous_llm_switch.value),
                     "max_reversals": int(altr_max_reversals.value) if altr_max_reversals.value not in (None, "") else None,
                     "restart_at_loss_pct": float(altr_restart_loss_pct.value) if altr_restart_loss_pct.value not in (None, "") else None,
                     "restart_at_loss_usd": float(altr_restart_loss_usd.value) if altr_restart_loss_usd.value not in (None, "") else None,

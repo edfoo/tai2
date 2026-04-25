@@ -302,6 +302,11 @@ class MarketService:
         self._alternator_peak_pnl_pct: dict[str, float] = {}
         self._alternator_peak_pnl_usd: dict[str, float] = {}
         self._alternator_ws_check_pending: bool = False
+        # Continuous LLM supervision (optional, controlled by alternator config).
+        # The LLMService instance is injected after construction via set_llm_service().
+        self._llm_service: Any = None
+        self._llm_mandate: dict[str, dict[str, Any]] = {}  # per-symbol active mandate
+        self._llm_supervision_running: set[str] = set()  # prevents concurrent calls
 
     async def start(self) -> None:
         """Launch the market snapshot poller and websocket consumers if not already running."""
@@ -1152,6 +1157,10 @@ class MarketService:
         self._strategy_config = config or {}
         self._emit_debug(f"Strategy config updated: {self._strategy_config}")
 
+    def set_llm_service(self, llm_service: Any) -> None:
+        """Inject the shared LLMService instance for continuous supervision calls."""
+        self._llm_service = llm_service
+
     async def _check_skimming(self) -> None:
         """Close any open position whose unrealised PnL ratio meets the skimming threshold.
 
@@ -1983,6 +1992,7 @@ class MarketService:
         candle_position_lookback = int(alternator.get("candle_position_lookback") or 20)
         footprint_delta_filter = bool(alternator.get("footprint_delta_filter", False))
         footprint_delta_min_ratio = float(alternator.get("footprint_delta_min_ratio") or 0.0)
+        continuous_llm = bool(alternator.get("continuous_llm", False))
         _rev_profit_pct_static = self._extract_float(alternator.get("reverse_at_profit_pct"))
         rev_profit_pct = _rev_profit_pct_static  # may be overridden per-symbol in the loop below
         rev_profit_usd = self._extract_float(alternator.get("reverse_at_profit_usd"))
@@ -2099,6 +2109,84 @@ class MarketService:
                 close_pos_side = None
                 new_entry_side = "buy" if pos_val > 0 else "sell"
                 new_entry_pos_side = None
+
+            # ── Continuous LLM supervision (optional) ─────────────────────────
+            if continuous_llm and self._llm_service is not None:
+                mandate = self._llm_mandate.get(symbol) or {}
+                mandate_valid = mandate.get("_expires_at", 0.0) > time.monotonic()
+                # Fire fresh supervision in background if mandate is absent or expired.
+                if not mandate_valid and symbol not in self._llm_supervision_running:
+                    asyncio.create_task(
+                        self._run_llm_supervision(
+                            symbol,
+                            {
+                                "pos_side": pos_side,
+                                "upl_pct": upl_pct,
+                                "upl_usd": upl_usd,
+                                "flip_count": flip_count,
+                            },
+                        ),
+                        name=f"altr-supervision-{symbol}",
+                    )
+                # Apply mandate if still valid (mandate from a previous call).
+                if mandate_valid:
+                    m_action = str(mandate.get("action") or "continue").lower()
+                    if m_action == "close":
+                        self._emit_debug(
+                            f"Alternator: {symbol} LLM mandate=close — closing without reversal"
+                        )
+                        self._alternator_flipping.add(symbol)
+                        asyncio.create_task(
+                            self._alternator_flip(
+                                symbol=symbol,
+                                close_side=close_side,
+                                close_pos_side=close_pos_side,
+                                new_entry_side=None,
+                                new_entry_pos_side=None,
+                                contracts=contracts,
+                                trade_mode=trade_mode,
+                                flip_count=flip_count,
+                                trigger="llm_close",
+                            ),
+                            name=f"alternator-flip-{symbol}",
+                        )
+                        continue
+                    if m_action == "pause":
+                        self._emit_debug(
+                            f"Alternator: {symbol} LLM mandate=pause — skipping reversals this cycle"
+                        )
+                        continue
+                    # Override max_reversals if the LLM mandated a tighter cap.
+                    m_max_rev = mandate.get("max_reversals_override")
+                    if m_max_rev is not None:
+                        max_reversals = int(m_max_rev)
+                    # Soft stop: close if loss exceeds the LLM-set threshold.
+                    m_soft_stop = mandate.get("soft_stop_pct")
+                    if (
+                        m_soft_stop is not None
+                        and upl_pct is not None
+                        and upl_pct <= -abs(float(m_soft_stop))
+                    ):
+                        self._emit_debug(
+                            f"Alternator: {symbol} LLM soft_stop={m_soft_stop:.2f}% triggered "
+                            f"(upl_pct={upl_pct:.2f}%) — closing"
+                        )
+                        self._alternator_flipping.add(symbol)
+                        asyncio.create_task(
+                            self._alternator_flip(
+                                symbol=symbol,
+                                close_side=close_side,
+                                close_pos_side=close_pos_side,
+                                new_entry_side=None,
+                                new_entry_pos_side=None,
+                                contracts=contracts,
+                                trade_mode=trade_mode,
+                                flip_count=flip_count,
+                                trigger="llm_soft_stop",
+                            ),
+                            name=f"alternator-flip-{symbol}",
+                        )
+                        continue
 
             # ── Priority 1: Ride condition ────────────────────────────────────
             hit_ride_pct = (
@@ -2560,6 +2648,141 @@ class MarketService:
             logger.warning("Alternator flip error for %s: %s", symbol_key, exc)
         finally:
             self._alternator_flipping.discard(symbol_key)
+
+    async def _run_llm_supervision(
+        self,
+        symbol: str,
+        pos_info: dict[str, Any],
+    ) -> None:
+        """Fire a stripped LLM call to produce a supervision mandate for a live Alternator position.
+
+        Runs as a fire-and-forget background task.  The mandate is stored in
+        ``self._llm_mandate[symbol]`` and read on the *next* ``_check_alternator()`` cycle
+        so execution is never blocked waiting for the LLM.
+
+        The payload is deliberately compact — labeled signal summary only, no raw candle
+        series — so the round trip is fast (~1–3 s with Grok 4 Fast).
+        """
+        symbol_key = symbol.upper()
+        self._llm_supervision_running.add(symbol_key)
+        try:
+            # Gather labeled signals from the stored snapshot via PromptBuilder.
+            market_signals: dict[str, Any] = {}
+            pre_computed: dict[str, Any] = {}
+            try:
+                snapshot = await self.state_service.get_market_snapshot()
+                if snapshot:
+                    from app.services.prompt_builder import PromptBuilder
+                    pb = PromptBuilder(snapshot=snapshot)
+                    full_ctx = (pb.build(symbol=symbol_key) or {}).get("context") or {}
+                    market_signals = full_ctx.get("market_signals") or {}
+                    pre_computed = full_ctx.get("pre_computed_modifiers") or {}
+            except Exception as exc:  # pragma: no cover - best-effort
+                logger.debug("Supervision signal extraction failed for %s: %s", symbol_key, exc)
+
+            ticker = self._latest_ticker.get(symbol_key) or {}
+            last_price = self._price_from_ticker(ticker) or 0.0
+
+            supervision_context = {
+                "symbol": symbol_key,
+                "last_price": last_price,
+                "position": {
+                    "side": pos_info.get("pos_side"),
+                    "upl_pct": pos_info.get("upl_pct"),
+                    "upl_usd": pos_info.get("upl_usd"),
+                    "flip_count": pos_info.get("flip_count"),
+                },
+                "market": {
+                    "regime": market_signals.get("market_regime"),
+                    "htf_alignment": pre_computed.get("htf_alignment_class"),
+                    "obv_trend": market_signals.get("obv_trend"),
+                    "cvd_trend": market_signals.get("cvd_trend"),
+                    "funding_rate_pct": market_signals.get("funding_rate_pct"),
+                    "rsi_zone": market_signals.get("rsi_zone"),
+                    "adx": market_signals.get("adx"),
+                    "atr_pct": market_signals.get("atr_pct"),
+                },
+            }
+
+            supervision_system = (
+                "You are a real-time position supervisor for a crypto perpetual futures Alternator bot. "
+                "The Alternator oscillates between long and short positions on configurable profit/loss "
+                "thresholds. Your job is to decide whether it should keep running, pause, or close now. "
+                "Respond with ONLY a valid JSON object — no markdown, no explanation outside the JSON."
+            )
+
+            supervision_prompt = (
+                "Given the position state and labeled market signals below, choose ONE action:\n"
+                "  continue  — Alternator runs normally (default when signals are mixed or unclear)\n"
+                "  pause     — skip reversals this cycle; re-evaluate next cycle\n"
+                "  close     — close position immediately without reversing (only for high-conviction reversal signals)\n\n"
+                "You may also set:\n"
+                "  max_reversals_override: int or null — cap total future flips; null = use bot config\n"
+                "  soft_stop_pct: float or null — close if PnL drops below -X% from here; null = disabled\n"
+                "  expires_in_seconds: 60–600 — how long this mandate stays valid\n\n"
+                f"Context:\n{json.dumps(supervision_context, default=str)}"
+            )
+
+            supervision_schema = {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["continue", "pause", "close"],
+                    },
+                    "max_reversals_override": {
+                        "anyOf": [{"type": "integer", "minimum": 0}, {"type": "null"}]
+                    },
+                    "soft_stop_pct": {
+                        "anyOf": [{"type": "number", "minimum": 0}, {"type": "null"}]
+                    },
+                    "rationale": {"type": "string"},
+                    "expires_in_seconds": {
+                        "type": "integer",
+                        "minimum": 60,
+                        "maximum": 600,
+                    },
+                },
+                "required": [
+                    "action",
+                    "max_reversals_override",
+                    "soft_stop_pct",
+                    "rationale",
+                    "expires_in_seconds",
+                ],
+            }
+
+            payload = {
+                "system": supervision_system,
+                "prompt": supervision_prompt,
+                "response_schema": supervision_schema,
+            }
+
+            decision = await self._llm_service.run(payload)
+
+            action = str(decision.get("action") or "continue").lower()
+            if action not in ("continue", "pause", "close"):
+                action = "continue"
+            expires_in = max(60, min(600, int(decision.get("expires_in_seconds") or 300)))
+
+            mandate: dict[str, Any] = {
+                "action": action,
+                "max_reversals_override": decision.get("max_reversals_override"),
+                "soft_stop_pct": decision.get("soft_stop_pct"),
+                "rationale": str(decision.get("rationale") or ""),
+                "_expires_at": time.monotonic() + expires_in,
+            }
+            self._llm_mandate[symbol_key] = mandate
+            self._emit_debug(
+                f"Alternator LLM supervision: {symbol_key} → action={action} "
+                f"expires_in={expires_in}s | {mandate['rationale'][:120]}"
+            )
+
+        except Exception as exc:  # pragma: no cover - best-effort; never crash the alternator
+            logger.warning("LLM supervision call failed for %s: %s", symbol_key, exc)
+        finally:
+            self._llm_supervision_running.discard(symbol_key)
 
     @property
     def ws_connection_status(self) -> tuple[bool, bool, bool]:
