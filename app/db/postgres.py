@@ -27,7 +27,8 @@ CREATE TABLE IF NOT EXISTS executed_trades (
     amount NUMERIC NOT NULL,
     llm_reasoning TEXT,
     pnl NUMERIC,
-    fee NUMERIC
+    fee NUMERIC,
+    fee_paid_at TIMESTAMPTZ
 );
 
 CREATE TABLE IF NOT EXISTS prompt_runs (
@@ -63,13 +64,22 @@ CREATE TABLE IF NOT EXISTS prompt_versions (
 """
 
 INSERT_SQL = (
-    "INSERT INTO executed_trades (id, timestamp, symbol, instrument, side, size, price, amount, llm_reasoning, pnl, fee) "
-    "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"
+    "INSERT INTO executed_trades (id, timestamp, symbol, instrument, side, size, price, amount, llm_reasoning, pnl, fee, fee_paid_at) "
+    "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)"
 )
 
 UPDATE_TRADE_PNL_SQL = (
-    "UPDATE executed_trades SET pnl = $1, fee = COALESCE($2, fee), okx_fill_id = $3 "
+    "UPDATE executed_trades SET pnl = $1, fee = COALESCE($2, fee), okx_fill_id = $3, "
+    "fee_paid_at = COALESCE(fee_paid_at, NOW()) "
     "WHERE id = $4"
+)
+
+# Back-fill entry-leg fee only (pnl stays NULL until the position closes).
+UPDATE_ENTRY_FEE_SQL = (
+    "UPDATE executed_trades "
+    "SET fee = COALESCE($1, fee), okx_fill_id = COALESCE(okx_fill_id, $2), "
+    "fee_paid_at = COALESCE(fee_paid_at, NOW()) "
+    "WHERE id = $3"
 )
 
 FETCH_UNRECONCILED_SQL = """
@@ -160,7 +170,8 @@ FETCH_PROMPTS_SQL = (
 FETCH_TOTAL_FEES_SQL = "SELECT COALESCE(SUM(fee), 0) AS total_fee FROM executed_trades"
 FETCH_WINDOW_FEES_SQL = (
     "SELECT COALESCE(SUM(fee), 0) AS total_fee "
-    "FROM executed_trades WHERE timestamp >= NOW() - ($1::double precision * INTERVAL '1 hour')"
+    "FROM executed_trades "
+    "WHERE COALESCE(fee_paid_at, timestamp) >= NOW() - ($1::double precision * INTERVAL '1 hour')"
 )
 
 UPSERT_PAIR_SQL = (
@@ -205,11 +216,17 @@ async def init_postgres_pool(*, min_size: int = 1, max_size: int = 10) -> asyncp
         );
         """
     )
-    # Add okx_fill_id column idempotently (no-op if it already exists).
+    # Add okx_fill_id and fee_paid_at columns idempotently (no-op if they already exist).
     await _POOL.execute(
         """
         ALTER TABLE executed_trades
         ADD COLUMN IF NOT EXISTS okx_fill_id TEXT;
+        """
+    )
+    await _POOL.execute(
+        """
+        ALTER TABLE executed_trades
+        ADD COLUMN IF NOT EXISTS fee_paid_at TIMESTAMPTZ;
         """
     )
     logger.info("PostgreSQL pool initialized")
@@ -246,6 +263,10 @@ async def insert_executed_trade(trade: ExecutedTrade) -> None:
         trade.llm_reasoning,
         trade.pnl,
         trade.fee,
+        # fee_paid_at: set to now when fee is already known (e.g. Alternator close/entry
+        # recorded immediately after fill); NULL for LLM entry orders whose fee is
+        # back-filled later by the reconciler via UPDATE_TRADE_PNL_SQL.
+        datetime.now(timezone.utc) if trade.fee is not None else None,
     )
 
 
@@ -266,23 +287,41 @@ async def update_trade_pnl(
     )
 
 
+async def update_entry_fee(
+    trade_id: Any,
+    fee: float | None,
+    okx_fill_id: str | None,
+) -> None:
+    """Back-fill the entry-leg fee before the position closes (pnl remains NULL)."""
+    pool = await get_postgres_pool()
+    await pool.execute(
+        UPDATE_ENTRY_FEE_SQL,
+        fee,
+        okx_fill_id,
+        trade_id,
+    )
+
+
 async def fetch_unreconciled_trades(
     symbol: str,
     side: str,
     lookback_hours: float = 48.0,
+    same_side: bool = False,
 ) -> list[dict[str, Any]]:
     """Return the most recent trades for *symbol*/*side* that still have no PnL recorded.
 
-    *side* is the **closing** side from OKX (e.g. ``"buy"`` means the closing leg of a SHORT).
-    The open-position side is the opposite one, so we query the opposite direction to find the
-    original entry that should receive the realized PnL.
+    By default *side* is the **closing** side from OKX (e.g. ``"buy"`` means the closing leg
+    of a SHORT) and we query the *opposite* direction to find the original entry.
+
+    Pass ``same_side=True`` when you want to look up an entry fill directly (e.g. to
+    back-fill a taker fee before the position closes).
     """
-    opposite = "sell" if side.lower() == "buy" else "buy"
+    resolved_side = side.lower() if same_side else ("sell" if side.lower() == "buy" else "buy")
     pool = await get_postgres_pool()
     records = await pool.fetch(
         FETCH_UNRECONCILED_SQL,
         symbol.upper(),
-        opposite,
+        resolved_side,
         float(lookback_hours),
     )
     return [dict(row) for row in records]
@@ -1183,6 +1222,7 @@ __all__ = [
     "fetch_okx_fees_window",
     "fetch_recent_trades",
     "fetch_trading_pairs",
+    "fetch_unreconciled_trades",
     "get_postgres_pool",
     "get_prompt_version",
     "init_postgres_pool",
@@ -1195,6 +1235,8 @@ __all__ = [
     "insert_executed_trade",
     "insert_prompt_run",
     "insert_prompt_version",
+    "update_entry_fee",
+    "update_trade_pnl",
     "save_okx_sub_account",
     "save_llm_model",
     "save_guardrails",

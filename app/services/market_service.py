@@ -25,6 +25,7 @@ from app.db.postgres import (
     fetch_unreconciled_trades,
     insert_equity_point,
     insert_executed_trade,
+    update_entry_fee,
     update_trade_pnl,
 )
 from app.models.trade import ExecutedTrade
@@ -2481,6 +2482,22 @@ class MarketService:
                     f"Alternator: {symbol_key} close order rejected — aborting"
                 )
                 return
+            # Record the close leg so the fee card and history page include it.
+            _close_ticker = self._latest_ticker.get(symbol_key) or {}
+            _close_price = self._price_from_ticker(_close_ticker) or 0.0
+            _close_fee_raw = self._extract_float(
+                close_ok.get("fee") or close_ok.get("fillFee")
+                if isinstance(close_ok, dict) else None
+            )
+            _close_fee = abs(_close_fee_raw) if _close_fee_raw is not None else None
+            await self._record_trade_execution(
+                symbol=symbol,
+                side=close_side,
+                price=_close_price,
+                amount=contracts,
+                rationale=f"Alternator close (trigger={trigger})",
+                fee=_close_fee,
+            )
             self._emit_debug(
                 f"Alternator: {symbol_key} close order submitted "
                 f"(side={close_side}, contracts={contracts}, trigger={trigger})"
@@ -2522,6 +2539,17 @@ class MarketService:
                 self._emit_debug(
                     f"Alternator: {symbol_key} reversed to {new_side_label} "
                     f"(flip #{new_flip_count}, trigger={trigger}, contracts={contracts})"
+                )
+                # Record the entry leg; fee will be back-filled by the reconciler.
+                _entry_ticker = self._latest_ticker.get(symbol_key) or {}
+                _entry_price = self._price_from_ticker(_entry_ticker) or 0.0
+                await self._record_trade_execution(
+                    symbol=symbol,
+                    side=new_entry_side,
+                    price=_entry_price,
+                    amount=contracts,
+                    rationale=f"Alternator entry (trigger={trigger}, flip=#{new_flip_count})",
+                    fee=None,
                 )
             else:
                 self._emit_debug(
@@ -8765,6 +8793,72 @@ class MarketService:
 
         if reconciled:
             logger.info("Fill reconciliation: updated PnL for %d trade(s)", reconciled)
+
+        # Second pass: capture entry-leg taker fees (pnl == 0 fills).
+        # The entry row was inserted with fee=NULL; once the exchange reports the fill
+        # we can store the fee so the fee-card window query counts it promptly.
+        entry_fees_stored = 0
+        for fill in fills:
+            raw_pnl = fill.get("pnl") or fill.get("fillPnl") or "0"
+            try:
+                pnl_value = float(raw_pnl)
+            except (TypeError, ValueError):
+                continue
+            if pnl_value != 0.0:
+                # Closing fills already handled in the loop above.
+                continue
+
+            raw_fee = fill.get("fee") or fill.get("fillFee") or None
+            if raw_fee is None:
+                continue
+            try:
+                fee_value = abs(float(raw_fee))
+            except (TypeError, ValueError):
+                continue
+            if fee_value == 0.0:
+                continue
+
+            inst_id = str(fill.get("instId") or "").upper()
+            fill_side = str(fill.get("side") or "").lower()
+            fill_id = str(fill.get("fillId") or fill.get("tradeId") or "")
+            if not inst_id or not fill_side:
+                continue
+
+            try:
+                # For entry fills the row side matches the fill side (same direction).
+                candidates = await fetch_unreconciled_trades(
+                    symbol=inst_id,
+                    side=fill_side,
+                    lookback_hours=48.0,
+                    same_side=True,
+                )
+            except TypeError:
+                # fetch_unreconciled_trades may not support same_side yet; skip gracefully.
+                continue
+            except Exception as exc:  # pragma: no cover - best-effort
+                logger.debug("entry fee lookup failed for %s: %s", inst_id, exc)
+                continue
+
+            if not candidates:
+                continue
+
+            target = candidates[0]
+            try:
+                await update_entry_fee(
+                    trade_id=target["id"],
+                    fee=fee_value,
+                    okx_fill_id=fill_id or None,
+                )
+                entry_fees_stored += 1
+                self._emit_debug(
+                    f"Stored entry fee for {inst_id}: {fee_value:.4f} USDT "
+                    f"(fill {fill_id}, trade {target['id']})"
+                )
+            except Exception as exc:  # pragma: no cover - best-effort
+                logger.warning("Failed to update entry fee for %s: %s", inst_id, exc)
+
+        if entry_fees_stored:
+            logger.info("Fill reconciliation: stored entry fees for %d trade(s)", entry_fees_stored)
 
     @staticmethod
     def _build_tpsl_client_id(symbol: str) -> str:
