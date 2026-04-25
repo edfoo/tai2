@@ -6431,7 +6431,27 @@ class MarketService:
             pos_side = "short"
             reduce_only = True
 
-        if not reduce_only and (stop_loss_price is None or not isinstance(stop_loss_price, (int, float)) or stop_loss_price <= 0):
+        # When the Alternator strategy is active, exits are managed by reversals.
+        # Strip TP/SL from the initial entry so the order goes through cleanly
+        # and the guardrails below (stop_loss_required, require_protection) don't
+        # block a perfectly valid Alternator entry that has no protective levels.
+        _alternator_entry = not reduce_only and bool(
+            (self._strategy_config.get("alternator") or {}).get("enabled")
+        )
+        if _alternator_entry:
+            if take_profit_price or stop_loss_price:
+                self._emit_debug(
+                    f"{symbol} Alternator enabled: stripping TP ({take_profit_price}) "
+                    f"and SL ({stop_loss_price}) from initial entry order"
+                )
+            take_profit_price = None
+            stop_loss_price = None
+            requested_take_profit = None
+            requested_stop_loss = None
+            take_profit_ratio = None
+            stop_loss_ratio = None
+
+        if not reduce_only and not _alternator_entry and (stop_loss_price is None or not isinstance(stop_loss_price, (int, float)) or stop_loss_price <= 0):
             self._record_execution_feedback(
                 symbol,
                 "Blocked: stop-loss required",
@@ -6445,7 +6465,7 @@ class MarketService:
             self._emit_debug(f"Execution skipped for {symbol}: stop-loss required for entries")
             return False
 
-        if require_protection and not reduce_only and (
+        if require_protection and not reduce_only and not _alternator_entry and (
             take_profit_price is None
             or not isinstance(take_profit_price, (int, float))
             or take_profit_price <= 0
