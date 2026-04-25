@@ -2014,6 +2014,7 @@ class MarketService:
         max_reversals: int | None = (
             int(max_reversals_raw) if max_reversals_raw is not None else None
         )
+        close_on_max_reversals = bool(alternator.get("close_on_max_reversals", False))
         restart_loss_pct = self._extract_float(alternator.get("restart_at_loss_pct"))
         restart_loss_usd = self._extract_float(alternator.get("restart_at_loss_usd"))
         ride_profit_pct = self._extract_float(alternator.get("ride_at_profit_pct"))
@@ -2028,6 +2029,7 @@ class MarketService:
             and restart_loss_usd is None
             and not dynamic_threshold
             and not trailing_close
+            and not close_on_max_reversals
         ):
             self._emit_debug("Alternator: no trigger thresholds configured — skipping")
             return
@@ -2211,6 +2213,37 @@ class MarketService:
                             name=f"alternator-flip-{symbol}",
                         )
                         continue
+
+            # ── Priority 0.5: Close flat when max reversals exhausted ─────────
+            # When close_on_max_reversals is enabled and flip_count has reached
+            # the configured cap, close immediately without waiting for a
+            # profit or loss threshold to fire again.
+            if (
+                close_on_max_reversals
+                and max_reversals is not None
+                and flip_count >= max_reversals
+            ):
+                self._emit_debug(
+                    f"Alternator: {symbol} max reversals exhausted "
+                    f"(flip_count={flip_count} >= max_reversals={max_reversals}) — "
+                    "closing flat"
+                )
+                self._alternator_flipping.add(symbol)
+                asyncio.create_task(
+                    self._alternator_flip(
+                        symbol=symbol,
+                        close_side=close_side,
+                        close_pos_side=close_pos_side,
+                        new_entry_side=None,
+                        new_entry_pos_side=None,
+                        contracts=contracts,
+                        trade_mode=trade_mode,
+                        flip_count=flip_count,
+                        trigger="max_reversals_exhausted",
+                    ),
+                    name=f"alternator-flip-{symbol}",
+                )
+                continue
 
             # ── Priority 1: Ride condition ────────────────────────────────────
             hit_ride_pct = (

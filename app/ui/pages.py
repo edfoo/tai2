@@ -2951,6 +2951,7 @@ def register_pages(app: FastAPI) -> None:
             "footprint_delta_filter": False,
             "footprint_delta_min_ratio": 0.0,
             "continuous_llm": False,
+            "close_on_max_reversals": False,
             "max_reversals": None,
             "restart_at_loss_pct": None,
             "restart_at_loss_usd": None,
@@ -3481,6 +3482,13 @@ def register_pages(app: FastAPI) -> None:
                                 "hint='Total flip limit (blank = unlimited)' "
                                 "persistent-hint clearable stack-label"
                             )
+                            altr_close_on_max_reversals = ui.switch(
+                                "Close on Limit",
+                                value=bool(alternator.get("close_on_max_reversals", False)),
+                            ).props(
+                                "hint='Close flat immediately once max reversals are reached, "
+                                "instead of waiting for the next threshold' persistent-hint dense color=primary"
+                            ).bind_enabled_from(altr_max_reversals, "value", backward=lambda v: v not in (None, ""))
                         ui.label("Ride (hand to Protector)").classes("text-xs font-semibold text-slate-600 mt-1")
                         with ui.row().classes("gap-4 items-start mb-2"):
                             _altr_ride_pct_raw = alternator.get("ride_at_profit_pct")
@@ -3627,6 +3635,7 @@ def register_pages(app: FastAPI) -> None:
                     "footprint_delta_min_ratio": float(altr_fpd_min_ratio.value or 0.0),
                     "continuous_llm": bool(altr_continuous_llm_switch.value),
                     "max_reversals": int(altr_max_reversals.value) if altr_max_reversals.value not in (None, "") else None,
+                    "close_on_max_reversals": bool(altr_close_on_max_reversals.value),
                     "restart_at_loss_pct": float(altr_restart_loss_pct.value) if altr_restart_loss_pct.value not in (None, "") else None,
                     "restart_at_loss_usd": float(altr_restart_loss_usd.value) if altr_restart_loss_usd.value not in (None, "") else None,
                     "ride_at_profit_pct": float(altr_ride_profit_pct.value) if altr_ride_profit_pct.value not in (None, "") else None,
