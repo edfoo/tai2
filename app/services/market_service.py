@@ -296,6 +296,11 @@ class MarketService:
         self._alternator_flip_counts: dict[str, int] = {}
         self._alternator_flipping: set[str] = set()
         self._alternator_riding: set[str] = set()
+        # Trailing-reverse state: track peak PnL once threshold is crossed.
+        self._alternator_above_threshold: set[str] = set()
+        self._alternator_peak_pnl_pct: dict[str, float] = {}
+        self._alternator_peak_pnl_usd: dict[str, float] = {}
+        self._alternator_ws_check_pending: bool = False
 
     async def start(self) -> None:
         """Launch the market snapshot poller and websocket consumers if not already running."""
@@ -573,6 +578,18 @@ class MarketService:
                 self._private_ws_patch_pending = True
                 asyncio.create_task(
                     self._schedule_patch_publish(), name="okx-ws-private-patch"
+                )
+            # Trigger high-frequency alternator check for trailing-reverse mode.
+            _altr_cfg = self._strategy_config.get("alternator") or {}
+            if (
+                _altr_cfg.get("enabled")
+                and _altr_cfg.get("trailing_reverse")
+                and not self._alternator_ws_check_pending
+            ):
+                self._alternator_ws_check_pending = True
+                asyncio.create_task(
+                    self._schedule_alternator_ws_check(),
+                    name="alternator-ws-check",
                 )
         elif channel == "account" and isinstance(data, list) and data:
             # Account channel always delivers a full snapshot of the top-level account
@@ -1846,6 +1863,35 @@ class MarketService:
 
     # ── Alternator strategy ──────────────────────────────────────────────────
 
+    def _compute_avg_amplitude_pct(self, symbol: str, lookback: int = 20) -> float | None:
+        """Average candle amplitude as a % of mid-price over the last ``lookback`` HTF candles.
+
+        Formula per candle: (H − L) / ((H + L) / 2) × 100.
+        The average over the lookback window equals the typical % swing per bar
+        and is used as an adaptive reversal threshold for the Alternator when
+        ``dynamic_threshold`` is enabled.
+
+        Falls back to LTF candles when HTF data is unavailable.
+        Returns ``None`` when there are fewer than 3 usable candles.
+        """
+        candles: list[list[Any]] = self._latest_ohlcv_htf.get(symbol) or []
+        if len(candles) < 3:
+            candles = self._latest_ohlcv.get(symbol) or []
+        if len(candles) < 3:
+            return None
+        recent = candles[-lookback:]
+        amplitudes: list[float] = []
+        for c in recent:
+            try:
+                high = float(c[2])
+                low = float(c[3])
+                mid = (high + low) * 0.5
+                if mid > 0 and high > low:
+                    amplitudes.append((high - low) / mid * 100.0)
+            except (IndexError, TypeError, ValueError):
+                continue
+        return sum(amplitudes) / len(amplitudes) if amplitudes else None
+
     async def _check_alternator(self) -> None:
         """Oscillate between long/short positions on profit and loss thresholds.
 
@@ -1887,7 +1933,13 @@ class MarketService:
             )
             return
 
-        rev_profit_pct = self._extract_float(alternator.get("reverse_at_profit_pct"))
+        trailing_reverse = bool(alternator.get("trailing_reverse", False))
+        trailing_pullback_pct = abs(self._extract_float(alternator.get("trailing_pullback_pct")) or 0.0)
+        dynamic_threshold = bool(alternator.get("dynamic_threshold", False))
+        dynamic_factor = abs(self._extract_float(alternator.get("dynamic_threshold_factor")) or 1.0)
+        dynamic_lookback = int(alternator.get("dynamic_threshold_lookback") or 20)
+        _rev_profit_pct_static = self._extract_float(alternator.get("reverse_at_profit_pct"))
+        rev_profit_pct = _rev_profit_pct_static  # may be overridden per-symbol in the loop below
         rev_profit_usd = self._extract_float(alternator.get("reverse_at_profit_usd"))
         max_reversals_raw = alternator.get("max_reversals")
         max_reversals: int | None = (
@@ -1901,10 +1953,11 @@ class MarketService:
         stop_loss_usd = self._extract_float(alternator.get("stop_at_loss_usd"))
 
         if (
-            rev_profit_pct is None
+            _rev_profit_pct_static is None
             and rev_profit_usd is None
             and restart_loss_pct is None
             and restart_loss_usd is None
+            and not dynamic_threshold
         ):
             self._emit_debug("Alternator: no trigger thresholds configured — skipping")
             return
@@ -1928,10 +1981,15 @@ class MarketService:
             del self._alternator_flip_counts[gone]
             self._emit_debug(f"Alternator: {gone} no longer open — flip count cleared")
         self._alternator_riding &= active_symbols
+        stale_trailing = set(self._alternator_peak_pnl_pct) | set(self._alternator_peak_pnl_usd) | self._alternator_above_threshold
+        for gone in stale_trailing - active_symbols:
+            self._alternator_above_threshold.discard(gone)
+            self._alternator_peak_pnl_pct.pop(gone, None)
+            self._alternator_peak_pnl_usd.pop(gone, None)
 
         self._emit_debug(
             f"Alternator: checking {len(positions)} position(s), "
-            f"rev_profit_pct={rev_profit_pct} rev_profit_usd={rev_profit_usd} "
+            f"rev_profit_pct={_rev_profit_pct_static!r} dyn={dynamic_threshold} rev_profit_usd={rev_profit_usd} "
             f"max_reversals={max_reversals} restart_loss_pct={restart_loss_pct} "
             f"restart_loss_usd={restart_loss_usd} ride_profit_pct={ride_profit_pct} "
             f"stop_loss_pct={stop_loss_pct}"
@@ -1952,6 +2010,22 @@ class MarketService:
             pos_val = self._extract_float(pos.get("pos"))
             if not pos_val or pos_val == 0:
                 continue
+
+            # ── Per-symbol effective profit threshold ────────────────────────
+            rev_profit_pct = _rev_profit_pct_static
+            if dynamic_threshold:
+                _dyn_amp = self._compute_avg_amplitude_pct(symbol, lookback=dynamic_lookback)
+                if _dyn_amp is not None:
+                    rev_profit_pct = _dyn_amp * dynamic_factor
+                    self._emit_debug(
+                        f"Alternator: {symbol} dynamic rev_profit_pct = {rev_profit_pct:.3f}% "
+                        f"(avg_amplitude={_dyn_amp:.3f}% \u00d7 factor={dynamic_factor})"
+                    )
+                else:
+                    self._emit_debug(
+                        f"Alternator: {symbol} dynamic threshold: insufficient candle data, "
+                        f"using static ({_rev_profit_pct_static!r}%)"
+                    )
 
             upl_ratio = self._extract_float(pos.get("uplRatio"))
             upl_usd = self._extract_float(pos.get("upl"))
@@ -2054,34 +2128,106 @@ class MarketService:
                 and upl_usd is not None
                 and upl_usd >= abs(rev_profit_usd)
             )
-            if hit_rev_profit_pct or hit_rev_profit_usd:
-                will_flip = max_reversals is None or flip_count < max_reversals
-                rev_trigger = (
-                    f"upl_pct={upl_pct:.2f}% >= {abs(rev_profit_pct):.2f}%"
-                    if hit_rev_profit_pct
-                    else f"upl_usd={upl_usd:.4f} >= {abs(rev_profit_usd):.4f}"
-                )
-                self._emit_debug(
-                    f"Alternator: {symbol} PROFIT triggered ({rev_trigger}), "
-                    f"flip_count={flip_count} max_reversals={max_reversals} "
-                    f"action={'FLIP' if will_flip else 'CLOSE'}"
-                )
-                self._alternator_flipping.add(symbol)
-                asyncio.create_task(
-                    self._alternator_flip(
-                        symbol=symbol,
-                        close_side=close_side,
-                        close_pos_side=close_pos_side,
-                        new_entry_side=new_entry_side if will_flip else None,
-                        new_entry_pos_side=new_entry_pos_side if will_flip else None,
-                        contracts=contracts,
-                        trade_mode=trade_mode,
-                        flip_count=flip_count,
-                        trigger="profit",
-                    ),
-                    name=f"alternator-flip-{symbol}",
-                )
-                continue
+            in_trailing = symbol in self._alternator_above_threshold
+
+            if hit_rev_profit_pct or hit_rev_profit_usd or in_trailing:
+                if not trailing_reverse:
+                    # ── Immediate mode (original behaviour) ──────────────────
+                    if hit_rev_profit_pct or hit_rev_profit_usd:
+                        will_flip = max_reversals is None or flip_count < max_reversals
+                        rev_trigger = (
+                            f"upl_pct={upl_pct:.2f}% >= {abs(rev_profit_pct):.2f}%"
+                            if hit_rev_profit_pct
+                            else f"upl_usd={upl_usd:.4f} >= {abs(rev_profit_usd):.4f}"
+                        )
+                        self._emit_debug(
+                            f"Alternator: {symbol} PROFIT triggered ({rev_trigger}), "
+                            f"flip_count={flip_count} max_reversals={max_reversals} "
+                            f"action={'FLIP' if will_flip else 'CLOSE'}"
+                        )
+                        self._alternator_flipping.add(symbol)
+                        asyncio.create_task(
+                            self._alternator_flip(
+                                symbol=symbol,
+                                close_side=close_side,
+                                close_pos_side=close_pos_side,
+                                new_entry_side=new_entry_side if will_flip else None,
+                                new_entry_pos_side=new_entry_pos_side if will_flip else None,
+                                contracts=contracts,
+                                trade_mode=trade_mode,
+                                flip_count=flip_count,
+                                trigger="profit",
+                            ),
+                            name=f"alternator-flip-{symbol}",
+                        )
+                        continue
+                else:
+                    # ── Trailing mode: wait for pullback from peak ────────────
+                    if hit_rev_profit_pct or hit_rev_profit_usd:
+                        self._alternator_above_threshold.add(symbol)
+                    # Update peak PnL (only upward)
+                    if upl_pct is not None:
+                        self._alternator_peak_pnl_pct[symbol] = max(
+                            self._alternator_peak_pnl_pct.get(symbol, upl_pct), upl_pct
+                        )
+                    if upl_usd is not None:
+                        self._alternator_peak_pnl_usd[symbol] = max(
+                            self._alternator_peak_pnl_usd.get(symbol, upl_usd), upl_usd
+                        )
+                    # Check whether PnL has pulled back enough from peak
+                    pullback_factor = 1.0 - trailing_pullback_pct / 100.0
+                    peak_pct = self._alternator_peak_pnl_pct.get(symbol)
+                    peak_usd = self._alternator_peak_pnl_usd.get(symbol)
+                    pullback_by_pct = (
+                        peak_pct is not None
+                        and upl_pct is not None
+                        and rev_profit_pct is not None
+                        and upl_pct < peak_pct * pullback_factor
+                    )
+                    pullback_by_usd = (
+                        peak_usd is not None
+                        and upl_usd is not None
+                        and rev_profit_usd is not None
+                        and upl_usd < peak_usd * pullback_factor
+                    )
+                    if pullback_by_pct or pullback_by_usd:
+                        will_flip = max_reversals is None or flip_count < max_reversals
+                        rev_trigger = (
+                            f"upl_pct={upl_pct:.2f}% < peak {peak_pct:.2f}% × {pullback_factor:.3f}"
+                            if pullback_by_pct
+                            else f"upl_usd={upl_usd:.4f} < peak {peak_usd:.4f} × {pullback_factor:.3f}"
+                        )
+                        self._emit_debug(
+                            f"Alternator: {symbol} TRAILING PROFIT triggered ({rev_trigger}), "
+                            f"flip_count={flip_count} max_reversals={max_reversals} "
+                            f"action={'FLIP' if will_flip else 'CLOSE'}"
+                        )
+                        self._alternator_above_threshold.discard(symbol)
+                        self._alternator_peak_pnl_pct.pop(symbol, None)
+                        self._alternator_peak_pnl_usd.pop(symbol, None)
+                        self._alternator_flipping.add(symbol)
+                        asyncio.create_task(
+                            self._alternator_flip(
+                                symbol=symbol,
+                                close_side=close_side,
+                                close_pos_side=close_pos_side,
+                                new_entry_side=new_entry_side if will_flip else None,
+                                new_entry_pos_side=new_entry_pos_side if will_flip else None,
+                                contracts=contracts,
+                                trade_mode=trade_mode,
+                                flip_count=flip_count,
+                                trigger="profit_trailing",
+                            ),
+                            name=f"alternator-flip-{symbol}",
+                        )
+                    else:
+                        self._emit_debug(
+                            f"Alternator: {symbol} trailing profit — "
+                            f"peak_pct={peak_pct!r} current_pct={upl_pct!r} "
+                            f"peak_usd={peak_usd!r} current_usd={upl_usd!r} "
+                            f"pullback_needed={trailing_pullback_pct}% — waiting"
+                        )
+                    continue
 
             # ── Priority 4: Restart at loss ───────────────────────────────────
             hit_restart_pct = (
@@ -2653,6 +2799,23 @@ class MarketService:
         """Debounce helper: coalesce rapid private-WS frames before patching Redis."""
         await asyncio.sleep(0.3)
         await self._patch_and_publish_snapshot()
+
+    async def _schedule_alternator_ws_check(self) -> None:
+        """Run _check_alternator shortly after a private WS position update settles.
+
+        Triggered from ``_handle_private_ws_message`` when the positions channel
+        delivers fresh data and the Alternator trailing-reverse mode is active.
+        The 0.5 s delay ensures ``_patch_and_publish_snapshot`` has updated
+        ``_last_full_snapshot`` before the check reads it.
+        """
+        await asyncio.sleep(0.5)
+        self._alternator_ws_check_pending = False
+        try:
+            await self._check_alternator()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.debug("Alternator WS-triggered check error: %s", exc)
 
     async def _patch_and_publish_snapshot(self) -> None:
         """Republish the cached snapshot with fresh positions/account from the private WS.

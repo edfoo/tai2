@@ -2935,6 +2935,11 @@ def register_pages(app: FastAPI) -> None:
             "enabled": False,
             "reverse_at_profit_pct": None,
             "reverse_at_profit_usd": None,
+            "dynamic_threshold": False,
+            "dynamic_threshold_factor": 1.0,
+            "dynamic_threshold_lookback": 20,
+            "trailing_reverse": False,
+            "trailing_pullback_pct": 10.0,
             "max_reversals": None,
             "restart_at_loss_pct": None,
             "restart_at_loss_usd": None,
@@ -3217,6 +3222,35 @@ def register_pages(app: FastAPI) -> None:
                             "Mutually exclusive with Skimming and Commutator."
                         ).classes("text-xs text-slate-500 mb-3")
                         ui.label("Reverse at Profit").classes("text-xs font-semibold text-slate-600 mt-1")
+                        with ui.row().classes("gap-4 items-center mb-2"):
+                            altr_dynamic_switch = ui.switch(
+                                "Dynamic Threshold",
+                                value=bool(alternator.get("dynamic_threshold", False)),
+                            ).props(
+                                "hint='Compute reversal threshold from average HTF candle amplitude: (H−L)/mid × 100' persistent-hint dense color=primary"
+                            )
+                            _altr_df_raw = alternator.get("dynamic_threshold_factor", 1.0)
+                            altr_dynamic_factor = ui.number(
+                                label="Factor",
+                                value=float(_altr_df_raw) if _altr_df_raw is not None else 1.0,
+                                min=0.1,
+                                max=10.0,
+                                step=0.1,
+                                precision=2,
+                            ).classes("w-28").props(
+                                "hint='threshold = avg_amplitude × factor' persistent-hint suffix='×'"
+                            ).bind_enabled_from(altr_dynamic_switch, "value")
+                            _altr_dl_raw = alternator.get("dynamic_threshold_lookback", 20)
+                            altr_dynamic_lookback = ui.number(
+                                label="Lookback",
+                                value=int(_altr_dl_raw) if _altr_dl_raw is not None else 20,
+                                min=3,
+                                max=200,
+                                step=1,
+                                precision=0,
+                            ).classes("w-28").props(
+                                "hint='HTF bars used for amplitude average' persistent-hint suffix='bars'"
+                            ).bind_enabled_from(altr_dynamic_switch, "value")
                         with ui.row().classes("gap-4 items-start mb-2"):
                             _altr_rpp_raw = alternator.get("reverse_at_profit_pct")
                             altr_rev_profit_pct = ui.number(
@@ -3226,9 +3260,9 @@ def register_pages(app: FastAPI) -> None:
                                 step=0.1,
                                 precision=2,
                             ).classes("w-48").props(
-                                "hint='Flip when position PnL >= +X% (blank = disabled)' "
+                                "hint='Flip when position PnL >= +X% — ignored when Dynamic Threshold is ON' "
                                 "persistent-hint clearable stack-label"
-                            )
+                            ).bind_enabled_from(altr_dynamic_switch, "value", backward=lambda v: not v)
                             _altr_rpu_raw = alternator.get("reverse_at_profit_usd")
                             altr_rev_profit_usd = ui.number(
                                 label="Reverse at USDT Profit",
@@ -3240,6 +3274,24 @@ def register_pages(app: FastAPI) -> None:
                                 "hint='Flip when unrealised profit >= this USDT (blank = disabled)' "
                                 "persistent-hint clearable stack-label"
                             )
+                        with ui.row().classes("gap-4 items-center mb-2"):
+                            altr_trailing_switch = ui.switch(
+                                "Trailing Reverse",
+                                value=bool(alternator.get("trailing_reverse", False)),
+                            ).props(
+                                "hint='Wait for PnL to pull back from its peak before reversing, rather than reversing immediately at threshold' persistent-hint dense color=primary"
+                            )
+                            _altr_tpb_raw = alternator.get("trailing_pullback_pct", 10.0)
+                            altr_trailing_pullback_pct = ui.number(
+                                label="Pullback %",
+                                value=float(_altr_tpb_raw) if _altr_tpb_raw is not None else 10.0,
+                                min=0.0,
+                                max=100.0,
+                                step=0.5,
+                                precision=1,
+                            ).classes("w-36").props(
+                                "hint='Reverse when PnL drops this % below its peak (e.g. 10 = reverse at 90% of peak)' persistent-hint suffix='%'"
+                            ).bind_enabled_from(altr_trailing_switch, "value")
                         ui.label("Restart at Loss").classes("text-xs font-semibold text-slate-600 mt-1")
                         with ui.row().classes("gap-4 items-start mb-2"):
                             _altr_rlp_raw = alternator.get("restart_at_loss_pct")
@@ -3407,6 +3459,11 @@ def register_pages(app: FastAPI) -> None:
                     "enabled": bool(alternator_switch.value),
                     "reverse_at_profit_pct": float(altr_rev_profit_pct.value) if altr_rev_profit_pct.value not in (None, "") else None,
                     "reverse_at_profit_usd": float(altr_rev_profit_usd.value) if altr_rev_profit_usd.value not in (None, "") else None,
+                    "dynamic_threshold": bool(altr_dynamic_switch.value),
+                    "dynamic_threshold_factor": float(altr_dynamic_factor.value or 1.0),
+                    "dynamic_threshold_lookback": int(altr_dynamic_lookback.value or 20),
+                    "trailing_reverse": bool(altr_trailing_switch.value),
+                    "trailing_pullback_pct": float(altr_trailing_pullback_pct.value or 10.0),
                     "max_reversals": int(altr_max_reversals.value) if altr_max_reversals.value not in (None, "") else None,
                     "restart_at_loss_pct": float(altr_restart_loss_pct.value) if altr_restart_loss_pct.value not in (None, "") else None,
                     "restart_at_loss_usd": float(altr_restart_loss_usd.value) if altr_restart_loss_usd.value not in (None, "") else None,
