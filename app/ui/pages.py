@@ -3080,33 +3080,8 @@ def register_pages(app: FastAPI) -> None:
                         ui.label(
                             "The lock ratio grows with each step so the SL trails price more "
                             "tightly as profits compound: "
-                            "effective lock = 1 − (1 − lock_ratio) ÷ step_number. "
-                            "Example below uses activate 10 %, step 10 %, lock 0.5:"
-                        ).classes("text-xs text-slate-400 mb-1")
-                        ui.html(
-                            content=(
-                                "<table class='text-xs text-slate-400 mb-3 border-collapse'>"
-                                "<thead><tr>"
-                                "<th class='pr-3 text-left font-medium'>Step</th>"
-                                "<th class='pr-3 text-left font-medium'>PnL reached</th>"
-                                "<th class='pr-3 text-left font-medium'>Eff. lock</th>"
-                                "<th class='text-left font-medium'>SL placed at</th>"
-                                "</tr></thead>"
-                                "<tbody>"
-                                "<tr><td class='pr-3'>1</td><td class='pr-3'>+10 %</td><td class='pr-3'>50 %</td><td>+5 %</td></tr>"
-                                "<tr><td class='pr-3'>2</td><td class='pr-3'>+20 %</td><td class='pr-3'>75 %</td><td>+15 %</td></tr>"
-                                "<tr><td class='pr-3'>3</td><td class='pr-3'>+30 %</td><td class='pr-3'>83 %</td><td>+25 %</td></tr>"
-                                "<tr><td class='pr-3'>4</td><td class='pr-3'>+40 %</td><td class='pr-3'>88 %</td><td>+35 %</td></tr>"
-                                "<tr><td class='pr-3'>5</td><td class='pr-3'>+50 %</td><td class='pr-3'>90 %</td><td>+45 %</td></tr>"
-                                "<tr><td class='pr-3'>6</td><td class='pr-3'>+60 %</td><td class='pr-3'>92 %</td><td>+55 %</td></tr>"
-                                "<tr><td class='pr-3'>7</td><td class='pr-3'>+70 %</td><td class='pr-3'>93 %</td><td>+65 %</td></tr>"
-                                "<tr><td class='pr-3'>8</td><td class='pr-3'>+80 %</td><td class='pr-3'>94 %</td><td>+75 %</td></tr>"
-                                "<tr><td class='pr-3'>9</td><td class='pr-3'>+90 %</td><td class='pr-3'>94 %</td><td>+85 %</td></tr>"
-                                "<tr><td class='pr-3'>10</td><td class='pr-3'>+100 %</td><td class='pr-3'>95 %</td><td>+95 %</td></tr>"
-                                "</tbody></table>"
-                            ),
-                            sanitize=False,
-                        )
+                            "effective lock = 1 − (1 − lock_ratio) ÷ step_number."
+                        ).classes("text-xs text-slate-400 mb-2")
                         with ui.row().classes("gap-4 items-start"):
                             _pt_act_raw = protector.get("activate_pct")
                             protector_activate = ui.number(
@@ -3139,6 +3114,49 @@ def register_pages(app: FastAPI) -> None:
                             ).classes("w-48").props(
                                 "hint='Fraction of step level locked in as SL (e.g. 0.5 = 50%)' persistent-hint"
                             )
+                        def _protector_table_html(activate: float, step: float, lock: float, rows: int = 10) -> str:
+                            tbody = ""
+                            for n in range(1, rows + 1):
+                                pnl = activate + (n - 1) * step
+                                eff_lock = 1.0 - (1.0 - lock) / n
+                                sl = pnl * eff_lock
+                                tbody += (
+                                    f"<tr>"
+                                    f"<td class='pr-3'>{n}</td>"
+                                    f"<td class='pr-3'>+{pnl:.1f} %</td>"
+                                    f"<td class='pr-3'>{eff_lock * 100:.0f} %</td>"
+                                    f"<td>+{sl:.1f} %</td>"
+                                    f"</tr>"
+                                )
+                            return (
+                                "<table class='text-xs text-slate-400 mt-2 mb-1 border-collapse'>"
+                                "<thead><tr>"
+                                "<th class='pr-3 text-left font-medium'>Step</th>"
+                                "<th class='pr-3 text-left font-medium'>PnL reached</th>"
+                                "<th class='pr-3 text-left font-medium'>Eff. lock</th>"
+                                "<th class='text-left font-medium'>SL placed at</th>"
+                                "</tr></thead>"
+                                f"<tbody>{tbody}</tbody></table>"
+                            )
+                        ui.label("Live preview (updates as you type):").classes("text-[10px] text-slate-400 mt-1")
+                        _pt_act_init = float(protector.get("activate_pct") or 10.0)
+                        _pt_step_init = float(protector.get("step_pct") or 10.0)
+                        _pt_lock_init = float(protector.get("lock_ratio") or 0.5)
+                        protector_table = ui.html(
+                            content=_protector_table_html(_pt_act_init, _pt_step_init, _pt_lock_init),
+                            sanitize=False,
+                        )
+                        def _refresh_protector_table() -> None:
+                            try:
+                                act = float(protector_activate.value or 10.0)
+                                stp = float(protector_step.value or 10.0)
+                                lk = float(protector_lock.value or 0.5)
+                            except (TypeError, ValueError):
+                                return
+                            protector_table.content = _protector_table_html(act, stp, lk)
+                        protector_activate.on_value_change(lambda _: _refresh_protector_table())
+                        protector_step.on_value_change(lambda _: _refresh_protector_table())
+                        protector_lock.on_value_change(lambda _: _refresh_protector_table())
                     _active_badge_prot = ui.badge("Active", color="positive").bind_visibility_from(
                         protector_switch, "value"
                     )
