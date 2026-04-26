@@ -286,6 +286,7 @@ class MarketService:
         # closes all (or only losing) positions when a TP/SL threshold is hit.
         self._shotgun_baseline_equity: float | None = None
         self._shotgun_fired: bool = False
+        self._shotgun_closing: set[str] = set()  # symbols with in-flight Shotgun close orders
         # Protector strategy: tracks symbols whose SL update task is in-flight
         # so concurrent refresh ticks don't spawn duplicate amendment tasks.
         self._protector_updating: set[str] = set()
@@ -1262,6 +1263,51 @@ class MarketService:
                 name=f"skim-close-{symbol}",
             )
 
+    async def _shotgun_close_position(
+        self,
+        symbol: str,
+        close_side: str,
+        pos_side: str | None,
+        contracts: float,
+        trade_mode: str | None,
+    ) -> None:
+        """Submit a market reduce-only order on behalf of the Shotgun strategy.
+
+        On success the symbol stays in ``_shotgun_closing`` until the position
+        settles and is pruned by the Alternator's ``active_symbols`` logic.
+        On rejection or exception the symbol is removed immediately so the
+        Alternator can resume protecting the still-open position.
+        """
+        coid = self._generate_client_order_id("shot")
+        resolved_trade_mode = trade_mode or "cross"
+        accepted = False
+        try:
+            result = await self._submit_order(
+                symbol=symbol,
+                side=close_side,
+                pos_side=pos_side,
+                size=contracts,
+                trade_mode=resolved_trade_mode,
+                order_type="market",
+                reduce_only=True,
+                client_order_id=coid,
+                attach_algo_orders=None,
+            )
+            if result is None:
+                self._emit_debug(f"Shotgun: {symbol} — trade API unavailable")
+            else:
+                order_result = result[0] if isinstance(result, tuple) else result
+                if order_result:
+                    self._emit_debug(f"Shotgun: {symbol} close order accepted")
+                    accepted = True
+                else:
+                    self._emit_debug(f"Shotgun: {symbol} close order rejected — Alternator will resume")
+        except Exception as exc:
+            logger.warning("Shotgun close order error for %s: %s", symbol, exc)
+        finally:
+            if not accepted:
+                self._shotgun_closing.discard(symbol)
+
     async def _skim_close_position(
         self,
         symbol: str,
@@ -1426,8 +1472,9 @@ class MarketService:
                 f"Shotgun {trigger_reason}: closing {symbol} side={close_side} "
                 f"contracts={contracts} posSide={effective_pos_side!r}"
             )
+            self._shotgun_closing.add(symbol)
             asyncio.create_task(
-                self._skim_close_position(symbol, close_side, effective_pos_side, contracts, trade_mode),
+                self._shotgun_close_position(symbol, close_side, effective_pos_side, contracts, trade_mode),
                 name=f"shotgun-close-{symbol}",
             )
 
@@ -1987,6 +2034,7 @@ class MarketService:
             )
             return
 
+
         trailing_reverse = bool(alternator.get("trailing_reverse", False))
         trailing_pullback_pct = abs(self._extract_float(alternator.get("trailing_pullback_pct")) or 0.0)
         dynamic_threshold = bool(alternator.get("dynamic_threshold", False))
@@ -2073,6 +2121,8 @@ class MarketService:
             self._alternator_close_above_threshold.discard(gone)
             self._alternator_close_peak_pnl_pct.pop(gone, None)
             self._alternator_close_peak_pnl_usd.pop(gone, None)
+        # Prune stale Shotgun-closing entries for positions that have settled.
+        self._shotgun_closing &= active_symbols
 
         self._emit_debug(
             f"Alternator: checking {len(positions)} position(s), "
@@ -2093,6 +2143,9 @@ class MarketService:
                 continue
             if symbol in self._alternator_riding:
                 self._emit_debug(f"Alternator: {symbol} handed to Protector — skipping")
+                continue
+            if symbol in self._shotgun_closing:
+                self._emit_debug(f"Alternator: {symbol} Shotgun close in-flight — skipping")
                 continue
             pos_val = self._extract_float(pos.get("pos"))
             if not pos_val or pos_val == 0:
