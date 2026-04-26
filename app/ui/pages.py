@@ -33,6 +33,7 @@ from app.db.postgres import (
     save_frontend_timezone,
     save_candle_settings,
     load_candle_settings,
+    save_governor_config,
     set_enabled_trading_pairs,
 )
 from app.services.prompt_builder import (
@@ -4985,6 +4986,124 @@ def register_pages(app: FastAPI) -> None:
                     "hint='Only applies to reasoning models (deepseek-r1, o1, etc.)' persistent-hint"
                 )
             ui.separator().classes("w-full my-4")
+            ui.label("Governor").classes("text-sm text-slate-500")
+            _gov_cfg = (config.get("governor") or {})
+            with ui.row().classes("w-full flex-wrap gap-4 items-start"):
+                gov_mode_select = ui.select(
+                    options={
+                        "disabled": "Disabled",
+                        "governor_only": "Governor only (rule-based trades)",
+                        "llm_with_filter": "LLM + Governor filter",
+                    },
+                    value=str(_gov_cfg.get("mode") or "disabled"),
+                    label="Governor mode",
+                ).classes("w-full md:w-72").props(
+                    "hint='disabled: Governor inactive | governor_only: rule-based entries on own schedule | llm_with_filter: LLM runs but Governor vetos/amends each trade' persistent-hint"
+                )
+                gov_schedule_select = ui.select(
+                    options={
+                        "timer": "Timer (fixed interval)",
+                        "on_close": "On close (all positions cleared)",
+                    },
+                    value=str(_gov_cfg.get("schedule") or "timer"),
+                    label="Entry schedule",
+                ).classes("w-full md:w-64").props(
+                    "hint='governor_only mode only — timer: check every N seconds; on_close: fire when all positions clear' persistent-hint"
+                )
+                _gov_interval_raw = _gov_cfg.get("entry_interval_seconds", 300.0)
+                gov_interval_input = ui.number(
+                    label="Entry interval (seconds)",
+                    value=float(_gov_interval_raw) if _gov_interval_raw is not None else 300.0,
+                    min=30,
+                    step=60,
+                    precision=0,
+                ).classes("w-full md:w-48").props(
+                    "hint='governor_only + timer mode: seconds between entry evaluations' persistent-hint suffix='s'"
+                )
+                _gov_notional_raw = _gov_cfg.get("notional_usd")
+                gov_notional_input = ui.number(
+                    label="Notional per trade (USDT)",
+                    value=float(_gov_notional_raw) if _gov_notional_raw is not None else None,
+                    min=1.0,
+                    step=10.0,
+                    precision=2,
+                ).classes("w-full md:w-48").props(
+                    "hint='Fixed USDT size per Governor entry (also used to amend LLM trades in filter mode)' persistent-hint clearable"
+                )
+                gov_trade_mode_select = ui.select(
+                    options={"isolated": "Isolated", "cross": "Cross"},
+                    value=str(_gov_cfg.get("trade_mode") or "isolated"),
+                    label="Trade mode",
+                ).classes("w-full md:w-40").props(
+                    "hint='Margin mode for Governor-opened positions' persistent-hint"
+                )
+            with ui.row().classes("w-full flex-wrap gap-4 items-start mt-1"):
+                _gov_tp_raw = _gov_cfg.get("tp_pct")
+                gov_tp_input = ui.number(
+                    label="Take profit (%)",
+                    value=float(_gov_tp_raw) if _gov_tp_raw is not None else None,
+                    min=0.01,
+                    step=0.1,
+                    precision=2,
+                ).classes("w-full md:w-40").props(
+                    "hint='Close when uplRatio ≥ this % (blank = none)' persistent-hint clearable"
+                )
+                _gov_sl_raw = _gov_cfg.get("sl_pct")
+                gov_sl_input = ui.number(
+                    label="Stop loss (%)",
+                    value=float(_gov_sl_raw) if _gov_sl_raw is not None else None,
+                    min=0.01,
+                    step=0.1,
+                    precision=2,
+                ).classes("w-full md:w-40").props(
+                    "hint='Close when uplRatio ≤ -X% (blank = none)' persistent-hint clearable"
+                )
+                _gov_rsi_os_raw = _gov_cfg.get("rsi_oversold", 35.0)
+                gov_rsi_oversold_input = ui.number(
+                    label="RSI oversold (BUY)",
+                    value=float(_gov_rsi_os_raw) if _gov_rsi_os_raw is not None else 35.0,
+                    min=1,
+                    max=49,
+                    step=1,
+                    precision=0,
+                ).classes("w-full md:w-40").props(
+                    "hint='BUY signal when RSI < this' persistent-hint"
+                )
+                _gov_rsi_ob_raw = _gov_cfg.get("rsi_overbought", 65.0)
+                gov_rsi_overbought_input = ui.number(
+                    label="RSI overbought (SELL)",
+                    value=float(_gov_rsi_ob_raw) if _gov_rsi_ob_raw is not None else 65.0,
+                    min=51,
+                    max=99,
+                    step=1,
+                    precision=0,
+                ).classes("w-full md:w-40").props(
+                    "hint='SELL signal when RSI > this' persistent-hint"
+                )
+                _gov_adx_raw = _gov_cfg.get("min_adx", 0.0)
+                gov_min_adx_input = ui.number(
+                    label="Min ADX",
+                    value=float(_gov_adx_raw) if _gov_adx_raw is not None else 0.0,
+                    min=0,
+                    max=100,
+                    step=5,
+                    precision=0,
+                ).classes("w-full md:w-32").props(
+                    "hint='Skip if ADX below this (0 = off)' persistent-hint"
+                )
+            with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                gov_require_htf_switch = ui.switch(
+                    "Require HTF trend alignment",
+                    value=bool(_gov_cfg.get("require_htf_trend", True)),
+                ).props("dense color=primary")
+                ui.label("HTF EMA50 > EMA200 for BUY / EMA50 < EMA200 for SELL.").classes("text-xs text-slate-500")
+            with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                gov_require_cmf_switch = ui.switch(
+                    "Require CMF confirmation",
+                    value=bool(_gov_cfg.get("require_cmf", True)),
+                ).props("dense color=primary")
+                ui.label("CMF must be positive for BUY and negative for SELL.").classes("text-xs text-slate-500")
+            ui.separator().classes("w-full my-4")
             ui.label("Candle settings").classes("text-sm text-slate-500")
             with ui.row().classes("w-full flex-wrap gap-4"):
                 ohlcv_fetch_limit_input = ui.number(
@@ -5910,6 +6029,24 @@ def register_pages(app: FastAPI) -> None:
                 "min_momentum_pct": max(0.0, _coerce(screener_min_momentum_input.value, 0.0, float)),
                 "min_hl_range_pct": max(0.0, _coerce(screener_min_hl_range_input.value, 0.0, float)),
             }
+            config["governor"] = {
+                "mode": str(gov_mode_select.value or "disabled"),
+                "schedule": str(gov_schedule_select.value or "timer"),
+                "entry_interval_seconds": max(30.0, _coerce(gov_interval_input.value, 300, float)),
+                "trade_mode": str(gov_trade_mode_select.value or "isolated"),
+                "notional_usd": float(gov_notional_input.value) if gov_notional_input.value not in (None, "") else None,
+                "tp_pct": float(gov_tp_input.value) if gov_tp_input.value not in (None, "") else None,
+                "sl_pct": float(gov_sl_input.value) if gov_sl_input.value not in (None, "") else None,
+                "rsi_oversold": float(gov_rsi_oversold_input.value or 35.0),
+                "rsi_overbought": float(gov_rsi_overbought_input.value or 65.0),
+                "min_adx": float(gov_min_adx_input.value or 0.0),
+                "require_htf_trend": bool(gov_require_htf_switch.value),
+                "require_cmf": bool(gov_require_cmf_switch.value),
+            }
+            try:
+                await save_governor_config(config["governor"])
+            except Exception as exc:  # pragma: no cover - db optional
+                ui.notify(f"Failed to persist governor config: {exc}", color="warning")
             app.state.runtime_config = config
             llm_service = getattr(app.state, "llm_service", None)
             if llm_service:
@@ -5921,6 +6058,7 @@ def register_pages(app: FastAPI) -> None:
                 market_service.set_wait_for_tp_sl(config.get("wait_for_tp_sl", False))
                 market_service.set_flip_llm_decision(config["guardrails"].get("flip_llm_decision", False))
                 market_service.set_screener_config(config["screener"])
+                market_service.set_governor_config(config["governor"])
                 await market_service.set_okx_flag(config.get("okx_api_flag"))
                 await market_service.set_sub_account(
                     config.get("okx_sub_account"),

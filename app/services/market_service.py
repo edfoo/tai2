@@ -314,6 +314,20 @@ class MarketService:
         self._llm_service: Any = None
         self._llm_mandate: dict[str, dict[str, Any]] = {}  # per-symbol active mandate
         self._llm_supervision_running: set[str] = set()  # prevents concurrent calls
+        # Governor: rule-based entry/exit + optional LLM trade filter.
+        # Stored separately from _strategy_config (lives in runtime_config["governor"]).
+        self._governor_config: dict[str, Any] = {}
+        # _governor_entering: per-symbol in-flight entry guard.
+        self._governor_entering: set[str] = set()
+        # _governor_in_position: symbols where Governor opened a trade.
+        #   value → {"side": "long"|"short", "pos_side": str|None}
+        self._governor_in_position: dict[str, dict[str, Any]] = {}
+        # Scheduling state (governor_only mode).
+        self._governor_last_entry_check: float = 0.0
+        # on_close mode: symbols that just had a Governor-close accepted.
+        self._governor_trigger_symbols: set[str] = set()
+        # on_close mode: were there any open positions on the previous tick?
+        self._governor_had_positions: bool = False
 
     async def start(self) -> None:
         """Launch the market snapshot poller and websocket consumers if not already running."""
@@ -1164,6 +1178,11 @@ class MarketService:
         self._strategy_config = config or {}
         self._emit_debug(f"Strategy config updated: {self._strategy_config}")
 
+    def set_governor_config(self, config: dict[str, Any]) -> None:
+        """Update the Governor configuration at runtime (called from CFG save)."""
+        self._governor_config = config or {}
+        self._emit_debug(f"Governor config updated: {self._governor_config}")
+
     def set_llm_service(self, llm_service: Any) -> None:
         """Inject the shared LLMService instance for continuous supervision calls."""
         self._llm_service = llm_service
@@ -1992,6 +2011,331 @@ class MarketService:
         except (IndexError, TypeError, ValueError):
             return None
         return (last_price - range_low) / (range_high - range_low)
+
+    # ── Governor ──────────────────────────────────────────────────────────────
+
+    def _governor_evaluate_signal(self, symbol: str) -> str | None:
+        """Return "buy", "sell", or None based on the current snapshot indicators.
+
+        Used both by ``_check_governor`` (standalone entries) and by
+        ``handle_llm_decision`` (LLM trade filter).
+
+        A signal fires only when ALL enabled filters agree:
+          - RSI below oversold threshold (buy) or above overbought threshold (sell)
+          - CMF positive (buy) / negative (sell) when require_cmf is True
+          - HTF EMA50 > EMA200 (buy) / < EMA200 (sell) when require_htf_trend is True
+          - ADX ≥ min_adx when min_adx > 0
+        Returns None when indicators are neutral or any filter disagrees.
+        """
+        gov = self._governor_config
+        rsi_oversold = self._extract_float(gov.get("rsi_oversold")) or 35.0
+        rsi_overbought = self._extract_float(gov.get("rsi_overbought")) or 65.0
+        require_htf_trend = bool(gov.get("require_htf_trend", True))
+        require_cmf = bool(gov.get("require_cmf", True))
+        min_adx = self._extract_float(gov.get("min_adx")) or 0.0
+
+        snapshot = self._last_full_snapshot
+        if not snapshot:
+            return None
+        market_data: dict[str, Any] = snapshot.get("market_data") or {}
+        sym_data = market_data.get(symbol) or {}
+        indicators = sym_data.get("indicators") or {}
+
+        rsi = self._extract_float(indicators.get("rsi"))
+        cmf = self._extract_float((indicators.get("cmf") or {}).get("value"))
+        adx = self._extract_float((indicators.get("adx") or {}).get("value"))
+
+        htf_indicators = sym_data.get("indicators_htf") or indicators
+        htf_ma = htf_indicators.get("moving_averages") or {}
+        htf_ema50 = self._extract_float(htf_ma.get("ema_50"))
+        htf_ema200 = self._extract_float(htf_ma.get("ema_200"))
+        htf_bullish = htf_ema50 is not None and htf_ema200 is not None and htf_ema50 > htf_ema200
+        htf_bearish = htf_ema50 is not None and htf_ema200 is not None and htf_ema50 < htf_ema200
+
+        if rsi is None:
+            return None
+        if min_adx > 0 and (adx is None or adx < min_adx):
+            return None
+
+        buy_signal = (
+            rsi < rsi_oversold
+            and (not require_cmf or (cmf is not None and cmf > 0))
+            and (not require_htf_trend or htf_bullish)
+        )
+        sell_signal = (
+            rsi > rsi_overbought
+            and (not require_cmf or (cmf is not None and cmf < 0))
+            and (not require_htf_trend or htf_bearish)
+        )
+        if buy_signal:
+            return "buy"
+        if sell_signal:
+            return "sell"
+        return None
+
+    async def _check_governor(self) -> None:
+        """Standalone Governor entry/exit loop (governor_only mode).
+
+        Runs every ``_positions_refresh_interval`` seconds.
+
+        Schedule modes
+        --------------
+        timer    – evaluate entries every ``entry_interval_seconds``.
+        on_close – evaluate entries globally once all positions have been closed
+                   (transitions from having positions → having none).
+
+        Exit management
+        ---------------
+        Monitors ``uplRatio`` on every tick (regardless of schedule mode) and
+        submits a market reduce-only close when TP or SL % is hit.
+        """
+        gov = self._governor_config
+        mode = str(gov.get("mode") or "disabled").lower()
+        if mode != "governor_only":
+            return
+
+        snapshot = self._last_full_snapshot
+        if not snapshot:
+            return
+
+        positions: list[dict[str, Any]] = snapshot.get("positions") or []
+        active_symbols = {
+            str(p.get("instId", "")).upper()
+            for p in positions
+            if isinstance(p, dict) and self._extract_float(p.get("pos"))
+        }
+        has_any_position = bool(active_symbols)
+
+        # Prune stale tracking (position settled externally)
+        for sym in list(self._governor_in_position):
+            if sym not in active_symbols:
+                self._emit_debug(f"Governor: {sym} no longer in positions — clearing tracking")
+                self._governor_in_position.pop(sym, None)
+
+        trade_mode = str(gov.get("trade_mode") or "isolated").lower()
+        if trade_mode not in {"isolated", "cross"}:
+            trade_mode = "isolated"
+        notional_usd = self._extract_float(gov.get("notional_usd"))
+        tp_pct = self._extract_float(gov.get("tp_pct"))
+        sl_pct = self._extract_float(gov.get("sl_pct"))
+
+        market_data: dict[str, Any] = snapshot.get("market_data") or {}
+
+        # ── EXIT: TP/SL check (every tick) ───────────────────────────────────
+        for symbol in list(self._governor_in_position):
+            if symbol not in active_symbols:
+                continue
+            pos_entry = next(
+                (
+                    p for p in positions
+                    if isinstance(p, dict)
+                    and str(p.get("instId", "")).upper() == symbol
+                    and self._extract_float(p.get("pos"))
+                ),
+                None,
+            )
+            if pos_entry is None:
+                continue
+            upl_ratio = self._extract_float(pos_entry.get("uplRatio"))
+            upl_pct = (upl_ratio * 100.0) if upl_ratio is not None else None
+            hit_tp = tp_pct is not None and upl_pct is not None and upl_pct >= tp_pct
+            hit_sl = sl_pct is not None and upl_pct is not None and upl_pct <= -abs(sl_pct)
+            if hit_tp or hit_sl:
+                reason = "TP" if hit_tp else "SL"
+                pos_val = self._extract_float(pos_entry.get("pos")) or 0.0
+                pos_side_raw = str(pos_entry.get("posSide", "")).lower()
+                entry_trade_mode = str(pos_entry.get("mgnMode") or "").lower() or trade_mode
+                if pos_side_raw == "long":
+                    close_side, eff_pos_side = "sell", "long"
+                elif pos_side_raw == "short":
+                    close_side, eff_pos_side = "buy", "short"
+                else:
+                    close_side = "sell" if pos_val > 0 else "buy"
+                    eff_pos_side = None
+                contracts = abs(pos_val)
+                self._emit_debug(
+                    f"Governor {reason}: {symbol} upl={upl_pct:.2f}% — "
+                    f"closing {close_side} {contracts} contracts"
+                )
+                self._governor_in_position.pop(symbol, None)
+                asyncio.create_task(
+                    self._governor_close_position(symbol, close_side, eff_pos_side, contracts, entry_trade_mode),
+                    name=f"governor-close-{symbol}",
+                )
+            else:
+                self._emit_debug(
+                    f"Governor: {symbol} holding — upl={upl_pct:.2f}% "
+                    f"(tp={tp_pct}% sl={sl_pct and -abs(sl_pct)!r}%)"
+                )
+
+        # ── ENTRY scheduling gate ─────────────────────────────────────────────
+        schedule = str(gov.get("schedule") or "timer").lower()
+        entry_interval = float(gov.get("entry_interval_seconds") or 300.0)
+        _now = time.monotonic()
+
+        if schedule == "timer":
+            run_entry = _now - self._governor_last_entry_check >= entry_interval
+            if run_entry:
+                self._governor_last_entry_check = _now
+                self._emit_debug(f"Governor: timer entry check (every {entry_interval:.0f}s)")
+        else:  # on_close
+            # Fire when transitioning from positions → no positions.
+            if self._governor_had_positions and not has_any_position:
+                run_entry = True
+                self._emit_debug("Governor: on-close entry check — all positions cleared")
+            else:
+                run_entry = False
+        self._governor_had_positions = has_any_position
+
+        if not run_entry:
+            return
+
+        if notional_usd is None or notional_usd <= 0:
+            self._emit_debug("Governor: notional_usd not configured — skipping entry")
+            return
+
+        for symbol in list(self.symbols):
+            if symbol in self._governor_entering:
+                self._emit_debug(f"Governor: {symbol} entry in-flight — skipping")
+                continue
+            if symbol in self._governor_in_position:
+                self._emit_debug(f"Governor: {symbol} already tracked — skipping entry")
+                continue
+            if symbol in active_symbols:
+                self._emit_debug(f"Governor: {symbol} has external position — skipping")
+                continue
+
+            signal = self._governor_evaluate_signal(symbol)
+            if signal is None:
+                self._emit_debug(f"Governor: {symbol} — no entry signal")
+                continue
+
+            sym_data = market_data.get(symbol) or {}
+            ticker = sym_data.get("ticker") or self._latest_ticker.get(symbol) or {}
+            last_price = self._extract_float(ticker.get("last") or ticker.get("lastPr"))
+            if not last_price or last_price <= 0:
+                self._emit_debug(f"Governor: {symbol} no last price — skipping")
+                continue
+
+            ct_val = self._contract_value(symbol)
+            raw_size = notional_usd / last_price
+            contracts = raw_size / ct_val if ct_val > 0 else raw_size
+            spec = self._instrument_specs.get(symbol.upper()) or {}
+            min_size = self._extract_float(spec.get("min_size") or spec.get("lot_size")) or 0.0
+            if min_size > 0 and contracts < min_size:
+                self._emit_debug(
+                    f"Governor: {symbol} contracts {contracts:.6f} below min {min_size} — skipping"
+                )
+                continue
+
+            dual_side = any(
+                isinstance(p, dict) and p.get("posSide") in {"long", "short"}
+                for p in positions
+            )
+            pos_side = ("long" if signal == "buy" else "short") if dual_side else None
+
+            tp_price: float | None = None
+            sl_price: float | None = None
+            if tp_pct and tp_pct > 0:
+                tp_price = last_price * (1 + tp_pct / 100.0) if signal == "buy" else last_price * (1 - tp_pct / 100.0)
+            if sl_pct and sl_pct > 0:
+                sl_price = last_price * (1 - sl_pct / 100.0) if signal == "buy" else last_price * (1 + sl_pct / 100.0)
+            attach: list[dict[str, Any]] | None = None
+            if tp_price or sl_price:
+                attach = self._build_attach_algo_orders(
+                    take_profit_price=tp_price,
+                    stop_loss_price=sl_price,
+                )
+
+            self._emit_debug(
+                f"Governor ENTRY: {symbol} {signal.upper()} contracts={contracts:.6f} "
+                f"notional={notional_usd} last={last_price} tp={tp_price} sl={sl_price}"
+            )
+            self._governor_entering.add(symbol)
+            asyncio.create_task(
+                self._governor_open_position(
+                    symbol=symbol,
+                    side=signal,
+                    pos_side=pos_side,
+                    contracts=contracts,
+                    trade_mode=trade_mode,
+                    attach_algo_orders=attach,
+                ),
+                name=f"governor-entry-{symbol}",
+            )
+
+    async def _governor_open_position(
+        self,
+        symbol: str,
+        side: str,
+        pos_side: str | None,
+        contracts: float,
+        trade_mode: str,
+        attach_algo_orders: list[dict[str, Any]] | None,
+    ) -> None:
+        """Submit a Governor entry order and record position tracking on success."""
+        coid = self._generate_client_order_id("gov")
+        try:
+            result = await self._submit_order(
+                symbol=symbol,
+                side=side,
+                pos_side=pos_side,
+                size=contracts,
+                trade_mode=trade_mode,
+                order_type="market",
+                reduce_only=False,
+                client_order_id=coid,
+                attach_algo_orders=attach_algo_orders,
+            )
+            if result is None:
+                self._emit_debug(f"Governor: {symbol} — trade API unavailable")
+                return
+            order_result = result[0] if isinstance(result, tuple) else result
+            if order_result:
+                self._emit_debug(f"Governor: {symbol} entry accepted ({side})")
+                self._governor_in_position[symbol] = {
+                    "side": "long" if side == "buy" else "short",
+                    "pos_side": pos_side,
+                }
+            else:
+                self._emit_debug(f"Governor: {symbol} entry rejected")
+        except Exception as exc:
+            logger.warning("Governor entry error for %s: %s", symbol, exc)
+        finally:
+            self._governor_entering.discard(symbol)
+
+    async def _governor_close_position(
+        self,
+        symbol: str,
+        close_side: str,
+        pos_side: str | None,
+        contracts: float,
+        trade_mode: str,
+    ) -> None:
+        """Submit a Governor TP/SL close order."""
+        coid = self._generate_client_order_id("gov-c")
+        try:
+            result = await self._submit_order(
+                symbol=symbol,
+                side=close_side,
+                pos_side=pos_side,
+                size=contracts,
+                trade_mode=trade_mode or "isolated",
+                order_type="market",
+                reduce_only=True,
+                client_order_id=coid,
+                attach_algo_orders=None,
+            )
+            if result is None:
+                self._emit_debug(f"Governor: {symbol} close — trade API unavailable")
+            else:
+                order_result = result[0] if isinstance(result, tuple) else result
+                if order_result:
+                    self._emit_debug(f"Governor: {symbol} close accepted")
+                else:
+                    self._emit_debug(f"Governor: {symbol} close rejected")
+        except Exception as exc:
+            logger.warning("Governor close error for %s: %s", symbol, exc)
 
     async def _check_alternator(self) -> None:
         """Oscillate between long/short positions on profit and loss thresholds.
@@ -3494,6 +3838,12 @@ class MarketService:
                 raise
             except Exception as exc:  # pragma: no cover - best-effort
                 logger.debug("Alternator check error: %s", exc)
+            try:
+                await self._check_governor()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # pragma: no cover - best-effort
+                logger.debug("Governor check error: %s", exc)
             await asyncio.sleep(self._positions_refresh_interval)
 
     async def _schedule_patch_publish(self) -> None:
@@ -6118,6 +6468,50 @@ class MarketService:
             self._decision_state[symbol] = {"action": action, "timestamp": now}
             self._emit_debug(summary)
             return False
+
+        # ── Governor LLM filter (llm_with_filter mode) ───────────────────────
+        _gov = self._governor_config
+        if str(_gov.get("mode") or "disabled").lower() == "llm_with_filter":
+            gov_signal = self._governor_evaluate_signal(symbol)
+            llm_direction = "buy" if action == "BUY" else "sell"
+            if gov_signal != llm_direction:
+                veto_reason = (
+                    f"Governor vetoed LLM {action} for {symbol}: "
+                    f"indicator signal={gov_signal!r} (full signal required)"
+                )
+                self._emit_debug(veto_reason)
+                self._record_execution_feedback(
+                    symbol,
+                    veto_reason,
+                    level="warning",
+                    meta={"action": action, "governor_signal": gov_signal},
+                )
+                return False
+            # Governor agrees — amend trade with Governor's TP/SL if configured.
+            gov_tp_pct = self._extract_float(_gov.get("tp_pct"))
+            gov_sl_pct = self._extract_float(_gov.get("sl_pct"))
+            gov_notional = self._extract_float(_gov.get("notional_usd"))
+            _amended: list[str] = []
+            if gov_notional and gov_notional > 0:
+                decision = dict(decision)
+                decision["notional_usd"] = gov_notional
+                _amended.append(f"notional_usd={gov_notional}")
+            if last_price and last_price > 0 and (gov_tp_pct or gov_sl_pct):
+                decision = dict(decision)
+                if gov_tp_pct and gov_tp_pct > 0:
+                    tp_val = last_price * (1 + gov_tp_pct / 100.0) if action == "BUY" else last_price * (1 - gov_tp_pct / 100.0)
+                    decision["take_profit"] = tp_val
+                    _amended.append(f"take_profit={tp_val:.4f}")
+                if gov_sl_pct and gov_sl_pct > 0:
+                    sl_val = last_price * (1 - gov_sl_pct / 100.0) if action == "BUY" else last_price * (1 + gov_sl_pct / 100.0)
+                    decision["stop_loss"] = sl_val
+                    _amended.append(f"stop_loss={sl_val:.4f}")
+            if _amended:
+                self._emit_debug(
+                    f"Governor approved LLM {action} for {symbol}; amended: {', '.join(_amended)}"
+                )
+            else:
+                self._emit_debug(f"Governor approved LLM {action} for {symbol} (no amendments)")
 
         if wait_for_tp_sl and current_side in {"LONG", "SHORT"}:
             closing_action = (
