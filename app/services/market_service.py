@@ -3424,12 +3424,6 @@ class MarketService:
             except Exception as exc:  # pragma: no cover - best-effort
                 logger.debug("Skimming check error: %s", exc)
             try:
-                await self._check_shotgun()
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:  # pragma: no cover - best-effort
-                logger.debug("Shotgun check error: %s", exc)
-            try:
                 await self._check_protector()
             except asyncio.CancelledError:
                 raise
@@ -3527,6 +3521,12 @@ class MarketService:
                 patched["ticker"] = self._latest_ticker[primary]
         self._last_full_snapshot = patched
         await self.state_service.set_market_snapshot(patched)
+        try:
+            await self._check_shotgun()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # pragma: no cover - best-effort
+            logger.debug("Shotgun check error (patch): %s", exc)
 
     @staticmethod
     def _normalize_symbols(symbols: list[str] | None) -> list[str]:
