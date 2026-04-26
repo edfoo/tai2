@@ -2938,6 +2938,9 @@ def register_pages(app: FastAPI) -> None:
             "dynamic_threshold": False,
             "dynamic_threshold_factor": 1.0,
             "dynamic_threshold_lookback": 20,
+            "dynamic_loss_threshold": False,
+            "dynamic_loss_factor": 1.0,
+            "dynamic_loss_lookback": 20,
             "trailing_reverse": False,
             "trailing_pullback_pct": 10.0,
             "trailing_close": False,
@@ -3445,6 +3448,35 @@ def register_pages(app: FastAPI) -> None:
                                 "hint='LLM supervises live Alternator positions: can pause, close, or cap reversals based on market signals' persistent-hint dense color=primary"
                             )
                         ui.label("Restart at Loss").classes("text-xs font-semibold text-slate-600 mt-1")
+                        with ui.row().classes("gap-4 items-center mb-2"):
+                            altr_dynamic_loss_switch = ui.switch(
+                                "Dynamic Loss Threshold",
+                                value=bool(alternator.get("dynamic_loss_threshold", False)),
+                            ).props(
+                                "hint='Compute loss threshold from average HTF candle amplitude: (H−L)/mid × 100' persistent-hint dense color=primary"
+                            )
+                            _altr_dlf_raw = alternator.get("dynamic_loss_factor", 1.0)
+                            altr_dynamic_loss_factor = ui.number(
+                                label="Factor",
+                                value=float(_altr_dlf_raw) if _altr_dlf_raw is not None else 1.0,
+                                min=0.1,
+                                max=10.0,
+                                step=0.1,
+                                precision=2,
+                            ).classes("w-28").props(
+                                "hint='threshold = avg_amplitude × factor' persistent-hint suffix='×'"
+                            ).bind_enabled_from(altr_dynamic_loss_switch, "value")
+                            _altr_dll_raw = alternator.get("dynamic_loss_lookback", 20)
+                            altr_dynamic_loss_lookback = ui.number(
+                                label="Lookback",
+                                value=int(_altr_dll_raw) if _altr_dll_raw is not None else 20,
+                                min=3,
+                                max=200,
+                                step=1,
+                                precision=0,
+                            ).classes("w-28").props(
+                                "hint='HTF bars used for amplitude average' persistent-hint suffix='bars'"
+                            ).bind_enabled_from(altr_dynamic_loss_switch, "value")
                         with ui.row().classes("gap-4 items-start mb-2"):
                             _altr_rlp_raw = alternator.get("restart_at_loss_pct")
                             altr_restart_loss_pct = ui.number(
@@ -3454,9 +3486,9 @@ def register_pages(app: FastAPI) -> None:
                                 step=0.1,
                                 precision=2,
                             ).classes("w-48").props(
-                                "hint='Flip back when position PnL <= -X% (blank = disabled)' "
+                                "hint='Flip back when position PnL <= -X% — ignored when Dynamic Loss Threshold is ON (blank = disabled)' "
                                 "persistent-hint clearable stack-label"
-                            )
+                            ).bind_enabled_from(altr_dynamic_loss_switch, "value", backward=lambda v: not v)
                             _altr_rlu_raw = alternator.get("restart_at_loss_usd")
                             altr_restart_loss_usd = ui.number(
                                 label="Restart at USDT Loss",
@@ -3621,6 +3653,9 @@ def register_pages(app: FastAPI) -> None:
                     "dynamic_threshold": bool(altr_dynamic_switch.value),
                     "dynamic_threshold_factor": float(altr_dynamic_factor.value or 1.0),
                     "dynamic_threshold_lookback": int(altr_dynamic_lookback.value or 20),
+                    "dynamic_loss_threshold": bool(altr_dynamic_loss_switch.value),
+                    "dynamic_loss_factor": float(altr_dynamic_loss_factor.value or 1.0),
+                    "dynamic_loss_lookback": int(altr_dynamic_loss_lookback.value or 20),
                     "trailing_reverse": bool(altr_trailing_switch.value),
                     "trailing_pullback_pct": float(altr_trailing_pullback_pct.value or 10.0),
                     "trailing_close": bool(altr_trailing_close_switch.value),

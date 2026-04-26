@@ -1992,6 +1992,9 @@ class MarketService:
         dynamic_threshold = bool(alternator.get("dynamic_threshold", False))
         dynamic_factor = abs(self._extract_float(alternator.get("dynamic_threshold_factor")) or 1.0)
         dynamic_lookback = int(alternator.get("dynamic_threshold_lookback") or 20)
+        dynamic_loss_threshold = bool(alternator.get("dynamic_loss_threshold", False))
+        dynamic_loss_factor = abs(self._extract_float(alternator.get("dynamic_loss_factor")) or 1.0)
+        dynamic_loss_lookback = int(alternator.get("dynamic_loss_lookback") or 20)
         candle_position_filter = bool(alternator.get("candle_position_filter", False))
         candle_position_long_max = float(alternator.get("candle_position_long_max") or 0.75)
         candle_position_short_min = float(alternator.get("candle_position_short_min") or 0.25)
@@ -2030,6 +2033,7 @@ class MarketService:
             and restart_loss_pct is None
             and restart_loss_usd is None
             and not dynamic_threshold
+            and not dynamic_loss_threshold
             and not trailing_close
             and not close_on_max_reversals
         ):
@@ -2108,6 +2112,22 @@ class MarketService:
                     self._emit_debug(
                         f"Alternator: {symbol} dynamic threshold: insufficient candle data, "
                         f"using static ({_rev_profit_pct_static!r}%)"
+                    )
+
+            # ── Per-symbol effective loss threshold ──────────────────────────
+            _restart_loss_pct_effective = restart_loss_pct
+            if dynamic_loss_threshold:
+                _dyn_loss_amp = self._compute_avg_amplitude_pct(symbol, lookback=dynamic_loss_lookback)
+                if _dyn_loss_amp is not None:
+                    _restart_loss_pct_effective = _dyn_loss_amp * dynamic_loss_factor
+                    self._emit_debug(
+                        f"Alternator: {symbol} dynamic restart_loss_pct = {_restart_loss_pct_effective:.3f}% "
+                        f"(avg_amplitude={_dyn_loss_amp:.3f}% \u00d7 factor={dynamic_loss_factor})"
+                    )
+                else:
+                    self._emit_debug(
+                        f"Alternator: {symbol} dynamic loss threshold: insufficient candle data, "
+                        f"using static ({restart_loss_pct!r}%)"
                     )
 
             upl_ratio = self._extract_float(pos.get("uplRatio"))
@@ -2594,9 +2614,9 @@ class MarketService:
 
             # ── Priority 4: Restart at loss ───────────────────────────────────
             hit_restart_pct = (
-                restart_loss_pct is not None
+                _restart_loss_pct_effective is not None
                 and upl_pct is not None
-                and upl_pct <= -abs(restart_loss_pct)
+                and upl_pct <= -abs(_restart_loss_pct_effective)
             )
             hit_restart_usd = (
                 restart_loss_usd is not None
@@ -2606,7 +2626,7 @@ class MarketService:
             if hit_restart_pct or hit_restart_usd:
                 will_flip = max_reversals is None or flip_count < max_reversals
                 restart_trigger = (
-                    f"upl_pct={upl_pct:.2f}% <= -{abs(restart_loss_pct):.2f}%"
+                    f"upl_pct={upl_pct:.2f}% <= -{abs(_restart_loss_pct_effective):.2f}%"
                     if hit_restart_pct
                     else f"upl_usd={upl_usd:.4f} <= -{abs(restart_loss_usd):.4f}"
                 )
