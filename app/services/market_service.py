@@ -1339,13 +1339,6 @@ class MarketService:
         snapshot = self._last_full_snapshot
         if not snapshot:
             return
-        positions: list[dict[str, Any]] = snapshot.get("positions") or []
-        open_positions = [
-            p for p in positions
-            if isinstance(p, dict) and self._extract_float(p.get("pos"))
-        ]
-        if not open_positions:
-            return
         current_equity = self._extract_float(snapshot.get("account_equity"))
         if current_equity is None:
             return
@@ -1387,13 +1380,27 @@ class MarketService:
             return
 
         trigger_reason = "TP" if hit_tp else "SL"
+        positions: list[dict[str, Any]] = snapshot.get("positions") or []
+        if not positions:
+            self._emit_debug(f"Shotgun {trigger_reason}: no open positions to close")
+            self._shotgun_fired = True
+            return
+
         self._shotgun_fired = True
         self._emit_debug(
             f"Shotgun {trigger_reason} triggered: delta={delta_usd:+.4f} USDT ({delta_pct:+.4f}%); "
             f"closing {'negative-PnL' if (hit_sl and close_only_negative) else 'all'} positions"
         )
 
-        for pos in open_positions:
+        for pos in positions:
+            if not isinstance(pos, dict):
+                continue
+            symbol = str(pos.get("instId", "")).upper()
+            if not symbol:
+                continue
+            pos_val = self._extract_float(pos.get("pos"))
+            if not pos_val or pos_val == 0:
+                continue
 
             # SL + close_only_negative: skip positions with positive unrealized PnL
             if hit_sl and close_only_negative:
