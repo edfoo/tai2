@@ -4362,6 +4362,7 @@ def register_pages(app: FastAPI) -> None:
         guardrails.setdefault("isolated_margin_symbol_seeds_usd", {})
         guardrails.setdefault("isolated_wallet_bootstrap_pct", None)
         guardrails.setdefault("atr_risk_per_trade_pct", None)
+        guardrails.setdefault("cvd_guard", {"enabled": False, "lookback": 10, "min_slope_pct": 0.0})
         guardrails.setdefault("require_reward_risk_ratio", True)
         guardrails.setdefault("require_protection", True)
         guardrails.setdefault("footprint", {
@@ -4595,6 +4596,32 @@ def register_pages(app: FastAPI) -> None:
                     placeholder="e.g. 1",
                 ).classes("w-full md:w-48").props(
                     "clearable hint='Cap position size so a full stop-out loses at most this % of equity (1% risk model). Leave blank to disable.' persistent-hint"
+                )
+            with ui.row().classes("w-full flex-wrap gap-4 items-start"):
+                _cvd_cfg_ui = guardrails.get("cvd_guard") or {}
+                cvd_guard_enabled_toggle = ui.switch(
+                    "CVD Guard Enabled",
+                    value=bool(_cvd_cfg_ui.get("enabled", False)),
+                ).props(
+                    "hint='Block BUY/SELL when CVD momentum contradicts the trade direction' persistent-hint"
+                )
+                cvd_guard_lookback_input = ui.number(
+                    label="CVD Lookback Bars",
+                    value=_cvd_cfg_ui.get("lookback", 10),
+                    step=1,
+                    min=2,
+                    max=200,
+                ).classes("w-full md:w-40").props(
+                    "hint='Recent CVD series bars used to measure slope' persistent-hint"
+                )
+                cvd_guard_min_slope_input = ui.number(
+                    label="CVD Min Slope %",
+                    value=_cvd_cfg_ui.get("min_slope_pct", 0.0),
+                    step=0.5,
+                    min=0.0,
+                    max=100,
+                ).classes("w-full md:w-40").props(
+                    "hint='Minimum % change in CVD to count as directional (0 = any). Neutral CVD never blocks.' persistent-hint"
                 )
             with ui.row().classes("w-full flex-wrap gap-4"):
                 min_hold_seconds_input = ui.number(
@@ -5866,6 +5893,15 @@ def register_pages(app: FastAPI) -> None:
                 "max_position_pct": new_max_pct,
                 "daily_loss_limit_pct": new_daily_loss_limit,
                 "atr_risk_per_trade_pct": _safe_float(atr_risk_per_trade_input.value),
+                "cvd_guard": {
+                    "enabled": bool(cvd_guard_enabled_toggle.value),
+                    "lookback": _coerce(
+                        cvd_guard_lookback_input.value,
+                        (guardrails.get("cvd_guard") or {}).get("lookback", 10),
+                        int,
+                    ),
+                    "min_slope_pct": _safe_float(cvd_guard_min_slope_input.value) or 0.0,
+                },
                 "min_hold_seconds": _coerce(
                     min_hold_seconds_input.value,
                     guardrails.get("min_hold_seconds", 180),

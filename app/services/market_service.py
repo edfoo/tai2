@@ -6570,6 +6570,67 @@ class MarketService:
             else:
                 self._emit_debug(f"Launcher approved LLM {action} for {symbol} (no amendments)")
 
+        # ── CVD / Order-Flow Guard ────────────────────────────────────────────
+        # Implements spec section 3: Order Flow & Heatmap Integration.
+        # Validates that CVD momentum (slope of the recent cvd_series) agrees
+        # with the LLM's intended direction.  Neutral CVD is never a blocker;
+        # only a clear conflict (bearish CVD + BUY, or bullish CVD + SELL) vetoes.
+        _cvd_cfg = guardrails.get("cvd_guard") or {}
+        if _cvd_cfg.get("enabled") and action in ("BUY", "SELL"):
+            _cvd_lookback = max(2, int(self._extract_float(_cvd_cfg.get("lookback")) or 10))
+            _cvd_min_slope = self._extract_float(_cvd_cfg.get("min_slope_pct")) or 0.0
+            _snap_cvd = self._last_full_snapshot
+            _cvd_series = (
+                ((_snap_cvd.get("market_data") or {}).get(symbol) or {})
+                .get("custom_metrics", {})
+                .get("cvd_series")
+                if _snap_cvd
+                else None
+            )
+            if isinstance(_cvd_series, list) and len(_cvd_series) >= 2:
+                _window = _cvd_series[-_cvd_lookback:]
+                _cvd_first, _cvd_last = _window[0], _window[-1]
+                _denom = max(abs(_cvd_first), 1.0)
+                _slope_pct = (_cvd_last - _cvd_first) / _denom * 100.0
+                if _slope_pct > _cvd_min_slope:
+                    _cvd_trend = "bullish"
+                elif _slope_pct < -_cvd_min_slope:
+                    _cvd_trend = "bearish"
+                else:
+                    _cvd_trend = "neutral"
+                _cvd_conflict = (
+                    (action == "BUY" and _cvd_trend == "bearish")
+                    or (action == "SELL" and _cvd_trend == "bullish")
+                )
+                if _cvd_conflict:
+                    _cvd_reason = (
+                        f"CVD guard vetoed {action} for {symbol}: "
+                        f"cvd_trend={_cvd_trend} (slope={_slope_pct:+.1f}% over "
+                        f"{len(_window)} bars) conflicts with LLM direction"
+                    )
+                    self._emit_debug(_cvd_reason)
+                    self._record_execution_feedback(
+                        symbol,
+                        _cvd_reason,
+                        level="warning",
+                        meta={
+                            "action": action,
+                            "cvd_trend": _cvd_trend,
+                            "cvd_slope_pct": round(_slope_pct, 2),
+                        },
+                    )
+                    return False
+                else:
+                    self._emit_debug(
+                        f"{symbol} CVD guard: trend={_cvd_trend} slope={_slope_pct:+.1f}% "
+                        f"— aligned with {action}; proceeding"
+                    )
+            else:
+                self._emit_debug(
+                    f"{symbol} CVD guard: insufficient CVD data "
+                    f"(series len={len(_cvd_series) if isinstance(_cvd_series, list) else 'none'}); skipping"
+                )
+
         if wait_for_tp_sl and current_side in {"LONG", "SHORT"}:
             closing_action = (
                 (current_side == "LONG" and action == "SELL")
