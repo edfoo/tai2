@@ -4361,6 +4361,7 @@ def register_pages(app: FastAPI) -> None:
         guardrails.setdefault("isolated_margin_max_transfer_usd", None)
         guardrails.setdefault("isolated_margin_symbol_seeds_usd", {})
         guardrails.setdefault("isolated_wallet_bootstrap_pct", None)
+        guardrails.setdefault("atr_risk_per_trade_pct", None)
         guardrails.setdefault("require_reward_risk_ratio", True)
         guardrails.setdefault("require_protection", True)
         guardrails.setdefault("footprint", {
@@ -4584,6 +4585,16 @@ def register_pages(app: FastAPI) -> None:
                     max=100,
                 ).classes("w-full md:w-48").props(
                     "hint='Soft kill switch when daily drawdown breaches this percent (enter 3 for 3%)' persistent-hint"
+                )
+                atr_risk_per_trade_input = ui.number(
+                    label="ATR Risk Per Trade %",
+                    value=guardrails.get("atr_risk_per_trade_pct"),
+                    step=0.1,
+                    min=0.0,
+                    max=10,
+                    placeholder="e.g. 1",
+                ).classes("w-full md:w-48").props(
+                    "clearable hint='Cap position size so a full stop-out loses at most this % of equity (1% risk model). Leave blank to disable.' persistent-hint"
                 )
             with ui.row().classes("w-full flex-wrap gap-4"):
                 min_hold_seconds_input = ui.number(
@@ -5854,6 +5865,7 @@ def register_pages(app: FastAPI) -> None:
                 ),
                 "max_position_pct": new_max_pct,
                 "daily_loss_limit_pct": new_daily_loss_limit,
+                "atr_risk_per_trade_pct": _safe_float(atr_risk_per_trade_input.value),
                 "min_hold_seconds": _coerce(
                     min_hold_seconds_input.value,
                     guardrails.get("min_hold_seconds", 180),

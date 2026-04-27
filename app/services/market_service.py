@@ -746,6 +746,7 @@ class MarketService:
             open_interest = await self._fetch_open_interest(symbol)
             ohlcv = await self._fetch_ohlcv(symbol)
             indicators = self._compute_indicators(ohlcv)
+            indicators["structure"] = self._compute_structure(ohlcv)
             ohlcv_htf = await self._fetch_ohlcv_htf(symbol)
             if ohlcv_htf:
                 htf_bar, _ = self._HTF_MAP.get(self._ohlc_bar, ("", 0))
@@ -4396,6 +4397,134 @@ class MarketService:
         }
         return indicators
 
+    @staticmethod
+    def _compute_structure(ohlcv: list[list[Any]], swing_lookback: int = 5) -> dict[str, Any]:
+        """Detect swing highs/lows, liquidity sweeps, and Market Structure Shifts (MSS).
+
+        A swing high is a candle whose high is the highest within ``swing_lookback``
+        candles on each side.  A swing low is the symmetric opposite.
+
+        A **liquidity sweep** occurs when price wicks below a recent swing low (long
+        sweep) or above a recent swing high (short sweep) and then closes back inside
+        the range — indicating stop-loss hunting.
+
+        A **Market Structure Shift (MSS)** is confirmed on the *next candle* after
+        the sweep candle: the close must be back above the swept swing low (bullish
+        MSS) or below the swept swing high (bearish MSS).
+
+        Returns
+        -------
+        dict with:
+          swing_highs   – list of {index, price, ts_ms} for recent pivot highs (newest last)
+          swing_lows    – list of {index, price, ts_ms} for recent pivot lows (newest last)
+          last_sweep    – {direction, level, candle_index, ts_ms} | None
+          mss_confirmed – bool: True when the candle immediately after the sweep
+                          closes on the "recovery" side of the swept level
+          mss_direction – "bullish" | "bearish" | None
+        """
+        empty: dict[str, Any] = {
+            "swing_highs": [],
+            "swing_lows": [],
+            "last_sweep": None,
+            "mss_confirmed": False,
+            "mss_direction": None,
+        }
+        if not ohlcv or len(ohlcv) < swing_lookback * 2 + 3:
+            return empty
+
+        normalized = [row[:6] for row in ohlcv if len(row) >= 6]
+        if not normalized:
+            return empty
+
+        highs = [float(r[2]) for r in normalized]
+        lows = [float(r[3]) for r in normalized]
+        closes = [float(r[4]) for r in normalized]
+        ts_list = [float(r[0]) for r in normalized]
+        n = len(normalized)
+
+        # ── Pivot detection ──────────────────────────────────────────────────
+        swing_highs: list[dict[str, Any]] = []
+        swing_lows: list[dict[str, Any]] = []
+        lb = swing_lookback
+        # Leave the last ``lb`` candles unpinned (not enough right-side context yet)
+        for i in range(lb, n - lb):
+            left_h = highs[i - lb : i]
+            right_h = highs[i + 1 : i + lb + 1]
+            if highs[i] > max(left_h) and highs[i] > max(right_h):
+                swing_highs.append({"index": i, "price": highs[i], "ts_ms": ts_list[i]})
+            left_l = lows[i - lb : i]
+            right_l = lows[i + 1 : i + lb + 1]
+            if lows[i] < min(left_l) and lows[i] < min(right_l):
+                swing_lows.append({"index": i, "price": lows[i], "ts_ms": ts_list[i]})
+
+        # ── Sweep + MSS detection ────────────────────────────────────────────
+        # Scan from the most recent candle backward for the first sweep event.
+        # We need at least 2 candles after a pivot for an MSS confirmation check.
+        last_sweep: dict[str, Any] | None = None
+        mss_confirmed = False
+        mss_direction: str | None = None
+
+        # Check sweep of swing lows (bullish scenario: wick below → close above)
+        if swing_lows:
+            # Use the most recent swing low as the reference liquidity level
+            ref_low = swing_lows[-1]
+            level = ref_low["price"]
+            pivot_idx = ref_low["index"]
+            # Look for a sweep candle after the pivot
+            for i in range(pivot_idx + 1, n):
+                if lows[i] < level:
+                    # Wick swept below the swing low
+                    last_sweep = {
+                        "direction": "long",
+                        "level": level,
+                        "candle_index": i,
+                        "ts_ms": ts_list[i],
+                    }
+                    # MSS: next candle (or same candle) closes back above the level
+                    if closes[i] > level:
+                        mss_confirmed = True
+                        mss_direction = "bullish"
+                    elif i + 1 < n and closes[i + 1] > level:
+                        mss_confirmed = True
+                        mss_direction = "bullish"
+                    break  # use the earliest sweep after the pivot
+
+        # Check sweep of swing highs (bearish scenario: wick above → close below)
+        if swing_highs:
+            ref_high = swing_highs[-1]
+            level_h = ref_high["price"]
+            pivot_idx_h = ref_high["index"]
+            for i in range(pivot_idx_h + 1, n):
+                if highs[i] > level_h:
+                    sweep_candidate = {
+                        "direction": "short",
+                        "level": level_h,
+                        "candle_index": i,
+                        "ts_ms": ts_list[i],
+                    }
+                    # Prefer the more *recent* sweep event
+                    if last_sweep is None or i > last_sweep["candle_index"]:
+                        mss_candidate = False
+                        mss_dir_candidate: str | None = None
+                        if closes[i] < level_h:
+                            mss_candidate = True
+                            mss_dir_candidate = "bearish"
+                        elif i + 1 < n and closes[i + 1] < level_h:
+                            mss_candidate = True
+                            mss_dir_candidate = "bearish"
+                        last_sweep = sweep_candidate
+                        mss_confirmed = mss_candidate
+                        mss_direction = mss_dir_candidate
+                    break
+
+        return {
+            "swing_highs": swing_highs[-10:],  # keep last 10 pivots
+            "swing_lows": swing_lows[-10:],
+            "last_sweep": last_sweep,
+            "mss_confirmed": mss_confirmed,
+            "mss_direction": mss_direction,
+        }
+
     def _get_trade_buffer(self, symbol: str) -> Deque[dict[str, float]]:
         """Return (and lazily create) the rolling trade buffer for a symbol."""
         buffer = self._trade_buffers.get(symbol)
@@ -6716,6 +6845,56 @@ class MarketService:
         ):
             equity_based_cap = max(0.0, account_equity * effective_max_pct)
             guardrail_notional_cap = equity_based_cap
+
+        # ── ATR risk-per-trade cap ──────────────────────────────────────────
+        # Implements the 1% risk model from master_technical.md:
+        #   max_notional = (equity × risk_pct%) / (ATR_stop / entry_price)
+        # This caps the position notional so that a full stop-out never costs
+        # more than risk_pct% of equity, regardless of what the LLM requested.
+        # Only fires when guardrails.atr_risk_per_trade_pct is configured (>0).
+        _atr_risk_pct_cfg = self._extract_float(guardrails.get("atr_risk_per_trade_pct"))
+        if (
+            _atr_risk_pct_cfg
+            and _atr_risk_pct_cfg > 0
+            and account_equity is not None
+            and account_equity > 0
+            and last_price
+            and last_price > 0
+        ):
+            _snap_rm = self._last_full_snapshot
+            _risk_metrics = (
+                ((_snap_rm.get("market_data") or {}).get(symbol) or {}).get("risk_metrics") or {}
+                if _snap_rm
+                else {}
+            )
+            _suggested_stop = self._extract_float(_risk_metrics.get("suggested_stop"))
+            if _suggested_stop and _suggested_stop > 0:
+                _stop_fraction = _suggested_stop / last_price
+                _atr_max_notional = round(
+                    (account_equity * _atr_risk_pct_cfg / 100.0) / _stop_fraction, 2
+                )
+                _prev_cap = guardrail_notional_cap
+                if guardrail_notional_cap is None or _atr_max_notional < guardrail_notional_cap:
+                    guardrail_notional_cap = _atr_max_notional
+                    self._emit_debug(
+                        f"{symbol} ATR risk cap: equity={account_equity:.2f} "
+                        f"× risk={_atr_risk_pct_cfg}% / stop_dist={_stop_fraction:.4f} "
+                        f"= {_atr_max_notional:.2f}"
+                        + (
+                            f" (tighter than equity cap {_prev_cap:.2f})"
+                            if _prev_cap and _atr_max_notional < _prev_cap
+                            else ""
+                        )
+                    )
+                else:
+                    self._emit_debug(
+                        f"{symbol} ATR risk cap {_atr_max_notional:.2f} "
+                        f"is looser than equity cap {_prev_cap:.2f}; equity cap kept"
+                    )
+            else:
+                self._emit_debug(
+                    f"{symbol} ATR risk cap: no ATR data available (suggested_stop missing); skipping"
+                )
 
         confidence_value = self._normalize_confidence(decision.get("confidence"))
         equity_pct = self._extract_float(decision.get("equity_pct"))
