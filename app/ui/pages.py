@@ -342,7 +342,7 @@ def register_pages(app: FastAPI) -> None:
                     )
                 if meta_label:
                     meta_label.set_text(
-                        f"Auto Prompt Scheduler · {'ON' if auto_prompt_enabled else 'OFF'}"
+                        f"Scheduler · {'ON' if auto_prompt_enabled else 'OFF'}"
                     )
                 if hint_label:
                     hint_label.set_text("Resume unlocks once equity recovers above the limit.")
@@ -666,7 +666,7 @@ def register_pages(app: FastAPI) -> None:
                         risk_lock_refs["detail"] = ui.label(
                             "Equity drop exceeded the configured daily cap."
                         ).classes("text-sm text-rose-800")
-                        risk_lock_refs["meta"] = ui.label("Auto Prompt Scheduler · OFF").classes(
+                        risk_lock_refs["meta"] = ui.label("Scheduler · OFF").classes(
                             "text-xs text-rose-700"
                         )
                         risk_lock_refs["hint"] = ui.label(
@@ -4708,6 +4708,13 @@ def register_pages(app: FastAPI) -> None:
                 ).classes("w-full md:w-48").props(
                     "hint='Prevents over-trading by capping per-symbol order count in any rolling hour' persistent-hint"
                 )
+                max_trades_to_open_input = ui.number(
+                    label="Max Trades to Open",
+                    value=guardrails.get("max_trades_to_open", 0),
+                    min=0,
+                ).classes("w-full md:w-48").props(
+                    "hint='Per scheduler cycle: open only the top N ranked BUY/SELL decisions (0 = unlimited)' persistent-hint"
+                )
                 trade_window_seconds_input = ui.number(
                     label="Trade Window (sec)",
                     value=guardrails.get("trade_window_seconds", 3600),
@@ -4931,9 +4938,11 @@ def register_pages(app: FastAPI) -> None:
                     "hint='Disabling falls back to REST polling every interval' persistent-hint"
                 )
                 auto_prompt_switch = ui.switch(
-                    "Auto Prompt Scheduler",
+                    "Scheduler",
                     value=config.get("auto_prompt_enabled", False),
-                ).classes("w-full md:w-48")
+                ).classes("w-full md:w-48").props(
+                    "hint='Runs the active decision mode (LLM, Governor, or both) on the configured trigger' persistent-hint"
+                )
                 fee_window_input = ui.number(
                     label="Fee Window (hours)",
                     value=config.get("fee_window_hours", 24.0),
@@ -4947,6 +4956,16 @@ def register_pages(app: FastAPI) -> None:
                     value=config.get("auto_prompt_interval", 300),
                     min=30,
                 ).classes("w-full md:w-48")
+                auto_prompt_trigger_select = ui.select(
+                    options={
+                        "scheduled": "Scheduled (fixed interval)",
+                        "consecutive": "Consecutive (re-run when positions close)",
+                    },
+                    value=config.get("auto_prompt_trigger", "scheduled"),
+                    label="Scheduler trigger",
+                ).classes("w-full md:w-72").props(
+                    "hint='Scheduled: sleep interval between ticks | Consecutive: immediately re-run once all positions are closed' persistent-hint"
+                )
                 ta_timeframe_select_cfg = ui.select(
                     options=TA_TIMEFRAME_OPTIONS,
                     label="Analysis Timeframe",
@@ -5664,6 +5683,7 @@ def register_pages(app: FastAPI) -> None:
                 "daily_loss_limit_pct": snapshot_daily_limit,
                 "min_hold_seconds": _safe_int(min_hold_seconds_input.value),
                 "max_trades_per_hour": _safe_int(max_trades_per_hour_input.value),
+                "max_trades_to_open": _safe_int(max_trades_to_open_input.value),
                 "trade_window_seconds": _safe_int(trade_window_seconds_input.value),
                 "risk_model": guardrails.get("risk_model", "ATR based stops x1.5"),
                 "require_position_alignment": bool(require_alignment_switch.value),
@@ -5858,6 +5878,7 @@ def register_pages(app: FastAPI) -> None:
                     int,
                 ),
             )
+            config["auto_prompt_trigger"] = str(auto_prompt_trigger_select.value or "scheduled")
             try:
                 await save_prompt_interval(config["auto_prompt_interval"])
             except Exception as exc:  # pragma: no cover - db optional
@@ -5949,6 +5970,11 @@ def register_pages(app: FastAPI) -> None:
                 "max_trades_per_hour": _coerce(
                     max_trades_per_hour_input.value,
                     guardrails.get("max_trades_per_hour", 2),
+                    int,
+                ),
+                "max_trades_to_open": _coerce(
+                    max_trades_to_open_input.value,
+                    guardrails.get("max_trades_to_open", 0),
                     int,
                 ),
                 "trade_window_seconds": _coerce(
@@ -6076,6 +6102,7 @@ def register_pages(app: FastAPI) -> None:
             scheduler = getattr(app.state, "prompt_scheduler", None)
             if scheduler:
                 await scheduler.update_interval(config["auto_prompt_interval"])
+                await scheduler.set_trigger_mode(config.get("auto_prompt_trigger", "scheduled"))
                 await scheduler.set_enabled(config["auto_prompt_enabled"])
             ui.notify("Configuration saved", color="positive")
             app.state.frontend_events.append("CFG updated")

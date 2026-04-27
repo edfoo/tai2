@@ -44,6 +44,12 @@ class PromptScheduler:
         self._last_tick_at: float = 0.0
         self._tick_running: bool = False
         self._tick_started_at: float = 0.0
+        # "scheduled" = fixed interval sleep; "consecutive" = re-run as soon
+        # as the previous tick completes AND no open positions remain.
+        self._trigger_mode: str = "scheduled"
+        # Minimum gap between consecutive ticks to avoid busy-looping while
+        # positions are settling after close orders land on OKX.
+        self._consecutive_min_delay: float = 10.0
 
     async def start(self) -> None:
         async with self._lock:
@@ -76,6 +82,15 @@ class PromptScheduler:
             self._interval = seconds
             if self._task and not self._task.done():
                 logger.info("Prompt scheduler interval updated to %ss", seconds)
+
+    async def set_trigger_mode(self, mode: str) -> None:
+        """Switch between 'scheduled' (fixed interval) and 'consecutive' (re-run on no positions)."""
+        mode = str(mode or "scheduled").lower()
+        if mode not in {"scheduled", "consecutive"}:
+            mode = "scheduled"
+        async with self._lock:
+            self._trigger_mode = mode
+            logger.info("Prompt scheduler trigger mode set to '%s'", mode)
 
     @property
     def is_ticking(self) -> bool:
@@ -120,7 +135,11 @@ class PromptScheduler:
                 finally:
                     self._tick_running = False
                     self._last_tick_at = time.monotonic()
-                await asyncio.sleep(self._interval)
+
+                if self._trigger_mode == "consecutive":
+                    await self._wait_for_no_positions()
+                else:
+                    await asyncio.sleep(self._interval)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # pragma: no cover - defensive logging
@@ -133,6 +152,35 @@ class PromptScheduler:
                 except asyncio.CancelledError:
                     raise
         logger.debug("Prompt scheduler loop exited")
+
+    async def _wait_for_no_positions(self) -> None:
+        """Block until all open positions are closed, then enforce the minimum delay.
+
+        Polls the in-memory snapshot every ``_consecutive_min_delay`` seconds.
+        Falls back to a single ``_consecutive_min_delay`` sleep when market
+        service is unavailable.
+        """
+        await asyncio.sleep(self._consecutive_min_delay)
+        while self._enabled:
+            market_service = getattr(self._app.state, "market_service", None)
+            if market_service is None:
+                break
+            snapshot = getattr(market_service, "_last_full_snapshot", None) or {}
+            positions: list[dict[str, Any]] = snapshot.get("positions") or []
+            has_open = any(
+                isinstance(p, dict)
+                and market_service._extract_float(p.get("pos"))
+                for p in positions
+            )
+            if not has_open:
+                logger.debug("Consecutive mode: no open positions — starting next cycle")
+                break
+            logger.debug(
+                "Consecutive mode: %d position(s) open — waiting %ss",
+                len(positions),
+                self._consecutive_min_delay,
+            )
+            await asyncio.sleep(self._consecutive_min_delay)
 
     async def _tick(self) -> None:
         market_service = getattr(self._app.state, "market_service", None)
@@ -184,79 +232,91 @@ class PromptScheduler:
                 if _baseline_eq > 0:
                     market_service.record_shotgun_baseline(_baseline_eq)
 
-        # ── Phase 1: ask the LLM for ALL symbols concurrently ─────────────
-        # LLM calls are pure I/O — running them in parallel costs the same
-        # wall-clock time as a single call and lets us see every decision
-        # before committing any funds.
-        # Budget per symbol for LLM call + DB persist.  Must leave room for
-        # the execution phase (90s/symbol) within TICK_TIMEOUT_SECONDS (800s).
-        # Set to 620s to accommodate slow models like Gemma 4 31B (~600s).
-        _FETCH_TIMEOUT = 620
+        # Read runtime config once; governs all four phases below.
+        _rc = getattr(self._app.state, "runtime_config", {}) or {}
+        _gov_config = _rc.get("governor") or {}
+        _decision_mode = str(_gov_config.get("mode") or "disabled").lower()
 
-        async def _fetch_decision(
-            symbol: str,
-        ) -> tuple[str, Any, dict[str, Any] | None, str | None]:
-            """Prepare prompt + call LLM. Returns (symbol, bundle, decision, prompt_id)."""
-            try:
-                _ms = getattr(self._app.state, "market_service", None)
-                if _ms:
-                    _rc = getattr(self._app.state, "runtime_config", {}) or {}
-                    _gr = _rc.get("guardrails") or {}
-                    _blocked = _ms.is_symbol_blocked(symbol, _gr)
-                    if _blocked:
-                        logger.debug("Skipping LLM for %s: %s", symbol, _blocked)
+        # ── Phase 1: collect decisions ─────────────────────────────────────
+        if _decision_mode == "governor_only":
+            # Governor path: evaluate rule-based entry signals, no LLM calls.
+            # bundle=None signals Phase 3 to use direct handle_llm_decision().
+            valid: list[tuple[str, Any, dict[str, Any] | None, str | None]] = (
+                self._collect_governor_decisions(symbols, market_service)
+            )
+        else:
+            # LLM path: ask the LLM for ALL symbols concurrently.
+            # LLM calls are pure I/O — running them in parallel costs the same
+            # wall-clock time as a single call and lets us see every decision
+            # before committing any funds.
+            # Budget per symbol for LLM call + DB persist.  Must leave room for
+            # the execution phase (90s/symbol) within TICK_TIMEOUT_SECONDS (800s).
+            # Set to 620s to accommodate slow models like Gemma 4 31B (~600s).
+            _FETCH_TIMEOUT = 620
+
+            async def _fetch_decision(
+                symbol: str,
+            ) -> tuple[str, Any, dict[str, Any] | None, str | None]:
+                """Prepare prompt + call LLM. Returns (symbol, bundle, decision, prompt_id)."""
+                try:
+                    _ms = getattr(self._app.state, "market_service", None)
+                    if _ms:
+                        _gr = _rc.get("guardrails") or {}
+                        _blocked = _ms.is_symbol_blocked(symbol, _gr)
+                        if _blocked:
+                            logger.debug("Skipping LLM for %s: %s", symbol, _blocked)
+                            return symbol, None, None, None
+                    bundle, error_response = await prepare_prompt_payload(self._app, symbol=symbol)
+                    if error_response:
+                        status = getattr(error_response, "status_code", None)
+                        body = getattr(error_response, "body", b"error")
+                        if status == 503:
+                            logger.warning(
+                                "Prompt scheduler skipping %s: snapshot stale or unavailable (%s)",
+                                symbol,
+                                body,
+                            )
+                        else:
+                            logger.debug(
+                                "Prompt scheduler skipping %s: %s",
+                                symbol,
+                                body,
+                            )
+                        if status == 423:
+                            self._handle_daily_loss_lock(symbol)
                         return symbol, None, None, None
-                bundle, error_response = await prepare_prompt_payload(self._app, symbol=symbol)
-                if error_response:
-                    status = getattr(error_response, "status_code", None)
-                    body = getattr(error_response, "body", b"error")
-                    if status == 503:
-                        logger.warning(
-                            "Prompt scheduler skipping %s: snapshot stale or unavailable (%s)",
-                            symbol,
-                            body,
-                        )
-                    else:
-                        logger.debug(
-                            "Prompt scheduler skipping %s: %s",
-                            symbol,
-                            body,
-                        )
-                    if status == 423:
-                        self._handle_daily_loss_lock(symbol)
+                    if not bundle:
+                        return symbol, None, None, None
+                    decision, prompt_id = await fetch_llm_decision(self._app, bundle)
+                    return symbol, bundle, decision, prompt_id
+                except asyncio.TimeoutError:
+                    # Raised by the wait_for wrapper below — already logged there.
                     return symbol, None, None, None
-                if not bundle:
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.exception("Prompt scheduler LLM fetch failed for %s: %s", symbol, exc)
                     return symbol, None, None, None
-                decision, prompt_id = await fetch_llm_decision(self._app, bundle)
-                return symbol, bundle, decision, prompt_id
-            except asyncio.TimeoutError:
-                # Raised by the wait_for wrapper below — already logged there.
-                return symbol, None, None, None
-            except Exception as exc:  # pragma: no cover - defensive
-                logger.exception("Prompt scheduler LLM fetch failed for %s: %s", symbol, exc)
-                return symbol, None, None, None
 
-        async def _fetch_decision_with_timeout(
-            symbol: str,
-        ) -> tuple[str, Any, dict[str, Any] | None, str | None]:
-            try:
-                return await asyncio.wait_for(_fetch_decision(symbol), timeout=_FETCH_TIMEOUT)
-            except asyncio.TimeoutError:
-                logger.warning(
-                    "Prompt scheduler LLM fetch timed out after %ss for %s; skipping",
-                    _FETCH_TIMEOUT,
-                    symbol,
-                )
-                return symbol, None, None, None
+            async def _fetch_decision_with_timeout(
+                symbol: str,
+            ) -> tuple[str, Any, dict[str, Any] | None, str | None]:
+                try:
+                    return await asyncio.wait_for(_fetch_decision(symbol), timeout=_FETCH_TIMEOUT)
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "Prompt scheduler LLM fetch timed out after %ss for %s; skipping",
+                        _FETCH_TIMEOUT,
+                        symbol,
+                    )
+                    return symbol, None, None, None
 
-        raw_results: list[tuple[str, Any, dict[str, Any] | None, str | None]] = list(
-            await asyncio.gather(*(_fetch_decision_with_timeout(s) for s in symbols))
-        )
-        valid = [
-            (sym, bundle, decision, prompt_id)
-            for sym, bundle, decision, prompt_id in raw_results
-            if bundle is not None and decision is not None
-        ]
+            raw_results: list[tuple[str, Any, dict[str, Any] | None, str | None]] = list(
+                await asyncio.gather(*(_fetch_decision_with_timeout(s) for s in symbols))
+            )
+            valid = [
+                (sym, bundle, decision, prompt_id)
+                for sym, bundle, decision, prompt_id in raw_results
+                if bundle is not None and decision is not None
+            ]
 
         # ── Phase 2: sort BUY/SELL by quality ─────────────────────────────
         # Highest confidence first; lowest risk_score as tiebreaker so the
@@ -273,6 +333,19 @@ class PromptScheduler:
         actionable = sorted([i for i in valid if _is_actionable(i)], key=_decision_sort_key)
         non_actionable = [i for i in valid if not _is_actionable(i)]
 
+        # Apply "Max Trades to Open" cap (0 = unlimited).
+        # Decisions beyond the cap are demoted to non-actionable so they are
+        # still recorded as HOLDs but no orders are placed.
+        _max_open = int((_rc.get("guardrails") or {}).get("max_trades_to_open") or 0)
+        if _max_open > 0 and len(actionable) > _max_open:
+            logger.info(
+                "Prompt scheduler: capping actionable from %d to %d (max_trades_to_open)",
+                len(actionable),
+                _max_open,
+            )
+            non_actionable = actionable[_max_open:] + non_actionable
+            actionable = actionable[:_max_open]
+
         # Per-symbol execution budget: keeps one stuck OKX call from consuming
         # the entire tick timeout and blocking all remaining decisions.
         _EXEC_TIMEOUT = 90
@@ -284,17 +357,32 @@ class PromptScheduler:
         # equity is left after earlier trades have committed funds.
         for sym, bundle, decision, prompt_id in actionable:
             try:
-                await asyncio.wait_for(
-                    apply_llm_decision(self._app, bundle, decision, prompt_id),
-                    timeout=_EXEC_TIMEOUT,
-                )
-                logger.info(
-                    "Prompt scheduler decision for %s action=%s confidence=%s prompt_id=%s",
-                    sym,
-                    decision.get("action"),
-                    decision.get("confidence"),
-                    prompt_id,
-                )
+                if bundle is None:
+                    # Governor-only path: call handle_llm_decision directly so
+                    # all guardrails (margin, position alignment, daily loss, etc.) apply.
+                    _ms = market_service or getattr(self._app.state, "market_service", None)
+                    if _ms:
+                        await asyncio.wait_for(
+                            _ms.handle_llm_decision(decision, {}),
+                            timeout=_EXEC_TIMEOUT,
+                        )
+                    logger.info(
+                        "Governor decision for %s action=%s",
+                        sym,
+                        decision.get("action"),
+                    )
+                else:
+                    await asyncio.wait_for(
+                        apply_llm_decision(self._app, bundle, decision, prompt_id),
+                        timeout=_EXEC_TIMEOUT,
+                    )
+                    logger.info(
+                        "Prompt scheduler decision for %s action=%s confidence=%s prompt_id=%s",
+                        sym,
+                        decision.get("action"),
+                        decision.get("confidence"),
+                        prompt_id,
+                    )
             except asyncio.TimeoutError:
                 logger.warning(
                     "Prompt scheduler execution timed out after %ss for %s; continuing",
@@ -329,7 +417,32 @@ class PromptScheduler:
             except Exception as exc:  # pragma: no cover - defensive
                 logger.exception("Prompt scheduler HOLD recording failed for %s: %s", sym, exc)
 
-        await asyncio.gather(*(_apply_hold(i) for i in non_actionable))
+        # Governor-only mode has no HOLD recording — signals are binary (fire or skip).
+        if _decision_mode != "governor_only":
+            await asyncio.gather(*(_apply_hold(i) for i in non_actionable))
+
+    def _collect_governor_decisions(
+        self,
+        symbols: Iterable[str],
+        market_service: Any,
+    ) -> list[tuple[str, None, dict[str, Any], None]]:
+        """Return Governor-mode decision tuples for all symbols that have a signal.
+
+        bundle=None in each tuple signals Phase 3 to call handle_llm_decision()
+        directly instead of apply_llm_decision().
+        """
+        if market_service is None:
+            return []
+        results: list[tuple[str, None, dict[str, Any], None]] = []
+        for symbol in symbols:
+            try:
+                decision = market_service.build_governor_decision(symbol)
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.debug("Governor decision build failed for %s: %s", symbol, exc)
+                decision = None
+            if decision is not None:
+                results.append((symbol, None, decision, None))
+        return results
 
     def _resolve_symbols(self, snapshot: dict[str, Any]) -> Iterable[str]:
         symbols = snapshot.get("symbols") or []
