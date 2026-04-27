@@ -6631,6 +6631,71 @@ class MarketService:
                     f"(series len={len(_cvd_series) if isinstance(_cvd_series, list) else 'none'}); skipping"
                 )
 
+        # ── Order-Book Wall Guard ─────────────────────────────────────────────
+        # Implements spec section 3 (Heatmap / limit-order wall detection).
+        # Scans the L2 order book for abnormally large resting orders on the
+        # *opposing* side within a configurable % of the current price.
+        # A dominant wall nearby = price barrier the trade must punch through;
+        # vetoes until the wall is consumed or price moves away from it.
+        _ob_cfg = guardrails.get("ob_wall_guard") or {}
+        if _ob_cfg.get("enabled") and action in ("BUY", "SELL") and last_price and last_price > 0:
+            _ob_proximity_pct = self._extract_float(_ob_cfg.get("proximity_pct")) or 1.0
+            _ob_wall_ratio    = self._extract_float(_ob_cfg.get("wall_ratio"))    or 3.0
+            _snap_ob = self._last_full_snapshot
+            _ob_book = (
+                ((_snap_ob.get("market_data") or {}).get(symbol) or {})
+                .get("order_book", {})
+                if _snap_ob
+                else {}
+            )
+            # For BUY we check the ask side (sell walls above price).
+            # For SELL we check the bid side (buy walls below price).
+            if action == "BUY":
+                _ob_levels = _ob_book.get("asks") or []  # [[price, size], ...]
+                _ob_nearby = [
+                    s for p, s in _ob_levels
+                    if last_price <= p <= last_price * (1 + _ob_proximity_pct / 100.0)
+                ]
+            else:
+                _ob_levels = _ob_book.get("bids") or []  # [[price, size], ...]
+                _ob_nearby = [
+                    s for p, s in _ob_levels
+                    if last_price * (1 - _ob_proximity_pct / 100.0) <= p <= last_price
+                ]
+            if _ob_levels and _ob_nearby:
+                _ob_avg_size = sum(s for _, s in _ob_levels) / len(_ob_levels)
+                _ob_wall_size = max(_ob_nearby)
+                if _ob_avg_size > 0 and _ob_wall_size >= _ob_wall_ratio * _ob_avg_size:
+                    _ob_reason = (
+                        f"OB wall guard vetoed {action} for {symbol}: "
+                        f"opposing wall size={_ob_wall_size:.2f} "
+                        f"({_ob_wall_size / _ob_avg_size:.1f}x avg={_ob_avg_size:.2f}) "
+                        f"within {_ob_proximity_pct}% of price={last_price}"
+                    )
+                    self._emit_debug(_ob_reason)
+                    self._record_execution_feedback(
+                        symbol,
+                        _ob_reason,
+                        level="warning",
+                        meta={
+                            "action": action,
+                            "wall_size": _ob_wall_size,
+                            "avg_level_size": round(_ob_avg_size, 4),
+                            "wall_ratio": round(_ob_wall_size / _ob_avg_size, 2),
+                        },
+                    )
+                    return False
+                else:
+                    self._emit_debug(
+                        f"{symbol} OB wall guard: no dominant wall within {_ob_proximity_pct}% "
+                        f"(max_nearby={_ob_wall_size:.2f}, avg={_ob_avg_size:.2f}); proceeding"
+                    )
+            else:
+                self._emit_debug(
+                    f"{symbol} OB wall guard: no {('ask' if action == 'BUY' else 'bid')} levels "
+                    f"within {_ob_proximity_pct}% of price; skipping"
+                )
+
         if wait_for_tp_sl and current_side in {"LONG", "SHORT"}:
             closing_action = (
                 (current_side == "LONG" and action == "SELL")

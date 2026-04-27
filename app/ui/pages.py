@@ -4363,6 +4363,7 @@ def register_pages(app: FastAPI) -> None:
         guardrails.setdefault("isolated_wallet_bootstrap_pct", None)
         guardrails.setdefault("atr_risk_per_trade_pct", None)
         guardrails.setdefault("cvd_guard", {"enabled": False, "lookback": 10, "min_slope_pct": 0.0})
+        guardrails.setdefault("ob_wall_guard", {"enabled": False, "proximity_pct": 1.0, "wall_ratio": 3.0})
         guardrails.setdefault("require_reward_risk_ratio", True)
         guardrails.setdefault("require_protection", True)
         guardrails.setdefault("footprint", {
@@ -4622,6 +4623,32 @@ def register_pages(app: FastAPI) -> None:
                     max=100,
                 ).classes("w-full md:w-40").props(
                     "hint='Minimum % change in CVD to count as directional (0 = any). Neutral CVD never blocks.' persistent-hint"
+                )
+            with ui.row().classes("w-full flex-wrap gap-4 items-start"):
+                _ob_cfg_ui = guardrails.get("ob_wall_guard") or {}
+                ob_wall_enabled_toggle = ui.switch(
+                    "OB Wall Guard Enabled",
+                    value=bool(_ob_cfg_ui.get("enabled", False)),
+                ).props(
+                    "hint='Block BUY/SELL when a dominant opposing limit-order wall sits within proximity of the current price' persistent-hint"
+                )
+                ob_wall_proximity_input = ui.number(
+                    label="Wall Proximity %",
+                    value=_ob_cfg_ui.get("proximity_pct", 1.0),
+                    step=0.1,
+                    min=0.1,
+                    max=10.0,
+                ).classes("w-full md:w-40").props(
+                    "hint='Scan the opposing order-book side within this % of current price for walls' persistent-hint"
+                )
+                ob_wall_ratio_input = ui.number(
+                    label="Wall Size Ratio",
+                    value=_ob_cfg_ui.get("wall_ratio", 3.0),
+                    step=0.5,
+                    min=1.0,
+                    max=20.0,
+                ).classes("w-full md:w-40").props(
+                    "hint='A level is a wall when its size exceeds this multiple of the average level size (e.g. 3 = 3× average)' persistent-hint"
                 )
             with ui.row().classes("w-full flex-wrap gap-4"):
                 min_hold_seconds_input = ui.number(
@@ -5901,6 +5928,11 @@ def register_pages(app: FastAPI) -> None:
                         int,
                     ),
                     "min_slope_pct": _safe_float(cvd_guard_min_slope_input.value) or 0.0,
+                },
+                "ob_wall_guard": {
+                    "enabled": bool(ob_wall_enabled_toggle.value),
+                    "proximity_pct": _safe_float(ob_wall_proximity_input.value) or 1.0,
+                    "wall_ratio": _safe_float(ob_wall_ratio_input.value) or 3.0,
                 },
                 "min_hold_seconds": _coerce(
                     min_hold_seconds_input.value,
