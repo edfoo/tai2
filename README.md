@@ -61,7 +61,7 @@ tests/             # pytest suites
 2. **Data Layer** – TimescaleDB schema, asyncpg pool, Redis `StateService`.
 3. **Market Engine** – OKX REST/WebSocket, indicators, Redis snapshots.
 4. **Reasoning Engine** – OpenRouter-based LLM decisions and trade execution.
-5. **Frontend** – NiceGUI pages for LIVE/TA/ENGINE/HISTORY/DEBUG/CFG.
+5. **Frontend** – NiceGUI pages for LIVE/TA/STRATEGY/HISTORY/DEBUG/PROMPT/CFG.
 6. **Integration** – FastAPI startup orchestration, global error surface, final docs/tests.
 
 ## Notes

@@ -1195,7 +1195,6 @@ class MarketService:
         """
         skimming = self._strategy_config.get("skimming") or {}
         if not skimming.get("enabled"):
-            self._emit_debug("Skimming: disabled — skipping check")
             return
         if (self._strategy_config.get("alternator") or {}).get("enabled"):
             return
@@ -1521,7 +1520,6 @@ class MarketService:
         """
         protector = self._strategy_config.get("protector") or {}
         if not protector.get("enabled"):
-            self._emit_debug("Protector: disabled — skipping check")
             return
         activate_pct = self._extract_float(protector.get("activate_pct"))
         step_pct = self._extract_float(protector.get("step_pct"))
@@ -1698,7 +1696,6 @@ class MarketService:
         """
         commutator = self._strategy_config.get("commutator") or {}
         if not commutator.get("enabled"):
-            self._emit_debug("Commutator: disabled — skipping check")
             return
         if (self._strategy_config.get("alternator") or {}).get("enabled"):
             return
@@ -6394,9 +6391,21 @@ class MarketService:
             gov_signal = self._launcher_evaluate_signal(symbol)
             llm_direction = "buy" if action == "BUY" else "sell"
             if gov_signal != llm_direction:
+                # Distinguish: no data vs neutral vs conflicting.
+                _snap = self._last_full_snapshot
+                _sym_indicators = (
+                    ((_snap.get("market_data") or {}).get(symbol) or {}).get("indicators") or {}
+                    if _snap else {}
+                )
+                _rsi = self._extract_float(_sym_indicators.get("rsi"))
+                if _snap is None or _rsi is None:
+                    veto_detail = "no indicator data available"
+                elif gov_signal is None:
+                    veto_detail = f"indicators neutral (RSI={_rsi:.1f}), no directional alignment"
+                else:
+                    veto_detail = f"conflicting indicator signal={gov_signal!r}"
                 veto_reason = (
-                    f"Launcher vetoed LLM {action} for {symbol}: "
-                    f"indicator signal={gov_signal!r} (full signal required)"
+                    f"Launcher vetoed LLM {action} for {symbol}: {veto_detail}"
                 )
                 self._emit_debug(veto_reason)
                 self._record_execution_feedback(

@@ -67,7 +67,7 @@ app/
     openrouter_service.py
     prompt_utils.py
   ui/
-    pages.py            # All NiceGUI page renderers (LIVE, TA, ENGINE, DEBUG, CFG)
+    pages.py            # All NiceGUI page renderers (LIVE, TA, STRATEGY, HISTORY, DEBUG, PROMPT, CFG)
     components.py
 tests/
   test_app.py, test_okx.py, test_okx_adapter.py, test_db.py, test_prompt_runner.py
@@ -133,7 +133,6 @@ logs/
 |---|---|---|
 | `/` | LIVE | Real-time positions, balances, ticker, LLM Insight Feed |
 | `/ta` | TA | Indicators, funding, CVD, order book |
-| `/engine` | ENGINE | LLM decision log, manual prompt trigger |
 | `/history` | HISTORY | Executed trades |
 | `/debug` | DEBUG | Application logs (live, filterable), WebSocket events |
 | `/cfg` | CFG | All runtime config: prompts, guardrails, trading pairs, model |

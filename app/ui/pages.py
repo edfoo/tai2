@@ -3692,114 +3692,6 @@ def register_pages(app: FastAPI) -> None:
 
         save_button.on("click", save_strategy_settings)
 
-    def render_engine_page() -> None:
-        navigation("ENGINE")
-        wrapper = page_container()
-        store = make_snapshot_store()
-
-        with wrapper:
-            ui.label("Reasoning Engine").classes("text-2xl font-bold")
-            symbol_select = ui.select(options=[], label="Symbol").classes("w-full md:w-64")
-            symbol_select.disable()
-            decision_card = ui.card().classes("w-full p-4")
-            with decision_card:
-                action_label = ui.label("Action: HOLD").classes("text-xl font-semibold")
-                justification_label = ui.label("Reasoning pending...")
-
-            ui.label("Interactive Chat").classes("text-lg font-semibold mt-4")
-            chat_column = ui.column().classes("w-full gap-2")
-            with chat_column:
-                question_input = ui.textarea(
-                    value="Explain why you haven't traded in the last hour based on the current CVD.",
-                    placeholder="Ask the LLM",
-                ).classes("w-full")
-                send_button = ui.button("Ask", icon="send")
-
-        current_symbol = {"value": None}
-        last_snapshot = {"value": None}
-
-        def update(snapshot: dict[str, Any] | None) -> None:
-            last_snapshot["value"] = snapshot
-            if not snapshot:
-                return
-            symbols = snapshot.get("symbols") or []
-            market_data = snapshot.get("market_data") or {}
-            if symbols:
-                symbol_select.options = symbols
-                symbol_select.enable()
-                if current_symbol["value"] not in symbols:
-                    current_symbol["value"] = symbols[0]
-                    symbol_select.value = current_symbol["value"]
-            else:
-                symbol_select.options = []
-                symbol_select.disable()
-            selected_symbol = current_symbol["value"] or snapshot.get("symbol")
-            market_entry = market_data.get(selected_symbol, {})
-            custom = market_entry.get("custom_metrics") or snapshot.get("custom_metrics") or {}
-            cvd = custom.get("cumulative_volume_delta", 0)
-            ofi_block = custom.get("order_flow_imbalance")
-            if isinstance(ofi_block, dict):
-                ofi_value = ofi_block.get("net")
-            else:
-                ofi_value = ofi_block
-            action = "BUY" if cvd and cvd > 1 else "SELL" if cvd and cvd < -1 else "HOLD"
-            action_label.set_text(f"Action: {action}")
-            if isinstance(ofi_value, (int, float)):
-                imbalance_text = f"{ofi_value:.2f}"
-            elif ofi_value is None:
-                imbalance_text = "--"
-            else:
-                imbalance_text = str(ofi_value)
-            justification_label.set_text(
-                f"Derived from current order flow imbalance {imbalance_text}."
-            )
-
-        async def handle_question() -> None:
-            snapshot = store.snapshot or {}
-            symbols = snapshot.get("symbols") or []
-            selected_symbol = current_symbol["value"] or snapshot.get("symbol")
-            market_entry = (snapshot.get("market_data") or {}).get(
-                selected_symbol or (symbols[0] if symbols else None),
-                {},
-            )
-            custom = market_entry.get("custom_metrics") or snapshot.get("custom_metrics") or {}
-            cvd = custom.get("cumulative_volume_delta", 0)
-            ofi_block = custom.get("order_flow_imbalance")
-            ofi_value = ofi_block.get("net") if isinstance(ofi_block, dict) else ofi_block
-            response = (
-                "No trades executed because cumulative volume delta is stable "
-                f"({cvd:.2f}) and liquidity imbalance {ofi_value or '--'} doesn't justify action."
-            )
-            with chat_column:
-                ui.chat_message(question_input.value or "", name="user").classes(
-                    "self-end bg-slate-200 text-slate-900"
-                )
-                ui.chat_message(response, name="engine").classes("bg-emerald-50 text-emerald-900")
-            app.state.frontend_events.append(
-                f"User Q at {format_now('%Y-%m-%d %H:%M:%S %Z')}"
-            )
-
-        send_button.on("click", lambda _: asyncio.create_task(handle_question()))
-        unsubscribe_update = store.subscribe(update)
-        client = ui.context.client
-        cleanup_state = {"done": False}
-
-        def _teardown_client(_: Any | None = None) -> None:
-            if cleanup_state["done"]:
-                return
-            cleanup_state["done"] = True
-            unsubscribe_update()
-            store.stop()
-
-        client.on_disconnect(_teardown_client)
-        client.on_delete(_teardown_client)
-
-        def on_symbol_change(e: Any) -> None:
-            current_symbol["value"] = e.value
-            update(last_snapshot["value"])
-
-        symbol_select.on_value_change(on_symbol_change)
-
     def render_history_page() -> None:
         navigation("HISTORY")
         wrapper = page_container()
@@ -6129,10 +6021,6 @@ def register_pages(app: FastAPI) -> None:
 
     @ui.page("/strategy")
     def strategy() -> None:
-        render_strategy_page()
-
-    @ui.page("/engine")
-    def engine() -> None:
         render_strategy_page()
 
     @ui.page("/history")
