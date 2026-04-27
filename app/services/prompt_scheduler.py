@@ -49,7 +49,7 @@ class PromptScheduler:
         self._trigger_mode: str = "scheduled"
         # Minimum gap between consecutive ticks to avoid busy-looping while
         # positions are settling after close orders land on OKX.
-        self._consecutive_min_delay: float = 10.0
+        self._consecutive_min_delay: float = 60.0
 
     async def start(self) -> None:
         async with self._lock:

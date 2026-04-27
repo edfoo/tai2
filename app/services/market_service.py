@@ -2401,8 +2401,11 @@ class MarketService:
         # Prune stale Shotgun-closing entries for positions that have settled.
         self._shotgun_closing &= active_symbols
 
+        if not active_symbols:
+            return
+
         self._emit_debug(
-            f"Alternator: checking {len(positions)} position(s), "
+            f"Alternator: checking {len(active_symbols)} position(s), "
             f"rev_profit_pct={_rev_profit_pct_static!r} dyn={dynamic_threshold} rev_profit_usd={rev_profit_usd} "
             f"max_reversals={max_reversals} restart_loss_pct={restart_loss_pct} "
             f"restart_loss_usd={restart_loss_usd} ride_profit_pct={ride_profit_pct} "
