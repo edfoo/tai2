@@ -5012,14 +5012,14 @@ def register_pages(app: FastAPI) -> None:
                     },
                     value=config.get("auto_prompt_trigger", "scheduled"),
                     label="Scheduler trigger",
-                ).classes("w-full md:w-72").props(
-                    "hint='Scheduled: sleep interval between ticks | Consecutive: immediately re-run once all positions are closed' persistent-hint"
+                ).classes("w-full md:flex-1").props(
+                    "hint='Scheduled: fixed interval between ticks | Consecutive: immediately re-run once all positions are closed — works with both LLM and Launcher modes' persistent-hint"
                 )
                 ta_timeframe_select_cfg = ui.select(
                     options=TA_TIMEFRAME_OPTIONS,
                     label="Analysis Timeframe",
                     value=timeframe_default,
-                ).classes("w-full md:w-40")
+                ).classes("w-full md:flex-1")
                 timezone_select = (
                     ui.select(
                         options=TIMEZONE_OPTIONS,
@@ -5027,30 +5027,32 @@ def register_pages(app: FastAPI) -> None:
                         value=config.get("frontend_timezone", DEFAULT_FRONTEND_TIMEZONE),
                         with_input=True,
                     )
-                    .classes("w-full md:w-60")
+                    .classes("w-full md:flex-1")
                     .props("use-input fill-input input-debounce='0' clearable")
                 )
-                model_select = ui.select(
-                    model_options,
-                    label="Model",
-                    value=initial_model_value,
-                ).classes("w-full md:w-64")
-                model_cost_label = ui.label("Pricing unavailable").classes(
-                    "text-xs text-slate-500"
-                )
+                ui.element("div").classes("w-full")  # force model row onto its own line
+                with ui.column().classes("flex-1 gap-0 min-w-0"):
+                    model_select = ui.select(
+                        model_options,
+                        label="Model",
+                        value=initial_model_value,
+                    ).classes("w-full")
+                    model_cost_label = ui.label("Pricing unavailable").classes(
+                        "text-xs text-slate-500 mt-1"
+                    )
                 llm_timeout_input = ui.number(
                     label="LLM Timeout (seconds)",
                     value=config.get("llm_timeout_seconds", 300),
                     min=10,
                     step=10,
-                ).classes("w-full md:w-48").props(
+                ).classes("w-full md:flex-1").props(
                     "hint='Max wait for a single OpenRouter request; reasoning models may need 180-300s' persistent-hint"
                 )
                 llm_reasoning_effort_select = ui.select(
                     options={"low": "Low (fast)", "medium": "Medium", "high": "High (thorough)"},
                     label="Reasoning Effort",
                     value=config.get("llm_reasoning_effort", "low"),
-                ).classes("w-full md:w-48").props(
+                ).classes("w-full md:flex-1").props(
                     "hint='Only applies to reasoning models (deepseek-r1, o1, etc.)' persistent-hint"
                 )
             ui.separator().classes("w-full my-4")
