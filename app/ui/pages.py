@@ -2954,6 +2954,9 @@ def register_pages(app: FastAPI) -> None:
             "candle_position_lookback": 20,
             "footprint_delta_filter": False,
             "footprint_delta_min_ratio": 0.0,
+            "ob_wall_suppress": False,
+            "ob_wall_proximity_pct": 1.0,
+            "ob_wall_ratio": 3.0,
             "continuous_llm": False,
             "close_on_max_reversals": False,
             "max_reversals": None,
@@ -2963,6 +2966,13 @@ def register_pages(app: FastAPI) -> None:
             "ride_at_profit_usd": None,
             "stop_at_loss_pct": None,
             "stop_at_loss_usd": None,
+        })
+        strategy.setdefault("ob_wall_stops", {
+            "enabled": False,
+            "proximity_pct": 2.0,
+            "wall_ratio": 3.0,
+            "min_sl_improvement_pct": 0.1,
+            "sl_buffer_pct": 0.1,
         })
 
         with wrapper:
@@ -3440,6 +3450,32 @@ def register_pages(app: FastAPI) -> None:
                                 "hint='Only block if |net_delta|/total_vol ≥ this (0 = any imbalance)' "
                                 "persistent-hint suffix=''"
                             ).bind_enabled_from(altr_fpd_switch, "value")
+                        ui.label("OB Wall Suppression").classes("text-xs font-semibold text-slate-600 mt-1")
+                        ui.label(
+                            "Block reversals when a dominant opposing limit-order wall sits within proximity of the current price. "
+                            "Uses the same wall-ratio logic as the OB Wall Guard guardrail."
+                        ).classes("text-xs text-slate-400 mb-1")
+                        with ui.row().classes("gap-4 items-center mb-2"):
+                            altr_ob_wall_suppress = ui.switch(
+                                "OB Wall Suppress",
+                                value=bool(alternator.get("ob_wall_suppress", False)),
+                            ).props(
+                                "hint='Block reversal entries when a dominant order-book wall opposes the flip direction' persistent-hint dense color=primary"
+                            )
+                            altr_ob_wall_proximity = ui.number(
+                                label="Proximity %",
+                                value=alternator.get("ob_wall_proximity_pct", 1.0),
+                                min=0.1, max=10.0, step=0.1, precision=1,
+                            ).classes("w-28").props(
+                                "hint='Scan opposing side within this % of price' persistent-hint suffix='%'"
+                            ).bind_enabled_from(altr_ob_wall_suppress, "value")
+                            altr_ob_wall_ratio = ui.number(
+                                label="Wall Ratio",
+                                value=alternator.get("ob_wall_ratio", 3.0),
+                                min=1.0, max=20.0, step=0.5, precision=1,
+                            ).classes("w-28").props(
+                                "hint='Level counts as wall when size ≥ this × average' persistent-hint suffix='×'"
+                            ).bind_enabled_from(altr_ob_wall_suppress, "value")
                         ui.label("Continuous LLM Supervision").classes("text-xs font-semibold text-slate-600 mt-1")
                         with ui.row().classes("gap-4 items-center mb-2"):
                             altr_continuous_llm_switch = ui.switch(
@@ -3574,10 +3610,54 @@ def register_pages(app: FastAPI) -> None:
                         alternator_switch, "value"
                     )
 
-            ui.separator().classes("w-full my-4")
-            save_button = ui.button("Save", icon="save")
+            ui.separator().classes("w-full my-2")
+            with ui.card().classes("w-full rounded-lg border border-slate-200 mb-1"):
+                _ob_stops_cfg = strategy.get("ob_wall_stops") or {}
+                with ui.row().classes("w-full items-center gap-2 flex-nowrap"):
+                    ob_wall_stops_switch = ui.switch(
+                        value=bool(_ob_stops_cfg.get("enabled", False)),
+                    ).props("dense color=primary")
+                    with ui.expansion("OB Wall Dynamic Stop-Loss").classes("flex-1 text-sm font-medium"):
+                        ui.label(
+                            "Automatically tightens stop-losses by anchoring them just behind the nearest "
+                            "significant resting limit-order wall in the supporting direction. "
+                            "For LONG positions the stop moves up toward the largest bid wall below price; "
+                            "for SHORT positions it moves down toward the largest ask wall above price. "
+                            "The stop is never loosened."
+                        ).classes("text-xs text-slate-400 mb-2")
+                        with ui.row().classes("gap-4 items-center flex-wrap mb-2"):
+                            ob_wall_stops_proximity = ui.number(
+                                label="Proximity %",
+                                value=_ob_stops_cfg.get("proximity_pct", 2.0),
+                                min=0.1, max=20.0, step=0.1, precision=1,
+                            ).classes("w-32").props(
+                                "hint='Scan for walls within this % of current price' persistent-hint suffix='%'"
+                            ).bind_enabled_from(ob_wall_stops_switch, "value")
+                            ob_wall_stops_ratio = ui.number(
+                                label="Wall Ratio",
+                                value=_ob_stops_cfg.get("wall_ratio", 3.0),
+                                min=1.0, max=20.0, step=0.5, precision=1,
+                            ).classes("w-32").props(
+                                "hint='A level qualifies as a wall when its size ≥ N× average level size' persistent-hint suffix='×'"
+                            ).bind_enabled_from(ob_wall_stops_switch, "value")
+                            ob_wall_stops_min_improvement = ui.number(
+                                label="Min Improvement %",
+                                value=_ob_stops_cfg.get("min_sl_improvement_pct", 0.1),
+                                min=0.01, max=5.0, step=0.05, precision=2,
+                            ).classes("w-36").props(
+                                "hint='Minimum % price improvement required to re-place the SL algo (avoids micro-churn)' persistent-hint suffix='%'"
+                            ).bind_enabled_from(ob_wall_stops_switch, "value")
+                            ob_wall_stops_buffer = ui.number(
+                                label="Buffer Behind Wall %",
+                                value=_ob_stops_cfg.get("sl_buffer_pct", 0.1),
+                                min=0.01, max=2.0, step=0.05, precision=2,
+                            ).classes("w-40").props(
+                                "hint='Stop is placed this % below/above the wall price (breathing room)' persistent-hint suffix='%'"
+                            ).bind_enabled_from(ob_wall_stops_switch, "value")
+                _active_badge_ob_stops = ui.badge("Active", color="positive").bind_visibility_from(
+                    ob_wall_stops_switch, "value"
+                )
 
-        # ── Mutual exclusion: Skimming / Commutator / Alternator ─────────────
         # Only one of these three can be enabled at a time.  When the user turns
         # one ON the others are silently disabled and a notification is shown.
         _mutex_busy: dict[str, bool] = {"flag": False}
@@ -3669,6 +3749,9 @@ def register_pages(app: FastAPI) -> None:
                     "candle_position_lookback": int(altr_cpf_lookback.value or 20),
                     "footprint_delta_filter": bool(altr_fpd_switch.value),
                     "footprint_delta_min_ratio": float(altr_fpd_min_ratio.value or 0.0),
+                    "ob_wall_suppress": bool(altr_ob_wall_suppress.value),
+                    "ob_wall_proximity_pct": float(altr_ob_wall_proximity.value or 1.0),
+                    "ob_wall_ratio": float(altr_ob_wall_ratio.value or 3.0),
                     "continuous_llm": bool(altr_continuous_llm_switch.value),
                     "max_reversals": int(altr_max_reversals.value) if altr_max_reversals.value not in (None, "") else None,
                     "close_on_max_reversals": bool(altr_close_on_max_reversals.value),
@@ -3678,6 +3761,13 @@ def register_pages(app: FastAPI) -> None:
                     "ride_at_profit_usd": float(altr_ride_profit_usd.value) if altr_ride_profit_usd.value not in (None, "") else None,
                     "stop_at_loss_pct": float(altr_stop_loss_pct.value) if altr_stop_loss_pct.value not in (None, "") else None,
                     "stop_at_loss_usd": float(altr_stop_loss_usd.value) if altr_stop_loss_usd.value not in (None, "") else None,
+                },
+                "ob_wall_stops": {
+                    "enabled": bool(ob_wall_stops_switch.value),
+                    "proximity_pct": float(ob_wall_stops_proximity.value or 2.0),
+                    "wall_ratio": float(ob_wall_stops_ratio.value or 3.0),
+                    "min_sl_improvement_pct": float(ob_wall_stops_min_improvement.value or 0.1),
+                    "sl_buffer_pct": float(ob_wall_stops_buffer.value or 0.1),
                 },
             }
             config["strategy"] = updated_strategy

@@ -2310,6 +2310,9 @@ class MarketService:
         candle_position_lookback = int(alternator.get("candle_position_lookback") or 20)
         footprint_delta_filter = bool(alternator.get("footprint_delta_filter", False))
         footprint_delta_min_ratio = float(alternator.get("footprint_delta_min_ratio") or 0.0)
+        ob_wall_suppress = bool(alternator.get("ob_wall_suppress", False))
+        ob_wall_proximity_pct = self._extract_float(alternator.get("ob_wall_proximity_pct")) or 1.0
+        ob_wall_ratio = self._extract_float(alternator.get("ob_wall_ratio")) or 3.0
         continuous_llm = bool(alternator.get("continuous_llm", False))
         trailing_close = bool(alternator.get("trailing_close", False))
         trailing_close_activate_pct = abs(
@@ -2800,6 +2803,42 @@ class MarketService:
                                     f"Alternator: {symbol} footprint delta filter — "
                                     "no trade data in window, skipping"
                                 )
+                        if ob_wall_suppress and will_flip and new_entry_side is not None:
+                            _ob_ticker = self._latest_ticker.get(symbol) or {}
+                            _ob_price = self._extract_float(
+                                _ob_ticker.get("last") or _ob_ticker.get("lastPr")
+                            )
+                            if _ob_price and _ob_price > 0:
+                                _snap_altr = self._last_full_snapshot
+                                _altr_ob_book = (
+                                    ((_snap_altr.get("market_data") or {}).get(symbol) or {})
+                                    .get("order_book", {})
+                                    if _snap_altr else {}
+                                )
+                                _altr_ob_levels = (
+                                    _altr_ob_book.get("asks") if new_entry_side == "buy"
+                                    else _altr_ob_book.get("bids")
+                                ) or []
+                                _altr_ob_nearby = [
+                                    s for p, s in _altr_ob_levels
+                                    if (
+                                        _ob_price <= p <= _ob_price * (1 + ob_wall_proximity_pct / 100.0)
+                                        if new_entry_side == "buy"
+                                        else _ob_price * (1 - ob_wall_proximity_pct / 100.0) <= p <= _ob_price
+                                    )
+                                ]
+                                if _altr_ob_levels and _altr_ob_nearby:
+                                    _altr_avg = sum(s for _, s in _altr_ob_levels) / len(_altr_ob_levels)
+                                    _altr_wall = max(_altr_ob_nearby)
+                                    if _altr_avg > 0 and _altr_wall >= ob_wall_ratio * _altr_avg:
+                                        _wall_dir = "LONG" if new_entry_side == "buy" else "SHORT"
+                                        self._emit_debug(
+                                            f"Alternator: {symbol} {_wall_dir} profit reversal "
+                                            f"blocked by OB wall — wall_size={_altr_wall:.2f} "
+                                            f"({_altr_wall / _altr_avg:.1f}x avg={_altr_avg:.2f}) "
+                                            f"within {ob_wall_proximity_pct}% of price — waiting"
+                                        )
+                                        continue
                         self._alternator_flipping.add(symbol)
                         asyncio.create_task(
                             self._alternator_flip(
@@ -2816,8 +2855,6 @@ class MarketService:
                             name=f"alternator-flip-{symbol}",
                         )
                         continue
-                else:
-                    # ── Trailing mode: wait for pullback from peak ────────────
                     if hit_rev_profit_pct or hit_rev_profit_usd:
                         self._alternator_above_threshold.add(symbol)
                     # Update peak PnL (only upward)
@@ -2899,6 +2936,42 @@ class MarketService:
                                     f"Alternator: {symbol} footprint delta filter — "
                                     "no trade data in window, skipping"
                                 )
+                        if ob_wall_suppress and will_flip and new_entry_side is not None:
+                            _ob_ticker = self._latest_ticker.get(symbol) or {}
+                            _ob_price = self._extract_float(
+                                _ob_ticker.get("last") or _ob_ticker.get("lastPr")
+                            )
+                            if _ob_price and _ob_price > 0:
+                                _snap_altr = self._last_full_snapshot
+                                _altr_ob_book = (
+                                    ((_snap_altr.get("market_data") or {}).get(symbol) or {})
+                                    .get("order_book", {})
+                                    if _snap_altr else {}
+                                )
+                                _altr_ob_levels = (
+                                    _altr_ob_book.get("asks") if new_entry_side == "buy"
+                                    else _altr_ob_book.get("bids")
+                                ) or []
+                                _altr_ob_nearby = [
+                                    s for p, s in _altr_ob_levels
+                                    if (
+                                        _ob_price <= p <= _ob_price * (1 + ob_wall_proximity_pct / 100.0)
+                                        if new_entry_side == "buy"
+                                        else _ob_price * (1 - ob_wall_proximity_pct / 100.0) <= p <= _ob_price
+                                    )
+                                ]
+                                if _altr_ob_levels and _altr_ob_nearby:
+                                    _altr_avg = sum(s for _, s in _altr_ob_levels) / len(_altr_ob_levels)
+                                    _altr_wall = max(_altr_ob_nearby)
+                                    if _altr_avg > 0 and _altr_wall >= ob_wall_ratio * _altr_avg:
+                                        _wall_dir = "LONG" if new_entry_side == "buy" else "SHORT"
+                                        self._emit_debug(
+                                            f"Alternator: {symbol} {_wall_dir} trailing reversal "
+                                            f"blocked by OB wall — wall_size={_altr_wall:.2f} "
+                                            f"({_altr_wall / _altr_avg:.1f}x avg={_altr_avg:.2f}) "
+                                            f"within {ob_wall_proximity_pct}% of price — waiting"
+                                        )
+                                        continue
                         self._alternator_above_threshold.discard(symbol)
                         self._alternator_peak_pnl_pct.pop(symbol, None)
                         self._alternator_peak_pnl_usd.pop(symbol, None)
@@ -2990,6 +3063,42 @@ class MarketService:
                             f"Alternator: {symbol} footprint delta filter — "
                             "no trade data in window, skipping"
                         )
+                if ob_wall_suppress and will_flip and new_entry_side is not None:
+                    _ob_ticker = self._latest_ticker.get(symbol) or {}
+                    _ob_price = self._extract_float(
+                        _ob_ticker.get("last") or _ob_ticker.get("lastPr")
+                    )
+                    if _ob_price and _ob_price > 0:
+                        _snap_altr = self._last_full_snapshot
+                        _altr_ob_book = (
+                            ((_snap_altr.get("market_data") or {}).get(symbol) or {})
+                            .get("order_book", {})
+                            if _snap_altr else {}
+                        )
+                        _altr_ob_levels = (
+                            _altr_ob_book.get("asks") if new_entry_side == "buy"
+                            else _altr_ob_book.get("bids")
+                        ) or []
+                        _altr_ob_nearby = [
+                            s for p, s in _altr_ob_levels
+                            if (
+                                _ob_price <= p <= _ob_price * (1 + ob_wall_proximity_pct / 100.0)
+                                if new_entry_side == "buy"
+                                else _ob_price * (1 - ob_wall_proximity_pct / 100.0) <= p <= _ob_price
+                            )
+                        ]
+                        if _altr_ob_levels and _altr_ob_nearby:
+                            _altr_avg = sum(s for _, s in _altr_ob_levels) / len(_altr_ob_levels)
+                            _altr_wall = max(_altr_ob_nearby)
+                            if _altr_avg > 0 and _altr_wall >= ob_wall_ratio * _altr_avg:
+                                _wall_dir = "LONG" if new_entry_side == "buy" else "SHORT"
+                                self._emit_debug(
+                                    f"Alternator: {symbol} {_wall_dir} loss-restart blocked by OB wall "
+                                    f"— wall_size={_altr_wall:.2f} "
+                                    f"({_altr_wall / _altr_avg:.1f}x avg={_altr_avg:.2f}) "
+                                    f"within {ob_wall_proximity_pct}% of price — waiting"
+                                )
+                                continue
                 self._alternator_flipping.add(symbol)
                 asyncio.create_task(
                     self._alternator_flip(
@@ -3761,7 +3870,153 @@ class MarketService:
                 raise
             except Exception as exc:  # pragma: no cover - best-effort
                 logger.debug("Launcher check error: %s", exc)
+            try:
+                await self._check_ob_wall_stops()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # pragma: no cover - best-effort
+                logger.debug("OB wall stops check error: %s", exc)
             await asyncio.sleep(self._positions_refresh_interval)
+
+    async def _check_ob_wall_stops(self) -> None:
+        """Dynamically anchor stop-losses to the nearest supporting OB wall.
+
+        For LONG positions: scans the bid side for a dominant wall within
+        ``proximity_pct``% below the current price and places the stop just
+        below it (wall_price × (1 − sl_buffer_pct/100)), using the large
+        resting orders as a physical barrier.  For SHORT positions: scans the
+        ask side for a dominant wall above price and places the stop just above.
+
+        The SL is only updated when:
+          1. The proposed SL is tighter than the current one (moves toward
+             profit — never loosens an existing stop).
+          2. The improvement ≥ min_sl_improvement_pct of current price
+             (prevents micro-churning of OKX algo orders).
+
+        Config lives under strategy.ob_wall_stops:
+          enabled                 – bool
+          proximity_pct           – % below/above price to scan (default 2.0)
+          wall_ratio              – N× avg level size to call it a wall (default 3.0)
+          min_sl_improvement_pct  – min % price improvement before re-placing (default 0.1)
+          sl_buffer_pct           – % behind the wall where stop is placed (default 0.1)
+        """
+        ob_stops_cfg = self._strategy_config.get("ob_wall_stops") or {}
+        if not ob_stops_cfg.get("enabled"):
+            return
+        proximity_pct = self._extract_float(ob_stops_cfg.get("proximity_pct")) or 2.0
+        wall_ratio = self._extract_float(ob_stops_cfg.get("wall_ratio")) or 3.0
+        min_improvement_pct = self._extract_float(ob_stops_cfg.get("min_sl_improvement_pct")) or 0.1
+        sl_buffer_pct = self._extract_float(ob_stops_cfg.get("sl_buffer_pct")) or 0.1
+
+        snapshot = self._last_full_snapshot
+        if not snapshot:
+            return
+        positions: list[dict[str, Any]] = snapshot.get("positions") or []
+        if not positions:
+            return
+
+        for pos in positions:
+            if not isinstance(pos, dict):
+                continue
+            symbol = str(pos.get("instId", "")).upper()
+            if not symbol:
+                continue
+            pos_val = self._extract_float(pos.get("pos"))
+            if not pos_val or pos_val == 0:
+                continue
+            pos_side = str(pos.get("posSide", "")).lower()
+            trade_mode = str(pos.get("mgnMode") or "").lower() or "cross"
+
+            # Determine position direction
+            if pos_side == "long":
+                is_long = True
+            elif pos_side == "short":
+                is_long = False
+            else:
+                # Net-mode: infer from sign of pos
+                is_long = pos_val > 0
+
+            # Current market price
+            ticker = self._latest_ticker.get(symbol) or {}
+            last_price = self._extract_float(ticker.get("last") or ticker.get("lastPr"))
+            if not last_price or last_price <= 0:
+                continue
+
+            # Current protection state
+            symbol_key = symbol.upper()
+            protection = self._position_protection.get(symbol_key) or {}
+            current_sl = self._extract_float(protection.get("stop_loss"))
+            current_tp = self._extract_float(protection.get("take_profit"))
+
+            # Order book for this symbol
+            ob_book = (
+                (snapshot.get("market_data") or {}).get(symbol, {}).get("order_book", {})
+            )
+            if is_long:
+                # Bid walls BELOW current price provide support
+                levels = ob_book.get("bids") or []
+                nearby = [
+                    (p, s) for p, s in levels
+                    if last_price * (1 - proximity_pct / 100.0) <= p < last_price
+                ]
+            else:
+                # Ask walls ABOVE current price act as resistance / ceiling
+                levels = ob_book.get("asks") or []
+                nearby = [
+                    (p, s) for p, s in levels
+                    if last_price < p <= last_price * (1 + proximity_pct / 100.0)
+                ]
+
+            if not levels or not nearby:
+                continue
+            avg_size = sum(s for _, s in levels) / len(levels)
+            if avg_size <= 0:
+                continue
+
+            # Find the single dominant wall (largest level in range)
+            wall_price, wall_size = max(nearby, key=lambda x: x[1])
+            if wall_size < wall_ratio * avg_size:
+                continue  # no wall significant enough to anchor to
+
+            # Place stop just behind the wall
+            if is_long:
+                proposed_sl = wall_price * (1 - sl_buffer_pct / 100.0)
+            else:
+                proposed_sl = wall_price * (1 + sl_buffer_pct / 100.0)
+
+            # Only update if it meaningfully tightens the stop
+            if current_sl is not None:
+                if is_long and proposed_sl <= current_sl:
+                    continue  # would loosen stop — never downgrade
+                if not is_long and proposed_sl >= current_sl:
+                    continue
+                improvement = abs(proposed_sl - current_sl) / last_price * 100.0
+                if improvement < min_improvement_pct:
+                    continue  # improvement too small to justify a re-place
+
+            action = "BUY" if is_long else "SELL"
+            dual_side = pos_side in {"long", "short"}
+            effective_pos_side = pos_side if dual_side else None
+
+            self._emit_debug(
+                f"OB wall stops: {symbol} {'LONG' if is_long else 'SHORT'} — "
+                f"wall at {wall_price:.4f} "
+                f"(size={wall_size:.2f}, {wall_size / avg_size:.1f}× avg={avg_size:.2f}) "
+                f"— moving SL {current_sl!r} → {proposed_sl:.4f}"
+            )
+            success = await self._refresh_position_protection(
+                symbol=symbol,
+                trade_mode=trade_mode,
+                action=action,
+                take_profit_price=current_tp,
+                stop_loss_price=proposed_sl,
+                dual_side_mode=dual_side,
+                pos_side=effective_pos_side,
+            )
+            if not success:
+                self._emit_debug(
+                    f"OB wall stops: {symbol} SL update to {proposed_sl:.4f} failed"
+                )
 
     async def _schedule_patch_publish(self) -> None:
         """Debounce helper: coalesce rapid private-WS frames before patching Redis."""
