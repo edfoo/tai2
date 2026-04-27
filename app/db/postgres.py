@@ -918,21 +918,21 @@ async def load_strategy_config() -> dict[str, Any]:
     return {}
 
 
-async def save_governor_config(config: dict[str, Any]) -> None:
+async def save_launcher_config(config: dict[str, Any]) -> None:
     pool = await get_postgres_pool()
     await pool.execute(
         """
         INSERT INTO runtime_settings (key, value, updated_at)
-        VALUES ('governor_config', $1::jsonb, NOW())
+        VALUES ('launcher_config', $1::jsonb, NOW())
         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
         """,
         json.dumps(config or {}),
     )
 
 
-async def load_governor_config() -> dict[str, Any]:
+async def load_launcher_config() -> dict[str, Any]:
     pool = await get_postgres_pool()
-    row = await pool.fetchrow("SELECT value FROM runtime_settings WHERE key = 'governor_config'")
+    row = await pool.fetchrow("SELECT value FROM runtime_settings WHERE key = 'launcher_config'")
     if not row:
         return {}
     value = row["value"]

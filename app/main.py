@@ -23,7 +23,7 @@ from app.db.postgres import (
     load_guardrails,
     load_screener_config,
     load_strategy_config,
-    load_governor_config,
+    load_launcher_config,
     load_ta_timeframe,
     load_llm_model,
     load_execution_settings,
@@ -223,7 +223,7 @@ def _create_lifespan(enable_background_services: bool):
             "ohlcv_fetch_limit": 200,
             "ohlcv_snapshot_candles": 96,
             "ohlcv_snapshot_htf_candles": 48,
-            "governor": {},
+            "launcher": {},
         }
         app.state.runtime_config["wait_for_tp_sl"] = bool(
             app.state.runtime_config["guardrails"].get("wait_for_tp_sl", False)
@@ -393,12 +393,12 @@ def _create_lifespan(enable_background_services: bool):
                     if stored_strategy:
                         app.state.runtime_config["strategy"] = stored_strategy
                 try:
-                    stored_governor = await load_governor_config()
+                    stored_launcher = await load_launcher_config()
                 except Exception as exc:  # pragma: no cover - optional
-                    logger.error("Failed to load governor config: %s", exc)
+                    logger.error("Failed to load launcher config: %s", exc)
                 else:
-                    if stored_governor:
-                        app.state.runtime_config["governor"] = stored_governor
+                    if stored_launcher:
+                        app.state.runtime_config["launcher"] = stored_launcher
                 try:
                     stored_candle_settings = await load_candle_settings()
                 except Exception as exc:  # pragma: no cover - optional
@@ -464,9 +464,9 @@ def _create_lifespan(enable_background_services: bool):
                 stored_strategy = app.state.runtime_config.get("strategy") or {}
                 if stored_strategy:
                     market_service.set_strategy_config(stored_strategy)
-                stored_governor_cfg = app.state.runtime_config.get("governor") or {}
-                if stored_governor_cfg:
-                    market_service.set_governor_config(stored_governor_cfg)
+                stored_launcher_cfg = app.state.runtime_config.get("launcher") or {}
+                if stored_launcher_cfg:
+                    market_service.set_launcher_config(stored_launcher_cfg)
                 scheduler = PromptScheduler(
                     app,
                     default_interval=app.state.runtime_config.get("auto_prompt_interval", 300),

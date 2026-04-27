@@ -234,15 +234,15 @@ class PromptScheduler:
 
         # Read runtime config once; governs all four phases below.
         _rc = getattr(self._app.state, "runtime_config", {}) or {}
-        _gov_config = _rc.get("governor") or {}
+        _gov_config = _rc.get("launcher") or {}
         _decision_mode = str(_gov_config.get("mode") or "disabled").lower()
 
         # ── Phase 1: collect decisions ─────────────────────────────────────
-        if _decision_mode == "governor_only":
-            # Governor path: evaluate rule-based entry signals, no LLM calls.
+        if _decision_mode == "launcher_only":
+            # Launcher path: evaluate rule-based entry signals, no LLM calls.
             # bundle=None signals Phase 3 to use direct handle_llm_decision().
             valid: list[tuple[str, Any, dict[str, Any] | None, str | None]] = (
-                self._collect_governor_decisions(symbols, market_service)
+                self._collect_launcher_decisions(symbols, market_service)
             )
         else:
             # LLM path: ask the LLM for ALL symbols concurrently.
@@ -358,7 +358,7 @@ class PromptScheduler:
         for sym, bundle, decision, prompt_id in actionable:
             try:
                 if bundle is None:
-                    # Governor-only path: call handle_llm_decision directly so
+                    # Launcher-only path: call handle_llm_decision directly so
                     # all guardrails (margin, position alignment, daily loss, etc.) apply.
                     _ms = market_service or getattr(self._app.state, "market_service", None)
                     if _ms:
@@ -367,7 +367,7 @@ class PromptScheduler:
                             timeout=_EXEC_TIMEOUT,
                         )
                     logger.info(
-                        "Governor decision for %s action=%s",
+                        "Launcher decision for %s action=%s",
                         sym,
                         decision.get("action"),
                     )
@@ -417,16 +417,16 @@ class PromptScheduler:
             except Exception as exc:  # pragma: no cover - defensive
                 logger.exception("Prompt scheduler HOLD recording failed for %s: %s", sym, exc)
 
-        # Governor-only mode has no HOLD recording — signals are binary (fire or skip).
-        if _decision_mode != "governor_only":
+        # Launcher-only mode has no HOLD recording — signals are binary (fire or skip).
+        if _decision_mode != "launcher_only":
             await asyncio.gather(*(_apply_hold(i) for i in non_actionable))
 
-    def _collect_governor_decisions(
+    def _collect_launcher_decisions(
         self,
         symbols: Iterable[str],
         market_service: Any,
     ) -> list[tuple[str, None, dict[str, Any], None]]:
-        """Return Governor-mode decision tuples for all symbols that have a signal.
+        """Return Launcher-mode decision tuples for all symbols that have a signal.
 
         bundle=None in each tuple signals Phase 3 to call handle_llm_decision()
         directly instead of apply_llm_decision().
@@ -436,9 +436,9 @@ class PromptScheduler:
         results: list[tuple[str, None, dict[str, Any], None]] = []
         for symbol in symbols:
             try:
-                decision = market_service.build_governor_decision(symbol)
+                decision = market_service.build_launcher_decision(symbol)
             except Exception as exc:  # pragma: no cover - defensive
-                logger.debug("Governor decision build failed for %s: %s", symbol, exc)
+                logger.debug("Launcher decision build failed for %s: %s", symbol, exc)
                 decision = None
             if decision is not None:
                 results.append((symbol, None, decision, None))

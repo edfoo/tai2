@@ -314,20 +314,20 @@ class MarketService:
         self._llm_service: Any = None
         self._llm_mandate: dict[str, dict[str, Any]] = {}  # per-symbol active mandate
         self._llm_supervision_running: set[str] = set()  # prevents concurrent calls
-        # Governor: rule-based entry/exit + optional LLM trade filter.
-        # Stored separately from _strategy_config (lives in runtime_config["governor"]).
-        self._governor_config: dict[str, Any] = {}
-        # _governor_entering: per-symbol in-flight entry guard.
-        self._governor_entering: set[str] = set()
-        # _governor_in_position: symbols where Governor opened a trade.
+        # Launcher: rule-based entry/exit + optional LLM trade filter.
+        # Stored separately from _strategy_config (lives in runtime_config["launcher"]).
+        self._launcher_config: dict[str, Any] = {}
+        # _launcher_entering: per-symbol in-flight entry guard.
+        self._launcher_entering: set[str] = set()
+        # _launcher_in_position: symbols where Launcher opened a trade.
         #   value → {"side": "long"|"short", "pos_side": str|None}
-        self._governor_in_position: dict[str, dict[str, Any]] = {}
-        # Scheduling state (governor_only mode).
-        self._governor_last_entry_check: float = 0.0
-        # on_close mode: symbols that just had a Governor-close accepted.
-        self._governor_trigger_symbols: set[str] = set()
+        self._launcher_in_position: dict[str, dict[str, Any]] = {}
+        # Scheduling state (launcher_only mode).
+        self._launcher_last_entry_check: float = 0.0
+        # on_close mode: symbols that just had a Launcher-close accepted.
+        self._launcher_trigger_symbols: set[str] = set()
         # on_close mode: were there any open positions on the previous tick?
-        self._governor_had_positions: bool = False
+        self._launcher_had_positions: bool = False
 
     async def start(self) -> None:
         """Launch the market snapshot poller and websocket consumers if not already running."""
@@ -1178,10 +1178,10 @@ class MarketService:
         self._strategy_config = config or {}
         self._emit_debug(f"Strategy config updated: {self._strategy_config}")
 
-    def set_governor_config(self, config: dict[str, Any]) -> None:
-        """Update the Governor configuration at runtime (called from CFG save)."""
-        self._governor_config = config or {}
-        self._emit_debug(f"Governor config updated: {self._governor_config}")
+    def set_launcher_config(self, config: dict[str, Any]) -> None:
+        """Update the Launcher configuration at runtime (called from CFG save)."""
+        self._launcher_config = config or {}
+        self._emit_debug(f"Launcher config updated: {self._launcher_config}")
 
     def set_llm_service(self, llm_service: Any) -> None:
         """Inject the shared LLMService instance for continuous supervision calls."""
@@ -2012,12 +2012,12 @@ class MarketService:
             return None
         return (last_price - range_low) / (range_high - range_low)
 
-    # ── Governor ──────────────────────────────────────────────────────────────
+    # ── Launcher ──────────────────────────────────────────────────────────────
 
-    def _governor_evaluate_signal(self, symbol: str) -> str | None:
+    def _launcher_evaluate_signal(self, symbol: str) -> str | None:
         """Return "buy", "sell", or None based on the current snapshot indicators.
 
-        Used both by ``_check_governor`` (standalone entries) and by
+        Used both by ``_check_launcher`` (standalone entries) and by
         ``handle_llm_decision`` (LLM trade filter).
 
         A signal fires only when ALL enabled filters agree:
@@ -2027,7 +2027,7 @@ class MarketService:
           - ADX ≥ min_adx when min_adx > 0
         Returns None when indicators are neutral or any filter disagrees.
         """
-        gov = self._governor_config
+        gov = self._launcher_config
         rsi_oversold = self._extract_float(gov.get("rsi_oversold")) or 35.0
         rsi_overbought = self._extract_float(gov.get("rsi_overbought")) or 65.0
         require_htf_trend = bool(gov.get("require_htf_trend", True))
@@ -2073,17 +2073,17 @@ class MarketService:
             return "sell"
         return None
 
-    async def _check_governor(self) -> None:
-        """Update Governor position-tracking state for the scheduler's on_close trigger.
+    async def _check_launcher(self) -> None:
+        """Update Launcher position-tracking state for the scheduler's on_close trigger.
 
-        Entry decisions for governor_only mode are now driven by
-        PromptScheduler._tick() via build_governor_decision().  This method
-        only prunes _governor_in_position and updates _governor_had_positions
+        Entry decisions for launcher_only mode are now driven by
+        PromptScheduler._tick() via build_launcher_decision().  This method
+        only prunes _launcher_in_position and updates _launcher_had_positions
         so the on_close trigger can detect the transition to no open positions.
         """
-        gov = self._governor_config
+        gov = self._launcher_config
         mode = str(gov.get("mode") or "disabled").lower()
-        if mode != "governor_only":
+        if mode != "launcher_only":
             return
 
         snapshot = self._last_full_snapshot
@@ -2098,14 +2098,14 @@ class MarketService:
         }
 
         # Prune stale tracking (position settled externally)
-        for sym in list(self._governor_in_position):
+        for sym in list(self._launcher_in_position):
             if sym not in active_symbols:
-                self._emit_debug(f"Governor: {sym} no longer in positions — clearing tracking")
-                self._governor_in_position.pop(sym, None)
+                self._emit_debug(f"Launcher: {sym} no longer in positions — clearing tracking")
+                self._launcher_in_position.pop(sym, None)
 
-        self._governor_had_positions = bool(active_symbols)
+        self._launcher_had_positions = bool(active_symbols)
 
-    async def _governor_open_position(
+    async def _launcher_open_position(
         self,
         symbol: str,
         side: str,
@@ -2114,7 +2114,7 @@ class MarketService:
         trade_mode: str,
         attach_algo_orders: list[dict[str, Any]] | None,
     ) -> None:
-        """Submit a Governor entry order and record position tracking on success."""
+        """Submit a Launcher entry order and record position tracking on success."""
         coid = self._generate_client_order_id("gov")
         try:
             result = await self._submit_order(
@@ -2129,23 +2129,23 @@ class MarketService:
                 attach_algo_orders=attach_algo_orders,
             )
             if result is None:
-                self._emit_debug(f"Governor: {symbol} — trade API unavailable")
+                self._emit_debug(f"Launcher: {symbol} — trade API unavailable")
                 return
             order_result = result[0] if isinstance(result, tuple) else result
             if order_result:
-                self._emit_debug(f"Governor: {symbol} entry accepted ({side})")
-                self._governor_in_position[symbol] = {
+                self._emit_debug(f"Launcher: {symbol} entry accepted ({side})")
+                self._launcher_in_position[symbol] = {
                     "side": "long" if side == "buy" else "short",
                     "pos_side": pos_side,
                 }
             else:
-                self._emit_debug(f"Governor: {symbol} entry rejected")
+                self._emit_debug(f"Launcher: {symbol} entry rejected")
         except Exception as exc:
-            logger.warning("Governor entry error for %s: %s", symbol, exc)
+            logger.warning("Launcher entry error for %s: %s", symbol, exc)
         finally:
-            self._governor_entering.discard(symbol)
+            self._launcher_entering.discard(symbol)
 
-    async def _governor_close_position(
+    async def _launcher_close_position(
         self,
         symbol: str,
         close_side: str,
@@ -2153,7 +2153,7 @@ class MarketService:
         contracts: float,
         trade_mode: str,
     ) -> None:
-        """Submit a Governor TP/SL close order."""
+        """Submit a Launcher TP/SL close order."""
         coid = self._generate_client_order_id("gov-c")
         try:
             result = await self._submit_order(
@@ -2168,24 +2168,24 @@ class MarketService:
                 attach_algo_orders=None,
             )
             if result is None:
-                self._emit_debug(f"Governor: {symbol} close — trade API unavailable")
+                self._emit_debug(f"Launcher: {symbol} close — trade API unavailable")
             else:
                 order_result = result[0] if isinstance(result, tuple) else result
                 if order_result:
-                    self._emit_debug(f"Governor: {symbol} close accepted")
+                    self._emit_debug(f"Launcher: {symbol} close accepted")
                 else:
-                    self._emit_debug(f"Governor: {symbol} close rejected")
+                    self._emit_debug(f"Launcher: {symbol} close rejected")
         except Exception as exc:
-            logger.warning("Governor close error for %s: %s", symbol, exc)
+            logger.warning("Launcher close error for %s: %s", symbol, exc)
 
-    def build_governor_decision(self, symbol: str) -> dict[str, Any] | None:
-        """Build a synthetic decision dict using the Governor's signal evaluation.
+    def build_launcher_decision(self, symbol: str) -> dict[str, Any] | None:
+        """Build a synthetic decision dict using the Launcher's signal evaluation.
 
-        Called by PromptScheduler._tick() in governor_only mode.  Returns a
+        Called by PromptScheduler._tick() in launcher_only mode.  Returns a
         decision compatible with handle_llm_decision(), or None if no signal
         fires or the symbol is not eligible for entry.
         """
-        gov = self._governor_config
+        gov = self._launcher_config
         snapshot = self._last_full_snapshot
         if not snapshot:
             return None
@@ -2198,29 +2198,29 @@ class MarketService:
         }
         symbol_upper = symbol.upper()
 
-        if symbol_upper in self._governor_entering:
-            self._emit_debug(f"Governor: {symbol} entry in-flight — skipping")
+        if symbol_upper in self._launcher_entering:
+            self._emit_debug(f"Launcher: {symbol} entry in-flight — skipping")
             return None
-        if symbol_upper in self._governor_in_position:
-            self._emit_debug(f"Governor: {symbol} already tracked — skipping")
+        if symbol_upper in self._launcher_in_position:
+            self._emit_debug(f"Launcher: {symbol} already tracked — skipping")
             return None
         if symbol_upper in active_symbols:
-            self._emit_debug(f"Governor: {symbol} has open position — skipping")
+            self._emit_debug(f"Launcher: {symbol} has open position — skipping")
             return None
 
-        signal = self._governor_evaluate_signal(symbol)
+        signal = self._launcher_evaluate_signal(symbol)
         if signal is None:
-            self._emit_debug(f"Governor: {symbol} — no entry signal")
+            self._emit_debug(f"Launcher: {symbol} — no entry signal")
             return None
 
         notional_usd = self._extract_float(gov.get("notional_usd"))
         if not notional_usd or notional_usd <= 0:
-            self._emit_debug(f"Governor: notional_usd not configured — skipping {symbol}")
+            self._emit_debug(f"Launcher: notional_usd not configured — skipping {symbol}")
             return None
 
         last_price = self.get_last_price(symbol)
         if not last_price or last_price <= 0:
-            self._emit_debug(f"Governor: {symbol} no last price — skipping")
+            self._emit_debug(f"Launcher: {symbol} no last price — skipping")
             return None
 
         tp_pct = self._extract_float(gov.get("tp_pct"))
@@ -2241,7 +2241,7 @@ class MarketService:
             )
 
         self._emit_debug(
-            f"Governor signal: {symbol} {signal.upper()} last={last_price} "
+            f"Launcher signal: {symbol} {signal.upper()} last={last_price} "
             f"notional={notional_usd} tp={tp_price} sl={sl_price}"
         )
         return {
@@ -2252,8 +2252,8 @@ class MarketService:
             "risk_score": 0.5,
             "take_profit": tp_price,
             "stop_loss": sl_price,
-            "rationale": f"Governor signal: {signal.upper()}",
-            "_decision_origin": "governor",
+            "rationale": f"Launcher signal: {signal.upper()}",
+            "_decision_origin": "launcher",
         }
 
     async def _check_alternator(self) -> None:
@@ -3758,11 +3758,11 @@ class MarketService:
             except Exception as exc:  # pragma: no cover - best-effort
                 logger.debug("Alternator check error: %s", exc)
             try:
-                await self._check_governor()
+                await self._check_launcher()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # pragma: no cover - best-effort
-                logger.debug("Governor check error: %s", exc)
+                logger.debug("Launcher check error: %s", exc)
             await asyncio.sleep(self._positions_refresh_interval)
 
     async def _schedule_patch_publish(self) -> None:
@@ -6388,14 +6388,14 @@ class MarketService:
             self._emit_debug(summary)
             return False
 
-        # ── Governor LLM filter (llm_with_filter mode) ───────────────────────
-        _gov = self._governor_config
+        # ── Launcher LLM filter (llm_with_filter mode) ───────────────────────
+        _gov = self._launcher_config
         if str(_gov.get("mode") or "disabled").lower() == "llm_with_filter":
-            gov_signal = self._governor_evaluate_signal(symbol)
+            gov_signal = self._launcher_evaluate_signal(symbol)
             llm_direction = "buy" if action == "BUY" else "sell"
             if gov_signal != llm_direction:
                 veto_reason = (
-                    f"Governor vetoed LLM {action} for {symbol}: "
+                    f"Launcher vetoed LLM {action} for {symbol}: "
                     f"indicator signal={gov_signal!r} (full signal required)"
                 )
                 self._emit_debug(veto_reason)
@@ -6403,10 +6403,10 @@ class MarketService:
                     symbol,
                     veto_reason,
                     level="warning",
-                    meta={"action": action, "governor_signal": gov_signal},
+                    meta={"action": action, "launcher_signal": gov_signal},
                 )
                 return False
-            # Governor agrees — amend trade with Governor's TP/SL if configured.
+            # Launcher agrees — amend trade with Launcher's TP/SL if configured.
             gov_tp_pct = self._extract_float(_gov.get("tp_pct"))
             gov_sl_pct = self._extract_float(_gov.get("sl_pct"))
             gov_notional = self._extract_float(_gov.get("notional_usd"))
@@ -6427,10 +6427,10 @@ class MarketService:
                     _amended.append(f"stop_loss={sl_val:.4f}")
             if _amended:
                 self._emit_debug(
-                    f"Governor approved LLM {action} for {symbol}; amended: {', '.join(_amended)}"
+                    f"Launcher approved LLM {action} for {symbol}; amended: {', '.join(_amended)}"
                 )
             else:
-                self._emit_debug(f"Governor approved LLM {action} for {symbol} (no amendments)")
+                self._emit_debug(f"Launcher approved LLM {action} for {symbol} (no amendments)")
 
         if wait_for_tp_sl and current_side in {"LONG", "SHORT"}:
             closing_action = (
