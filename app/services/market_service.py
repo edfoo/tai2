@@ -908,6 +908,12 @@ class MarketService:
             mode = str(entry.get("mgnMode") or entry.get("marginMode") or "isolated").lower()
             if mode != "isolated":
                 continue
+            # Skip closed-position stale entries (pos=0).  OKX retains these in the
+            # positions list briefly after closure; attempting to add margin to them
+            # returns 59300 "Position does not exist" and would block new entries.
+            pos_size = self._extract_float(entry.get("pos"))
+            if pos_size is not None and pos_size == 0:
+                continue
             entry_side = str(entry.get("posSide") or "").lower()
             if normalized_side and entry_side and entry_side != normalized_side:
                 if fallback_entry is None:

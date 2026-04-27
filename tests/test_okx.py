@@ -287,7 +287,7 @@ def test_handle_llm_seeds_isolated_margin_when_tier_requires_more_margin(monkeyp
         }
         context = {
             "symbol": service.symbol,
-            "positions": [{"instId": service.symbol, "pos": "0"}],
+            "positions": [{"instId": service.symbol, "pos": "100"}],
             "market": {"last_price": 1.0},
             "account": {
                 "account_equity": 600.0,
@@ -306,6 +306,7 @@ def test_handle_llm_seeds_isolated_margin_when_tier_requires_more_margin(monkeyp
                 "min_leverage": 6.0,
                 "max_leverage": 10.0,
                 "max_position_pct": 10.0,
+                "require_position_alignment": False,
             },
         }
 
@@ -496,7 +497,7 @@ def test_handle_llm_seeds_isolated_margin_when_position_wallet_empty(monkeypatch
                 "instId": service.symbol,
                 "mgnMode": "isolated",
                 "posSide": "long",
-                "pos": "0",
+                "pos": "10",
                 "margin": "0",
             }
         ]
@@ -523,7 +524,7 @@ def test_handle_llm_seeds_isolated_margin_when_position_wallet_empty(monkeypatch
                         "instId": service.symbol,
                         "mgnMode": "isolated",
                         "posSide": "long",
-                        "pos": "0",
+                        "pos": "10",
                         "margin": "120",
                     }
                 ]
@@ -568,6 +569,7 @@ def test_handle_llm_seeds_isolated_margin_when_position_wallet_empty(monkeypatch
                 "max_leverage": 3.0,
                 "max_position_pct": 0.5,
                 "isolated_margin_seed_pct": 0.2,
+                "require_position_alignment": False,
             },
             "market": {"last_price": 0.03},
             "account": {
@@ -1650,7 +1652,7 @@ def test_handle_llm_attempts_isolated_margin_top_up(monkeypatch: pytest.MonkeyPa
                 "instId": service.symbol,
                 "mgnMode": "isolated",
                 "posSide": "long",
-                "pos": "0",
+                "pos": "10",
                 "margin": "0",
             }
         ]
@@ -1666,6 +1668,7 @@ def test_handle_llm_attempts_isolated_margin_top_up(monkeypatch: pytest.MonkeyPa
                 "min_leverage": 0.5,
                 "max_leverage": 3,
                 "max_position_pct": 0.5,
+                "require_position_alignment": False,
             },
             "market": {"last_price": 100},
             "account": {
@@ -1795,7 +1798,7 @@ def test_handle_llm_auto_seeds_isolated_margin(monkeypatch: pytest.MonkeyPatch) 
                 "instId": service.symbol,
                 "mgnMode": "isolated",
                 "posSide": "long",
-                "pos": "0",
+                "pos": "10",
                 "margin": "0",
             }
         ]
@@ -1818,6 +1821,7 @@ def test_handle_llm_auto_seeds_isolated_margin(monkeypatch: pytest.MonkeyPatch) 
                 "max_position_pct": 0.5,
                 "isolated_margin_seed_usd": 250.0,
                 "isolated_margin_max_transfer_usd": 400.0,
+                "require_position_alignment": False,
             },
             "market": {"last_price": 100},
             "account": {
