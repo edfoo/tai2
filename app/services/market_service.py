@@ -1410,6 +1410,14 @@ class MarketService:
         snapshot = self._last_full_snapshot
         if not snapshot:
             return
+
+        # No point tracking equity when there's nothing to close.
+        positions: list[dict[str, Any]] = snapshot.get("positions") or []
+        if not positions:
+            self._shotgun_baseline_equity = None
+            self._shotgun_fired = False
+            return
+
         current_equity = self._extract_float(snapshot.get("account_equity"))
         if current_equity is None:
             return
@@ -1451,7 +1459,6 @@ class MarketService:
             return
 
         trigger_reason = "TP" if hit_tp else "SL"
-        positions: list[dict[str, Any]] = snapshot.get("positions") or []
         if not positions:
             self._emit_debug(f"Shotgun {trigger_reason}: no open positions to close")
             self._shotgun_fired = True
