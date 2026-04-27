@@ -3610,7 +3610,6 @@ def register_pages(app: FastAPI) -> None:
                         alternator_switch, "value"
                     )
 
-            ui.separator().classes("w-full my-2")
             with ui.card().classes("w-full rounded-lg border border-slate-200 mb-1"):
                 _ob_stops_cfg = strategy.get("ob_wall_stops") or {}
                 with ui.row().classes("w-full items-center gap-2 flex-nowrap"):
@@ -3657,6 +3656,9 @@ def register_pages(app: FastAPI) -> None:
                 _active_badge_ob_stops = ui.badge("Active", color="positive").bind_visibility_from(
                     ob_wall_stops_switch, "value"
                 )
+
+            ui.separator().classes("w-full my-2")
+            save_button = ui.button("Save", icon="save", color="primary")
 
         # Only one of these three can be enabled at a time.  When the user turns
         # one ON the others are silently disabled and a notification is shown.
