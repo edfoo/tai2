@@ -401,9 +401,18 @@ class PromptScheduler:
                     # (passing {} causes execution_enabled to always read as False).
                     _ms = market_service or getattr(self._app.state, "market_service", None)
                     if _ms:
+                        # runtime_config stores execution as flat keys
+                        # (execution_enabled, execution_trade_mode, …) — the
+                        # same mapping PromptBuilder does when building context.
                         _launcher_context: dict[str, Any] = {
                             "symbol": sym,
-                            "execution": _rc.get("execution") or {},
+                            "execution": {
+                                "enabled": bool(_rc.get("execution_enabled", False)),
+                                "trade_mode": _rc.get("execution_trade_mode") or "isolated",
+                                "order_type": _rc.get("execution_order_type") or "market",
+                                "min_size": _rc.get("execution_min_size"),
+                                "min_sizes": _rc.get("execution_min_sizes") or {},
+                            },
                             "guardrails": _rc.get("guardrails") or {},
                             "risk_locks": _rc.get("risk_locks") or {},
                         }
