@@ -2078,8 +2078,13 @@ class MarketService:
                 fp_net_delta = self._extract_float(fp_data.get("net_delta"))
 
         if rsi is None:
+            self._emit_debug(f"Launcher: {symbol} — no entry signal (RSI unavailable)")
             return None
         if min_adx > 0 and (adx is None or adx < min_adx):
+            self._emit_debug(
+                f"Launcher: {symbol} — no entry signal "
+                f"(ADX={adx:.1f} < min={min_adx:.1f})"
+            )
             return None
 
         buy_signal = (
@@ -2098,6 +2103,20 @@ class MarketService:
             return "buy"
         if sell_signal:
             return "sell"
+
+        # Build a human-readable breakdown of which filters blocked the signal.
+        rsi_str = f"RSI={rsi:.1f} (need <{rsi_oversold} or >{rsi_overbought})"
+        parts = [rsi_str]
+        if require_cmf:
+            parts.append(f"CMF={cmf:.3f}" if cmf is not None else "CMF=n/a")
+        if require_htf_trend:
+            if htf_ema50 is not None and htf_ema200 is not None:
+                parts.append(f"HTF EMA50={htf_ema50:.4g}/EMA200={htf_ema200:.4g} ({'bull' if htf_bullish else 'bear' if htf_bearish else 'flat'})")
+            else:
+                parts.append("HTF EMA=n/a")
+        if require_footprint_delta:
+            parts.append(f"fp_delta={fp_net_delta:.2f}" if fp_net_delta is not None else "fp_delta=n/a")
+        self._emit_debug(f"Launcher: {symbol} — no entry signal ({', '.join(parts)})")
         return None
 
     async def _check_launcher(self) -> None:
@@ -2237,7 +2256,6 @@ class MarketService:
 
         signal = self._launcher_evaluate_signal(symbol)
         if signal is None:
-            self._emit_debug(f"Launcher: {symbol} — no entry signal")
             return None
 
         notional_usd = self._extract_float(gov.get("notional_usd"))
