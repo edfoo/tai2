@@ -396,10 +396,19 @@ class PromptScheduler:
                 if bundle is None:
                     # Launcher-only path: call handle_llm_decision directly so
                     # all guardrails (margin, position alignment, daily loss, etc.) apply.
+                    # Build a context block from runtime_config so execution flags,
+                    # guardrails, and risk_locks are all visible to handle_llm_decision
+                    # (passing {} causes execution_enabled to always read as False).
                     _ms = market_service or getattr(self._app.state, "market_service", None)
                     if _ms:
+                        _launcher_context: dict[str, Any] = {
+                            "symbol": sym,
+                            "execution": _rc.get("execution") or {},
+                            "guardrails": _rc.get("guardrails") or {},
+                            "risk_locks": _rc.get("risk_locks") or {},
+                        }
                         await asyncio.wait_for(
-                            _ms.handle_llm_decision(decision, {}),
+                            _ms.handle_llm_decision(decision, _launcher_context),
                             timeout=_EXEC_TIMEOUT,
                         )
                     logger.info(
