@@ -6748,7 +6748,10 @@ class MarketService:
             last_price = self._extract_float(
                 (self._latest_ticker.get(symbol) or {}).get("last")
             )
-        if flip_llm_decision and action in {"BUY", "SELL"}:
+        # Never flip Launcher-originated decisions: the Launcher already chose
+        # the direction based on its own signal; flipping it would contradict that.
+        _is_launcher_decision = str(decision.get("_decision_origin") or "").lower() == "launcher"
+        if flip_llm_decision and not _is_launcher_decision and action in {"BUY", "SELL"}:
             action = "SELL" if action == "BUY" else "BUY"
             decision = dict(decision)
             orig_tp = self._extract_float(decision.get("take_profit"))
@@ -6819,8 +6822,9 @@ class MarketService:
             },
         )
         now = time.time()
+        _origin_label = "Launcher" if str(decision.get("_decision_origin") or "").lower() == "launcher" else "LLM"
         summary = (
-            f"LLM decision {action} "
+            f"{_origin_label} decision {action} "
             f"notional_usd={decision.get('notional_usd', decision.get('position_size', '--'))} "
             f"conf={decision.get('confidence', '--')} symbol={symbol}"
         )
@@ -8101,7 +8105,7 @@ class MarketService:
             take_profit_ratio = None
             stop_loss_ratio = None
 
-        if not reduce_only and not _alternator_entry and (stop_loss_price is None or not isinstance(stop_loss_price, (int, float)) or stop_loss_price <= 0):
+        if require_protection and not reduce_only and not _alternator_entry and (stop_loss_price is None or not isinstance(stop_loss_price, (int, float)) or stop_loss_price <= 0):
             self._record_execution_feedback(
                 symbol,
                 "Blocked: stop-loss required",
