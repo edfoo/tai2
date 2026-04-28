@@ -334,17 +334,43 @@ class PromptScheduler:
         non_actionable = [i for i in valid if not _is_actionable(i)]
 
         # Apply "Max Trades to Open" cap (0 = unlimited).
+        # The cap is interpreted as max *concurrent* open positions, not just
+        # new trades per tick.  We subtract the count of positions that are
+        # already open so that if the cap is 1 and there is already 1 open
+        # position, no new orders are placed this tick.
         # Decisions beyond the cap are demoted to non-actionable so they are
         # still recorded as HOLDs but no orders are placed.
         _max_open = int((_rc.get("guardrails") or {}).get("max_trades_to_open") or 0)
-        if _max_open > 0 and len(actionable) > _max_open:
-            logger.info(
-                "Prompt scheduler: capping actionable from %d to %d (max_trades_to_open)",
-                len(actionable),
-                _max_open,
-            )
-            non_actionable = actionable[_max_open:] + non_actionable
-            actionable = actionable[:_max_open]
+        if _max_open > 0:
+            _ms_cap = market_service or getattr(self._app.state, "market_service", None)
+            _open_count = 0
+            if _ms_cap is not None:
+                _cap_snapshot = getattr(_ms_cap, "_last_full_snapshot", None) or {}
+                _cap_positions: list[dict] = _cap_snapshot.get("positions") or []
+                _open_count = sum(
+                    1
+                    for p in _cap_positions
+                    if isinstance(p, dict) and _ms_cap._extract_float(p.get("pos"))
+                )
+            _effective_cap = max(0, _max_open - _open_count)
+            if len(actionable) > _effective_cap:
+                logger.info(
+                    "Prompt scheduler: capping actionable from %d to %d "
+                    "(max_trades_to_open=%d, already_open=%d)",
+                    len(actionable),
+                    _effective_cap,
+                    _max_open,
+                    _open_count,
+                )
+                # Demote excess BUY/SELL decisions to HOLD so Phase 4 records
+                # them without placing orders.  Mutate a copy of the decision
+                # dict to avoid side-effects on the original bundle payload.
+                demoted = [
+                    (sym, bundle, {**dec, "action": "HOLD"}, pid)
+                    for sym, bundle, dec, pid in actionable[_effective_cap:]
+                ]
+                non_actionable = demoted + non_actionable
+                actionable = actionable[:_effective_cap]
 
         # Per-symbol execution budget: keeps one stuck OKX call from consuming
         # the entire tick timeout and blocking all remaining decisions.
