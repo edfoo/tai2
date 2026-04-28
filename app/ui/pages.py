@@ -5181,6 +5181,12 @@ def register_pages(app: FastAPI) -> None:
                     value=bool(_gov_cfg.get("require_cmf", True)),
                 ).props("dense color=primary")
                 ui.label("CMF must be positive for BUY and negative for SELL.").classes("text-xs text-slate-500")
+            with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                gov_require_fp_delta_switch = ui.switch(
+                    "Require footprint net delta",
+                    value=bool(_gov_cfg.get("require_footprint_delta", False)),
+                ).props("dense color=primary")
+                ui.label("15-min tape net delta must be positive for BUY and negative for SELL.").classes("text-xs text-slate-500")
             ui.separator().classes("w-full my-4")
             ui.label("Candle settings").classes("text-sm text-slate-500")
             with ui.row().classes("w-full flex-wrap gap-4"):
@@ -6143,6 +6149,7 @@ def register_pages(app: FastAPI) -> None:
                 "min_adx": float(gov_min_adx_input.value or 0.0),
                 "require_htf_trend": bool(gov_require_htf_switch.value),
                 "require_cmf": bool(gov_require_cmf_switch.value),
+                "require_footprint_delta": bool(gov_require_fp_delta_switch.value),
             }
             try:
                 await save_launcher_config(config["launcher"])

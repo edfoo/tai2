@@ -131,3 +131,23 @@ Open the `STRATEGY` page to configure autonomous position-management strategies 
 - **OB Wall Dynamic Stop-Loss** – Independent of Alternator; anchors stop-losses to the nearest dominant supporting limit-order wall (bid wall for LONGs, ask wall for SHORTs). The stop only ever moves in the profit direction; it is never loosened. Configurable proximity, wall-ratio threshold, minimum improvement gate, and buffer behind the wall.
 
 When you click **Save**, the app persists the configuration (PostgreSQL for guardrails/prompt versions/execution settings, Redis for runtime snapshot state) and rehydrates all services in-place: MarketService gets new symbols, websocket or poll intervals, and OKX credentials; the scheduler updates its cadence; the LLM service swaps models; and the UI log buffers announce the change.
+
+
+## Launcher decision
+The Launcher uses these indicators, all of which must agree simultaneously:
+
+|Indicator|Buy|Sell|Configurable|
+|-|-|-|-|
+|RSI (required)|< RSI Oversold (default 35)|> RSI Overbought (default 65)|	Yes|
+|CMF (optional)|CMF > 0|CMF < 0|Toggle require_cmf|
+|HTF EMA trend (optional)|EMA50 > EMA200|EMA50 < EMA200|Toggle require_htf_trend|
+|ADX (optional)|ADX ≥ min_adx|ADX ≥ min_adx|min_adx (0 = disabled)|
+
+All data comes from the LTF snapshot (except EMA trend which uses indicators_htf).
+
+All signals firing "no entry" means RSI is neither oversold nor overbought on any of those symbols — i.e. the market is in a neutral RSI range. The HTF EMA trend and CMF filters compound this. If you're seeing it consistently fire nothing, you could:
+
+- Loosen the RSI thresholds (e.g. 40/60 instead of 35/65)
+- Disable require_htf_trend and/or require_cmf
+- Lower min_adx or set it to 0
+- All configurable from the CFG page → Launcher section.

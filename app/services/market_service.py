@@ -2041,6 +2041,7 @@ class MarketService:
           - CMF positive (buy) / negative (sell) when require_cmf is True
           - HTF EMA50 > EMA200 (buy) / < EMA200 (sell) when require_htf_trend is True
           - ADX ≥ min_adx when min_adx > 0
+          - 15-min footprint net_delta > 0 (buy) / < 0 (sell) when require_footprint_delta is True
         Returns None when indicators are neutral or any filter disagrees.
         """
         gov = self._launcher_config
@@ -2048,6 +2049,7 @@ class MarketService:
         rsi_overbought = self._extract_float(gov.get("rsi_overbought")) or 65.0
         require_htf_trend = bool(gov.get("require_htf_trend", True))
         require_cmf = bool(gov.get("require_cmf", True))
+        require_footprint_delta = bool(gov.get("require_footprint_delta", False))
         min_adx = self._extract_float(gov.get("min_adx")) or 0.0
 
         snapshot = self._last_full_snapshot
@@ -2068,6 +2070,13 @@ class MarketService:
         htf_bullish = htf_ema50 is not None and htf_ema200 is not None and htf_ema50 > htf_ema200
         htf_bearish = htf_ema50 is not None and htf_ema200 is not None and htf_ema50 < htf_ema200
 
+        # Footprint net delta from the live market metrics (populated by _compute_custom_metrics)
+        fp_net_delta: float | None = None
+        if require_footprint_delta:
+            fp_data = (sym_data.get("custom_metrics") or {}).get("footprint") or self._compute_footprint(symbol)
+            if fp_data:
+                fp_net_delta = self._extract_float(fp_data.get("net_delta"))
+
         if rsi is None:
             return None
         if min_adx > 0 and (adx is None or adx < min_adx):
@@ -2077,11 +2086,13 @@ class MarketService:
             rsi < rsi_oversold
             and (not require_cmf or (cmf is not None and cmf > 0))
             and (not require_htf_trend or htf_bullish)
+            and (not require_footprint_delta or (fp_net_delta is not None and fp_net_delta > 0))
         )
         sell_signal = (
             rsi > rsi_overbought
             and (not require_cmf or (cmf is not None and cmf < 0))
             and (not require_htf_trend or htf_bearish)
+            and (not require_footprint_delta or (fp_net_delta is not None and fp_net_delta < 0))
         )
         if buy_signal:
             return "buy"
