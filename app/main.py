@@ -467,6 +467,9 @@ def _create_lifespan(enable_background_services: bool):
                 stored_launcher_cfg = app.state.runtime_config.get("launcher") or {}
                 if stored_launcher_cfg:
                     market_service.set_launcher_config(stored_launcher_cfg)
+                market_service.set_footprint_config(
+                    app.state.runtime_config.get("guardrails", {}).get("footprint") or {}
+                )
                 scheduler = PromptScheduler(
                     app,
                     default_interval=app.state.runtime_config.get("auto_prompt_interval", 300),

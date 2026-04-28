@@ -280,6 +280,7 @@ class MarketService:
         self._bootstrap_blocked: dict[str, float] = {}
         self._wake_poll: asyncio.Event = asyncio.Event()
         self._strategy_config: dict[str, Any] = {}
+        self._footprint_config: dict[str, Any] = {}
         self._skimming_triggered: set[str] = set()
         # Shotgun strategy: equity baseline captured at each prompt run.
         # _check_shotgun() compares current equity against this anchor and
@@ -1184,6 +1185,10 @@ class MarketService:
         """Apply an updated strategy configuration (e.g. skimming settings)."""
         self._strategy_config = config or {}
         self._emit_debug(f"Strategy config updated: {self._strategy_config}")
+
+    def set_footprint_config(self, config: dict[str, Any]) -> None:
+        """Apply updated footprint guardrail config (e.g. bucket_pct)."""
+        self._footprint_config = config or {}
 
     def set_launcher_config(self, config: dict[str, Any]) -> None:
         """Update the Launcher configuration at runtime (called from CFG save)."""
@@ -4860,10 +4865,21 @@ class MarketService:
 
         spec = self._instrument_specs.get(symbol.upper())
         tick_size = float((spec or {}).get("tick_size") or 0.0)
-        if tick_size <= 0:
+
+        # Determine bucket size: percentage-based (preferred) or tick-based fallback.
+        _bucket_pct = float(self._footprint_config.get("bucket_pct") or 0.0)
+        if _bucket_pct > 0.0:
+            # Use the most recent trade price from the buffer as the reference price.
+            _ref_px = buf[-1]["px"] if buf else 0.0
+            bucket_size = _ref_px * (_bucket_pct / 100.0) if _ref_px > 0 else 0.0
+        else:
+            if tick_size <= 0:
+                return {}
+            bucket_size = tick_size * self.FOOTPRINT_BUCKET_TICKS
+
+        if bucket_size <= 0:
             return {}
 
-        bucket_size = tick_size * self.FOOTPRINT_BUCKET_TICKS
         cutoff = time.time() - self.FOOTPRINT_WINDOW_SECONDS
 
         # profile: bucket_index (int) -> {"ask": float, "bid": float}

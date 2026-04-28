@@ -4463,6 +4463,7 @@ def register_pages(app: FastAPI) -> None:
             "net_delta_confidence_delta": 0.02,
             "imbalance_zone_confidence_delta": 0.03,
             "imbalance_zone_proximity_pct": 0.3,
+            "bucket_pct": 0.1,
         })
         if "wait_for_tp_sl" not in config:
             config["wait_for_tp_sl"] = bool(guardrails.get("wait_for_tp_sl", False))
@@ -4878,6 +4879,13 @@ def register_pages(app: FastAPI) -> None:
             ).classes("text-xs text-slate-500")
             _fp_cfg = guardrails.setdefault("footprint", {})
             with ui.row().classes("w-full flex-wrap gap-4"):
+                fp_bucket_pct_input = ui.number(
+                    label="Bucket Width %",
+                    value=_fp_cfg.get("bucket_pct", 0.1),
+                    min=0.01, max=5.0, step=0.01, format="%.2f",
+                ).classes("w-full md:w-48").props(
+                    "hint='Price bucket width as a % of current price (0 = use tick_size×100 fallback)' persistent-hint suffix='%'"
+                )
                 fp_poc_risk_input = ui.number(
                     label="POC Risk Δ",
                     value=_fp_cfg.get("poc_risk_delta", 0.05),
@@ -6077,6 +6085,7 @@ def register_pages(app: FastAPI) -> None:
                 "isolated_wallet_bootstrap_pct": bootstrap_pct_fraction,
                 "llm_notional_mode": llm_notional_mode_select.value,
                 "footprint": {
+                    "bucket_pct": _safe_float(fp_bucket_pct_input.value) if _safe_float(fp_bucket_pct_input.value) is not None else 0.1,
                     "poc_risk_delta": _safe_float(fp_poc_risk_input.value) if _safe_float(fp_poc_risk_input.value) is not None else 0.05,
                     "net_delta_confidence_delta": _safe_float(fp_net_delta_conf_input.value) if _safe_float(fp_net_delta_conf_input.value) is not None else 0.02,
                     "imbalance_zone_confidence_delta": _safe_float(fp_imbalance_conf_input.value) if _safe_float(fp_imbalance_conf_input.value) is not None else 0.03,
@@ -6149,6 +6158,7 @@ def register_pages(app: FastAPI) -> None:
             if market_service:
                 market_service.set_wait_for_tp_sl(config.get("wait_for_tp_sl", False))
                 market_service.set_flip_llm_decision(config["guardrails"].get("flip_llm_decision", False))
+                market_service.set_footprint_config(config["guardrails"].get("footprint") or {})
                 market_service.set_screener_config(config["screener"])
                 market_service.set_launcher_config(config["launcher"])
                 await market_service.set_okx_flag(config.get("okx_api_flag"))

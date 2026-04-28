@@ -2643,6 +2643,7 @@ class PromptBuilder:
                 "net_delta_confidence_delta": 0.02,
                 "imbalance_zone_confidence_delta": 0.03,
                 "imbalance_zone_proximity_pct": 0.3,
+                "bucket_pct": 0.1,
             },
         }
 
