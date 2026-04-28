@@ -136,7 +136,17 @@ class PromptScheduler:
                     self._tick_running = False
                     self._last_tick_at = time.monotonic()
 
-                if self._trigger_mode == "consecutive":
+                # Use consecutive behaviour when explicitly set, OR when the
+                # Launcher is in launcher_only mode with schedule='on_close'
+                # (the two settings are equivalent in intent; always honour
+                # the launcher schedule so the user only has one knob to turn).
+                _rc_run = getattr(self._app.state, "runtime_config", {}) or {}
+                _gov_run = _rc_run.get("launcher") or {}
+                _launcher_on_close = (
+                    str(_gov_run.get("mode") or "disabled").lower() == "launcher_only"
+                    and str(_gov_run.get("schedule") or "timer").lower() == "on_close"
+                )
+                if self._trigger_mode == "consecutive" or _launcher_on_close:
                     await self._wait_for_no_positions()
                 else:
                     await asyncio.sleep(self._interval)

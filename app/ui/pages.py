@@ -5012,7 +5012,9 @@ def register_pages(app: FastAPI) -> None:
                     label="Prompt Interval (seconds)",
                     value=config.get("auto_prompt_interval", 300),
                     min=30,
-                ).classes("w-full md:w-48")
+                ).classes("w-full md:w-48").props(
+                    "hint='LLM / llm_with_filter modes only — auto-derived from Launcher Entry interval when in launcher_only mode' persistent-hint"
+                )
                 auto_prompt_trigger_select = ui.select(
                     options={
                         "scheduled": "Scheduled (fixed interval)",
@@ -5021,7 +5023,7 @@ def register_pages(app: FastAPI) -> None:
                     value=config.get("auto_prompt_trigger", "scheduled"),
                     label="Scheduler trigger",
                 ).classes("w-full md:flex-1").props(
-                    "hint='Scheduled: fixed interval between ticks | Consecutive: immediately re-run once all positions are closed — works with both LLM and Launcher modes' persistent-hint"
+                    "hint='LLM / llm_with_filter modes only — auto-set from Launcher Entry schedule when in launcher_only mode (on_close→consecutive, timer→scheduled)' persistent-hint"
                 )
                 ta_timeframe_select_cfg = ui.select(
                     options=TA_TIMEFRAME_OPTIONS,
@@ -5664,8 +5666,38 @@ def register_pages(app: FastAPI) -> None:
                 "Orders are sent as market orders on OKX. Enable only on funded accounts."
             ).classes("text-xs text-rose-600")
 
-        if not auto_prompt_switch.value:
-            auto_prompt_interval_input.disable()
+        def _sync_scheduler_ui() -> None:
+            """Enable/disable LLM scheduler controls based on current selections.
+
+            The Scheduler toggle is the master on/off.  When off, all
+            scheduling controls are disabled regardless of other settings.
+            When on, secondary rules apply:
+            - Launcher-only mode: trigger and interval are irrelevant (the
+              Launcher owns its own schedule) — both disabled.
+            - Consecutive trigger: interval is irrelevant — disabled.
+            - Scheduled LLM/filter mode: both trigger and interval active.
+            """
+            scheduler_on = bool(auto_prompt_switch.value)
+            launcher_only = str(gov_mode_select.value or "disabled") == "launcher_only"
+            consecutive = str(auto_prompt_trigger_select.value or "scheduled") == "consecutive"
+            if not scheduler_on:
+                # Master off — nothing is scheduled, grey everything out.
+                auto_prompt_trigger_select.disable()
+                auto_prompt_interval_input.disable()
+            elif launcher_only:
+                # Launcher owns its schedule; these controls are irrelevant.
+                auto_prompt_trigger_select.disable()
+                auto_prompt_interval_input.disable()
+            elif consecutive:
+                # No fixed interval needed — re-runs as soon as positions close.
+                auto_prompt_trigger_select.enable()
+                auto_prompt_interval_input.disable()
+            else:
+                # Scheduled LLM / filter mode — all controls active.
+                auto_prompt_trigger_select.enable()
+                auto_prompt_interval_input.enable()
+
+        _sync_scheduler_ui()
         if not execution_switch.value:
             execution_trade_mode_select.disable()
             execution_min_size_input.disable()
@@ -5698,13 +5730,20 @@ def register_pages(app: FastAPI) -> None:
             model_cost_label.set_text(describe_model_cost(model_id))
             model_cost_label.update()
 
-        def on_auto_prompt_toggle(e: Any) -> None:
-            if e.value:
-                auto_prompt_interval_input.enable()
-            else:
-                auto_prompt_interval_input.disable()
+        def on_auto_prompt_toggle(_: Any) -> None:
+            _sync_scheduler_ui()
 
         auto_prompt_switch.on_value_change(on_auto_prompt_toggle)
+
+        def on_trigger_change(_: Any) -> None:
+            _sync_scheduler_ui()
+
+        auto_prompt_trigger_select.on_value_change(on_trigger_change)
+
+        def on_gov_mode_change(_: Any) -> None:
+            _sync_scheduler_ui()
+
+        gov_mode_select.on_value_change(on_gov_mode_change)
 
         def on_execution_toggle(e: Any) -> None:
             if e.value:
@@ -5935,15 +5974,32 @@ def register_pages(app: FastAPI) -> None:
                 except (TypeError, ValueError):
                     return caster(fallback)
 
-            config["auto_prompt_interval"] = max(
-                30,
-                _coerce(
-                    auto_prompt_interval_input.value,
-                    config.get("auto_prompt_interval", 300),
-                    int,
-                ),
-            )
-            config["auto_prompt_trigger"] = str(auto_prompt_trigger_select.value or "scheduled")
+            # When launcher_only mode is active the Launcher's own "Entry
+            # schedule" setting is the single source of truth for how the
+            # scheduler loops.  Automatically sync the two scheduler controls
+            # so they can never conflict.
+            _gov_mode_save = str(gov_mode_select.value or "disabled")
+            if _gov_mode_save == "launcher_only":
+                _gov_sched_save = str(gov_schedule_select.value or "timer")
+                config["auto_prompt_trigger"] = (
+                    "consecutive" if _gov_sched_save == "on_close" else "scheduled"
+                )
+                _gov_interval_save = _coerce(
+                    gov_interval_input.value,
+                    300.0,
+                    float,
+                )
+                config["auto_prompt_interval"] = max(30, int(_gov_interval_save))
+            else:
+                config["auto_prompt_interval"] = max(
+                    30,
+                    _coerce(
+                        auto_prompt_interval_input.value,
+                        config.get("auto_prompt_interval", 300),
+                        int,
+                    ),
+                )
+                config["auto_prompt_trigger"] = str(auto_prompt_trigger_select.value or "scheduled")
             try:
                 await save_prompt_interval(config["auto_prompt_interval"])
             except Exception as exc:  # pragma: no cover - db optional

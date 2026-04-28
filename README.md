@@ -88,6 +88,15 @@ Each tick can source its entry decisions from the LLM, from the Launcher rule en
 - **Launcher only** — no LLM calls are made. The Launcher evaluates rule-based technical signals for each symbol synchronously and emits BUY/SELL/skip decisions directly. Supports its own scheduling sub-mode (`timer`: check every N seconds; `on_close`: fire when all positions clear).
 - **LLM + Launcher filter** (`llm_with_filter`) — the LLM is called for all symbols as normal, but before any order is placed the Launcher evaluates the same symbol independently. If the Launcher's indicator signal conflicts with the LLM's direction, the trade is vetoed. If they agree, the Launcher may amend the trade's notional size, take-profit, and stop-loss with its own configured values before execution.
 
+**CFG page control states** — the Scheduler toggle is the master on/off; secondary controls are automatically enabled or disabled to prevent conflicting settings:
+
+| Scheduler toggle | Launcher mode | Trigger | → Scheduler Trigger field | → Prompt Interval field |
+|---|---|---|---|---|
+| **OFF** | any | any | disabled | disabled |
+| ON | **Launcher only** | any | disabled | disabled |
+| ON | LLM / filter / disabled | **Consecutive** | enabled | disabled |
+| ON | LLM / filter / disabled | Scheduled | enabled | **enabled** |
+
 ### Execution ordering by confidence
 
 Each scheduler tick runs in four phases to ensure the highest-quality setups get first access to available capital:
