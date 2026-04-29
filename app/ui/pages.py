@@ -4454,6 +4454,7 @@ def register_pages(app: FastAPI) -> None:
         guardrails.setdefault("isolated_margin_symbol_seeds_usd", {})
         guardrails.setdefault("isolated_wallet_bootstrap_pct", None)
         guardrails.setdefault("atr_risk_per_trade_pct", None)
+        guardrails.setdefault("min_trade_notional_usd", None)
         guardrails.setdefault("cvd_guard", {"enabled": False, "lookback": 10, "min_slope_pct": 0.0})
         guardrails.setdefault("ob_wall_guard", {"enabled": False, "proximity_pct": 1.0, "wall_ratio": 3.0})
         guardrails.setdefault("require_reward_risk_ratio", True)
@@ -4690,6 +4691,15 @@ def register_pages(app: FastAPI) -> None:
                     placeholder="e.g. 1",
                 ).classes("w-full md:w-48").props(
                     "clearable hint='Cap position size so a full stop-out loses at most this % of equity (1% risk model). Leave blank to disable.' persistent-hint"
+                )
+                min_trade_notional_usd_input = ui.number(
+                    label="Min Trade Notional (USD)",
+                    value=guardrails.get("min_trade_notional_usd"),
+                    step=1.0,
+                    min=0.0,
+                    placeholder="e.g. 10",
+                ).classes("w-full md:w-48").props(
+                    "clearable hint='Scale up entry orders whose final notional (after all caps) is below this USD value to meet the minimum. Leave blank to disable.' persistent-hint"
                 )
             with ui.row().classes("w-full flex-wrap gap-4 items-start"):
                 _cvd_cfg_ui = guardrails.get("cvd_guard") or {}
@@ -5812,6 +5822,7 @@ def register_pages(app: FastAPI) -> None:
                 bootstrap_pct_snapshot = min(max(bootstrap_pct_snapshot, 0.0), 1.0)
             snapshot["isolated_wallet_bootstrap_pct"] = bootstrap_pct_snapshot
             snapshot["llm_notional_mode"] = llm_notional_mode_select.value
+            snapshot["min_trade_notional_usd"] = _safe_float(min_trade_notional_usd_input.value)
             snapshot["footprint"] = {
                 "poc_risk_delta": _safe_float(fp_poc_risk_input.value) if _safe_float(fp_poc_risk_input.value) is not None else 0.05,
                 "net_delta_confidence_delta": _safe_float(fp_net_delta_conf_input.value) if _safe_float(fp_net_delta_conf_input.value) is not None else 0.02,
@@ -6146,6 +6157,7 @@ def register_pages(app: FastAPI) -> None:
                 "isolated_margin_symbol_seeds_usd": _clean_isolated_seed_overrides(),
                 "isolated_wallet_bootstrap_pct": bootstrap_pct_fraction,
                 "llm_notional_mode": llm_notional_mode_select.value,
+                "min_trade_notional_usd": _safe_float(min_trade_notional_usd_input.value),
                 "footprint": {
                     "bucket_pct": _safe_float(fp_bucket_pct_input.value) if _safe_float(fp_bucket_pct_input.value) is not None else 0.1,
                     "poc_risk_delta": _safe_float(fp_poc_risk_input.value) if _safe_float(fp_poc_risk_input.value) is not None else 0.05,

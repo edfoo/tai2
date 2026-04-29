@@ -8815,6 +8815,41 @@ class MarketService:
             # introduced by chunking, equity-clip, or downsize logic above.
             _okx_sz_quantized = self._quantize_order_size(symbol, raw_size)
             okx_sz = _okx_sz_quantized if (_okx_sz_quantized is not None and _okx_sz_quantized > 0) else raw_size
+        # Scale up entry orders whose final notional is below the configured minimum.
+        if not reduce_only and last_price and last_price > 0:
+            _min_trade_notional = self._extract_float(guardrails.get("min_trade_notional_usd"))
+            if _min_trade_notional and _min_trade_notional > 0:
+                _final_notional = okx_sz * ct_val * last_price
+                if _final_notional < _min_trade_notional:
+                    # Target: smallest lot-aligned size whose notional >= minimum.
+                    _target_raw_sz = _min_trade_notional / (ct_val * last_price)
+                    spec = self._instrument_specs.get((symbol or "").upper()) or {}
+                    _lot = spec.get("lot_size") or 0.0
+                    if _lot > 0:
+                        _scaled_okx_sz = math.ceil((_target_raw_sz - 1e-9) / _lot) * _lot
+                    else:
+                        _scaled_okx_sz = _target_raw_sz
+                    _scaled_notional = _scaled_okx_sz * ct_val * last_price
+                    self._emit_debug(
+                        f"{symbol} notional {_final_notional:.2f} USDT below "
+                        f"min_trade_notional_usd={_min_trade_notional:.2f}; "
+                        f"scaling up: okx_sz {okx_sz:.4f} → {_scaled_okx_sz:.4f} "
+                        f"(notional ≈ {_scaled_notional:.2f} USDT)"
+                    )
+                    self._record_execution_feedback(
+                        symbol,
+                        f"Trade notional scaled up from {_final_notional:.2f} to {_scaled_notional:.2f} USDT to meet minimum",
+                        level="info",
+                        meta={
+                            "original_notional_usd": _final_notional,
+                            "scaled_notional_usd": _scaled_notional,
+                            "min_trade_notional_usd": _min_trade_notional,
+                            "original_okx_sz": okx_sz,
+                            "scaled_okx_sz": _scaled_okx_sz,
+                        },
+                    )
+                    okx_sz = _scaled_okx_sz
+                    raw_size = okx_sz * ct_val
         if not reduce_only and raw_size and last_price and last_price > 0:
             self._pending_notional[symbol] = raw_size * last_price * _bootstrap_order_chunks
         try:
