@@ -1418,7 +1418,11 @@ class MarketService:
 
         # No point tracking equity when there's nothing to close.
         positions: list[dict[str, Any]] = snapshot.get("positions") or []
-        if not positions:
+        has_open = any(
+            isinstance(p, dict) and (self._extract_float(p.get("pos")) or 0) != 0
+            for p in positions
+        )
+        if not has_open:
             self._shotgun_baseline_equity = None
             self._shotgun_fired = False
             return
