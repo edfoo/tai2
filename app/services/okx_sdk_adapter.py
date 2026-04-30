@@ -49,12 +49,18 @@ def _ensure_okx_utils() -> None:
     original_get_header = getattr(OkxUtils, "get_header", None)
     original_get_header_no_sign = getattr(OkxUtils, "get_header_no_sign", None)
 
-    def _normalize_sim_flag(flag: Any) -> bool:
+    def _normalize_sim_flag(flag: Any) -> str:
+        # okx-sdk forwards this value directly into HTTP headers, so it must be a string.
         if isinstance(flag, str):
-            return flag.strip() == "1"
+            cleaned = flag.strip()
+            if cleaned in {"0", "1"}:
+                return cleaned
+            return "1" if cleaned.lower() in {"true", "yes", "on"} else "0"
+        if isinstance(flag, bool):
+            return "1" if flag else "0"
         if isinstance(flag, (int, float)):
-            return int(flag) == 1
-        return bool(flag)
+            return "1" if int(flag) == 1 else "0"
+        return "1" if bool(flag) else "0"
 
     if original_get_header:
         def _patched_get_header(api_key, signature, timestamp, pass_phrase, simulation, debug):
