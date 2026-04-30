@@ -5926,6 +5926,13 @@ def register_pages(app: FastAPI) -> None:
         model_select.on_value_change(on_model_change)
 
         async def save_settings(event: Any | None = None) -> None:
+            def _safe_notify(message: str, **kwargs: Any) -> None:
+                """Silently ignore RuntimeError when the NiceGUI slot has been deleted."""
+                try:
+                    ui.notify(message, **kwargs)
+                except RuntimeError:
+                    pass
+
             config["poll_interval"] = int(ws_interval_input.value or 180)
             config["ohlcv_fetch_limit"] = max(50, int(ohlcv_fetch_limit_input.value or 200))
             config["ohlcv_snapshot_candles"] = max(10, int(ohlcv_snapshot_candles_input.value or 50))
@@ -5955,7 +5962,7 @@ def register_pages(app: FastAPI) -> None:
             try:
                 await save_poll_interval(config["poll_interval"])
             except Exception as exc:  # pragma: no cover - optional DB
-                ui.notify(f"Failed to persist poll interval: {exc}", color="warning")
+                _safe_notify(f"Failed to persist poll interval: {exc}", color="warning")
             try:
                 await save_candle_settings(
                     config["ohlcv_fetch_limit"],
@@ -5963,19 +5970,19 @@ def register_pages(app: FastAPI) -> None:
                     config["ohlcv_snapshot_htf_candles"],
                 )
             except Exception as exc:  # pragma: no cover - optional DB
-                ui.notify(f"Failed to persist candle settings: {exc}", color="warning")
+                _safe_notify(f"Failed to persist candle settings: {exc}", color="warning")
             try:
                 await save_frontend_timezone(timezone_value)
             except Exception as exc:  # pragma: no cover - optional DB
-                ui.notify(f"Failed to persist timezone: {exc}", color="warning")
+                _safe_notify(f"Failed to persist timezone: {exc}", color="warning")
             try:
                 await save_llm_model(config["llm_model_id"])
             except Exception as exc:  # pragma: no cover - db optional
-                ui.notify(f"Failed to persist default model: {exc}", color="warning")
+                _safe_notify(f"Failed to persist default model: {exc}", color="warning")
             try:
                 await save_ta_timeframe(config["ta_timeframe"])
             except Exception as exc:  # pragma: no cover - db optional
-                ui.notify(f"Failed to persist timeframe: {exc}", color="warning")
+                _safe_notify(f"Failed to persist timeframe: {exc}", color="warning")
 
             def _coerce(value: Any, fallback: Any, caster: Any) -> Any:
                 try:
@@ -6014,7 +6021,7 @@ def register_pages(app: FastAPI) -> None:
             try:
                 await save_prompt_interval(config["auto_prompt_interval"])
             except Exception as exc:  # pragma: no cover - db optional
-                ui.notify(f"Failed to persist prompt interval: {exc}", color="warning")
+                _safe_notify(f"Failed to persist prompt interval: {exc}", color="warning")
             config["execution_trade_mode"] = execution_trade_mode_select.value or "cross"
             config["execution_order_type"] = "market"
             config["execution_min_size"] = max(
@@ -6041,7 +6048,7 @@ def register_pages(app: FastAPI) -> None:
                     }
                 )
             except Exception as exc:  # pragma: no cover - db optional
-                ui.notify(f"Failed to persist execution settings: {exc}", color="warning")
+                _safe_notify(f"Failed to persist execution settings: {exc}", color="warning")
             config["fee_window_hours"] = max(
                 1.0,
                 _coerce(
@@ -6062,7 +6069,7 @@ def register_pages(app: FastAPI) -> None:
                     config["okx_api_flag"],
                 )
             except Exception as exc:  # pragma: no cover - db optional
-                ui.notify(f"Failed to persist OKX sub-account: {exc}", color="warning")
+                _safe_notify(f"Failed to persist OKX sub-account: {exc}", color="warning")
 
             new_max_pct = _percent_to_fraction(max_position_pct_input.value)
             if new_max_pct is None:
@@ -6183,18 +6190,18 @@ def register_pages(app: FastAPI) -> None:
                     continue
                 symbols.append(normalized)
             if not symbols:
-                ui.notify("At least one trading pair must be selected before saving.", color="negative")
+                _safe_notify("At least one trading pair must be selected before saving.", color="negative")
                 return
             selected_trading_pairs[:] = symbols
             config["trading_pairs"] = symbols
             try:
                 await set_enabled_trading_pairs(symbols)
             except Exception as exc:  # pragma: no cover - db optional
-                ui.notify(f"Failed to persist trading pairs: {exc}", color="warning")
+                _safe_notify(f"Failed to persist trading pairs: {exc}", color="warning")
             try:
                 await save_guardrails(config["guardrails"])
             except Exception as exc:  # pragma: no cover - db optional
-                ui.notify(f"Failed to persist guardrails: {exc}", color="warning")
+                _safe_notify(f"Failed to persist guardrails: {exc}", color="warning")
             config["screener"] = {
                 "enabled": bool(auto_select_symbols_switch.value),
                 "universe_filter": str(screener_universe_input.value or "*-USDT-SWAP").strip(),
@@ -6222,7 +6229,7 @@ def register_pages(app: FastAPI) -> None:
             try:
                 await save_launcher_config(config["launcher"])
             except Exception as exc:  # pragma: no cover - db optional
-                ui.notify(f"Failed to persist launcher config: {exc}", color="warning")
+                _safe_notify(f"Failed to persist launcher config: {exc}", color="warning")
             app.state.runtime_config = config
             llm_service = getattr(app.state, "llm_service", None)
             if llm_service:
@@ -6249,13 +6256,13 @@ def register_pages(app: FastAPI) -> None:
             try:
                 await save_screener_config(config["screener"])
             except Exception as exc:  # pragma: no cover - db optional
-                ui.notify(f"Failed to persist screener config: {exc}", color="warning")
+                _safe_notify(f"Failed to persist screener config: {exc}", color="warning")
             scheduler = getattr(app.state, "prompt_scheduler", None)
             if scheduler:
                 await scheduler.update_interval(config["auto_prompt_interval"])
                 await scheduler.set_trigger_mode(config.get("auto_prompt_trigger", "scheduled"))
                 await scheduler.set_enabled(config["auto_prompt_enabled"])
-            ui.notify("Configuration saved", color="positive")
+            _safe_notify("Configuration saved", color="positive")
             app.state.frontend_events.append("CFG updated")
 
         save_button.on("click", save_settings)
