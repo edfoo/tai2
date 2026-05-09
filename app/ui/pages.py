@@ -4629,12 +4629,12 @@ def register_pages(app: FastAPI) -> None:
             daily_loss_limit_value = _fraction_to_percent(guardrails.get("daily_loss_limit_pct"))
             if daily_loss_limit_value is None:
                 daily_loss_limit_value = 3.0
-            with ui.row().classes("w-full flex-wrap gap-4"):
+            with ui.grid(columns=4).classes("w-full gap-4"):
                 max_leverage_input = ui.number(
                     label="Max Leverage",
                     value=guardrails.get("max_leverage", 5),
                     min=1,
-                ).classes("w-full md:w-48").props(
+                ).classes("w-full").props(
                     "hint='Hard cap on leverage multiples for new positions' persistent-hint"
                 )
                 min_leverage_input = ui.number(
@@ -4642,7 +4642,7 @@ def register_pages(app: FastAPI) -> None:
                     value=guardrails.get("min_leverage", 1),
                     min=0,
                     step=0.1,
-                ).classes("w-full md:w-48").props(
+                ).classes("w-full").props(
                     "hint='Confidence-scaling floor applied before execution' persistent-hint"
                 )
                 min_leverage_conf_gate_input = ui.number(
@@ -4651,7 +4651,7 @@ def register_pages(app: FastAPI) -> None:
                     min=0,
                     max=1,
                     step=0.05,
-                ).classes("w-full md:w-48").props(
+                ).classes("w-full").props(
                     "hint='Confidence threshold below which BUY/SELL is hard-blocked and converted to HOLD (all execution paths)' persistent-hint"
                 )
                 llm_notional_mode_select = ui.select(
@@ -4661,7 +4661,7 @@ def register_pages(app: FastAPI) -> None:
                         "pre_leverage": "Pre-leverage (LLM sets margin to commit)",
                     },
                     value=guardrails.get("llm_notional_mode", "post_leverage"),
-                ).classes("w-full md:w-64").props(
+                ).classes("w-full").props(
                     "hint='Post-leverage: notional_usd is the full position value. Pre-leverage: notional_usd is the margin committed; bot applies leverage.' persistent-hint"
                 )
                 max_position_pct_input = ui.number(
@@ -4670,7 +4670,7 @@ def register_pages(app: FastAPI) -> None:
                     step=0.1,
                     min=0.1,
                     max=100,
-                ).classes("w-full md:w-48").props(
+                ).classes("w-full").props(
                     "hint='Percent of equity allowed per symbol (e.g., 15 = 15%)' persistent-hint"
                 )
                 daily_loss_limit_input = ui.number(
@@ -4679,7 +4679,7 @@ def register_pages(app: FastAPI) -> None:
                     step=0.1,
                     min=0.1,
                     max=100,
-                ).classes("w-full md:w-48").props(
+                ).classes("w-full").props(
                     "hint='Soft kill switch when daily drawdown breaches this percent (enter 3 for 3%)' persistent-hint"
                 )
                 atr_risk_per_trade_input = ui.number(
@@ -4689,7 +4689,7 @@ def register_pages(app: FastAPI) -> None:
                     min=0.0,
                     max=10,
                     placeholder="e.g. 1",
-                ).classes("w-full md:w-48").props(
+                ).classes("w-full").props(
                     "clearable hint='Cap position size so a full stop-out loses at most this % of equity (1% risk model). Leave blank to disable.' persistent-hint"
                 )
                 min_trade_notional_usd_input = ui.number(
@@ -4698,10 +4698,11 @@ def register_pages(app: FastAPI) -> None:
                     step=1.0,
                     min=0.0,
                     placeholder="e.g. 10",
-                ).classes("w-full md:w-48").props(
+                ).classes("w-full").props(
                     "clearable hint='Scale up entry orders whose final notional (after all caps) is below this USD value to meet the minimum. Leave blank to disable.' persistent-hint"
                 )
-            with ui.row().classes("w-full flex-wrap gap-4 items-start"):
+            ui.separator().classes("mt-4")
+            with ui.grid(columns=4).classes("w-full gap-4 items-start"):
                 _cvd_cfg_ui = guardrails.get("cvd_guard") or {}
                 cvd_guard_enabled_toggle = ui.switch(
                     "CVD Guard Enabled",
@@ -4715,7 +4716,7 @@ def register_pages(app: FastAPI) -> None:
                     step=1,
                     min=2,
                     max=200,
-                ).classes("w-full md:w-40").props(
+                ).classes("w-full").props(
                     "hint='Recent CVD series bars used to measure slope' persistent-hint"
                 )
                 cvd_guard_min_slope_input = ui.number(
@@ -4724,10 +4725,10 @@ def register_pages(app: FastAPI) -> None:
                     step=0.5,
                     min=0.0,
                     max=100,
-                ).classes("w-full md:w-40").props(
+                ).classes("w-full").props(
                     "hint='Minimum % change in CVD to count as directional (0 = any). Neutral CVD never blocks.' persistent-hint"
                 )
-            with ui.row().classes("w-full flex-wrap gap-4 items-start"):
+                ui.space()
                 _ob_cfg_ui = guardrails.get("ob_wall_guard") or {}
                 ob_wall_enabled_toggle = ui.switch(
                     "OB Wall Guard Enabled",
@@ -4741,7 +4742,7 @@ def register_pages(app: FastAPI) -> None:
                     step=0.1,
                     min=0.1,
                     max=10.0,
-                ).classes("w-full md:w-40").props(
+                ).classes("w-full").props(
                     "hint='Scan the opposing order-book side within this % of current price for walls' persistent-hint"
                 )
                 ob_wall_ratio_input = ui.number(
@@ -4750,29 +4751,31 @@ def register_pages(app: FastAPI) -> None:
                     step=0.5,
                     min=1.0,
                     max=20.0,
-                ).classes("w-full md:w-40").props(
+                ).classes("w-full").props(
                     "hint='A level is a wall when its size exceeds this multiple of the average level size (e.g. 3 = 3× average)' persistent-hint"
                 )
-            with ui.row().classes("w-full flex-wrap gap-4"):
+                ui.space()
+            ui.separator().classes("mt-4")
+            with ui.grid(columns=4).classes("w-full gap-4"):
                 min_hold_seconds_input = ui.number(
                     label="Min Hold / Cooldown (sec)",
                     value=guardrails.get("min_hold_seconds", 180),
                     min=0,
-                ).classes("w-full md:w-48").props(
+                ).classes("w-full").props(
                     "hint='Minimum time to wait before allowing another trade on the same symbol' persistent-hint"
                 )
                 max_trades_per_hour_input = ui.number(
                     label="Max Trades Per Hour",
                     value=guardrails.get("max_trades_per_hour", 2),
                     min=0,
-                ).classes("w-full md:w-48").props(
+                ).classes("w-full").props(
                     "hint='Prevents over-trading by capping per-symbol order count in any rolling hour' persistent-hint"
                 )
                 max_trades_to_open_input = ui.number(
                     label="Max Trades to Open",
                     value=guardrails.get("max_trades_to_open", 0),
                     min=0,
-                ).classes("w-full md:w-48").props(
+                ).classes("w-full").props(
                     "hint='Per scheduler cycle: open only the top N ranked BUY/SELL decisions (0 = unlimited)' persistent-hint"
                 )
                 trade_window_seconds_input = ui.number(
@@ -4780,8 +4783,38 @@ def register_pages(app: FastAPI) -> None:
                     value=guardrails.get("trade_window_seconds", 3600),
                     min=60,
                     step=60,
-                ).classes("w-full md:w-48").props(
+                ).classes("w-full").props(
                     "hint='Window used for trade limit and activity metrics' persistent-hint"
+                )
+                snapshot_max_age_input = ui.number(
+                    label="Snapshot Max Age (sec)",
+                    value=config.get(
+                        "snapshot_max_age_seconds",
+                        settings.snapshot_max_age_seconds,
+                    ),
+                    min=60,
+                ).classes("w-full").props(
+                    "hint='Blocks LLM prompts whenever Redis snapshot is older than this' persistent-hint"
+                )
+                execution_feedback_ttl_input = ui.number(
+                    label="Execution Feedback TTL (sec)",
+                    value=guardrails.get("execution_feedback_ttl_seconds", 600),
+                    min=0,
+                ).classes("w-full").props(
+                    "hint='How long warnings/errors stay in prompts before auto-expiring; set 0 to disable' persistent-hint"
+                )
+                adjust_invalid_tp_switch = ui.switch(
+                    "Adjust Invalid TP",
+                    value=guardrails.get("adjust_invalid_tp", False),
+                ).props(
+                    "hint='When the LLM supplies a TP on the wrong side of entry, replace it with the configured % offset rather than dropping it' persistent-hint"
+                )
+                adjust_invalid_tp_pct_input = ui.number(
+                    label="Adjust TP %",
+                    value=guardrails.get("adjust_invalid_tp_pct", 0.10) * 100,
+                    min=0.1, max=200.0, step=0.5, format="%.1f",
+                ).classes("w-full").props(
+                    "hint='Fallback TP target as OKX Floating PnL % (divided by leverage to get entry-price distance)' persistent-hint suffix='%'"
                 )
             with ui.grid(columns=3).classes("w-full gap-x-8 gap-y-4 mt-2"):
                 require_alignment_switch = ui.switch(
@@ -4820,37 +4853,6 @@ def register_pages(app: FastAPI) -> None:
                 ).props(
                     "hint='Invert the LLM\'s SIDE and swap TP/SL before opening the trade; useful for contrarian testing' persistent-hint"
                 )
-                with ui.row().classes("items-center gap-4 col-span-full md:col-span-1"):
-                    adjust_invalid_tp_switch = ui.switch(
-                        "Adjust Invalid TP",
-                        value=guardrails.get("adjust_invalid_tp", False),
-                    ).props(
-                        "hint='When the LLM supplies a TP on the wrong side of entry, replace it with the configured % offset rather than dropping it' persistent-hint"
-                    )
-                    adjust_invalid_tp_pct_input = ui.number(
-                        label="Adjust TP %",
-                        value=guardrails.get("adjust_invalid_tp_pct", 0.10) * 100,
-                        min=0.1, max=200.0, step=0.5, format="%.1f",
-                    ).classes("w-28").props(
-                        "hint='Fallback TP target as OKX Floating PnL % (divided by leverage to get entry-price distance)' persistent-hint suffix='%'"
-                    )
-            snapshot_max_age_input = ui.number(
-                label="Snapshot Max Age (sec)",
-                value=config.get(
-                    "snapshot_max_age_seconds",
-                    settings.snapshot_max_age_seconds,
-                ),
-                min=60,
-            ).classes("w-full md:w-48").props(
-                "hint='Blocks LLM prompts whenever Redis snapshot is older than this' persistent-hint"
-            )
-            execution_feedback_ttl_input = ui.number(
-                label="Execution Feedback TTL (sec)",
-                value=guardrails.get("execution_feedback_ttl_seconds", 600),
-                min=0,
-            ).classes("w-full md:w-48").props(
-                "hint='How long warnings/errors stay in prompts before auto-expiring; set 0 to disable' persistent-hint"
-            )
             ui.separator().classes("w-full my-3")
             ui.label("Isolated Margin Auto-Seed").classes("text-sm font-semibold text-slate-600")
             ui.label(
