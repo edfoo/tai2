@@ -2293,15 +2293,37 @@ class MarketService:
             f"Launcher signal: {symbol} {signal.upper()} last={last_price} "
             f"notional={notional_usd} tp={tp_price} sl={sl_price}"
         )
+        action = "BUY" if signal == "buy" else "SELL"
+
+        # --- Flip Launcher direction if configured ---
+        flip_dir = str(gov.get("flip_launcher_direction") or "").strip().lower()
+        if flip_dir in ("both", "from_long", "from_short"):
+            should_flip = (
+                flip_dir == "both"
+                or (flip_dir == "from_long" and action == "BUY")
+                or (flip_dir == "from_short" and action == "SELL")
+            )
+            if should_flip:
+                orig_action = action
+                action = "SELL" if action == "BUY" else "BUY"
+                # Mirror TP/SL through the current price to preserve the distance.
+                if last_price and last_price > 0:
+                    tp_price = round(2 * last_price - tp_price, 10) if tp_price else None
+                    sl_price = round(2 * last_price - sl_price, 10) if sl_price else None
+                self._emit_debug(
+                    f"Launcher flip ({flip_dir}): {symbol} {orig_action} → {action} "
+                    f"tp={tp_price} sl={sl_price}"
+                )
+
         return {
-            "action": "BUY" if signal == "buy" else "SELL",
+            "action": action,
             "symbol": symbol,
             "notional_usd": notional_usd,
             "confidence": 1.0,
             "risk_score": 0.5,
             "take_profit": tp_price,
             "stop_loss": sl_price,
-            "rationale": f"Launcher signal: {signal.upper()}",
+            "rationale": f"Launcher signal: {action}",
             "_decision_origin": "launcher",
         }
 

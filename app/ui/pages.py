@@ -5201,6 +5201,22 @@ def register_pages(app: FastAPI) -> None:
                     value=bool(_gov_cfg.get("require_footprint_delta", False)),
                 ).props("dense color=primary")
                 ui.label("15-min tape net delta must be positive for BUY and negative for SELL.").classes("text-xs text-slate-500")
+            with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                _flip_launcher_enabled = bool(_gov_cfg.get("flip_launcher_direction"))
+                flip_launcher_switch = ui.switch(
+                    "Flip Launcher Decision",
+                    value=_flip_launcher_enabled,
+                ).props("dense color=primary")
+                flip_launcher_select = ui.select(
+                    options={
+                        "both": "Both",
+                        "from_long": "From LONG only",
+                        "from_short": "From SHORT only",
+                    },
+                    value=_gov_cfg.get("flip_launcher_direction") or "both",
+                    label="Flip direction",
+                ).classes("w-40").props("dense")
+                ui.label("Invert the Launcher's trade direction before execution.").classes("text-xs text-slate-500")
             ui.separator().classes("w-full my-4")
             ui.label("Candle settings").classes("text-sm text-slate-500")
             with ui.row().classes("w-full flex-wrap gap-4"):
@@ -6227,6 +6243,7 @@ def register_pages(app: FastAPI) -> None:
                 "require_htf_trend": bool(gov_require_htf_switch.value),
                 "require_cmf": bool(gov_require_cmf_switch.value),
                 "require_footprint_delta": bool(gov_require_fp_delta_switch.value),
+                "flip_launcher_direction": str(flip_launcher_select.value) if flip_launcher_switch.value else None,
             }
             try:
                 await save_launcher_config(config["launcher"])
