@@ -2053,6 +2053,9 @@ class MarketService:
         rsi_overbought = self._extract_float(gov.get("rsi_overbought")) or 65.0
         require_htf_trend = bool(gov.get("require_htf_trend", True))
         require_cmf = bool(gov.get("require_cmf", True))
+        require_htf_cmf = bool(gov.get("require_htf_cmf", False))
+        require_cmf_cross = bool(gov.get("require_cmf_cross", False))
+        require_cmf_no_divergence = bool(gov.get("require_cmf_no_divergence", False))
         require_footprint_delta = bool(gov.get("require_footprint_delta", False))
         min_adx = self._extract_float(gov.get("min_adx")) or 0.0
 
@@ -2064,15 +2067,45 @@ class MarketService:
         indicators = sym_data.get("indicators") or {}
 
         rsi = self._extract_float(indicators.get("rsi"))
-        cmf = self._extract_float((indicators.get("cmf") or {}).get("value"))
+        # Use 14-period CMF for LTF entries (gap 2); fall back to 20-period if unavailable.
+        _cmf_14_block = indicators.get("cmf_14") or indicators.get("cmf") or {}
+        cmf = self._extract_float(_cmf_14_block.get("value"))
+        cmf_series_vals: list[float] = _cmf_14_block.get("series") or []
         adx = self._extract_float((indicators.get("adx") or {}).get("value"))
 
-        htf_indicators = sym_data.get("indicators_htf") or indicators
+        # HTF indicators are nested inside the LTF indicators dict.
+        htf_indicators: dict[str, Any] = indicators.get("htf_indicators") or {}
         htf_ma = htf_indicators.get("moving_averages") or {}
         htf_ema50 = self._extract_float(htf_ma.get("ema_50"))
         htf_ema200 = self._extract_float(htf_ma.get("ema_200"))
         htf_bullish = htf_ema50 is not None and htf_ema200 is not None and htf_ema50 > htf_ema200
         htf_bearish = htf_ema50 is not None and htf_ema200 is not None and htf_ema50 < htf_ema200
+
+        # HTF CMF governor (gap 1): HTF CMF must agree with trade direction.
+        htf_cmf = self._extract_float((htf_indicators.get("cmf") or {}).get("value"))
+        htf_cmf_bullish = htf_cmf is not None and htf_cmf > 0
+        htf_cmf_bearish = htf_cmf is not None and htf_cmf < 0
+
+        # CMF zero-line cross (gap 3a): CMF must have just crossed zero on this bar.
+        cmf_crossed_up = False
+        cmf_crossed_down = False
+        if require_cmf_cross and len(cmf_series_vals) >= 2:
+            prev_cmf = cmf_series_vals[-2]
+            if cmf is not None:
+                cmf_crossed_up = cmf > 0 and prev_cmf <= 0
+                cmf_crossed_down = cmf < 0 and prev_cmf >= 0
+
+        # CMF divergence (gap 3b): price direction vs CMF direction over last 5 bars.
+        bearish_div = False
+        bullish_div = False
+        if require_cmf_no_divergence and len(cmf_series_vals) >= 5:
+            ohlcv_compact = indicators.get("ohlcv") or []
+            closes = [c["close"] for c in ohlcv_compact if isinstance(c, dict) and "close" in c]
+            if len(closes) >= 5:
+                price_up = closes[-1] > closes[-5]
+                cmf_up = cmf_series_vals[-1] > cmf_series_vals[-5]
+                bearish_div = price_up and not cmf_up   # price higher, CMF lower → exhaustion
+                bullish_div = not price_up and cmf_up   # price lower, CMF higher → hidden strength
 
         # Footprint net delta from the live market metrics (populated by _compute_custom_metrics)
         fp_net_delta: float | None = None
@@ -2094,12 +2127,18 @@ class MarketService:
         buy_signal = (
             rsi < rsi_oversold
             and (not require_cmf or (cmf is not None and cmf > 0))
+            and (not require_htf_cmf or htf_cmf_bullish)
+            and (not require_cmf_cross or cmf_crossed_up)
+            and (not require_cmf_no_divergence or not bearish_div)
             and (not require_htf_trend or htf_bullish)
             and (not require_footprint_delta or (fp_net_delta is not None and fp_net_delta > 0))
         )
         sell_signal = (
             rsi > rsi_overbought
             and (not require_cmf or (cmf is not None and cmf < 0))
+            and (not require_htf_cmf or htf_cmf_bearish)
+            and (not require_cmf_cross or cmf_crossed_down)
+            and (not require_cmf_no_divergence or not bullish_div)
             and (not require_htf_trend or htf_bearish)
             and (not require_footprint_delta or (fp_net_delta is not None and fp_net_delta < 0))
         )
@@ -2112,7 +2151,18 @@ class MarketService:
         rsi_str = f"RSI={rsi:.1f} (need <{rsi_oversold} or >{rsi_overbought})"
         parts = [rsi_str]
         if require_cmf:
-            parts.append(f"CMF={cmf:.3f}" if cmf is not None else "CMF=n/a")
+            parts.append(f"CMF14={cmf:.3f}" if cmf is not None else "CMF14=n/a")
+        if require_htf_cmf:
+            parts.append(f"HTF_CMF={htf_cmf:.3f}" if htf_cmf is not None else "HTF_CMF=n/a")
+        if require_cmf_cross:
+            parts.append(f"CMF_cross={'up' if cmf_crossed_up else 'down' if cmf_crossed_down else 'none'}")
+        if require_cmf_no_divergence:
+            if bearish_div:
+                parts.append("CMF_div=bearish")
+            elif bullish_div:
+                parts.append("CMF_div=bullish")
+            else:
+                parts.append("CMF_div=none")
         if require_htf_trend:
             if htf_ema50 is not None and htf_ema200 is not None:
                 parts.append(f"HTF EMA50={htf_ema50:.4g}/EMA200={htf_ema200:.4g} ({'bull' if htf_bullish else 'bear' if htf_bearish else 'flat'})")
@@ -4656,6 +4706,7 @@ class MarketService:
         adx_df = ta.adx(high=df["high"], low=df["low"], close=df["close"], length=14)
         obv_series = ta.obv(close=df["close"], volume=df["volume"])
         cmf_series = ta.cmf(high=df["high"], low=df["low"], close=df["close"], volume=df["volume"], length=20)
+        cmf_14_series = ta.cmf(high=df["high"], low=df["low"], close=df["close"], volume=df["volume"], length=14)
         vwap_series = ta.vwap(high=df["high"], low=df["low"], close=df["close"], volume=df["volume"])
         volume_rsi_series = ta.rsi(df["volume"], length=14)
         atr_series = ta.atr(high=df["high"], low=df["low"], close=df["close"], length=14)
@@ -4709,6 +4760,10 @@ class MarketService:
             "cmf": {
                 "value": float(cmf_series.iloc[-1]) if cmf_series is not None and not cmf_series.empty else None,
                 "series": MarketService._series_to_list(cmf_series),
+            },
+            "cmf_14": {
+                "value": float(cmf_14_series.iloc[-1]) if cmf_14_series is not None and not cmf_14_series.empty else None,
+                "series": MarketService._series_to_list(cmf_14_series),
             },
             "moving_averages": {
                 "ema_50": float(ema_50.iloc[-1]) if ema_50 is not None and not ema_50.empty else None,

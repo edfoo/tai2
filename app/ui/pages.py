@@ -5194,7 +5194,25 @@ def register_pages(app: FastAPI) -> None:
                     "Require CMF confirmation",
                     value=bool(_gov_cfg.get("require_cmf", True)),
                 ).props("dense color=primary")
-                ui.label("CMF must be positive for BUY and negative for SELL.").classes("text-xs text-slate-500")
+                ui.label("LTF CMF (14-period) must be positive for BUY and negative for SELL.").classes("text-xs text-slate-500")
+            with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                gov_require_htf_cmf_switch = ui.switch(
+                    "Require HTF CMF confirmation",
+                    value=bool(_gov_cfg.get("require_htf_cmf", False)),
+                ).props("dense color=primary")
+                ui.label("HTF CMF (20-period) governor: must be positive for BUY and negative for SELL.").classes("text-xs text-slate-500")
+            with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                gov_require_cmf_cross_switch = ui.switch(
+                    "Require CMF zero-line cross",
+                    value=bool(_gov_cfg.get("require_cmf_cross", False)),
+                ).props("dense color=primary")
+                ui.label("LTF CMF must have just crossed zero this bar (negative→positive for BUY; positive→negative for SELL).").classes("text-xs text-slate-500")
+            with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                gov_require_cmf_no_div_switch = ui.switch(
+                    "Block on CMF divergence",
+                    value=bool(_gov_cfg.get("require_cmf_no_divergence", False)),
+                ).props("dense color=primary")
+                ui.label("Block BUY when price makes higher highs but CMF makes lower highs (bearish divergence), and vice versa for SELL.").classes("text-xs text-slate-500")
             with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                 gov_require_fp_delta_switch = ui.switch(
                     "Require footprint net delta",
@@ -6242,6 +6260,9 @@ def register_pages(app: FastAPI) -> None:
                 "min_adx": float(gov_min_adx_input.value or 0.0),
                 "require_htf_trend": bool(gov_require_htf_switch.value),
                 "require_cmf": bool(gov_require_cmf_switch.value),
+                "require_htf_cmf": bool(gov_require_htf_cmf_switch.value),
+                "require_cmf_cross": bool(gov_require_cmf_cross_switch.value),
+                "require_cmf_no_divergence": bool(gov_require_cmf_no_div_switch.value),
                 "require_footprint_delta": bool(gov_require_fp_delta_switch.value),
                 "flip_launcher_direction": str(flip_launcher_select.value) if flip_launcher_switch.value else None,
             }
