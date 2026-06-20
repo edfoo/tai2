@@ -2057,6 +2057,8 @@ class MarketService:
         require_cmf_cross = bool(gov.get("require_cmf_cross", False))
         require_cmf_no_divergence = bool(gov.get("require_cmf_no_divergence", False))
         require_footprint_delta = bool(gov.get("require_footprint_delta", False))
+        require_bb_position = bool(gov.get("require_bb_position", False))
+        bb_proximity_pct = self._extract_float(gov.get("bb_proximity_pct")) or 0.0
         min_adx = self._extract_float(gov.get("min_adx")) or 0.0
 
         snapshot = self._last_full_snapshot
@@ -2072,6 +2074,22 @@ class MarketService:
         cmf = self._extract_float(_cmf_14_block.get("value"))
         cmf_series_vals: list[float] = _cmf_14_block.get("series") or []
         adx = self._extract_float((indicators.get("adx") or {}).get("value"))
+
+        # Bollinger Band position filter: entry must be near/beyond the band.
+        _bb = indicators.get("bollinger_bands") or {}
+        bb_lower = self._extract_float(_bb.get("lower"))
+        bb_upper = self._extract_float(_bb.get("upper"))
+        bb_last_price = self.get_last_price(symbol)
+        bb_long_ok = (
+            bb_last_price is not None
+            and bb_lower is not None
+            and bb_last_price <= bb_lower * (1.0 + bb_proximity_pct / 100.0)
+        )
+        bb_short_ok = (
+            bb_last_price is not None
+            and bb_upper is not None
+            and bb_last_price >= bb_upper * (1.0 - bb_proximity_pct / 100.0)
+        )
 
         # HTF indicators are nested inside the LTF indicators dict.
         htf_indicators: dict[str, Any] = indicators.get("htf_indicators") or {}
@@ -2132,6 +2150,7 @@ class MarketService:
             and (not require_cmf_no_divergence or not bearish_div)
             and (not require_htf_trend or htf_bullish)
             and (not require_footprint_delta or (fp_net_delta is not None and fp_net_delta > 0))
+            and (not require_bb_position or bb_long_ok)
         )
         sell_signal = (
             rsi > rsi_overbought
@@ -2141,6 +2160,7 @@ class MarketService:
             and (not require_cmf_no_divergence or not bullish_div)
             and (not require_htf_trend or htf_bearish)
             and (not require_footprint_delta or (fp_net_delta is not None and fp_net_delta < 0))
+            and (not require_bb_position or bb_short_ok)
         )
         if buy_signal:
             return "buy"
@@ -2170,6 +2190,14 @@ class MarketService:
                 parts.append("HTF EMA=n/a")
         if require_footprint_delta:
             parts.append(f"fp_delta={fp_net_delta:.2f}" if fp_net_delta is not None else "fp_delta=n/a")
+        if require_bb_position:
+            if bb_last_price is not None and bb_lower is not None and bb_upper is not None:
+                parts.append(
+                    f"BB lower={bb_lower:.4g}/upper={bb_upper:.4g}/price={bb_last_price:.4g} "
+                    f"(long={'ok' if bb_long_ok else 'blocked'}, short={'ok' if bb_short_ok else 'blocked'})"
+                )
+            else:
+                parts.append("BB=n/a")
         self._emit_debug(f"Launcher: {symbol} — no entry signal ({', '.join(parts)})")
         return None
 
