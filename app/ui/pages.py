@@ -5235,6 +5235,22 @@ def register_pages(app: FastAPI) -> None:
                     label="Flip direction",
                 ).classes("w-40").props("dense")
                 ui.label("Invert the Launcher's trade direction before execution.").classes("text-xs text-slate-500")
+            with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                gov_require_bb_switch = ui.switch(
+                    "Require Bollinger Band position",
+                    value=bool(_gov_cfg.get("require_bb_position", False)),
+                ).props("dense color=primary")
+                ui.label("BUY only when price is at or below the lower band; SELL only when price is at or above the upper band.").classes("text-xs text-slate-500")
+            with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                gov_bb_proximity_input = ui.number(
+                    label="BB Proximity %",
+                    value=float(_gov_cfg.get("bb_proximity_pct") or 0.0),
+                    min=0.0,
+                    max=5.0,
+                    step=0.1,
+                    format="%.1f",
+                ).classes("w-48").props("dense")
+                ui.label("How far inside the band price may be and still qualify (e.g. 0.5 = within 0.5% above lower band counts as a long entry). 0 = price must be at or beyond the band.").classes("text-xs text-slate-500")
             ui.separator().classes("w-full my-4")
             ui.label("Candle settings").classes("text-sm text-slate-500")
             with ui.row().classes("w-full flex-wrap gap-4"):
@@ -6264,6 +6280,8 @@ def register_pages(app: FastAPI) -> None:
                 "require_cmf_cross": bool(gov_require_cmf_cross_switch.value),
                 "require_cmf_no_divergence": bool(gov_require_cmf_no_div_switch.value),
                 "require_footprint_delta": bool(gov_require_fp_delta_switch.value),
+                "require_bb_position": bool(gov_require_bb_switch.value),
+                "bb_proximity_pct": float(gov_bb_proximity_input.value or 0.0),
                 "flip_launcher_direction": str(flip_launcher_select.value) if flip_launcher_switch.value else None,
             }
             try:
