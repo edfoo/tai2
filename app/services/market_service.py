@@ -1383,13 +1383,33 @@ class MarketService:
         """Capture the equity anchor at the start of each prompt-scheduler cycle.
 
         Called by the prompt scheduler immediately after refreshing the snapshot.
-        Resets ``_shotgun_fired`` so the strategy can trigger once per cycle.
+        Always resets ``_shotgun_fired`` so the strategy can fire once per cycle,
+        but only re-anchors the baseline equity when the account is flat (no open
+        positions).  While positions are open the baseline stays fixed at the
+        pre-entry value so that Shotgun always measures from true entry-cycle
+        equity rather than resetting to a post-loss low and firing prematurely.
         """
         if equity <= 0:
             return
-        self._shotgun_baseline_equity = float(equity)
+        # Always allow one Shotgun check per scheduler cycle.
         self._shotgun_fired = False
-        self._emit_debug(f"Shotgun: baseline equity set to {equity:.4f} USDT")
+        # Only move the baseline when the account is flat.
+        snapshot = self._last_full_snapshot
+        has_open = False
+        if snapshot:
+            positions: list[dict[str, Any]] = snapshot.get("positions") or []
+            has_open = any(
+                isinstance(p, dict) and (self._extract_float(p.get("pos")) or 0) != 0
+                for p in positions
+            )
+        if not has_open:
+            self._shotgun_baseline_equity = float(equity)
+            self._emit_debug(f"Shotgun: baseline equity set to {equity:.4f} USDT")
+        else:
+            self._emit_debug(
+                f"Shotgun: baseline retained at "
+                f"{self._shotgun_baseline_equity:.4f} USDT (positions open)"
+            )
 
     async def _check_shotgun(self) -> None:
         """Close positions when total account equity has moved past configured TP/SL thresholds.

@@ -64,12 +64,15 @@ def _ensure_okx_utils() -> None:
 
     if original_get_header:
         def _patched_get_header(api_key, signature, timestamp, pass_phrase, simulation, debug):
+            # original get_header uses `if simulation:` (truthy check); pass as int
+            # so that 0 (live) is falsy and 1 (demo) is truthy — never pass the
+            # string "0" which would be truthy and always enable simulated trading.
             return original_get_header(
                 api_key,
                 signature,
                 timestamp,
                 pass_phrase,
-                _normalize_sim_flag(simulation),
+                int(_normalize_sim_flag(simulation)),
                 debug,
             )
 
@@ -77,7 +80,7 @@ def _ensure_okx_utils() -> None:
 
     if original_get_header_no_sign:
         def _patched_get_header_no_sign(simulation, debug):
-            return original_get_header_no_sign(_normalize_sim_flag(simulation), debug)
+            return original_get_header_no_sign(int(_normalize_sim_flag(simulation)), debug)
 
         OkxUtils.get_header_no_sign = _patched_get_header_no_sign  # type: ignore[attr-defined]
 
