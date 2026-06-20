@@ -1406,9 +1406,13 @@ class MarketService:
             self._shotgun_baseline_equity = float(equity)
             self._emit_debug(f"Shotgun: baseline equity set to {equity:.4f} USDT")
         else:
+            retained = (
+                f"{self._shotgun_baseline_equity:.4f} USDT"
+                if self._shotgun_baseline_equity is not None
+                else "unset"
+            )
             self._emit_debug(
-                f"Shotgun: baseline retained at "
-                f"{self._shotgun_baseline_equity:.4f} USDT (positions open)"
+                f"Shotgun: baseline retained at {retained} (positions open)"
             )
 
     async def _check_shotgun(self) -> None:
