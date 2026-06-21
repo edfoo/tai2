@@ -202,6 +202,9 @@ class MarketService:
         self.state_service = state_service
         self._account_api = account_api or self._build_account_api()
         self._market_api = market_api or self._build_market_api()
+        self._market_api_prod: Any | None = (
+            OkxMarket.MarketAPI(flag="0") if OkxMarket and self._okx_flag != "0" else None
+        )
         self._public_api = public_api or self._build_public_api()
         self._trading_api = trading_api or self._build_trading_api()
         self._trade_api = trade_api or self._build_trade_api()
