@@ -1214,7 +1214,8 @@ class MarketService:
         if threshold is None or threshold <= 0:
             self._emit_debug(f"Skimming: invalid threshold ({skimming.get('threshold_pct')!r}) — skipping")
             return
-        threshold_ratio = threshold / 100.0
+        dynamic_tp = bool(skimming.get("dynamic_tp", False))
+        dynamic_tp_fraction = self._extract_float(skimming.get("dynamic_tp_fraction")) or 0.7
         sl_pct = self._extract_float(skimming.get("stop_loss_pct"))
         sl_ratio = (-abs(sl_pct) / 100.0) if (sl_pct is not None and sl_pct > 0) else None
         snapshot = self._last_full_snapshot
@@ -1235,9 +1236,10 @@ class MarketService:
         }
         self._skimming_triggered &= active_symbols
         self._emit_debug(
-            f"Skimming: checking {len(positions)} position(s), threshold={threshold:.2f}% "
-            f"({threshold_ratio:.4f}), sl_ratio={sl_ratio}, already-triggered={self._skimming_triggered or 'none'}"
+            f"Skimming: checking {len(positions)} position(s), static_threshold={threshold:.2f}%, "
+            f"dynamic_tp={dynamic_tp}, sl_ratio={sl_ratio}, already-triggered={self._skimming_triggered or 'none'}"
         )
+        market_data: dict[str, Any] = snapshot.get("market_data") or {}
         for pos in positions:
             if not isinstance(pos, dict):
                 continue
@@ -1252,10 +1254,30 @@ class MarketService:
             if not pos_val or pos_val == 0:
                 self._emit_debug(f"Skimming: {symbol} — position size is zero, skipping")
                 continue
+
+            # Dynamic TP: derive threshold from current BB bandwidth for this symbol.
+            effective_threshold = threshold
+            dynamic_tp_source = "static"
+            if dynamic_tp:
+                sym_indicators = (market_data.get(symbol) or {}).get("indicators") or {}
+                _bb = sym_indicators.get("bollinger_bands") or {}
+                _bb_lower = self._extract_float(_bb.get("lower"))
+                _bb_upper = self._extract_float(_bb.get("upper"))
+                _bb_middle = self._extract_float(_bb.get("middle"))
+                if _bb_lower is not None and _bb_upper is not None and _bb_middle and _bb_middle > 0:
+                    _bw = (_bb_upper - _bb_lower) / _bb_middle * 100.0
+                    _lever = self._extract_float(pos.get("lever")) or 1.0
+                    _dyn = (_bw / 2.0) * dynamic_tp_fraction * _lever
+                    effective_threshold = max(threshold, _dyn)
+                    dynamic_tp_source = f"dynamic(bw={_bw:.2f}%,lev={_lever:.0f}x,frac={dynamic_tp_fraction}) → {_dyn:.2f}% → max={effective_threshold:.2f}%"
+                else:
+                    dynamic_tp_source = "dynamic(BB unavailable, fallback to static)"
+
+            threshold_ratio = effective_threshold / 100.0
             upl_ratio = self._extract_float(pos.get("uplRatio"))
             self._emit_debug(
                 f"Skimming: {symbol} uplRatio={upl_ratio!r} ({(upl_ratio * 100) if upl_ratio is not None else 'n/a'}%), "
-                f"threshold={threshold:.2f}%, sl_pct={sl_pct!r}, pos={pos_val!r}, "
+                f"threshold={effective_threshold:.2f}% [{dynamic_tp_source}], sl_pct={sl_pct!r}, pos={pos_val!r}, "
                 f"mgnMode={pos.get('mgnMode')!r}, posSide={pos.get('posSide')!r}"
             )
             if upl_ratio is None:
@@ -1286,6 +1308,7 @@ class MarketService:
             self._emit_debug(
                 f"Skimming {trigger_reason} triggered: {symbol} uplRatio={upl_ratio:.4%} "
                 f"({'>='+str(round(threshold_ratio*100,4))+'%' if hit_tp else '<='+str(round(sl_ratio*100,4))+'%'}); "
+                f"[{dynamic_tp_source}] "
                 f"submitting {close_side} close, contracts={contracts}, posSide={effective_pos_side!r}, tdMode={trade_mode!r}"
             )
             asyncio.create_task(

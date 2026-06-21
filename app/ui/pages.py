@@ -1822,10 +1822,11 @@ def register_pages(app: FastAPI) -> None:
                     skim_badge.props("color=positive rounded")
                     tp = skim.get("threshold_pct")
                     sl = skim.get("stop_loss_pct")
+                    dyn = bool(skim.get("dynamic_tp", False))
                     parts: list[str] = []
                     if tp is not None:
                         try:
-                            parts.append(f"TP {float(tp):.1f}%")
+                            parts.append(f"TP {'≥' if dyn else ''}{float(tp):.1f}% {'(Dynamic BB)' if dyn else ''}")
                         except (TypeError, ValueError):
                             pass
                     if sl is not None:
@@ -2911,6 +2912,17 @@ def register_pages(app: FastAPI) -> None:
         config = getattr(app.state, "runtime_config", {}) or {}
         strategy = config.setdefault("strategy", {})
         skimming = strategy.setdefault("skimming", {"enabled": False, "threshold_pct": 2.0, "stop_loss_pct": None})
+        # Dynamic TP notice banner
+        if bool(skimming.get("enabled")) and bool(skimming.get("dynamic_tp", False)):
+            with wrapper:
+                with ui.row().classes("w-full items-center gap-2 bg-amber-50 border border-amber-300 rounded-lg px-4 py-2 mb-2"):
+                    ui.icon("auto_graph", color="amber").classes("text-lg")
+                    frac = skimming.get("dynamic_tp_fraction", 0.7)
+                    floor = skimming.get("threshold_pct", 2.0)
+                    ui.label(
+                        f"Dynamic TP is active — Skimming TP is calculated from BB bandwidth ÷ 2 × {frac} × leverage, "
+                        f"with a floor of {floor}% PnL."
+                    ).classes("text-xs text-amber-800")
         shotgun = strategy.setdefault("shotgun", {
             "enabled": False,
             "tp_pct": None,
@@ -3001,7 +3013,7 @@ def register_pages(app: FastAPI) -> None:
                                 step=0.1,
                                 precision=2,
                             ).classes("w-48").props(
-                                "hint='Close when PnL reaches this % profit' persistent-hint"
+                                "hint='Floor TP: close when PnL reaches this % profit' persistent-hint"
                             )
                             _sl_raw = skimming.get("stop_loss_pct")
                             stop_loss_input = ui.number(
@@ -3013,6 +3025,29 @@ def register_pages(app: FastAPI) -> None:
                             ).classes("w-48").props(
                                 "hint='Close when PnL drops below this % loss (leave blank to disable)' persistent-hint clearable stack-label"
                             )
+                        with ui.row().classes("gap-4 items-center mt-2"):
+                            dynamic_tp_switch = ui.switch(
+                                "Dynamic TP (BB Bandwidth)",
+                                value=bool(skimming.get("dynamic_tp", False)),
+                            ).props("dense color=amber")
+                            ui.label(
+                                "Raises TP target based on current BB bandwidth: "
+                                "max(static TP, bandwidth÷2 × fraction × leverage). "
+                                "Static TP acts as a floor."
+                            ).classes("text-xs text-slate-500")
+                        with ui.row().classes("gap-4 items-center mt-1"):
+                            _dtp_frac_raw = skimming.get("dynamic_tp_fraction")
+                            dynamic_tp_fraction_input = ui.number(
+                                label="Reversion Fraction",
+                                value=float(_dtp_frac_raw) if _dtp_frac_raw is not None else 0.7,
+                                min=0.1,
+                                max=1.0,
+                                step=0.05,
+                                format="%.2f",
+                            ).classes("w-40").props("dense")
+                            ui.label(
+                                "Fraction of the half-bandwidth to target as TP (0.7 = 70% reversion toward midline)."
+                            ).classes("text-xs text-slate-500")
                     _active_badge = ui.badge("Active", color="positive").bind_visibility_from(
                         skimming_switch, "value"
                     )
@@ -3707,6 +3742,8 @@ def register_pages(app: FastAPI) -> None:
                     "enabled": bool(skimming_switch.value),
                     "threshold_pct": float(threshold_input.value or 2.0),
                     "stop_loss_pct": float(_sl_val) if _sl_val not in (None, "") else None,
+                    "dynamic_tp": bool(dynamic_tp_switch.value),
+                    "dynamic_tp_fraction": float(dynamic_tp_fraction_input.value or 0.7),
                 },
                 "shotgun": {
                     "enabled": bool(shotgun_switch.value),
