@@ -1826,7 +1826,7 @@ def register_pages(app: FastAPI) -> None:
                     parts: list[str] = []
                     if tp is not None:
                         try:
-                            parts.append(f"TP {'≥' if dyn else ''}{float(tp):.1f}% {'(Dynamic BB)' if dyn else ''}")
+                            parts.append(f"TP {'≤' if dyn else ''}{float(tp):.1f}% {'(Dynamic BB)' if dyn else ''}")
                         except (TypeError, ValueError):
                             pass
                     if sl is not None:
@@ -2920,8 +2920,8 @@ def register_pages(app: FastAPI) -> None:
                     frac = skimming.get("dynamic_tp_fraction", 0.7)
                     floor = skimming.get("threshold_pct", 2.0)
                     ui.label(
-                        f"Dynamic TP is active — Skimming TP is calculated from BB bandwidth ÷ 2 × {frac} × leverage, "
-                        f"with a floor of {floor}% PnL."
+                        f"Dynamic TP is active — TP target = min({floor}%, bandwidth÷2 × {frac} × leverage). "
+                        f"Static {floor}% acts as a ceiling; dynamic only tightens the target in low-bandwidth conditions."
                     ).classes("text-xs text-amber-800")
         shotgun = strategy.setdefault("shotgun", {
             "enabled": False,

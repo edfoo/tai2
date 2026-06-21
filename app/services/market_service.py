@@ -1282,8 +1282,11 @@ class MarketService:
                     _bw = (_bb_upper - _bb_lower) / _bb_middle * 100.0
                     _lever = self._extract_float(pos.get("lever")) or 1.0
                     _dyn = (_bw / 2.0) * dynamic_tp_fraction * _lever
-                    effective_threshold = max(threshold, _dyn)
-                    dynamic_tp_source = f"dynamic(bw={_bw:.2f}%,lev={_lever:.0f}x,frac={dynamic_tp_fraction}) → {_dyn:.2f}% → max={effective_threshold:.2f}%"
+                    # Use min(static, dynamic): dynamic TP can only tighten the target
+                    # (close earlier when bandwidth is narrow), never raise it above
+                    # the user's configured threshold.
+                    effective_threshold = min(threshold, _dyn) if _dyn > 0 else threshold
+                    dynamic_tp_source = f"dynamic(bw={_bw:.2f}%,lev={_lever:.0f}x,frac={dynamic_tp_fraction}) → {_dyn:.2f}% → min={effective_threshold:.2f}%"
                 else:
                     dynamic_tp_source = "dynamic(BB unavailable, fallback to static)"
 
