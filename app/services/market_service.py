@@ -743,7 +743,18 @@ class MarketService:
         account_equity = float(total_eq_usd or total_equity_value or total_account_value or 0.0)
         market_data: dict[str, dict[str, Any]] = {}
         instrument_specs: dict[str, dict[str, float]] = {}
-        for symbol in self.symbols:
+        # Build the set of symbols to fetch: screener list + any symbol with an open position
+        # so that strategies (Skimming, Alternator, etc.) always have indicator data for
+        # positions even when the screener has since dropped the symbol.
+        position_symbols = {
+            str(p.get("instId", "")).upper()
+            for p in positions
+            if isinstance(p, dict) and self._extract_float(p.get("pos"))
+        }
+        snapshot_symbols = list(self.symbols) + [
+            s for s in sorted(position_symbols) if s not in set(self.symbols)
+        ]
+        for symbol in snapshot_symbols:
             order_book = await self._fetch_order_book(symbol)
             ticker = await self._fetch_ticker(symbol)
             funding = await self._fetch_funding_rate(symbol)
