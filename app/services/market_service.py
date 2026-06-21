@@ -2084,6 +2084,8 @@ class MarketService:
         require_footprint_delta = bool(gov.get("require_footprint_delta", False))
         require_bb_position = bool(gov.get("require_bb_position", False))
         bb_proximity_pct = self._extract_float(gov.get("bb_proximity_pct")) or 0.0
+        min_bb_bandwidth = self._extract_float(gov.get("min_bb_bandwidth")) or 0.0
+        max_bb_bandwidth = self._extract_float(gov.get("max_bb_bandwidth")) or 0.0
         min_adx = self._extract_float(gov.get("min_adx")) or 0.0
         max_adx = self._extract_float(gov.get("max_adx")) or 0.0
 
@@ -2105,7 +2107,13 @@ class MarketService:
         _bb = indicators.get("bollinger_bands") or {}
         bb_lower = self._extract_float(_bb.get("lower"))
         bb_upper = self._extract_float(_bb.get("upper"))
+        bb_middle = self._extract_float(_bb.get("middle"))
         bb_last_price = self.get_last_price(symbol)
+        bb_bandwidth: float | None = (
+            (bb_upper - bb_lower) / bb_middle * 100.0
+            if bb_upper is not None and bb_lower is not None and bb_middle and bb_middle > 0
+            else None
+        )
         bb_long_ok = (
             bb_last_price is not None
             and bb_lower is not None
@@ -2173,6 +2181,20 @@ class MarketService:
                 f"(ADX={adx:.1f} > max={max_adx:.1f})"
             )
             return None
+        if min_bb_bandwidth > 0 and (bb_bandwidth is None or bb_bandwidth < min_bb_bandwidth):
+            self._emit_debug(
+                f"Launcher: {symbol} — no entry signal "
+                f"(BB bandwidth={bb_bandwidth:.2f}% < min={min_bb_bandwidth:.2f}%)"
+                if bb_bandwidth is not None else
+                f"Launcher: {symbol} — no entry signal (BB bandwidth unavailable, min={min_bb_bandwidth:.2f}%)"
+            )
+            return None
+        if max_bb_bandwidth > 0 and bb_bandwidth is not None and bb_bandwidth > max_bb_bandwidth:
+            self._emit_debug(
+                f"Launcher: {symbol} — no entry signal "
+                f"(BB bandwidth={bb_bandwidth:.2f}% > max={max_bb_bandwidth:.2f}%)"
+            )
+            return None
 
         buy_signal = (
             rsi < rsi_oversold
@@ -2230,6 +2252,10 @@ class MarketService:
                 )
             else:
                 parts.append("BB=n/a")
+        if min_bb_bandwidth > 0 or max_bb_bandwidth > 0:
+            parts.append(
+                f"BB_bw={bb_bandwidth:.2f}%" if bb_bandwidth is not None else "BB_bw=n/a"
+            )
         self._emit_debug(f"Launcher: {symbol} — no entry signal ({', '.join(parts)})")
         return None
 

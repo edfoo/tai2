@@ -5262,6 +5262,24 @@ def register_pages(app: FastAPI) -> None:
                     format="%.1f",
                 ).classes("w-48").props("dense")
                 ui.label("How far inside the band price may be and still qualify (e.g. 0.5 = within 0.5% above lower band counts as a long entry). 0 = price must be at or beyond the band.").classes("text-xs text-slate-500")
+            with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                gov_min_bb_bw_input = ui.number(
+                    label="Min BB Bandwidth %",
+                    value=float(_gov_cfg.get("min_bb_bandwidth") or 0.0),
+                    min=0.0,
+                    max=20.0,
+                    step=0.5,
+                    format="%.1f",
+                ).classes("w-48").props("dense")
+                gov_max_bb_bw_input = ui.number(
+                    label="Max BB Bandwidth %",
+                    value=float(_gov_cfg.get("max_bb_bandwidth") or 0.0),
+                    min=0.0,
+                    max=50.0,
+                    step=0.5,
+                    format="%.1f",
+                ).classes("w-48").props("dense")
+                ui.label("Block when BB bandwidth (upper−lower)/middle×100 is outside this range. 0 = off. Recommended: min=2 to filter squeezes.").classes("text-xs text-slate-500")
             ui.separator().classes("w-full my-4")
             ui.label("Candle settings").classes("text-sm text-slate-500")
             with ui.row().classes("w-full flex-wrap gap-4"):
@@ -6294,6 +6312,8 @@ def register_pages(app: FastAPI) -> None:
                 "require_footprint_delta": bool(gov_require_fp_delta_switch.value),
                 "require_bb_position": bool(gov_require_bb_switch.value),
                 "bb_proximity_pct": float(gov_bb_proximity_input.value or 0.0),
+                "min_bb_bandwidth": float(gov_min_bb_bw_input.value or 0.0),
+                "max_bb_bandwidth": float(gov_max_bb_bw_input.value or 0.0),
                 "flip_launcher_direction": str(flip_launcher_select.value) if flip_launcher_switch.value else None,
             }
             try:
