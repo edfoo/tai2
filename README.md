@@ -145,18 +145,54 @@ When you click **Save**, the app persists the configuration (PostgreSQL for guar
 ## Launcher decision
 The Launcher uses these indicators, all of which must agree simultaneously:
 
-|Indicator|Buy|Sell|Configurable|
-|-|-|-|-|
-|RSI (required)|< RSI Oversold (default 35)|> RSI Overbought (default 65)|	Yes|
-|CMF (optional)|CMF > 0|CMF < 0|Toggle require_cmf|
-|HTF EMA trend (optional)|EMA50 > EMA200|EMA50 < EMA200|Toggle require_htf_trend|
-|ADX (optional)|ADX ≥ min_adx|ADX ≥ min_adx|min_adx (0 = disabled)|
+| Indicator | Buy | Sell | Configurable |
+|---|---|---|---|
+| RSI (required) | < RSI Oversold (default 35) | > RSI Overbought (default 65) | Yes |
+| CMF (optional) | CMF > 0 | CMF < 0 | Toggle `require_cmf` |
+| HTF EMA trend (optional) | EMA50 > EMA200 | EMA50 < EMA200 | Toggle `require_htf_trend` |
+| ADX min (optional) | ADX ≥ min_adx | ADX ≥ min_adx | `min_adx` (0 = disabled) |
+| ADX max (optional) | ADX ≤ max_adx | ADX ≤ max_adx | `max_adx` (0 = disabled) |
+| BB position (optional) | price ≤ lower band × (1 + proximity%) | price ≥ upper band × (1 − proximity%) | Toggle `require_bb_position` |
+| BB bandwidth min (optional) | bandwidth > min_bb_bandwidth | bandwidth > min_bb_bandwidth | `min_bb_bandwidth` % (0 = disabled) |
+| BB bandwidth max (optional) | bandwidth < max_bb_bandwidth | bandwidth < max_bb_bandwidth | `max_bb_bandwidth` % (0 = disabled) |
 
-All data comes from the LTF snapshot (except EMA trend which uses indicators_htf).
+BB bandwidth is calculated as `(upper − lower) / middle × 100`.  
+All data comes from the LTF snapshot (except EMA trend which uses `htf_indicators`).
 
-All signals firing "no entry" means RSI is neither oversold nor overbought on any of those symbols — i.e. the market is in a neutral RSI range. The HTF EMA trend and CMF filters compound this. If you're seeing it consistently fire nothing, you could:
+### Mean-reversion scalping configuration
 
-- Loosen the RSI thresholds (e.g. 40/60 instead of 35/65)
-- Disable require_htf_trend and/or require_cmf
-- Lower min_adx or set it to 0
-- All configurable from the CFG page → Launcher section.
+The Launcher is well suited to mean-reversion scalping on 15m candles when combined with the Skimming strategy (small TP, wider SL). The recommended settings below filter for ranging conditions where price is at a statistical extreme:
+
+| Setting | Recommended value | Rationale |
+|---|---|---|
+| `rsi_oversold` | `25`–`28` | Only enter when RSI is at a genuine extreme, not mid-range noise |
+| `rsi_overbought` | `72`–`75` | Symmetric with above |
+| `require_htf_trend` | `false` | Ranging markets have no clean HTF trend; this filter blocks most signals |
+| `require_cmf` | `false` | CMF is a trend-confirmation signal; mean-reversion entries oppose prevailing flow |
+| `require_cmf_cross` | `false` | Zero-line cross is a trend-initiation signal — entry would be too late |
+| `require_cmf_no_divergence` | `false` | CMF divergence at extremes is actually a reversion signal, not a risk |
+| `require_footprint_delta` | `false` | 15-min net delta confirms trend direction, not reversion |
+| `require_bb_position` | `true` | Core filter: only enter when price is at or near a BB extreme |
+| `bb_proximity_pct` | `0.5` | Allows entry up to 0.5% inside the band to compensate for polling latency on 15m candles |
+| `min_bb_bandwidth` | `2.0` | Blocks entries during bandwidth squeezes that often precede breakouts |
+| `max_bb_bandwidth` | `0` (off) | Optionally cap at ~10–15% to avoid entering during extreme volatility events |
+| `max_adx` | `20` | Only trade when ADX confirms a ranging market; raise to `25` if too few signals |
+| `min_adx` | `0` (off) | Leave off for mean-reversion; a minimum trend strength is not required |
+
+**Skimming settings** (strategy page) for mean-reversion:
+
+| Setting | Recommended value | Rationale |
+|---|---|---|
+| `threshold_pct` | `7`–`10` (at 3× leverage) | TP ceiling as % of margin; at 3× leverage this equals ~2.3–3.3% price move |
+| `stop_loss_pct` | `15`–`20` | SL as % of margin; sized to survive normal noise without hitting a full trend leg |
+| `dynamic_tp` | `true` | Tightens TP in low-bandwidth conditions to exit before a squeeze breakout |
+| `dynamic_tp_fraction` | `0.7` | Target 70% reversion toward the BB midline before exiting |
+
+**Signal frequency tuning** — if the Launcher fires too few signals, adjust in this order:
+
+1. Raise `max_adx` from `20` → `25` → `30`
+2. Lower `min_bb_bandwidth` from `2.0` → `1.5` → `1.0`
+3. Relax RSI thresholds from `25/75` → `28/72`
+4. Increase `bb_proximity_pct` from `0.5` → `1.0` as a last resort
+
+All configurable from the CFG page → Launcher section.
