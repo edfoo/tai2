@@ -4711,13 +4711,18 @@ class MarketService:
         return data[0]
 
     async def _fetch_ohlcv(self, symbol: str) -> list[list[Any]]:
-        """Fetch OHLCV candles (cached fallback) for use in indicator calculations."""
+        """Fetch OHLCV candles (cached fallback) for use in indicator calculations.
+
+        Candle data is public — always uses the production endpoint regardless of
+        trading mode so that paper-trading sessions get accurate market history.
+        """
         cached = self._latest_ohlcv.get(symbol)
-        if not self._market_api:
+        candle_api = self._market_api_prod or self._market_api
+        if not candle_api:
             return cached or []
         try:
             response = await asyncio.to_thread(
-                self._market_api.get_candlesticks,
+                candle_api.get_candlesticks,
                 instId=symbol,
                 bar=self._ohlc_bar,
                 limit=self._ohlcv_fetch_limit,
@@ -4733,17 +4738,21 @@ class MarketService:
         return cached or []
 
     async def _fetch_ohlcv_htf(self, symbol: str) -> list[list[Any]]:
-        """Fetch OHLCV candles at the next-higher timeframe for the same wall-clock window."""
+        """Fetch OHLCV candles at the next-higher timeframe for the same wall-clock window.
+
+        Always uses the production endpoint — candle data is public.
+        """
         htf_bar, _ = self._HTF_MAP.get(self._ohlc_bar, ("", 0))
         if not htf_bar:
             return []
         limit = self._ohlcv_fetch_limit
         cached = self._latest_ohlcv_htf.get(symbol)
-        if not self._market_api:
+        candle_api = self._market_api_prod or self._market_api
+        if not candle_api:
             return cached or []
         try:
             response = await asyncio.to_thread(
-                self._market_api.get_candlesticks,
+                candle_api.get_candlesticks,
                 instId=symbol,
                 bar=htf_bar,
                 limit=limit,
@@ -9376,6 +9385,11 @@ class MarketService:
         """Recreate all OKX REST clients, typically after flipping env flags or credentials."""
         self._account_api = self._build_account_api()
         self._market_api = self._build_market_api()
+        # Production-flag MarketAPI used as candle fallback when demo flag returns no data.
+        # Candle data is public; production candles are accurate for paper-trading analysis.
+        self._market_api_prod: Any | None = (
+            OkxMarket.MarketAPI(flag="0") if OkxMarket and self._okx_flag != "0" else None
+        )
         self._public_api = self._build_public_api()
         self._trading_api = self._build_trading_api()
         self._trade_api = self._build_trade_api()
