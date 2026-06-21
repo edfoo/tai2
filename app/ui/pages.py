@@ -5183,6 +5183,17 @@ def register_pages(app: FastAPI) -> None:
                 ).classes("w-full md:w-32").props(
                     "hint='Skip if ADX below this (0 = off)' persistent-hint"
                 )
+                _gov_max_adx_raw = _gov_cfg.get("max_adx", 0.0)
+                gov_max_adx_input = ui.number(
+                    label="Max ADX",
+                    value=float(_gov_max_adx_raw) if _gov_max_adx_raw is not None else 0.0,
+                    min=0,
+                    max=100,
+                    step=5,
+                    precision=0,
+                ).classes("w-full md:w-32").props(
+                    "hint='Skip if ADX above this (0 = off)' persistent-hint"
+                )
             with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                 gov_require_htf_switch = ui.switch(
                     "Require HTF trend alignment",
@@ -6274,6 +6285,7 @@ def register_pages(app: FastAPI) -> None:
                 "rsi_oversold": float(gov_rsi_oversold_input.value or 35.0),
                 "rsi_overbought": float(gov_rsi_overbought_input.value or 65.0),
                 "min_adx": float(gov_min_adx_input.value or 0.0),
+                "max_adx": float(gov_max_adx_input.value or 0.0),
                 "require_htf_trend": bool(gov_require_htf_switch.value),
                 "require_cmf": bool(gov_require_cmf_switch.value),
                 "require_htf_cmf": bool(gov_require_htf_cmf_switch.value),

@@ -2069,6 +2069,7 @@ class MarketService:
           - CMF positive (buy) / negative (sell) when require_cmf is True
           - HTF EMA50 > EMA200 (buy) / < EMA200 (sell) when require_htf_trend is True
           - ADX ≥ min_adx when min_adx > 0
+          - ADX ≤ max_adx when max_adx > 0
           - 15-min footprint net_delta > 0 (buy) / < 0 (sell) when require_footprint_delta is True
         Returns None when indicators are neutral or any filter disagrees.
         """
@@ -2084,6 +2085,7 @@ class MarketService:
         require_bb_position = bool(gov.get("require_bb_position", False))
         bb_proximity_pct = self._extract_float(gov.get("bb_proximity_pct")) or 0.0
         min_adx = self._extract_float(gov.get("min_adx")) or 0.0
+        max_adx = self._extract_float(gov.get("max_adx")) or 0.0
 
         snapshot = self._last_full_snapshot
         if not snapshot:
@@ -2163,6 +2165,12 @@ class MarketService:
             self._emit_debug(
                 f"Launcher: {symbol} — no entry signal "
                 f"(ADX={adx:.1f} < min={min_adx:.1f})"
+            )
+            return None
+        if max_adx > 0 and adx is not None and adx > max_adx:
+            self._emit_debug(
+                f"Launcher: {symbol} — no entry signal "
+                f"(ADX={adx:.1f} > max={max_adx:.1f})"
             )
             return None
 
