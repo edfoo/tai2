@@ -574,11 +574,18 @@ class MarketService:
         data = message.get("data") or []
         if channel == "positions" and isinstance(data, list):
             if action == "snapshot":
-                # Full replacement — OKX sends a complete list on subscribe
-                self._latest_positions_raw = list(data)
+                # Full replacement — filter zero-pos rows that OKX transiently
+                # includes for recently-closed positions on subscribe.
+                self._latest_positions_raw = [
+                    p for p in data
+                    if isinstance(p, dict) and self._extract_float(p.get("pos")) != 0
+                ]
             elif action == "update":
                 if self._latest_positions_raw is None:
-                    self._latest_positions_raw = list(data)
+                    self._latest_positions_raw = [
+                        p for p in data
+                        if isinstance(p, dict) and self._extract_float(p.get("pos")) != 0
+                    ]
                 else:
                     # Upsert by (instId, posSide); remove positions where pos == "0"
                     key_to_idx: dict[tuple[str, str], int] = {
@@ -861,6 +868,9 @@ class MarketService:
         for entry in positions:
             if not isinstance(entry, dict):
                 annotated.append(entry)
+                continue
+            # Drop stale zero-pos rows OKX may transiently return after position closure.
+            if self._extract_float(entry.get("pos")) == 0:
                 continue
             symbol_value = entry.get("instId") or entry.get("symbol")
             symbol_key = str(symbol_value).strip().upper() if symbol_value else None
