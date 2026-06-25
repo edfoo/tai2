@@ -1594,7 +1594,9 @@ def register_pages(app: FastAPI) -> None:
 
         refresh_llm_cards()
         render_risk_lock_status()
-        ui.timer(15, lambda: refresh_llm_cards(last_snapshot["value"]))
+        _t_llm_cards = ui.timer(15, lambda: refresh_llm_cards(last_snapshot["value"]))
+        page_client.on_disconnect(_t_llm_cards.deactivate)
+        page_client.on_delete(_t_llm_cards.deactivate)
 
         def _format_credit_amount(usage: dict[str, Any] | None) -> str:
             if not usage:
@@ -1683,7 +1685,9 @@ def register_pages(app: FastAPI) -> None:
             _update_credit_display(usage)
 
         asyncio.create_task(refresh_openrouter_credits(True))
-        ui.timer(300, lambda: asyncio.create_task(refresh_openrouter_credits(True)))
+        _t_credits = ui.timer(300, lambda: asyncio.create_task(refresh_openrouter_credits(True)))
+        page_client.on_disconnect(_t_credits.deactivate)
+        page_client.on_delete(_t_credits.deactivate)
 
         async def refresh_okx_fees() -> None:
             window_hours = _get_fee_window_hours()
@@ -1699,7 +1703,9 @@ def register_pages(app: FastAPI) -> None:
             _update_fee_display(total_fee, window_hours=window_hours)
 
         asyncio.create_task(refresh_okx_fees())
-        ui.timer(300, lambda: asyncio.create_task(refresh_okx_fees()))
+        _t_fees = ui.timer(300, lambda: asyncio.create_task(refresh_okx_fees()))
+        page_client.on_disconnect(_t_fees.deactivate)
+        page_client.on_delete(_t_fees.deactivate)
 
         async def refresh_equity_chart() -> None:
             try:
@@ -2403,8 +2409,12 @@ def register_pages(app: FastAPI) -> None:
 
         page_client.on_disconnect(_teardown_client)
         page_client.on_delete(_teardown_client)
-        ui.timer(5, lambda: [update_snapshot_health(last_snapshot["value"]), render_strategy_status()])
-        ui.timer(5, set_ws_status)
+        _t_health = ui.timer(5, lambda: [update_snapshot_health(last_snapshot["value"]), render_strategy_status()])
+        _t_ws = ui.timer(5, set_ws_status)
+        page_client.on_disconnect(_t_health.deactivate)
+        page_client.on_delete(_t_health.deactivate)
+        page_client.on_disconnect(_t_ws.deactivate)
+        page_client.on_delete(_t_ws.deactivate)
 
         def _update_next_prompt_countdown() -> None:
             scheduler = getattr(app.state, "prompt_scheduler", None)
@@ -2435,7 +2445,9 @@ def register_pages(app: FastAPI) -> None:
             else:
                 next_prompt_label.set_text(f"Next prompt: {s}s")
 
-        ui.timer(1, _update_next_prompt_countdown)
+        _t_countdown = ui.timer(1, _update_next_prompt_countdown)
+        page_client.on_disconnect(_t_countdown.deactivate)
+        page_client.on_delete(_t_countdown.deactivate)
         asyncio.create_task(refresh_equity_chart())
 
 
@@ -4070,8 +4082,13 @@ def register_pages(app: FastAPI) -> None:
                 websocket_log.push(_render_event(entry))
             ws_seen["idx"] = len(events)
 
-        ui.timer(3, refresh_logs)
-        ui.timer(3, refresh_websocket)
+        _debug_client = ui.context.client
+        _t_logs = ui.timer(3, refresh_logs)
+        _t_ws_dbg = ui.timer(3, refresh_websocket)
+        _debug_client.on_disconnect(_t_logs.deactivate)
+        _debug_client.on_delete(_t_logs.deactivate)
+        _debug_client.on_disconnect(_t_ws_dbg.deactivate)
+        _debug_client.on_delete(_t_ws_dbg.deactivate)
 
     def render_prompt_page() -> None:
         navigation("PROMPT")
@@ -5510,7 +5527,9 @@ def register_pages(app: FastAPI) -> None:
                     timeout=6000,
                 )
 
-            ui.timer(5.0, _sync_screener_pairs)
+            _t_screener = ui.timer(5.0, _sync_screener_pairs)
+            client.on_disconnect(_t_screener.deactivate)
+            client.on_delete(_t_screener.deactivate)
 
             ui.label("Live Execution").classes("text-sm font-semibold text-rose-600 mt-2")
             with ui.row().classes("w-full flex-wrap gap-4"):
