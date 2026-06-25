@@ -948,6 +948,36 @@ async def load_launcher_config() -> dict[str, Any]:
     return {}
 
 
+async def save_notifications_config(config: dict[str, Any]) -> None:
+    pool = await get_postgres_pool()
+    await pool.execute(
+        """
+        INSERT INTO runtime_settings (key, value, updated_at)
+        VALUES ('notifications_config', $1::jsonb, NOW())
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+        """,
+        json.dumps(config or {}),
+    )
+
+
+async def load_notifications_config() -> dict[str, Any]:
+    pool = await get_postgres_pool()
+    row = await pool.fetchrow("SELECT value FROM runtime_settings WHERE key = 'notifications_config'")
+    if not row:
+        return {}
+    value = row["value"]
+    if isinstance(value, str):
+        try:
+            parsed: Any = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+    else:
+        parsed = value
+    if isinstance(parsed, dict):
+        return parsed
+    return {}
+
+
 async def save_poll_interval(interval_seconds: int) -> None:
     pool = await get_postgres_pool()
     try:

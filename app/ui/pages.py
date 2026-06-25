@@ -34,6 +34,7 @@ from app.db.postgres import (
     save_candle_settings,
     load_candle_settings,
     save_launcher_config,
+    save_notifications_config,
     set_enabled_trading_pairs,
 )
 from app.services.prompt_builder import (
@@ -4670,6 +4671,19 @@ def register_pages(app: FastAPI) -> None:
                     "Send trade close notification",
                     value=bool(_notifications_cfg.get("trade_close", False)),
                 )
+                async def _send_test_notification() -> None:
+                    from app.services.alert_service import send_alert
+                    try:
+                        await send_alert(
+                            "\U0001f9ea <b>Test Notification</b>\n"
+                            "Test message from tai2."
+                        )
+                        ui.notify("Test notification sent", color="positive")
+                    except Exception as exc:
+                        ui.notify(f"Failed to send test notification: {exc}", color="negative")
+                ui.button("Send test notification", icon="notifications", color="secondary").on(
+                    "click", _send_test_notification
+                )
             ui.separator().classes("mb-2")
             ui.label("Execution Guardrails").classes("text-xl font-semibold")
             ui.label("Limits enforced before orders are placed").classes("text-sm text-slate-500")
@@ -6374,6 +6388,10 @@ def register_pages(app: FastAPI) -> None:
                 await save_launcher_config(config["launcher"])
             except Exception as exc:  # pragma: no cover - db optional
                 _safe_notify(f"Failed to persist launcher config: {exc}", color="warning")
+            try:
+                await save_notifications_config(config.get("notifications") or {})
+            except Exception as exc:  # pragma: no cover - db optional
+                _safe_notify(f"Failed to persist notifications config: {exc}", color="warning")
             app.state.runtime_config = config
             llm_service = getattr(app.state, "llm_service", None)
             if llm_service:

@@ -32,6 +32,7 @@ from app.db.postgres import (
     load_okx_sub_account,
     load_frontend_timezone,
     load_candle_settings,
+    load_notifications_config,
 )
 from app.services.llm_service import LLMService
 from app.services.market_service import MarketService
@@ -400,6 +401,13 @@ def _create_lifespan(enable_background_services: bool):
                     if stored_launcher:
                         app.state.runtime_config["launcher"] = stored_launcher
                 try:
+                    stored_notifications = await load_notifications_config()
+                except Exception as exc:  # pragma: no cover - optional
+                    logger.error("Failed to load notifications config: %s", exc)
+                else:
+                    if stored_notifications:
+                        app.state.runtime_config["notifications"] = stored_notifications
+                try:
                     stored_candle_settings = await load_candle_settings()
                 except Exception as exc:  # pragma: no cover - optional
                     logger.error("Failed to load candle settings: %s", exc)
@@ -467,6 +475,9 @@ def _create_lifespan(enable_background_services: bool):
                 stored_launcher_cfg = app.state.runtime_config.get("launcher") or {}
                 if stored_launcher_cfg:
                     market_service.set_launcher_config(stored_launcher_cfg)
+                stored_notifications_cfg = app.state.runtime_config.get("notifications") or {}
+                if stored_notifications_cfg:
+                    market_service.set_notifications_config(stored_notifications_cfg)
                 market_service.set_footprint_config(
                     app.state.runtime_config.get("guardrails", {}).get("footprint") or {}
                 )
