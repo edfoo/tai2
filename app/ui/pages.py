@@ -4658,6 +4658,19 @@ def register_pages(app: FastAPI) -> None:
             with ui.row().classes("w-full justify-between items-center"):
                 ui.label("Engine Configuration").classes("text-2xl font-bold")
                 save_button = ui.button("Save", icon="save", color="primary")
+            ui.label("Notifications").classes("text-xl font-semibold")
+            ui.label("Send Telegram alerts when trades are opened or closed (requires TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in .env)").classes("text-sm text-slate-500")
+            _notifications_cfg = config.get("notifications") or {}
+            with ui.row().classes("gap-8 items-center mt-1 mb-2"):
+                notify_trade_open_switch = ui.switch(
+                    "Send trade open notification",
+                    value=bool(_notifications_cfg.get("trade_open", False)),
+                )
+                notify_trade_close_switch = ui.switch(
+                    "Send trade close notification",
+                    value=bool(_notifications_cfg.get("trade_close", False)),
+                )
+            ui.separator().classes("mb-2")
             ui.label("Execution Guardrails").classes("text-xl font-semibold")
             ui.label("Limits enforced before orders are placed").classes("text-sm text-slate-500")
             max_position_pct_value = _fraction_to_percent(guardrails.get("max_position_pct"))
@@ -6051,6 +6064,10 @@ def register_pages(app: FastAPI) -> None:
                 except RuntimeError:
                     pass
 
+            config["notifications"] = {
+                "trade_open": bool(notify_trade_open_switch.value),
+                "trade_close": bool(notify_trade_close_switch.value),
+            }
             config["poll_interval"] = int(ws_interval_input.value or 180)
             config["ohlcv_fetch_limit"] = max(50, int(ohlcv_fetch_limit_input.value or 200))
             config["ohlcv_snapshot_candles"] = max(10, int(ohlcv_snapshot_candles_input.value or 50))
@@ -6365,6 +6382,7 @@ def register_pages(app: FastAPI) -> None:
                 llm_service.set_reasoning_effort(config["llm_reasoning_effort"])
             market_service = getattr(app.state, "market_service", None)
             if market_service:
+                market_service.set_notifications_config(config.get("notifications") or {})
                 market_service.set_wait_for_tp_sl(config.get("wait_for_tp_sl", False))
                 market_service.set_flip_llm_decision(config["guardrails"].get("flip_llm_decision", False))
                 market_service.set_footprint_config(config["guardrails"].get("footprint") or {})

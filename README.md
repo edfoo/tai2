@@ -27,6 +27,8 @@
 - `DATABASE_URL` (e.g. `postgresql://user:pass@host:5432/tai2`)
 - `REDIS_URL` (e.g. `redis://localhost:6379/0`)
 - `POLL_INTERVAL` (seconds, defaults to 180)
+- `TELEGRAM_BOT_TOKEN` (optional — bot token from @BotFather; enables Telegram alerts)
+- `TELEGRAM_CHAT_ID` (optional — target chat or group ID; required when bot token is set)
 
 ## Running the App
 

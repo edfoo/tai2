@@ -321,6 +321,7 @@ class MarketService:
         # Launcher: rule-based entry/exit + optional LLM trade filter.
         # Stored separately from _strategy_config (lives in runtime_config["launcher"]).
         self._launcher_config: dict[str, Any] = {}
+        self._notifications_config: dict[str, Any] = {}
         # _launcher_entering: per-symbol in-flight entry guard.
         self._launcher_entering: set[str] = set()
         # _launcher_in_position: symbols where Launcher opened a trade.
@@ -1218,6 +1219,10 @@ class MarketService:
         """Update the Launcher configuration at runtime (called from CFG save)."""
         self._launcher_config = config or {}
         self._emit_debug(f"Launcher config updated: {self._launcher_config}")
+
+    def set_notifications_config(self, config: dict[str, Any]) -> None:
+        """Update the notifications configuration at runtime (called from CFG save)."""
+        self._notifications_config = config or {}
 
     def set_llm_service(self, llm_service: Any) -> None:
         """Inject the shared LLMService instance for continuous supervision calls."""
@@ -3437,6 +3442,7 @@ class MarketService:
                 amount=contracts,
                 rationale=f"Alternator close (trigger={trigger})",
                 fee=_close_fee,
+                is_close=True,
             )
             self._emit_debug(
                 f"Alternator: {symbol_key} close order submitted "
@@ -3490,6 +3496,7 @@ class MarketService:
                     amount=contracts,
                     rationale=f"Alternator entry (trigger={trigger}, flip=#{new_flip_count})",
                     fee=None,
+                    is_close=False,
                 )
             else:
                 self._emit_debug(
@@ -9242,6 +9249,7 @@ class MarketService:
             amount=executed_size,
             rationale=decision.get("rationale"),
             fee=fee_value,
+            is_close=reduce_only,
         )
         return True
 
@@ -10399,12 +10407,24 @@ class MarketService:
         amount: float,
         rationale: str | None,
         fee: float | None,
+        is_close: bool = False,
+        pnl_usd: float | None = None,
+        pnl_ratio: float | None = None,
     ) -> None:
         """Persist successful fills so downstream analytics and the UI have context."""
         if price is None or amount is None:
             return
         symbol_key = symbol.upper()
         self._position_activity[symbol_key] = time.time()
+        await self._maybe_send_trade_alert(
+            symbol=symbol_key,
+            side=side,
+            price=price,
+            amount=amount,
+            is_close=is_close,
+            pnl_usd=pnl_usd,
+            pnl_ratio=pnl_ratio,
+        )
         if not self.settings.database_url:
             return
         try:
@@ -10421,6 +10441,66 @@ class MarketService:
             await insert_executed_trade(trade)
         except Exception as exc:  # pragma: no cover - persistence best-effort
             self._emit_debug(f"Failed to persist executed trade: {exc}")
+
+    async def _maybe_send_trade_alert(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        price: float,
+        amount: float,
+        is_close: bool,
+        pnl_usd: float | None = None,
+        pnl_ratio: float | None = None,
+    ) -> None:
+        """Fire a Telegram alert if the relevant notification toggle is enabled."""
+        from app.services.alert_service import send_alert  # local import avoids circular deps
+
+        notif = self._notifications_config
+        if is_close:
+            if not notif.get("trade_close"):
+                return
+            # If pnl not explicitly passed, try to read it from the last known position snapshot.
+            if pnl_usd is None and self._last_full_snapshot:
+                for pos in (self._last_full_snapshot.get("positions") or []):
+                    if not isinstance(pos, dict):
+                        continue
+                    if str(pos.get("instId", "")).upper() != symbol:
+                        continue
+                    pnl_usd = self._extract_float(pos.get("upl"))
+                    pnl_ratio = self._extract_float(pos.get("uplRatio"))
+                    break
+            notional = amount * price
+            ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+            pnl_line = ""
+            if pnl_usd is not None:
+                sign = "+" if pnl_usd >= 0 else ""
+                pnl_line = f"\nPnL: {sign}{pnl_usd:.2f} USDT"
+                if pnl_ratio is not None:
+                    pnl_line += f" ({sign}{pnl_ratio * 100:.2f}%)"
+            text = (
+                f"\U0001f534 <b>Trade Closed</b>\n"
+                f"Symbol: <code>{symbol}</code>\n"
+                f"Side: {side.upper()}\n"
+                f"Price: {price:.6g} USDT\n"
+                f"Notional: {notional:.2f} USDT"
+                f"{pnl_line}\n"
+                f"Time: {ts}"
+            )
+        else:
+            if not notif.get("trade_open"):
+                return
+            notional = amount * price
+            ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+            text = (
+                f"\U0001f7e2 <b>Trade Opened</b>\n"
+                f"Symbol: <code>{symbol}</code>\n"
+                f"Side: {side.upper()}\n"
+                f"Price: {price:.6g} USDT\n"
+                f"Notional: {notional:.2f} USDT\n"
+                f"Time: {ts}"
+            )
+        await send_alert(text)
 
     async def _reconcile_fills(self) -> None:
         """Poll OKX fills-history and back-fill realized PnL on locally recorded entry trades.

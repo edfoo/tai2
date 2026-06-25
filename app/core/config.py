@@ -23,6 +23,8 @@ class Settings(BaseSettings):
         default=900, alias="SNAPSHOT_MAX_AGE_SECONDS", ge=60
     )
     trading_pairs_raw: str = Field(default="BTC-USDT-SWAP", alias="TRADING_PAIRS")
+    telegram_bot_token: Optional[str] = Field(default=None, alias="TELEGRAM_BOT_TOKEN")
+    telegram_chat_id: Optional[str] = Field(default=None, alias="TELEGRAM_CHAT_ID")
 
     @property
     def trading_pairs(self) -> list[str]:
