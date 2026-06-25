@@ -10478,13 +10478,22 @@ class MarketService:
                 pnl_line = f"\nPnL: {sign}{pnl_usd:.2f} USDT"
                 if pnl_ratio is not None:
                     pnl_line += f" ({sign}{pnl_ratio * 100:.2f}%)"
+            equity_line = ""
+            if self._last_full_snapshot:
+                _eq = self._extract_float(
+                    self._last_full_snapshot.get("account_equity")
+                    or self._last_full_snapshot.get("total_eq_usd")
+                )
+                if _eq is not None:
+                    equity_line = f"\nAccount Equity: {_eq:.2f} USDT"
             text = (
                 f"\U0001f534 <b>Trade Closed</b>\n"
                 f"Symbol: <code>{symbol}</code>\n"
                 f"Side: {side.upper()}\n"
                 f"Price: {price:.6g} USDT\n"
                 f"Notional: {notional:.2f} USDT"
-                f"{pnl_line}\n"
+                f"{pnl_line}"
+                f"{equity_line}\n"
                 f"Time: {ts}"
             )
         else:
