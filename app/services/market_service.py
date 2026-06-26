@@ -2147,6 +2147,8 @@ class MarketService:
         Returns None when indicators are neutral or any filter disagrees.
         """
         gov = self._launcher_config
+        if not bool(gov.get("mean_reversion_enabled", False)):
+            return None
         rsi_oversold = self._extract_float(gov.get("rsi_oversold")) or 35.0
         rsi_overbought = self._extract_float(gov.get("rsi_overbought")) or 65.0
         require_htf_trend = bool(gov.get("require_htf_trend", True))
