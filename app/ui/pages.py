@@ -2925,16 +2925,17 @@ def register_pages(app: FastAPI) -> None:
         config = getattr(app.state, "runtime_config", {}) or {}
         strategy = config.setdefault("strategy", {})
         skimming = strategy.setdefault("skimming", {"enabled": False, "threshold_pct": 2.0, "stop_loss_pct": None})
-        # Dynamic TP notice banner
-        if bool(skimming.get("enabled")) and bool(skimming.get("dynamic_tp", False)):
+        # Dynamic TP notice banner (Mean Reversion Scalping)
+        _mr_cfg_notice = config.get("launcher") or {}
+        if bool(_mr_cfg_notice.get("mean_reversion_enabled")) and bool(_mr_cfg_notice.get("dynamic_tp", False)):
             with wrapper:
                 with ui.row().classes("w-full items-center gap-2 bg-amber-50 border border-amber-300 rounded-lg px-4 py-2 mb-2"):
                     ui.icon("auto_graph", color="amber").classes("text-lg")
-                    frac = skimming.get("dynamic_tp_fraction", 0.7)
-                    floor = skimming.get("threshold_pct", 2.0)
+                    frac = _mr_cfg_notice.get("dynamic_tp_fraction", 0.7)
+                    tp_floor = _mr_cfg_notice.get("tp_pct", 2.0)
                     ui.label(
-                        f"Dynamic TP is active — TP target = min({floor}%, bandwidth÷2 × {frac} × leverage). "
-                        f"Static {floor}% acts as a ceiling; dynamic only tightens the target in low-bandwidth conditions."
+                        f"Dynamic TP is active for Mean Reversion — effective TP = min({tp_floor}%, bandwidth÷2 × {frac}). "
+                        f"Static {tp_floor}% acts as a ceiling; dynamic only tightens the target in low-bandwidth conditions."
                     ).classes("text-xs text-amber-800")
         shotgun = strategy.setdefault("shotgun", {
             "enabled": False,
@@ -3038,29 +3039,6 @@ def register_pages(app: FastAPI) -> None:
                             ).classes("w-48").props(
                                 "hint='Close when PnL drops below this % loss (leave blank to disable)' persistent-hint clearable stack-label"
                             )
-                        with ui.row().classes("gap-4 items-center mt-2"):
-                            dynamic_tp_switch = ui.switch(
-                                "Dynamic TP (BB Bandwidth)",
-                                value=bool(skimming.get("dynamic_tp", False)),
-                            ).props("dense color=amber")
-                            ui.label(
-                                "Raises TP target based on current BB bandwidth: "
-                                "max(static TP, bandwidth÷2 × fraction × leverage). "
-                                "Static TP acts as a floor."
-                            ).classes("text-xs text-slate-500")
-                        with ui.row().classes("gap-4 items-center mt-1"):
-                            _dtp_frac_raw = skimming.get("dynamic_tp_fraction")
-                            dynamic_tp_fraction_input = ui.number(
-                                label="Reversion Fraction",
-                                value=float(_dtp_frac_raw) if _dtp_frac_raw is not None else 0.7,
-                                min=0.1,
-                                max=1.0,
-                                step=0.05,
-                                format="%.2f",
-                            ).classes("w-40").props("dense")
-                            ui.label(
-                                "Fraction of the half-bandwidth to target as TP (0.7 = 70% reversion toward midline)."
-                            ).classes("text-xs text-slate-500")
                     _active_badge = ui.badge("Active", color="positive").bind_visibility_from(
                         skimming_switch, "value"
                     )
@@ -3094,6 +3072,30 @@ def register_pages(app: FastAPI) -> None:
                             ).classes("w-40").props(
                                 "hint='Close when uplRatio ≤ -X% (blank = none)' persistent-hint clearable"
                             )
+                        with ui.row().classes("gap-4 items-center mt-2"):
+                            mr_dynamic_tp_switch = ui.switch(
+                                "Dynamic TP (BB Bandwidth)",
+                                value=bool(_mr_cfg.get("dynamic_tp", False)),
+                            ).props("dense color=amber")
+                            ui.label(
+                                "Adjusts TP target based on current BB bandwidth at entry: "
+                                "effective TP = min(static TP, bandwidth÷2 × fraction). "
+                                "Static TP acts as a ceiling."
+                            ).classes("text-xs text-slate-500")
+                        with ui.row().classes("gap-4 items-center mt-1"):
+                            _mr_dtp_frac_raw = _mr_cfg.get("dynamic_tp_fraction")
+                            mr_dynamic_tp_fraction_input = ui.number(
+                                label="Reversion Fraction",
+                                value=float(_mr_dtp_frac_raw) if _mr_dtp_frac_raw is not None else 0.7,
+                                min=0.1,
+                                max=1.0,
+                                step=0.05,
+                                format="%.2f",
+                            ).classes("w-40").props("dense")
+                            ui.label(
+                                "Fraction of the half-bandwidth to use as TP (0.7 = 70% reversion toward midline)."
+                            ).classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-start"):
                             _mr_rsi_os_raw = _mr_cfg.get("rsi_oversold", 35.0)
                             mr_rsi_oversold_input = ui.number(
                                 label="RSI oversold (BUY)",
@@ -3893,8 +3895,6 @@ def register_pages(app: FastAPI) -> None:
                     "enabled": bool(skimming_switch.value),
                     "threshold_pct": float(threshold_input.value or 2.0),
                     "stop_loss_pct": float(_sl_val) if _sl_val not in (None, "") else None,
-                    "dynamic_tp": bool(dynamic_tp_switch.value),
-                    "dynamic_tp_fraction": float(dynamic_tp_fraction_input.value or 0.7),
                 },
                 "shotgun": {
                     "enabled": bool(shotgun_switch.value),
@@ -3986,6 +3986,8 @@ def register_pages(app: FastAPI) -> None:
                 "min_bb_bandwidth": float(mr_min_bb_bw_input.value or 0.0),
                 "max_bb_bandwidth": float(mr_max_bb_bw_input.value or 0.0),
                 "flip_launcher_direction": str(mr_flip_select.value) if mr_flip_switch.value else None,
+                "dynamic_tp": bool(mr_dynamic_tp_switch.value),
+                "dynamic_tp_fraction": float(mr_dynamic_tp_fraction_input.value or 0.7),
             })
             config["launcher"] = _launcher_cfg
             try:

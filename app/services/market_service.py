@@ -1261,8 +1261,6 @@ class MarketService:
         if threshold is None or threshold <= 0:
             self._emit_debug(f"Skimming: invalid threshold ({skimming.get('threshold_pct')!r}) — skipping")
             return
-        dynamic_tp = bool(skimming.get("dynamic_tp", False))
-        dynamic_tp_fraction = self._extract_float(skimming.get("dynamic_tp_fraction")) or 0.7
         sl_pct = self._extract_float(skimming.get("stop_loss_pct"))
         sl_ratio = (-abs(sl_pct) / 100.0) if (sl_pct is not None and sl_pct > 0) else None
         snapshot = self._last_full_snapshot
@@ -1284,7 +1282,7 @@ class MarketService:
         self._skimming_triggered &= active_symbols
         self._emit_debug(
             f"Skimming: checking {len(positions)} position(s), static_threshold={threshold:.2f}%, "
-            f"dynamic_tp={dynamic_tp}, sl_ratio={sl_ratio}, already-triggered={self._skimming_triggered or 'none'}"
+            f"sl_ratio={sl_ratio}, already-triggered={self._skimming_triggered or 'none'}"
         )
         market_data: dict[str, Any] = snapshot.get("market_data") or {}
         for pos in positions:
@@ -1302,32 +1300,13 @@ class MarketService:
                 self._emit_debug(f"Skimming: {symbol} — position size is zero, skipping")
                 continue
 
-            # Dynamic TP: derive threshold from current BB bandwidth for this symbol.
+            # Use the configured static threshold directly.
             effective_threshold = threshold
-            dynamic_tp_source = "static"
-            if dynamic_tp:
-                sym_indicators = (market_data.get(symbol) or {}).get("indicators") or {}
-                _bb = sym_indicators.get("bollinger_bands") or {}
-                _bb_lower = self._extract_float(_bb.get("lower"))
-                _bb_upper = self._extract_float(_bb.get("upper"))
-                _bb_middle = self._extract_float(_bb.get("middle"))
-                if _bb_lower is not None and _bb_upper is not None and _bb_middle and _bb_middle > 0:
-                    _bw = (_bb_upper - _bb_lower) / _bb_middle * 100.0
-                    _lever = self._extract_float(pos.get("lever")) or 1.0
-                    _dyn = (_bw / 2.0) * dynamic_tp_fraction * _lever
-                    # Use min(static, dynamic): dynamic TP can only tighten the target
-                    # (close earlier when bandwidth is narrow), never raise it above
-                    # the user's configured threshold.
-                    effective_threshold = min(threshold, _dyn) if _dyn > 0 else threshold
-                    dynamic_tp_source = f"dynamic(bw={_bw:.2f}%,lev={_lever:.0f}x,frac={dynamic_tp_fraction}) → {_dyn:.2f}% → min={effective_threshold:.2f}%"
-                else:
-                    dynamic_tp_source = "dynamic(BB unavailable, fallback to static)"
-
             threshold_ratio = effective_threshold / 100.0
             upl_ratio = self._extract_float(pos.get("uplRatio"))
             self._emit_debug(
                 f"Skimming: {symbol} uplRatio={upl_ratio!r} ({(upl_ratio * 100) if upl_ratio is not None else 'n/a'}%), "
-                f"threshold={effective_threshold:.2f}% [{dynamic_tp_source}], sl_pct={sl_pct!r}, pos={pos_val!r}, "
+                f"threshold={effective_threshold:.2f}%, sl_pct={sl_pct!r}, pos={pos_val!r}, "
                 f"mgnMode={pos.get('mgnMode')!r}, posSide={pos.get('posSide')!r}"
             )
             if upl_ratio is None:
@@ -1358,7 +1337,6 @@ class MarketService:
             self._emit_debug(
                 f"Skimming {trigger_reason} triggered: {symbol} uplRatio={upl_ratio:.4%} "
                 f"({'>='+str(round(threshold_ratio*100,4))+'%' if hit_tp else '<='+str(round(sl_ratio*100,4))+'%'}); "
-                f"[{dynamic_tp_source}] "
                 f"submitting {close_side} close, contracts={contracts}, posSide={effective_pos_side!r}, tdMode={trade_mode!r}"
             )
             asyncio.create_task(
@@ -2485,13 +2463,41 @@ class MarketService:
 
         tp_pct = self._extract_float(gov.get("tp_pct"))
         sl_pct = self._extract_float(gov.get("sl_pct"))
+        # Dynamic TP: when enabled, tighten the static TP using current BB bandwidth.
+        # Formula: effective_tp_pct = min(static_tp_pct, (bb_bandwidth / 2) × fraction × leverage)
+        # The dynamic value can only lower the target (close earlier in narrow bandwidth);
+        # it never raises it above the user-configured static TP.
+        dynamic_tp = bool(gov.get("dynamic_tp", False))
+        dynamic_tp_fraction = self._extract_float(gov.get("dynamic_tp_fraction")) or 0.7
+        effective_tp_pct = tp_pct
+        dynamic_tp_source = "static"
+        if dynamic_tp and tp_pct and tp_pct > 0:
+            sym_indicators = ((self._last_full_snapshot or {}).get("market_data") or {}).get(symbol) or {}
+            sym_indicators = sym_indicators.get("indicators") or {}
+            _bb = sym_indicators.get("bollinger_bands") or {}
+            _bb_lower = self._extract_float(_bb.get("lower"))
+            _bb_upper = self._extract_float(_bb.get("upper"))
+            _bb_middle = self._extract_float(_bb.get("middle"))
+            if _bb_lower is not None and _bb_upper is not None and _bb_middle and _bb_middle > 0:
+                _bw = (_bb_upper - _bb_lower) / _bb_middle * 100.0
+                # Leverage unknown at signal time; default to 1.0 (conservative — wider TP).
+                _lever = 1.0
+                _dyn = (_bw / 2.0) * dynamic_tp_fraction * _lever
+                if _dyn > 0:
+                    effective_tp_pct = min(tp_pct, _dyn)
+                    dynamic_tp_source = (
+                        f"dynamic(bw={_bw:.2f}%,frac={dynamic_tp_fraction}) "
+                        f"→ {_dyn:.2f}% → min={effective_tp_pct:.2f}%"
+                    )
+            else:
+                dynamic_tp_source = "dynamic(BB unavailable, fallback to static)"
         tp_price: float | None = None
         sl_price: float | None = None
-        if tp_pct and tp_pct > 0:
+        if effective_tp_pct and effective_tp_pct > 0:
             tp_price = (
-                last_price * (1 + tp_pct / 100.0)
+                last_price * (1 + effective_tp_pct / 100.0)
                 if signal == "buy"
-                else last_price * (1 - tp_pct / 100.0)
+                else last_price * (1 - effective_tp_pct / 100.0)
             )
         if sl_pct and sl_pct > 0:
             sl_price = (
@@ -2502,7 +2508,7 @@ class MarketService:
 
         self._emit_debug(
             f"Launcher signal: {symbol} {signal.upper()} last={last_price} "
-            f"notional={notional_usd} tp={tp_price} sl={sl_price}"
+            f"notional={notional_usd} tp={tp_price} sl={sl_price} [{dynamic_tp_source}]"
         )
         action = "BUY" if signal == "buy" else "SELL"
 
