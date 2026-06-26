@@ -322,6 +322,9 @@ class MarketService:
         # Stored separately from _strategy_config (lives in runtime_config["launcher"]).
         self._launcher_config: dict[str, Any] = {}
         self._notifications_config: dict[str, Any] = {}
+        # Tracks when the bot itself recorded a close (is_close=True) so the WS
+        # pos=0 handler can skip a duplicate notification for the same symbol.
+        self._last_bot_close_recorded: dict[str, float] = {}
         # _launcher_entering: per-symbol in-flight entry guard.
         self._launcher_entering: set[str] = set()
         # _launcher_in_position: symbols where Launcher opened a trade.
@@ -601,9 +604,24 @@ class MarketService:
                         k = (str(entry.get("instId", "")), str(entry.get("posSide", "")))
                         pos_val = self._extract_float(entry.get("pos"))
                         if pos_val is not None and pos_val == 0:
-                            # Position closed — purge from cache
+                            # Position closed — purge from cache and notify if not bot-initiated.
                             if k in key_to_idx:
+                                _closed_pos = self._latest_positions_raw[key_to_idx[k]]
                                 updated[key_to_idx[k]] = None
+                                _inst = str(entry.get("instId", "")).upper()
+                                _recently_closed_by_bot = (
+                                    time.time() - self._last_bot_close_recorded.get(_inst, 0) < 15
+                                )
+                                self._emit_debug(
+                                    f"[alert] WS pos=0 for {_inst}: "
+                                    f"recently_closed_by_bot={_recently_closed_by_bot}",
+                                    mirror_logger=False,
+                                )
+                                if not _recently_closed_by_bot and isinstance(_closed_pos, dict):
+                                    asyncio.create_task(
+                                        self._notify_ws_position_closed(_closed_pos, entry),
+                                        name=f"ws-close-notify-{_inst}",
+                                    )
                         elif k in key_to_idx:
                             updated[key_to_idx[k]] = entry
                         else:
@@ -10416,6 +10434,8 @@ class MarketService:
             return
         symbol_key = symbol.upper()
         self._position_activity[symbol_key] = time.time()
+        if is_close:
+            self._last_bot_close_recorded[symbol_key] = time.time()
         await self._maybe_send_trade_alert(
             symbol=symbol_key,
             side=side,
@@ -10442,6 +10462,50 @@ class MarketService:
         except Exception as exc:  # pragma: no cover - persistence best-effort
             self._emit_debug(f"Failed to persist executed trade: {exc}")
 
+    async def _notify_ws_position_closed(
+        self,
+        old_pos: dict[str, Any],
+        update_entry: dict[str, Any],
+    ) -> None:
+        """Send a close notification when OKX WS reports pos=0 (e.g. TP/SL triggered).
+
+        Called only when the position was NOT recently closed by the bot itself
+        (dedup guard: _last_bot_close_recorded within 15 s).
+        """
+        inst_id = str(old_pos.get("instId", "")).upper()
+        if not inst_id:
+            return
+        self._emit_debug(f"[alert] _notify_ws_position_closed fired for {inst_id}")
+        # Determine close side from pos side: long closed by sell, short by buy.
+        pos_side = str(old_pos.get("posSide", "")).lower()
+        close_side = "sell" if pos_side == "long" else "buy"
+        # Close price: prefer last/mark from the WS update, fall back to cached ticker.
+        last_px = self._extract_float(
+            update_entry.get("last") or update_entry.get("markPx")
+            or old_pos.get("last") or old_pos.get("markPx")
+        )
+        if not last_px or last_px <= 0:
+            _ticker = self._latest_ticker.get(inst_id) or {}
+            last_px = self._price_from_ticker(_ticker) or 0.0
+        # Position size is in contracts; convert to base-token units for notional.
+        old_pos_contracts = abs(self._extract_float(old_pos.get("pos")) or 0.0)
+        ct_val = self._contract_value(inst_id)
+        amount = old_pos_contracts * ct_val
+        # PnL from the update entry (realizedPnl / pnl fields).
+        pnl_usd = self._extract_float(
+            update_entry.get("realizedPnl") or update_entry.get("pnl")
+        )
+        pnl_ratio = self._extract_float(update_entry.get("pnlRatio"))
+        await self._maybe_send_trade_alert(
+            symbol=inst_id,
+            side=close_side,
+            price=last_px,
+            amount=amount,
+            is_close=True,
+            pnl_usd=pnl_usd,
+            pnl_ratio=pnl_ratio,
+        )
+
     async def _maybe_send_trade_alert(
         self,
         *,
@@ -10457,8 +10521,13 @@ class MarketService:
         from app.services.alert_service import send_alert  # local import avoids circular deps
 
         notif = self._notifications_config
+        self._emit_debug(
+            f"[alert] _maybe_send_trade_alert: symbol={symbol} is_close={is_close} "
+            f"notif_config={notif} price={price} amount={amount}"
+        )
         if is_close:
             if not notif.get("trade_close"):
+                self._emit_debug("[alert] trade_close toggle is off — skipping close notification")
                 return
             # If pnl not explicitly passed, try to read it from the last known position snapshot.
             if pnl_usd is None and self._last_full_snapshot:
@@ -10509,7 +10578,12 @@ class MarketService:
                 f"Notional: {notional:.2f} USDT\n"
                 f"Time: {ts}"
             )
-        await send_alert(text)
+        self._emit_debug(f"[alert] sending {'close' if is_close else 'open'} notification for {symbol}")
+        try:
+            await send_alert(text)
+            self._emit_debug(f"[alert] notification sent OK for {symbol}")
+        except Exception as exc:
+            self._emit_debug(f"[alert] send_alert raised exception: {exc}")
 
     async def _reconcile_fills(self) -> None:
         """Poll OKX fills-history and back-fill realized PnL on locally recorded entry trades.

@@ -3706,6 +3706,139 @@ def register_pages(app: FastAPI) -> None:
                 )
 
             ui.separator().classes("w-full my-2")
+
+            # ── Mean Reversion Scalping ─────────────────────────────────────────────
+            _mr_cfg = config.get("launcher") or {}
+            with ui.expansion("Mean Reversion Scalping", icon="auto_graph").classes("w-full border border-slate-200 rounded-xl"):
+                with ui.column().classes("w-full gap-3 p-2"):
+                    ui.label(
+                        "Entry signals and filters used by the Launcher for mean-reversion scalping trades. "
+                        "Launcher must be enabled on the CFG page."
+                    ).classes("text-xs text-slate-500")
+                    with ui.row().classes("w-full flex-wrap gap-4 items-start"):
+                        _mr_tp_raw = _mr_cfg.get("tp_pct")
+                        mr_tp_input = ui.number(
+                            label="Take profit (%)",
+                            value=float(_mr_tp_raw) if _mr_tp_raw is not None else None,
+                            min=0.01, step=0.1, precision=2,
+                        ).classes("w-full md:w-40").props(
+                            "hint='Close when uplRatio ≥ this % (blank = none)' persistent-hint clearable"
+                        )
+                        _mr_sl_raw = _mr_cfg.get("sl_pct")
+                        mr_sl_input = ui.number(
+                            label="Stop loss (%)",
+                            value=float(_mr_sl_raw) if _mr_sl_raw is not None else None,
+                            min=0.01, step=0.1, precision=2,
+                        ).classes("w-full md:w-40").props(
+                            "hint='Close when uplRatio ≤ -X% (blank = none)' persistent-hint clearable"
+                        )
+                        _mr_rsi_os_raw = _mr_cfg.get("rsi_oversold", 35.0)
+                        mr_rsi_oversold_input = ui.number(
+                            label="RSI oversold (BUY)",
+                            value=float(_mr_rsi_os_raw) if _mr_rsi_os_raw is not None else 35.0,
+                            min=1, max=49, step=1, precision=0,
+                        ).classes("w-full md:w-40").props(
+                            "hint='BUY signal when RSI < this' persistent-hint"
+                        )
+                        _mr_rsi_ob_raw = _mr_cfg.get("rsi_overbought", 65.0)
+                        mr_rsi_overbought_input = ui.number(
+                            label="RSI overbought (SELL)",
+                            value=float(_mr_rsi_ob_raw) if _mr_rsi_ob_raw is not None else 65.0,
+                            min=51, max=99, step=1, precision=0,
+                        ).classes("w-full md:w-40").props(
+                            "hint='SELL signal when RSI > this' persistent-hint"
+                        )
+                        _mr_adx_raw = _mr_cfg.get("min_adx", 0.0)
+                        mr_min_adx_input = ui.number(
+                            label="Min ADX",
+                            value=float(_mr_adx_raw) if _mr_adx_raw is not None else 0.0,
+                            min=0, max=100, step=5, precision=0,
+                        ).classes("w-full md:w-32").props(
+                            "hint='Skip if ADX below this (0 = off)' persistent-hint"
+                        )
+                        _mr_max_adx_raw = _mr_cfg.get("max_adx", 0.0)
+                        mr_max_adx_input = ui.number(
+                            label="Max ADX",
+                            value=float(_mr_max_adx_raw) if _mr_max_adx_raw is not None else 0.0,
+                            min=0, max=100, step=5, precision=0,
+                        ).classes("w-full md:w-32").props(
+                            "hint='Skip if ADX above this (0 = off)' persistent-hint"
+                        )
+                    with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                        mr_require_htf_switch = ui.switch(
+                            "Require HTF trend alignment",
+                            value=bool(_mr_cfg.get("require_htf_trend", True)),
+                        ).props("dense color=primary")
+                        ui.label("HTF EMA50 > EMA200 for BUY / EMA50 < EMA200 for SELL.").classes("text-xs text-slate-500")
+                    with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                        mr_require_cmf_switch = ui.switch(
+                            "Require CMF confirmation",
+                            value=bool(_mr_cfg.get("require_cmf", True)),
+                        ).props("dense color=primary")
+                        ui.label("LTF CMF (14-period) must be positive for BUY and negative for SELL.").classes("text-xs text-slate-500")
+                    with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                        mr_require_htf_cmf_switch = ui.switch(
+                            "Require HTF CMF confirmation",
+                            value=bool(_mr_cfg.get("require_htf_cmf", False)),
+                        ).props("dense color=primary")
+                        ui.label("HTF CMF (20-period) governor: must be positive for BUY and negative for SELL.").classes("text-xs text-slate-500")
+                    with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                        mr_require_cmf_cross_switch = ui.switch(
+                            "Require CMF zero-line cross",
+                            value=bool(_mr_cfg.get("require_cmf_cross", False)),
+                        ).props("dense color=primary")
+                        ui.label("LTF CMF must have just crossed zero this bar.").classes("text-xs text-slate-500")
+                    with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                        mr_require_cmf_no_div_switch = ui.switch(
+                            "Block on CMF divergence",
+                            value=bool(_mr_cfg.get("require_cmf_no_divergence", False)),
+                        ).props("dense color=primary")
+                        ui.label("Block BUY on bearish CMF divergence, and vice versa for SELL.").classes("text-xs text-slate-500")
+                    with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                        mr_require_fp_delta_switch = ui.switch(
+                            "Require footprint net delta",
+                            value=bool(_mr_cfg.get("require_footprint_delta", False)),
+                        ).props("dense color=primary")
+                        ui.label("15-min tape net delta must be positive for BUY and negative for SELL.").classes("text-xs text-slate-500")
+                    with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                        mr_require_bb_switch = ui.switch(
+                            "Require Bollinger Band position",
+                            value=bool(_mr_cfg.get("require_bb_position", False)),
+                        ).props("dense color=primary")
+                        ui.label("BUY only at/below lower band; SELL only at/above upper band.").classes("text-xs text-slate-500")
+                    with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                        mr_bb_proximity_input = ui.number(
+                            label="BB Proximity %",
+                            value=float(_mr_cfg.get("bb_proximity_pct") or 0.0),
+                            min=0.0, max=5.0, step=0.1, format="%.1f",
+                        ).classes("w-48").props("dense")
+                        ui.label("How far inside the band price may still qualify (0 = must be at/beyond band).").classes("text-xs text-slate-500")
+                    with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                        mr_min_bb_bw_input = ui.number(
+                            label="Min BB Bandwidth %",
+                            value=float(_mr_cfg.get("min_bb_bandwidth") or 0.0),
+                            min=0.0, max=20.0, step=0.5, format="%.1f",
+                        ).classes("w-48").props("dense")
+                        mr_max_bb_bw_input = ui.number(
+                            label="Max BB Bandwidth %",
+                            value=float(_mr_cfg.get("max_bb_bandwidth") or 0.0),
+                            min=0.0, max=50.0, step=0.5, format="%.1f",
+                        ).classes("w-48").props("dense")
+                        ui.label("Block when BB bandwidth is outside this range. 0 = off.").classes("text-xs text-slate-500")
+                    with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                        _mr_flip_enabled = bool(_mr_cfg.get("flip_launcher_direction"))
+                        mr_flip_switch = ui.switch(
+                            "Flip Launcher Decision",
+                            value=_mr_flip_enabled,
+                        ).props("dense color=primary")
+                        mr_flip_select = ui.select(
+                            options={"both": "Both", "from_long": "From LONG only", "from_short": "From SHORT only"},
+                            value=_mr_cfg.get("flip_launcher_direction") or "both",
+                            label="Flip direction",
+                        ).classes("w-40").props("dense")
+                        ui.label("Invert the Launcher's trade direction before execution.").classes("text-xs text-slate-500")
+
+            ui.separator().classes("w-full my-2")
             save_button = ui.button("Save", icon="save", color="primary")
 
         # Only one of these three can be enabled at a time.  When the user turns
@@ -3827,9 +3960,36 @@ def register_pages(app: FastAPI) -> None:
                 await save_strategy_config(updated_strategy)
             except Exception as exc:  # pragma: no cover - optional DB
                 ui.notify(f"Failed to persist strategy config: {exc}", color="warning")
+            # Persist mean reversion signal fields into config["launcher"].
+            _launcher_cfg = config.get("launcher") or {}
+            _launcher_cfg.update({
+                "tp_pct": float(mr_tp_input.value) if mr_tp_input.value not in (None, "") else None,
+                "sl_pct": float(mr_sl_input.value) if mr_sl_input.value not in (None, "") else None,
+                "rsi_oversold": float(mr_rsi_oversold_input.value or 35.0),
+                "rsi_overbought": float(mr_rsi_overbought_input.value or 65.0),
+                "min_adx": float(mr_min_adx_input.value or 0.0),
+                "max_adx": float(mr_max_adx_input.value or 0.0),
+                "require_htf_trend": bool(mr_require_htf_switch.value),
+                "require_cmf": bool(mr_require_cmf_switch.value),
+                "require_htf_cmf": bool(mr_require_htf_cmf_switch.value),
+                "require_cmf_cross": bool(mr_require_cmf_cross_switch.value),
+                "require_cmf_no_divergence": bool(mr_require_cmf_no_div_switch.value),
+                "require_footprint_delta": bool(mr_require_fp_delta_switch.value),
+                "require_bb_position": bool(mr_require_bb_switch.value),
+                "bb_proximity_pct": float(mr_bb_proximity_input.value or 0.0),
+                "min_bb_bandwidth": float(mr_min_bb_bw_input.value or 0.0),
+                "max_bb_bandwidth": float(mr_max_bb_bw_input.value or 0.0),
+                "flip_launcher_direction": str(mr_flip_select.value) if mr_flip_switch.value else None,
+            })
+            config["launcher"] = _launcher_cfg
+            try:
+                await save_launcher_config(_launcher_cfg)
+            except Exception as exc:  # pragma: no cover - optional DB
+                ui.notify(f"Failed to persist launcher signal config: {exc}", color="warning")
             market_service = getattr(app.state, "market_service", None)
             if market_service:
                 market_service.set_strategy_config(updated_strategy)
+                market_service.set_launcher_config(_launcher_cfg)
             ui.notify("Strategy settings saved", color="positive")
 
         save_button.on("click", save_strategy_settings)
@@ -5210,157 +5370,7 @@ def register_pages(app: FastAPI) -> None:
                 ).classes("w-full md:w-40").props(
                     "hint='Margin mode for Launcher-opened positions' persistent-hint"
                 )
-            with ui.row().classes("w-full flex-wrap gap-4 items-start mt-1"):
-                _gov_tp_raw = _gov_cfg.get("tp_pct")
-                gov_tp_input = ui.number(
-                    label="Take profit (%)",
-                    value=float(_gov_tp_raw) if _gov_tp_raw is not None else None,
-                    min=0.01,
-                    step=0.1,
-                    precision=2,
-                ).classes("w-full md:w-40").props(
-                    "hint='Close when uplRatio ≥ this % (blank = none)' persistent-hint clearable"
-                )
-                _gov_sl_raw = _gov_cfg.get("sl_pct")
-                gov_sl_input = ui.number(
-                    label="Stop loss (%)",
-                    value=float(_gov_sl_raw) if _gov_sl_raw is not None else None,
-                    min=0.01,
-                    step=0.1,
-                    precision=2,
-                ).classes("w-full md:w-40").props(
-                    "hint='Close when uplRatio ≤ -X% (blank = none)' persistent-hint clearable"
-                )
-                _gov_rsi_os_raw = _gov_cfg.get("rsi_oversold", 35.0)
-                gov_rsi_oversold_input = ui.number(
-                    label="RSI oversold (BUY)",
-                    value=float(_gov_rsi_os_raw) if _gov_rsi_os_raw is not None else 35.0,
-                    min=1,
-                    max=49,
-                    step=1,
-                    precision=0,
-                ).classes("w-full md:w-40").props(
-                    "hint='BUY signal when RSI < this' persistent-hint"
-                )
-                _gov_rsi_ob_raw = _gov_cfg.get("rsi_overbought", 65.0)
-                gov_rsi_overbought_input = ui.number(
-                    label="RSI overbought (SELL)",
-                    value=float(_gov_rsi_ob_raw) if _gov_rsi_ob_raw is not None else 65.0,
-                    min=51,
-                    max=99,
-                    step=1,
-                    precision=0,
-                ).classes("w-full md:w-40").props(
-                    "hint='SELL signal when RSI > this' persistent-hint"
-                )
-                _gov_adx_raw = _gov_cfg.get("min_adx", 0.0)
-                gov_min_adx_input = ui.number(
-                    label="Min ADX",
-                    value=float(_gov_adx_raw) if _gov_adx_raw is not None else 0.0,
-                    min=0,
-                    max=100,
-                    step=5,
-                    precision=0,
-                ).classes("w-full md:w-32").props(
-                    "hint='Skip if ADX below this (0 = off)' persistent-hint"
-                )
-                _gov_max_adx_raw = _gov_cfg.get("max_adx", 0.0)
-                gov_max_adx_input = ui.number(
-                    label="Max ADX",
-                    value=float(_gov_max_adx_raw) if _gov_max_adx_raw is not None else 0.0,
-                    min=0,
-                    max=100,
-                    step=5,
-                    precision=0,
-                ).classes("w-full md:w-32").props(
-                    "hint='Skip if ADX above this (0 = off)' persistent-hint"
-                )
-            with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
-                gov_require_htf_switch = ui.switch(
-                    "Require HTF trend alignment",
-                    value=bool(_gov_cfg.get("require_htf_trend", True)),
-                ).props("dense color=primary")
-                ui.label("HTF EMA50 > EMA200 for BUY / EMA50 < EMA200 for SELL.").classes("text-xs text-slate-500")
-            with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
-                gov_require_cmf_switch = ui.switch(
-                    "Require CMF confirmation",
-                    value=bool(_gov_cfg.get("require_cmf", True)),
-                ).props("dense color=primary")
-                ui.label("LTF CMF (14-period) must be positive for BUY and negative for SELL.").classes("text-xs text-slate-500")
-            with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
-                gov_require_htf_cmf_switch = ui.switch(
-                    "Require HTF CMF confirmation",
-                    value=bool(_gov_cfg.get("require_htf_cmf", False)),
-                ).props("dense color=primary")
-                ui.label("HTF CMF (20-period) governor: must be positive for BUY and negative for SELL.").classes("text-xs text-slate-500")
-            with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
-                gov_require_cmf_cross_switch = ui.switch(
-                    "Require CMF zero-line cross",
-                    value=bool(_gov_cfg.get("require_cmf_cross", False)),
-                ).props("dense color=primary")
-                ui.label("LTF CMF must have just crossed zero this bar (negative→positive for BUY; positive→negative for SELL).").classes("text-xs text-slate-500")
-            with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
-                gov_require_cmf_no_div_switch = ui.switch(
-                    "Block on CMF divergence",
-                    value=bool(_gov_cfg.get("require_cmf_no_divergence", False)),
-                ).props("dense color=primary")
-                ui.label("Block BUY when price makes higher highs but CMF makes lower highs (bearish divergence), and vice versa for SELL.").classes("text-xs text-slate-500")
-            with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
-                gov_require_fp_delta_switch = ui.switch(
-                    "Require footprint net delta",
-                    value=bool(_gov_cfg.get("require_footprint_delta", False)),
-                ).props("dense color=primary")
-                ui.label("15-min tape net delta must be positive for BUY and negative for SELL.").classes("text-xs text-slate-500")
-            with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
-                _flip_launcher_enabled = bool(_gov_cfg.get("flip_launcher_direction"))
-                flip_launcher_switch = ui.switch(
-                    "Flip Launcher Decision",
-                    value=_flip_launcher_enabled,
-                ).props("dense color=primary")
-                flip_launcher_select = ui.select(
-                    options={
-                        "both": "Both",
-                        "from_long": "From LONG only",
-                        "from_short": "From SHORT only",
-                    },
-                    value=_gov_cfg.get("flip_launcher_direction") or "both",
-                    label="Flip direction",
-                ).classes("w-40").props("dense")
-                ui.label("Invert the Launcher's trade direction before execution.").classes("text-xs text-slate-500")
-            with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
-                gov_require_bb_switch = ui.switch(
-                    "Require Bollinger Band position",
-                    value=bool(_gov_cfg.get("require_bb_position", False)),
-                ).props("dense color=primary")
-                ui.label("BUY only when price is at or below the lower band; SELL only when price is at or above the upper band.").classes("text-xs text-slate-500")
-            with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
-                gov_bb_proximity_input = ui.number(
-                    label="BB Proximity %",
-                    value=float(_gov_cfg.get("bb_proximity_pct") or 0.0),
-                    min=0.0,
-                    max=5.0,
-                    step=0.1,
-                    format="%.1f",
-                ).classes("w-48").props("dense")
-                ui.label("How far inside the band price may be and still qualify (e.g. 0.5 = within 0.5% above lower band counts as a long entry). 0 = price must be at or beyond the band.").classes("text-xs text-slate-500")
-            with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
-                gov_min_bb_bw_input = ui.number(
-                    label="Min BB Bandwidth %",
-                    value=float(_gov_cfg.get("min_bb_bandwidth") or 0.0),
-                    min=0.0,
-                    max=20.0,
-                    step=0.5,
-                    format="%.1f",
-                ).classes("w-48").props("dense")
-                gov_max_bb_bw_input = ui.number(
-                    label="Max BB Bandwidth %",
-                    value=float(_gov_cfg.get("max_bb_bandwidth") or 0.0),
-                    min=0.0,
-                    max=50.0,
-                    step=0.5,
-                    format="%.1f",
-                ).classes("w-48").props("dense")
-                ui.label("Block when BB bandwidth (upper−lower)/middle×100 is outside this range. 0 = off. Recommended: min=2 to filter squeezes.").classes("text-xs text-slate-500")
+            ui.label("Signal filters and TP/SL are configured on the STRATEGY page → Mean Reversion Scalping section.").classes("text-xs text-slate-400 mt-1")
             ui.separator().classes("w-full my-4")
             ui.label("Candle settings").classes("text-sm text-slate-500")
             with ui.row().classes("w-full flex-wrap gap-4"):
@@ -6379,29 +6389,16 @@ def register_pages(app: FastAPI) -> None:
                 "min_momentum_pct": max(0.0, _coerce(screener_min_momentum_input.value, 0.0, float)),
                 "min_hl_range_pct": max(0.0, _coerce(screener_min_hl_range_input.value, 0.0, float)),
             }
+            # Preserve signal fields from config (edited on STRATEGY page) and
+            # only overwrite the operational fields managed on this page.
+            _existing_launcher = config.get("launcher") or {}
             config["launcher"] = {
+                **_existing_launcher,
                 "mode": str(gov_mode_select.value or "disabled"),
                 "schedule": str(gov_schedule_select.value or "timer"),
                 "entry_interval_seconds": max(30.0, _coerce(gov_interval_input.value, 300, float)),
                 "trade_mode": str(gov_trade_mode_select.value or "isolated"),
                 "notional_usd": float(gov_notional_input.value) if gov_notional_input.value not in (None, "") else None,
-                "tp_pct": float(gov_tp_input.value) if gov_tp_input.value not in (None, "") else None,
-                "sl_pct": float(gov_sl_input.value) if gov_sl_input.value not in (None, "") else None,
-                "rsi_oversold": float(gov_rsi_oversold_input.value or 35.0),
-                "rsi_overbought": float(gov_rsi_overbought_input.value or 65.0),
-                "min_adx": float(gov_min_adx_input.value or 0.0),
-                "max_adx": float(gov_max_adx_input.value or 0.0),
-                "require_htf_trend": bool(gov_require_htf_switch.value),
-                "require_cmf": bool(gov_require_cmf_switch.value),
-                "require_htf_cmf": bool(gov_require_htf_cmf_switch.value),
-                "require_cmf_cross": bool(gov_require_cmf_cross_switch.value),
-                "require_cmf_no_divergence": bool(gov_require_cmf_no_div_switch.value),
-                "require_footprint_delta": bool(gov_require_fp_delta_switch.value),
-                "require_bb_position": bool(gov_require_bb_switch.value),
-                "bb_proximity_pct": float(gov_bb_proximity_input.value or 0.0),
-                "min_bb_bandwidth": float(gov_min_bb_bw_input.value or 0.0),
-                "max_bb_bandwidth": float(gov_max_bb_bw_input.value or 0.0),
-                "flip_launcher_direction": str(flip_launcher_select.value) if flip_launcher_switch.value else None,
             }
             try:
                 await save_launcher_config(config["launcher"])
