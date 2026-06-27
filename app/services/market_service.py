@@ -1294,14 +1294,21 @@ class MarketService:
         strategies = dict(config.get("strategies") or {})
         mr = dict(strategies.get("mean_reversion") or {})
 
-        # Migrate mean_reversion_enabled → enabled
-        if "mean_reversion_enabled" in config:
+        # Migrate mean_reversion_enabled → enabled (only if not already in mr)
+        if "mean_reversion_enabled" in config and "enabled" not in mr:
             mr["enabled"] = config.pop("mean_reversion_enabled")
+        elif "mean_reversion_enabled" in config:
+            # Already migrated; just remove the legacy key
+            config.pop("mean_reversion_enabled")
 
-        # Migrate all other strategy-specific keys
+        # Migrate all other strategy-specific keys (don't overwrite namespaced values)
         for key in _MR_KEYS - {"mean_reversion_enabled"}:
             if key in config:
-                mr[key] = config.pop(key)
+                if key not in mr:
+                    mr[key] = config.pop(key)
+                else:
+                    # Namespaced value already exists; discard the legacy flat key
+                    config.pop(key)
 
         strategies["mean_reversion"] = mr
         config["strategies"] = strategies
