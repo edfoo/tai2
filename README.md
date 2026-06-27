@@ -202,6 +202,17 @@ The Launcher is well suited to mean-reversion scalping on 15m candles when combi
 | `dynamic_tp` | `true` | Tightens TP in low-bandwidth conditions to exit before a squeeze breakout |
 | `dynamic_tp_fraction` | `0.7` | Target 70% reversion toward the BB midline before exiting |
 
+**Revised recommendation** — deeper entries for fewer stop-outs:
+
+| Setting | Current | Recommended | Why |
+|---|---|---|---|
+| `rsi_oversold` | 25 | 20 | Enter deeper — less adverse excursion left |
+| `rsi_overbought` | 75 | 80 | Symmetric |
+| `bb_proximity_pct` | 0.5 | 0.0 | Must touch the band, not be near it |
+| `min_bb_bandwidth` | 2.0 | 3.0 | Only enter when bands are wide enough to matter |
+| `tp_pct` | 7 | 7 (keep) | Don't change |
+| `sl_pct` | 11 | 15 | Small bump only — survives normal noise |
+
 **Skimming settings** (STRATEGY page) — optional auto-close on PnL threshold:
 
 | Setting | Recommended value | Rationale |
