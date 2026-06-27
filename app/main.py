@@ -399,10 +399,6 @@ def _create_lifespan(enable_background_services: bool):
                     logger.error("Failed to load launcher config: %s", exc)
                 else:
                     if stored_launcher:
-                        # Migrate legacy flat format to namespaced strategy format
-                        # so the UI and MarketService always see the same structure.
-                        from app.services.market_service import MarketService as _MS
-                        stored_launcher = _MS._migrate_launcher_config(stored_launcher)
                         app.state.runtime_config["launcher"] = stored_launcher
                 try:
                     stored_notifications = await load_notifications_config()
