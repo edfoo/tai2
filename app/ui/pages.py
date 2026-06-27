@@ -2926,8 +2926,8 @@ def register_pages(app: FastAPI) -> None:
         strategy = config.setdefault("strategy", {})
         skimming = strategy.setdefault("skimming", {"enabled": False, "threshold_pct": 2.0, "stop_loss_pct": None})
         # Dynamic TP notice banner (Mean Reversion Scalping)
-        _mr_cfg_notice = config.get("launcher") or {}
-        if bool(_mr_cfg_notice.get("mean_reversion_enabled")) and bool(_mr_cfg_notice.get("dynamic_tp", False)):
+        _mr_cfg_notice = ((config.get("launcher") or {}).get("strategies") or {}).get("mean_reversion") or {}
+        if bool(_mr_cfg_notice.get("enabled")) and bool(_mr_cfg_notice.get("dynamic_tp", False)):
             with wrapper:
                 with ui.row().classes("w-full items-center gap-2 bg-amber-50 border border-amber-300 rounded-lg px-4 py-2 mb-2"):
                     ui.icon("auto_graph", color="amber").classes("text-lg")
@@ -3044,11 +3044,11 @@ def register_pages(app: FastAPI) -> None:
                     )
 
             # ── Mean Reversion Scalping ─────────────────────────────────────────────
-            _mr_cfg = config.get("launcher") or {}
+            _mr_cfg = ((config.get("launcher") or {}).get("strategies") or {}).get("mean_reversion") or {}
             with ui.card().classes("w-full rounded-lg border border-slate-200 mb-1"):
                 with ui.row().classes("w-full items-center gap-2 flex-nowrap"):
                     mr_enabled_switch = ui.switch(
-                        value=bool(_mr_cfg.get("mean_reversion_enabled", False)),
+                        value=bool(_mr_cfg.get("enabled", False)),
                     ).props("dense color=primary")
                     with ui.expansion("Mean Reversion Scalping").classes("flex-1 text-sm font-medium"):
                         ui.label(
@@ -3965,10 +3965,11 @@ def register_pages(app: FastAPI) -> None:
                 await save_strategy_config(updated_strategy)
             except Exception as exc:  # pragma: no cover - optional DB
                 ui.notify(f"Failed to persist strategy config: {exc}", color="warning")
-            # Persist mean reversion signal fields into config["launcher"].
+            # Persist mean reversion signal fields into config["launcher"]["strategies"]["mean_reversion"].
             _launcher_cfg = config.get("launcher") or {}
-            _launcher_cfg.update({
-                "mean_reversion_enabled": bool(mr_enabled_switch.value),
+            _strategies_cfg = dict(_launcher_cfg.get("strategies") or {})
+            _strategies_cfg["mean_reversion"] = {
+                "enabled": bool(mr_enabled_switch.value),
                 "tp_pct": float(mr_tp_input.value) if mr_tp_input.value not in (None, "") else None,
                 "sl_pct": float(mr_sl_input.value) if mr_sl_input.value not in (None, "") else None,
                 "rsi_oversold": float(mr_rsi_oversold_input.value or 35.0),
@@ -3988,7 +3989,8 @@ def register_pages(app: FastAPI) -> None:
                 "flip_launcher_direction": str(mr_flip_select.value) if mr_flip_switch.value else None,
                 "dynamic_tp": bool(mr_dynamic_tp_switch.value),
                 "dynamic_tp_fraction": float(mr_dynamic_tp_fraction_input.value or 0.7),
-            })
+            }
+            _launcher_cfg["strategies"] = _strategies_cfg
             config["launcher"] = _launcher_cfg
             try:
                 await save_launcher_config(_launcher_cfg)

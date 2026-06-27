@@ -31,6 +31,8 @@ from app.db.postgres import (
 from app.models.trade import ExecutedTrade
 from app.services.okx_sdk_adapter import OkxAccountAdapter, OkxTradeAdapter
 from app.services.state_service import StateService
+from app.services.strategies import Strategy, StrategyHelpers
+from app.services.strategies.mean_reversion import MeanReversionStrategy
 
 
 def _ensure_httpx_proxies_compat() -> None:
@@ -336,6 +338,15 @@ class MarketService:
         self._launcher_trigger_symbols: set[str] = set()
         # on_close mode: were there any open positions on the previous tick?
         self._launcher_had_positions: bool = False
+        # Strategy registry: pluggable signal evaluators.
+        # Each strategy reads from config["strategies"][<strategy_name>].
+        self._strategies: list[Strategy] = [MeanReversionStrategy()]
+        self._strategy_helpers = StrategyHelpers(
+            extract_float=self._extract_float,
+            emit_debug=self._emit_debug,
+            get_last_price=self.get_last_price,
+            compute_footprint=self._compute_footprint,
+        )
 
     async def start(self) -> None:
         """Launch the market snapshot poller and websocket consumers if not already running."""
@@ -1234,9 +1245,67 @@ class MarketService:
         self._footprint_config = config or {}
 
     def set_launcher_config(self, config: dict[str, Any]) -> None:
-        """Update the Launcher configuration at runtime (called from CFG save)."""
-        self._launcher_config = config or {}
+        """Update the Launcher configuration at runtime (called from CFG save).
+
+        Automatically migrates the legacy flat format (e.g. ``mean_reversion_enabled``
+        at the top level) to the new namespaced format
+        (``strategies.mean_reversion.enabled``).
+        """
+        config = self._migrate_launcher_config(config or {})
+        self._launcher_config = config
         self._emit_debug(f"Launcher config updated: {self._launcher_config}")
+
+    @staticmethod
+    def _migrate_launcher_config(config: dict[str, Any]) -> dict[str, Any]:
+        """Migrate legacy flat launcher config to namespaced strategy format.
+
+        Old format::
+
+            {"mean_reversion_enabled": True, "rsi_oversold": 25, ...}
+
+        New format::
+
+            {"strategies": {"mean_reversion": {"enabled": True, "rsi_oversold": 25, ...}}}
+
+        Strategy-specific keys that are migrated:
+          mean_reversion_enabled → strategies.mean_reversion.enabled
+          rsi_oversold, rsi_overbought, min_adx, max_adx,
+          require_htf_trend, require_cmf, require_htf_cmf,
+          require_cmf_cross, require_cmf_no_divergence,
+          require_footprint_delta, require_bb_position,
+          bb_proximity_pct, min_bb_bandwidth, max_bb_bandwidth,
+          dynamic_tp, dynamic_tp_fraction, flip_launcher_direction
+        """
+        # Only migrate if there are legacy keys at the top level.
+        _MR_KEYS = {
+            "mean_reversion_enabled", "rsi_oversold", "rsi_overbought",
+            "min_adx", "max_adx", "require_htf_trend", "require_cmf",
+            "require_htf_cmf", "require_cmf_cross", "require_cmf_no_divergence",
+            "require_footprint_delta", "require_bb_position",
+            "bb_proximity_pct", "min_bb_bandwidth", "max_bb_bandwidth",
+            "dynamic_tp", "dynamic_tp_fraction", "flip_launcher_direction",
+            "tp_pct", "sl_pct",
+        }
+        has_legacy = any(k in config for k in _MR_KEYS)
+        if not has_legacy:
+            return config
+
+        config = dict(config)  # shallow copy
+        strategies = dict(config.get("strategies") or {})
+        mr = dict(strategies.get("mean_reversion") or {})
+
+        # Migrate mean_reversion_enabled → enabled
+        if "mean_reversion_enabled" in config:
+            mr["enabled"] = config.pop("mean_reversion_enabled")
+
+        # Migrate all other strategy-specific keys
+        for key in _MR_KEYS - {"mean_reversion_enabled"}:
+            if key in config:
+                mr[key] = config.pop(key)
+
+        strategies["mean_reversion"] = mr
+        config["strategies"] = strategies
+        return config
 
     def set_notifications_config(self, config: dict[str, Any]) -> None:
         """Update the notifications configuration at runtime (called from CFG save)."""
@@ -2110,206 +2179,21 @@ class MarketService:
     # ── Launcher ──────────────────────────────────────────────────────────────
 
     def _launcher_evaluate_signal(self, symbol: str) -> str | None:
-        """Return "buy", "sell", or None based on the current snapshot indicators.
+        """Return "buy", "sell", or None by delegating to the strategy registry.
 
-        Used both by ``_check_launcher`` (standalone entries) and by
-        ``handle_llm_decision`` (LLM trade filter).
-
-        A signal fires only when ALL enabled filters agree:
-          - RSI below oversold threshold (buy) or above overbought threshold (sell)
-          - CMF positive (buy) / negative (sell) when require_cmf is True
-          - HTF EMA50 > EMA200 (buy) / < EMA200 (sell) when require_htf_trend is True
-          - ADX ≥ min_adx when min_adx > 0
-          - ADX ≤ max_adx when max_adx > 0
-          - 15-min footprint net_delta > 0 (buy) / < 0 (sell) when require_footprint_delta is True
-        Returns None when indicators are neutral or any filter disagrees.
+        Iterates through all registered strategies; the first to fire wins.
+        Each strategy reads its own namespaced config from
+        ``_launcher_config["strategies"][<name>]``.
         """
-        gov = self._launcher_config
-        if not bool(gov.get("mean_reversion_enabled", False)):
-            return None
-        rsi_oversold = self._extract_float(gov.get("rsi_oversold")) or 35.0
-        rsi_overbought = self._extract_float(gov.get("rsi_overbought")) or 65.0
-        require_htf_trend = bool(gov.get("require_htf_trend", True))
-        require_cmf = bool(gov.get("require_cmf", True))
-        require_htf_cmf = bool(gov.get("require_htf_cmf", False))
-        require_cmf_cross = bool(gov.get("require_cmf_cross", False))
-        require_cmf_no_divergence = bool(gov.get("require_cmf_no_divergence", False))
-        require_footprint_delta = bool(gov.get("require_footprint_delta", False))
-        require_bb_position = bool(gov.get("require_bb_position", False))
-        bb_proximity_pct = self._extract_float(gov.get("bb_proximity_pct")) or 0.0
-        min_bb_bandwidth = self._extract_float(gov.get("min_bb_bandwidth")) or 0.0
-        max_bb_bandwidth = self._extract_float(gov.get("max_bb_bandwidth")) or 0.0
-        min_adx = self._extract_float(gov.get("min_adx")) or 0.0
-        max_adx = self._extract_float(gov.get("max_adx")) or 0.0
-
         snapshot = self._last_full_snapshot
         if not snapshot:
             return None
-        market_data: dict[str, Any] = snapshot.get("market_data") or {}
-        sym_data = market_data.get(symbol) or {}
-        indicators = sym_data.get("indicators") or {}
-
-        rsi = self._extract_float(indicators.get("rsi"))
-        # Use 14-period CMF for LTF entries (gap 2); fall back to 20-period if unavailable.
-        _cmf_14_block = indicators.get("cmf_14") or indicators.get("cmf") or {}
-        cmf = self._extract_float(_cmf_14_block.get("value"))
-        cmf_series_vals: list[float] = _cmf_14_block.get("series") or []
-        adx = self._extract_float((indicators.get("adx") or {}).get("value"))
-
-        # Bollinger Band position filter: entry must be near/beyond the band.
-        _bb = indicators.get("bollinger_bands") or {}
-        bb_lower = self._extract_float(_bb.get("lower"))
-        bb_upper = self._extract_float(_bb.get("upper"))
-        bb_middle = self._extract_float(_bb.get("middle"))
-        bb_last_price = self.get_last_price(symbol)
-        bb_bandwidth: float | None = (
-            (bb_upper - bb_lower) / bb_middle * 100.0
-            if bb_upper is not None and bb_lower is not None and bb_middle and bb_middle > 0
-            else None
-        )
-        bb_long_ok = (
-            bb_last_price is not None
-            and bb_lower is not None
-            and bb_last_price <= bb_lower * (1.0 + bb_proximity_pct / 100.0)
-        )
-        bb_short_ok = (
-            bb_last_price is not None
-            and bb_upper is not None
-            and bb_last_price >= bb_upper * (1.0 - bb_proximity_pct / 100.0)
-        )
-
-        # HTF indicators are nested inside the LTF indicators dict.
-        htf_indicators: dict[str, Any] = indicators.get("htf_indicators") or {}
-        htf_ma = htf_indicators.get("moving_averages") or {}
-        htf_ema50 = self._extract_float(htf_ma.get("ema_50"))
-        htf_ema200 = self._extract_float(htf_ma.get("ema_200"))
-        htf_bullish = htf_ema50 is not None and htf_ema200 is not None and htf_ema50 > htf_ema200
-        htf_bearish = htf_ema50 is not None and htf_ema200 is not None and htf_ema50 < htf_ema200
-
-        # HTF CMF governor (gap 1): HTF CMF must agree with trade direction.
-        htf_cmf = self._extract_float((htf_indicators.get("cmf") or {}).get("value"))
-        htf_cmf_bullish = htf_cmf is not None and htf_cmf > 0
-        htf_cmf_bearish = htf_cmf is not None and htf_cmf < 0
-
-        # CMF zero-line cross (gap 3a): CMF must have just crossed zero on this bar.
-        cmf_crossed_up = False
-        cmf_crossed_down = False
-        if require_cmf_cross and len(cmf_series_vals) >= 2:
-            prev_cmf = cmf_series_vals[-2]
-            if cmf is not None:
-                cmf_crossed_up = cmf > 0 and prev_cmf <= 0
-                cmf_crossed_down = cmf < 0 and prev_cmf >= 0
-
-        # CMF divergence (gap 3b): price direction vs CMF direction over last 5 bars.
-        bearish_div = False
-        bullish_div = False
-        if require_cmf_no_divergence and len(cmf_series_vals) >= 5:
-            ohlcv_compact = indicators.get("ohlcv") or []
-            closes = [c["close"] for c in ohlcv_compact if isinstance(c, dict) and "close" in c]
-            if len(closes) >= 5:
-                price_up = closes[-1] > closes[-5]
-                cmf_up = cmf_series_vals[-1] > cmf_series_vals[-5]
-                bearish_div = price_up and not cmf_up   # price higher, CMF lower → exhaustion
-                bullish_div = not price_up and cmf_up   # price lower, CMF higher → hidden strength
-
-        # Footprint net delta from the live market metrics (populated by _compute_custom_metrics)
-        fp_net_delta: float | None = None
-        if require_footprint_delta:
-            fp_data = (sym_data.get("custom_metrics") or {}).get("footprint") or self._compute_footprint(symbol)
-            if fp_data:
-                fp_net_delta = self._extract_float(fp_data.get("net_delta"))
-
-        if rsi is None:
-            self._emit_debug(f"Launcher: {symbol} — no entry signal (RSI unavailable)")
-            return None
-        if min_adx > 0 and (adx is None or adx < min_adx):
-            self._emit_debug(
-                f"Launcher: {symbol} — no entry signal "
-                f"(ADX={adx:.1f} < min={min_adx:.1f})"
-            )
-            return None
-        if max_adx > 0 and adx is not None and adx > max_adx:
-            self._emit_debug(
-                f"Launcher: {symbol} — no entry signal "
-                f"(ADX={adx:.1f} > max={max_adx:.1f})"
-            )
-            return None
-        if min_bb_bandwidth > 0 and (bb_bandwidth is None or bb_bandwidth < min_bb_bandwidth):
-            self._emit_debug(
-                f"Launcher: {symbol} — no entry signal "
-                f"(BB bandwidth={bb_bandwidth:.2f}% < min={min_bb_bandwidth:.2f}%)"
-                if bb_bandwidth is not None else
-                f"Launcher: {symbol} — no entry signal (BB bandwidth unavailable, min={min_bb_bandwidth:.2f}%)"
-            )
-            return None
-        if max_bb_bandwidth > 0 and bb_bandwidth is not None and bb_bandwidth > max_bb_bandwidth:
-            self._emit_debug(
-                f"Launcher: {symbol} — no entry signal "
-                f"(BB bandwidth={bb_bandwidth:.2f}% > max={max_bb_bandwidth:.2f}%)"
-            )
-            return None
-
-        buy_signal = (
-            rsi < rsi_oversold
-            and (not require_cmf or (cmf is not None and cmf > 0))
-            and (not require_htf_cmf or htf_cmf_bullish)
-            and (not require_cmf_cross or cmf_crossed_up)
-            and (not require_cmf_no_divergence or not bearish_div)
-            and (not require_htf_trend or htf_bullish)
-            and (not require_footprint_delta or (fp_net_delta is not None and fp_net_delta > 0))
-            and (not require_bb_position or bb_long_ok)
-        )
-        sell_signal = (
-            rsi > rsi_overbought
-            and (not require_cmf or (cmf is not None and cmf < 0))
-            and (not require_htf_cmf or htf_cmf_bearish)
-            and (not require_cmf_cross or cmf_crossed_down)
-            and (not require_cmf_no_divergence or not bullish_div)
-            and (not require_htf_trend or htf_bearish)
-            and (not require_footprint_delta or (fp_net_delta is not None and fp_net_delta < 0))
-            and (not require_bb_position or bb_short_ok)
-        )
-        if buy_signal:
-            return "buy"
-        if sell_signal:
-            return "sell"
-
-        # Build a human-readable breakdown of which filters blocked the signal.
-        rsi_str = f"RSI={rsi:.1f} (need <{rsi_oversold} or >{rsi_overbought})"
-        parts = [rsi_str]
-        if require_cmf:
-            parts.append(f"CMF14={cmf:.3f}" if cmf is not None else "CMF14=n/a")
-        if require_htf_cmf:
-            parts.append(f"HTF_CMF={htf_cmf:.3f}" if htf_cmf is not None else "HTF_CMF=n/a")
-        if require_cmf_cross:
-            parts.append(f"CMF_cross={'up' if cmf_crossed_up else 'down' if cmf_crossed_down else 'none'}")
-        if require_cmf_no_divergence:
-            if bearish_div:
-                parts.append("CMF_div=bearish")
-            elif bullish_div:
-                parts.append("CMF_div=bullish")
-            else:
-                parts.append("CMF_div=none")
-        if require_htf_trend:
-            if htf_ema50 is not None and htf_ema200 is not None:
-                parts.append(f"HTF EMA50={htf_ema50:.4g}/EMA200={htf_ema200:.4g} ({'bull' if htf_bullish else 'bear' if htf_bearish else 'flat'})")
-            else:
-                parts.append("HTF EMA=n/a")
-        if require_footprint_delta:
-            parts.append(f"fp_delta={fp_net_delta:.2f}" if fp_net_delta is not None else "fp_delta=n/a")
-        if require_bb_position:
-            if bb_last_price is not None and bb_lower is not None and bb_upper is not None:
-                parts.append(
-                    f"BB lower={bb_lower:.4g}/upper={bb_upper:.4g}/price={bb_last_price:.4g} "
-                    f"(long={'ok' if bb_long_ok else 'blocked'}, short={'ok' if bb_short_ok else 'blocked'})"
-                )
-            else:
-                parts.append("BB=n/a")
-        if min_bb_bandwidth > 0 or max_bb_bandwidth > 0:
-            parts.append(
-                f"BB_bw={bb_bandwidth:.2f}%" if bb_bandwidth is not None else "BB_bw=n/a"
-            )
-        self._emit_debug(f"Launcher: {symbol} — no entry signal ({', '.join(parts)})")
+        strategies_cfg = self._launcher_config.get("strategies") or {}
+        for strategy in self._strategies:
+            strat_cfg = strategies_cfg.get(strategy.name) or {}
+            signal = strategy.evaluate(symbol, snapshot, strat_cfg, self._strategy_helpers)
+            if signal is not None:
+                return signal
         return None
 
     async def _check_launcher(self) -> None:
@@ -2461,14 +2345,16 @@ class MarketService:
             self._emit_debug(f"Launcher: {symbol} no last price — skipping")
             return None
 
-        tp_pct = self._extract_float(gov.get("tp_pct"))
-        sl_pct = self._extract_float(gov.get("sl_pct"))
+        # TP/SL: read from strategy-specific config if available, fall back to launcher-level.
+        _mr_cfg = (gov.get("strategies") or {}).get("mean_reversion") or {}
+        tp_pct = self._extract_float(_mr_cfg.get("tp_pct") if _mr_cfg.get("tp_pct") is not None else gov.get("tp_pct"))
+        sl_pct = self._extract_float(_mr_cfg.get("sl_pct") if _mr_cfg.get("sl_pct") is not None else gov.get("sl_pct"))
         # Dynamic TP: when enabled, tighten the static TP using current BB bandwidth.
         # Formula: effective_tp_pct = min(static_tp_pct, (bb_bandwidth / 2) × fraction × leverage)
         # The dynamic value can only lower the target (close earlier in narrow bandwidth);
         # it never raises it above the user-configured static TP.
-        dynamic_tp = bool(gov.get("dynamic_tp", False))
-        dynamic_tp_fraction = self._extract_float(gov.get("dynamic_tp_fraction")) or 0.7
+        dynamic_tp = bool(_mr_cfg.get("dynamic_tp") if _mr_cfg.get("dynamic_tp") is not None else gov.get("dynamic_tp", False))
+        dynamic_tp_fraction = self._extract_float(_mr_cfg.get("dynamic_tp_fraction") if _mr_cfg.get("dynamic_tp_fraction") is not None else gov.get("dynamic_tp_fraction")) or 0.7
         effective_tp_pct = tp_pct
         dynamic_tp_source = "static"
         if dynamic_tp and tp_pct and tp_pct > 0:
@@ -2513,7 +2399,8 @@ class MarketService:
         action = "BUY" if signal == "buy" else "SELL"
 
         # --- Flip Launcher direction if configured ---
-        flip_dir = str(gov.get("flip_launcher_direction") or "").strip().lower()
+        # Read from strategy-specific config if available, fall back to launcher-level.
+        flip_dir = str(_mr_cfg.get("flip_launcher_direction") if _mr_cfg.get("flip_launcher_direction") is not None else gov.get("flip_launcher_direction") or "").strip().lower()
         if flip_dir in ("both", "from_long", "from_short"):
             should_flip = (
                 flip_dir == "both"
@@ -7124,8 +7011,10 @@ class MarketService:
                 )
                 return False
             # Launcher agrees — amend trade with Launcher's TP/SL if configured.
-            gov_tp_pct = self._extract_float(_gov.get("tp_pct"))
-            gov_sl_pct = self._extract_float(_gov.get("sl_pct"))
+            # Read TP/SL from strategy-specific config if available, fall back to launcher-level.
+            _mr_gov = (_gov.get("strategies") or {}).get("mean_reversion") or {}
+            gov_tp_pct = self._extract_float(_mr_gov.get("tp_pct") if _mr_gov.get("tp_pct") is not None else _gov.get("tp_pct"))
+            gov_sl_pct = self._extract_float(_mr_gov.get("sl_pct") if _mr_gov.get("sl_pct") is not None else _gov.get("sl_pct"))
             gov_notional = self._extract_float(_gov.get("notional_usd"))
             _amended: list[str] = []
             if gov_notional and gov_notional > 0:

@@ -50,7 +50,8 @@ app/
   core/            # config and security
   db/              # PostgreSQL/Timescale access
   models/          # Pydantic schemas (e.g., ExecutedTrade)
-  services/        # Redis state + upcoming OKX/LLM logic
+  services/        # Redis state + OKX/LLM logic
+    strategies/    # Pluggable Launcher strategies (Mean Reversion, …)
   ui/              # NiceGUI components and pages
   main.py          # FastAPI entry point
 
@@ -135,6 +136,7 @@ Open the `CFG` page in the NiceGUI UI to tune the runtime behavior. Key controls
 
 Open the `STRATEGY` page to configure autonomous position-management strategies that run independently of LLM decisions on a fast refresh loop:
 
+- **Mean Reversion Scalping** – Launcher entry strategy: rule-based RSI mean-reversion entries with optional CMF, HTF trend, ADX, BB position, and footprint-delta filters. Has its own TP/SL and Dynamic TP (BB bandwidth) settings. Enable/disable independently; the Launcher must also be set to `launcher_only` or `llm_with_filter` mode on the CFG page.
 - **Skimming** – Closes any position whose unrealised PnL ratio crosses a configurable threshold.
 - **Protector** – Locks in a portion of profit by ratcheting the stop-loss upward as the position gains.
 - **Commutator** – Reverses a losing position once after a configurable drawdown.
@@ -144,8 +146,18 @@ Open the `STRATEGY` page to configure autonomous position-management strategies 
 When you click **Save**, the app persists the configuration (PostgreSQL for guardrails/prompt versions/execution settings, Redis for runtime snapshot state) and rehydrates all services in-place: MarketService gets new symbols, websocket or poll intervals, and OKX credentials; the scheduler updates its cadence; the LLM service swaps models; and the UI log buffers announce the change.
 
 
-## Launcher decision
-The Launcher uses these indicators, all of which must agree simultaneously:
+## Launcher strategies
+
+The Launcher iterates through registered strategies on each scheduler tick; the first strategy to fire a signal wins. Strategies are pluggable — each implements a `Strategy` protocol with an `evaluate()` method that returns `"buy"`, `"sell"`, or `None`. Strategy configs are namespaced under `config["launcher"]["strategies"][<name>]`.
+
+To add a new strategy:
+1. Create `app/services/strategies/my_strategy.py` implementing the `Strategy` protocol
+2. Register it in `MarketService._strategies`
+3. Add a card on the STRATEGY page with its own enable/disable switch and config fields
+
+### Mean Reversion Scalping
+
+The built-in Mean Reversion strategy uses these indicators, all of which must agree simultaneously:
 
 | Indicator | Buy | Sell | Configurable |
 |---|---|---|---|
@@ -181,14 +193,21 @@ The Launcher is well suited to mean-reversion scalping on 15m candles when combi
 | `max_adx` | `20` | Only trade when ADX confirms a ranging market; raise to `25` if too few signals |
 | `min_adx` | `0` (off) | Leave off for mean-reversion; a minimum trend strength is not required |
 
-**Skimming settings** (strategy page) for mean-reversion:
+**Mean Reversion TP/SL settings** (STRATEGY page → Mean Reversion Scalping):
+
+| Setting | Recommended value | Rationale |
+|---|---|---|
+| `tp_pct` | `2`–`3` | Take-profit as % price move; tightened further by Dynamic TP in low-bandwidth conditions |
+| `sl_pct` | `5`–`15` | Stop-loss as % price move; sized to survive normal noise without hitting a full trend leg |
+| `dynamic_tp` | `true` | Tightens TP in low-bandwidth conditions to exit before a squeeze breakout |
+| `dynamic_tp_fraction` | `0.7` | Target 70% reversion toward the BB midline before exiting |
+
+**Skimming settings** (STRATEGY page) — optional auto-close on PnL threshold:
 
 | Setting | Recommended value | Rationale |
 |---|---|---|
 | `threshold_pct` | `7`–`10` (at 3× leverage) | TP ceiling as % of margin; at 3× leverage this equals ~2.3–3.3% price move |
-| `stop_loss_pct` | `15`–`20` | SL as % of margin; sized to survive normal noise without hitting a full trend leg |
-| `dynamic_tp` | `true` | Tightens TP in low-bandwidth conditions to exit before a squeeze breakout |
-| `dynamic_tp_fraction` | `0.7` | Target 70% reversion toward the BB midline before exiting |
+| `stop_loss_pct` | `15`–`20` | SL as % of margin; fallback if algo TP/SL not attached |
 
 **Signal frequency tuning** — if the Launcher fires too few signals, adjust in this order:
 
@@ -197,4 +216,18 @@ The Launcher is well suited to mean-reversion scalping on 15m candles when combi
 3. Relax RSI thresholds from `25/75` → `28/72`
 4. Increase `bb_proximity_pct` from `0.5` → `1.0` as a last resort
 
-All configurable from the CFG page → Launcher section.
+All configurable from the STRATEGY page → Mean Reversion Scalping section.
+
+If you get zero signals for several days, relax in this order:
+```
+RSI 20 → 22 → 25
+BB proximity 0.0 → 0.2 → 0.5
+Min BB bandwidth 3.0 → 2.5 → 2.0
+```
+
+If SL still gets hit occasionally:
+```
+Don't widen SL further. Instead
+Drop RSI to 18 (even deeper entries)
+Or enable OB Wall Dynamic Stop-Loss on the STRATEGY page — it places the SL at the nearest order-book wall, which adapts to market structure rather than a fixed %
+```
