@@ -1245,74 +1245,9 @@ class MarketService:
         self._footprint_config = config or {}
 
     def set_launcher_config(self, config: dict[str, Any]) -> None:
-        """Update the Launcher configuration at runtime (called from CFG save).
-
-        Automatically migrates the legacy flat format (e.g. ``mean_reversion_enabled``
-        at the top level) to the new namespaced format
-        (``strategies.mean_reversion.enabled``).
-        """
-        config = self._migrate_launcher_config(config or {})
-        self._launcher_config = config
+        """Update the Launcher configuration at runtime (called from CFG save)."""
+        self._launcher_config = config or {}
         self._emit_debug(f"Launcher config updated: {self._launcher_config}")
-
-    @staticmethod
-    def _migrate_launcher_config(config: dict[str, Any]) -> dict[str, Any]:
-        """Migrate legacy flat launcher config to namespaced strategy format.
-
-        Old format::
-
-            {"mean_reversion_enabled": True, "rsi_oversold": 25, ...}
-
-        New format::
-
-            {"strategies": {"mean_reversion": {"enabled": True, "rsi_oversold": 25, ...}}}
-
-        Strategy-specific keys that are migrated:
-          mean_reversion_enabled → strategies.mean_reversion.enabled
-          rsi_oversold, rsi_overbought, min_adx, max_adx,
-          require_htf_trend, require_cmf, require_htf_cmf,
-          require_cmf_cross, require_cmf_no_divergence,
-          require_footprint_delta, require_bb_position,
-          bb_proximity_pct, min_bb_bandwidth, max_bb_bandwidth,
-          dynamic_tp, dynamic_tp_fraction, flip_launcher_direction
-        """
-        # Only migrate if there are legacy keys at the top level.
-        _MR_KEYS = {
-            "mean_reversion_enabled", "rsi_oversold", "rsi_overbought",
-            "min_adx", "max_adx", "require_htf_trend", "require_cmf",
-            "require_htf_cmf", "require_cmf_cross", "require_cmf_no_divergence",
-            "require_footprint_delta", "require_bb_position",
-            "bb_proximity_pct", "min_bb_bandwidth", "max_bb_bandwidth",
-            "dynamic_tp", "dynamic_tp_fraction", "flip_launcher_direction",
-            "tp_pct", "sl_pct",
-        }
-        has_legacy = any(k in config for k in _MR_KEYS)
-        if not has_legacy:
-            return config
-
-        config = dict(config)  # shallow copy
-        strategies = dict(config.get("strategies") or {})
-        mr = dict(strategies.get("mean_reversion") or {})
-
-        # Migrate mean_reversion_enabled → enabled (only if not already in mr)
-        if "mean_reversion_enabled" in config and "enabled" not in mr:
-            mr["enabled"] = config.pop("mean_reversion_enabled")
-        elif "mean_reversion_enabled" in config:
-            # Already migrated; just remove the legacy key
-            config.pop("mean_reversion_enabled")
-
-        # Migrate all other strategy-specific keys (don't overwrite namespaced values)
-        for key in _MR_KEYS - {"mean_reversion_enabled"}:
-            if key in config:
-                if key not in mr:
-                    mr[key] = config.pop(key)
-                else:
-                    # Namespaced value already exists; discard the legacy flat key
-                    config.pop(key)
-
-        strategies["mean_reversion"] = mr
-        config["strategies"] = strategies
-        return config
 
     def set_notifications_config(self, config: dict[str, Any]) -> None:
         """Update the notifications configuration at runtime (called from CFG save)."""
