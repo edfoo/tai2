@@ -213,6 +213,19 @@ The Launcher is well suited to mean-reversion scalping on 15m candles when combi
 | `tp_pct` | 7 | 7 (keep) | Don't change |
 | `sl_pct` | 11 | 15 | Small bump only — survives normal noise |
 
+**Spike exhaustion filters** — prevent entering mid-spike when price keeps pumping after RSI > 80:
+
+| Setting | Recommended value | Rationale |
+|---|---|---|
+| `require_candle_rejection` | `true` | Require upper wick for shorts / lower wick for longs — candle must show rejection, not a clean close at the extreme |
+| `candle_rejection_pct` | `30` | Wick must be at least 30% of the candle's total range (shooting star / pin bar pattern) |
+| `require_vwap_reversion` | `true` | Require price extended from VWAP AND closing back toward it — confirms reversion has started, not just that price is extended |
+| `vwap_min_distance_pct` | `1.0` | Price must be at least 1% from VWAP to qualify as "extended" |
+| `require_volume_cooling` | `true` | Block entry while volume RSI is still high — the spike is being driven by heavy volume and may continue |
+| `volume_rsi_max` | `70` | Only enter when volume RSI drops below 70, signaling buying pressure is fading |
+
+These three filters together prevent the pattern where RSI > 80 triggers a short, but price keeps pumping another 50–100% before reverting. Instead, the strategy waits for the spike to show exhaustion (rejection wick + volume cooling + closing back toward VWAP) before entering.
+
 **Skimming settings** (STRATEGY page) — optional auto-close on PnL threshold:
 
 | Setting | Recommended value | Rationale |
