@@ -20,6 +20,7 @@ import pytest
 from app.services.market_service import MarketService
 from app.services.strategies import Strategy, StrategyHelpers, StrategySignal
 from app.services.strategies.mean_reversion import MeanReversionStrategy
+from app.services.strategies.spike_continuation import SpikeContinuationStrategy
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -33,12 +34,12 @@ class _DummyStateService:
         return {"positions": []}
 
 
-def _make_helpers() -> StrategyHelpers:
+def _make_helpers(last_price: float = 100.0) -> StrategyHelpers:
     """Create a StrategyHelpers with mock functions."""
     return StrategyHelpers(
         extract_float=MarketService._extract_float,
         emit_debug=lambda msg: None,
-        get_last_price=lambda symbol: 100.0,
+        get_last_price=lambda symbol: last_price,
         compute_footprint=lambda symbol: {},
     )
 
@@ -675,3 +676,304 @@ class TestBuildLauncherDecision:
         assert len(decisions) == 1
         decision = decisions[0]
         assert decision["_decision_origin"] == "launcher"
+
+
+# ── Spike Continuation Strategy ──────────────────────────────────────────────
+
+
+def _make_spike_snapshot(
+    *,
+    rsi: float | None = 65.0,
+    adx_value: float | None = 25.0,
+    bb_lower: float | None = 95.0,
+    bb_upper: float | None = 105.0,
+    bb_middle: float | None = 100.0,
+    last_price: float = 106.0,
+    volume_rsi_series: list[float] | None = None,
+    ohlcv: list[dict[str, Any]] | None = None,
+    symbol: str = "BTC-USDT-SWAP",
+) -> dict[str, Any]:
+    """Build a snapshot for Spike Continuation tests."""
+    if volume_rsi_series is None:
+        volume_rsi_series = [70.0, 82.0]  # rising by default
+    if ohlcv is None:
+        # Default: current candle is a strong bullish candle with large body.
+        # Spike origin (lowest low) is at 103.0, current close at 106.5 → ~3.4% extension.
+        # Keep extension under 5% so default max_spike_extension_pct=3.0 can be overridden in tests.
+        ohlcv = [
+            {"open": 103.0, "high": 103.5, "low": 102.8, "close": 103.2, "volume": 100.0},
+            {"open": 103.2, "high": 104.0, "low": 103.0, "close": 103.8, "volume": 120.0},
+            {"open": 103.8, "high": 104.5, "low": 103.5, "close": 104.3, "volume": 150.0},
+            {"open": 104.3, "high": 105.0, "low": 104.0, "close": 104.8, "volume": 180.0},
+            # Current candle: large body, close near high
+            {"open": 104.8, "high": 107.0, "low": 104.5, "close": 106.5, "volume": 250.0},
+        ]
+
+    indicators: dict[str, Any] = {
+        "rsi": rsi,
+        "adx": {"value": adx_value},
+        "bollinger_bands": {
+            "lower": bb_lower,
+            "upper": bb_upper,
+            "middle": bb_middle,
+        },
+        "volume_rsi_series": volume_rsi_series,
+        "ohlcv": ohlcv,
+    }
+
+    return {
+        "market_data": {
+            symbol: {
+                "indicators": indicators,
+                "custom_metrics": {},
+            }
+        },
+        "positions": [],
+        "last_price": last_price,
+    }
+
+
+class TestSpikeContinuationStrategy:
+    """Tests for the SpikeContinuationStrategy."""
+
+    def test_satisfies_protocol(self) -> None:
+        strategy = SpikeContinuationStrategy()
+        assert isinstance(strategy, Strategy)
+
+    def test_returns_none_when_disabled(self) -> None:
+        strategy = SpikeContinuationStrategy()
+        helpers = _make_helpers()
+        snapshot = _make_spike_snapshot()
+        config = {"enabled": False}
+        assert strategy.evaluate("BTC-USDT-SWAP", snapshot, config, helpers) is None
+
+    def test_buy_signal_when_all_filters_pass(self) -> None:
+        """A strong accelerating spike with rising volume RSI should fire a buy."""
+        strategy = SpikeContinuationStrategy()
+        helpers = _make_helpers(last_price=106.0)
+        snapshot = _make_spike_snapshot(
+            rsi=65.0,
+            last_price=106.0,
+            volume_rsi_series=[70.0, 82.0],
+        )
+        config = {
+            "enabled": True,
+            "volume_rsi_min": 75.0,
+            "rsi_min": 55.0,
+            "rsi_max": 75.0,
+            "require_bb_breakout": True,
+            "require_candle_strength": True,
+            "candle_strength_pct": 70.0,
+            "min_bb_bandwidth": 3.0,
+            "max_adx": 40.0,
+            "require_momentum_acceleration": True,
+            "acceleration_lookback": 3,
+            "acceleration_min_ratio": 1.5,
+            "require_rsi_rising": True,
+            "require_volume_rsi_rising": True,
+            "max_spike_extension_pct": 5.0,  # allow up to 5% extension
+            "spike_lookback": 5,
+        }
+        signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, helpers)
+        assert signal is not None
+        assert signal.direction == "buy"
+        assert signal.strategy_name == "spike_continuation"
+
+    def test_blocks_when_momentum_decelerating(self) -> None:
+        """If the current candle body is smaller than recent average, don't enter."""
+        strategy = SpikeContinuationStrategy()
+        helpers = _make_helpers(last_price=111.5)
+        # Current candle has a tiny body compared to recent large candles
+        ohlcv = [
+            {"open": 100.0, "high": 105.0, "low": 99.0, "close": 104.0, "volume": 200.0},
+            {"open": 104.0, "high": 108.0, "low": 103.0, "close": 107.0, "volume": 250.0},
+            {"open": 107.0, "high": 111.0, "low": 106.0, "close": 110.0, "volume": 300.0},
+            {"open": 110.0, "high": 112.0, "low": 109.0, "close": 111.0, "volume": 280.0},
+            # Current candle: tiny body (close near high but body is small)
+            {"open": 111.0, "high": 112.0, "low": 110.5, "close": 111.5, "volume": 100.0},
+        ]
+        snapshot = _make_spike_snapshot(
+            rsi=65.0,
+            last_price=111.5,
+            volume_rsi_series=[80.0, 82.0],
+            ohlcv=ohlcv,
+        )
+        config = {
+            "enabled": True,
+            "volume_rsi_min": 75.0,
+            "rsi_min": 55.0,
+            "rsi_max": 75.0,
+            "require_momentum_acceleration": True,
+            "acceleration_lookback": 3,
+            "acceleration_min_ratio": 1.5,
+            "require_rsi_rising": True,
+            "require_volume_rsi_rising": True,
+            "max_spike_extension_pct": 0,  # disable for this test
+        }
+        signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, helpers)
+        assert signal is None  # blocked — momentum decelerating
+
+    def test_blocks_when_volume_rsi_falling(self) -> None:
+        """If volume RSI is falling, don't enter — volume momentum is fading."""
+        strategy = SpikeContinuationStrategy()
+        helpers = _make_helpers(last_price=106.0)
+        snapshot = _make_spike_snapshot(
+            rsi=65.0,
+            last_price=106.0,
+            volume_rsi_series=[88.0, 82.0],  # falling
+        )
+        config = {
+            "enabled": True,
+            "volume_rsi_min": 75.0,
+            "rsi_min": 55.0,
+            "rsi_max": 75.0,
+            "require_volume_rsi_rising": True,
+            "max_spike_extension_pct": 0,
+        }
+        signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, helpers)
+        assert signal is None
+
+    def test_blocks_when_spike_already_extended(self) -> None:
+        """If price has moved more than max_spike_extension_pct from origin, don't enter."""
+        strategy = SpikeContinuationStrategy()
+        helpers = _make_helpers(last_price=112.0)
+        # Spike origin (lowest low) is at 95.0, current close is at 112.0 → 17.9% extension
+        ohlcv = [
+            {"open": 96.0, "high": 97.0, "low": 95.0, "close": 96.5, "volume": 100.0},
+            {"open": 96.5, "high": 100.0, "low": 96.0, "close": 99.5, "volume": 150.0},
+            {"open": 99.5, "high": 105.0, "low": 99.0, "close": 104.5, "volume": 200.0},
+            {"open": 104.5, "high": 110.0, "low": 104.0, "close": 109.5, "volume": 250.0},
+            {"open": 109.5, "high": 113.0, "low": 109.0, "close": 112.0, "volume": 300.0},
+        ]
+        snapshot = _make_spike_snapshot(
+            rsi=65.0,
+            last_price=112.0,
+            volume_rsi_series=[80.0, 85.0],
+            ohlcv=ohlcv,
+        )
+        config = {
+            "enabled": True,
+            "volume_rsi_min": 75.0,
+            "rsi_min": 55.0,
+            "rsi_max": 75.0,
+            "max_spike_extension_pct": 3.0,  # only allow 3% extension
+            "spike_lookback": 5,
+        }
+        signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, helpers)
+        assert signal is None  # blocked — spike already extended 17.9%
+
+    def test_blocks_when_rsi_too_extreme(self) -> None:
+        """If RSI is above rsi_max, don't enter — that's Mean Reversion territory."""
+        strategy = SpikeContinuationStrategy()
+        helpers = _make_helpers(last_price=106.0)
+        snapshot = _make_spike_snapshot(
+            rsi=85.0,  # too extreme
+            last_price=106.0,
+            volume_rsi_series=[80.0, 85.0],
+        )
+        config = {
+            "enabled": True,
+            "volume_rsi_min": 75.0,
+            "rsi_min": 55.0,
+            "rsi_max": 75.0,
+            "max_spike_extension_pct": 0,
+        }
+        signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, helpers)
+        assert signal is None
+
+    def test_blocks_when_volume_rsi_too_low(self) -> None:
+        """If volume RSI is below the minimum, don't enter."""
+        strategy = SpikeContinuationStrategy()
+        helpers = _make_helpers(last_price=106.0)
+        snapshot = _make_spike_snapshot(
+            rsi=65.0,
+            last_price=106.0,
+            volume_rsi_series=[60.0, 65.0],  # below 75
+        )
+        config = {
+            "enabled": True,
+            "volume_rsi_min": 75.0,
+            "rsi_min": 55.0,
+            "rsi_max": 75.0,
+            "max_spike_extension_pct": 0,
+        }
+        signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, helpers)
+        assert signal is None
+
+    def test_sell_signal_when_all_filters_pass(self) -> None:
+        """A strong accelerating bearish spike should fire a sell."""
+        strategy = SpikeContinuationStrategy()
+        helpers = _make_helpers(last_price=94.0)
+        # Bearish spike: price below BB lower, RSI in sell zone (25-45)
+        # Keep extension small: origin high at 107.0, current close at 103.5 → ~3.3%
+        ohlcv = [
+            {"open": 107.0, "high": 107.2, "low": 106.8, "close": 106.8, "volume": 100.0},
+            {"open": 106.8, "high": 107.0, "low": 106.0, "close": 106.2, "volume": 120.0},
+            {"open": 106.2, "high": 106.5, "low": 105.5, "close": 105.7, "volume": 150.0},
+            {"open": 105.7, "high": 106.0, "low": 105.0, "close": 105.2, "volume": 180.0},
+            # Current candle: large bearish body, close near low
+            {"open": 105.2, "high": 105.5, "low": 103.0, "close": 103.5, "volume": 250.0},
+        ]
+        snapshot = _make_spike_snapshot(
+            rsi=35.0,  # in sell zone (100-75=25 to 100-55=45)
+            bb_lower=95.0,
+            bb_upper=105.0,
+            bb_middle=100.0,
+            last_price=94.0,  # below BB lower
+            volume_rsi_series=[70.0, 82.0],
+            ohlcv=ohlcv,
+        )
+        config = {
+            "enabled": True,
+            "volume_rsi_min": 75.0,
+            "rsi_min": 55.0,
+            "rsi_max": 75.0,
+            "require_bb_breakout": True,
+            "require_candle_strength": True,
+            "candle_strength_pct": 70.0,
+            "min_bb_bandwidth": 3.0,
+            "max_adx": 40.0,
+            "require_momentum_acceleration": True,
+            "acceleration_lookback": 3,
+            "acceleration_min_ratio": 1.5,
+            "require_rsi_rising": True,
+            "require_volume_rsi_rising": True,
+            "max_spike_extension_pct": 5.0,  # allow up to 5% extension
+            "spike_lookback": 5,
+        }
+        signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, helpers)
+        assert signal is not None
+        assert signal.direction == "sell"
+
+    def test_acceleration_can_be_disabled(self) -> None:
+        """When require_momentum_acceleration is False, small bodies are OK."""
+        strategy = SpikeContinuationStrategy()
+        helpers = _make_helpers(last_price=105.3)
+        # Use candles with small extension so spike extension filter doesn't block
+        ohlcv = [
+            {"open": 103.0, "high": 103.5, "low": 102.8, "close": 103.2, "volume": 200.0},
+            {"open": 103.2, "high": 104.0, "low": 103.0, "close": 103.8, "volume": 250.0},
+            {"open": 103.8, "high": 104.5, "low": 103.5, "close": 104.3, "volume": 300.0},
+            {"open": 104.3, "high": 105.0, "low": 104.0, "close": 104.8, "volume": 280.0},
+            # Current candle: tiny body but close near high
+            {"open": 104.8, "high": 105.5, "low": 104.5, "close": 105.3, "volume": 100.0},
+        ]
+        snapshot = _make_spike_snapshot(
+            rsi=65.0,
+            last_price=105.3,
+            volume_rsi_series=[80.0, 82.0],
+            ohlcv=ohlcv,
+        )
+        config = {
+            "enabled": True,
+            "volume_rsi_min": 75.0,
+            "rsi_min": 55.0,
+            "rsi_max": 75.0,
+            "require_momentum_acceleration": False,  # disabled
+            "require_rsi_rising": True,
+            "require_volume_rsi_rising": True,
+            "max_spike_extension_pct": 0,  # disabled
+        }
+        signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, helpers)
+        assert signal is not None
+        assert signal.direction == "buy"

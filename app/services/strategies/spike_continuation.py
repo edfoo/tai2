@@ -6,6 +6,9 @@ exits before exhaustion signs appear.
 
 This is the mirror image of Mean Reversion: MR waits for exhaustion, this
 strategy enters on the explosion and exits before the reversion.
+
+Critical design goal: avoid entering at the TOP of a spike. The strategy
+verifies that momentum is still ACCELERATING (not peaking) before entering.
 """
 
 from __future__ import annotations
@@ -37,6 +40,23 @@ class SpikeContinuationStrategy:
       - ``sl_pct`` (float, default 5.0): stop-loss as % price move
       - ``max_adx`` (float, default 40): don't enter if trend is too strong
         (we want momentum spikes, not full trends — those won't revert)
+
+    Momentum acceleration filters (prevent entering at the top of a spike):
+      - ``require_momentum_acceleration`` (bool, default True): current candle
+        body must be larger than the average body of the last N candles
+      - ``acceleration_lookback`` (int, default 3): number of prior candles to
+        average for the acceleration comparison
+      - ``acceleration_min_ratio`` (float, default 1.5): current body must be
+        at least this multiple of the average recent body (1.5 = 50% larger)
+      - ``require_rsi_rising`` (bool, default True): RSI must be rising vs the
+        previous candle (momentum still building, not fading)
+      - ``require_volume_rsi_rising`` (bool, default True): volume RSI must be
+        rising vs the previous candle (volume momentum still building)
+      - ``max_spike_extension_pct`` (float, default 3.0): block entry if price
+        has already moved more than this % from the start of the spike.
+        Prevents entering at the top of an extended move. 0 = disabled.
+      - ``spike_lookback`` (int, default 5): candles to look back to find the
+        spike origin (lowest low for buys, highest high for sells)
     """
 
     name = "spike_continuation"
@@ -61,6 +81,15 @@ class SpikeContinuationStrategy:
         min_bb_bandwidth = helpers.extract_float(config.get("min_bb_bandwidth")) or 3.0
         max_adx = helpers.extract_float(config.get("max_adx")) or 40.0
 
+        # Momentum acceleration filters
+        require_momentum_acceleration = bool(config.get("require_momentum_acceleration", True))
+        acceleration_lookback = int(helpers.extract_float(config.get("acceleration_lookback")) or 3)
+        acceleration_min_ratio = helpers.extract_float(config.get("acceleration_min_ratio")) or 1.5
+        require_rsi_rising = bool(config.get("require_rsi_rising", True))
+        require_volume_rsi_rising = bool(config.get("require_volume_rsi_rising", True))
+        max_spike_extension_pct = helpers.extract_float(config.get("max_spike_extension_pct")) or 3.0
+        spike_lookback = int(helpers.extract_float(config.get("spike_lookback")) or 5)
+
         market_data: dict[str, Any] = snapshot.get("market_data") or {}
         sym_data = market_data.get(symbol) or {}
         indicators = sym_data.get("indicators") or {}
@@ -71,8 +100,11 @@ class SpikeContinuationStrategy:
         # Volume RSI — confirms the spike is volume-driven
         volume_rsi_series = indicators.get("volume_rsi_series") or []
         volume_rsi_value: float | None = None
+        volume_rsi_prev: float | None = None
         if volume_rsi_series:
             volume_rsi_value = helpers.extract_float(volume_rsi_series[-1])
+            if len(volume_rsi_series) >= 2:
+                volume_rsi_prev = helpers.extract_float(volume_rsi_series[-2])
 
         # Bollinger Bands — confirms breakout
         _bb = indicators.get("bollinger_bands") or {}
@@ -86,25 +118,94 @@ class SpikeContinuationStrategy:
             else None
         )
 
+        # OHLCV candles — for candle strength, momentum acceleration, and spike extension
+        ohlcv_compact = indicators.get("ohlcv") or []
+
         # Candle strength — close should be near the high (buy) or low (sell)
         candle_strong_buy = False
         candle_strong_sell = False
-        if require_candle_strength:
-            ohlcv_compact = indicators.get("ohlcv") or []
-            if ohlcv_compact and isinstance(ohlcv_compact[-1], dict):
-                _c = ohlcv_compact[-1]
-                _high = helpers.extract_float(_c.get("high"))
-                _low = helpers.extract_float(_c.get("low"))
-                _close = helpers.extract_float(_c.get("close"))
-                if _high is not None and _low is not None and _close is not None:
-                    _range = _high - _low
-                    if _range > 0:
-                        # Close position in candle range: 0 = at low, 100 = at high
-                        _close_pos = (_close - _low) / _range * 100.0
-                        # For buys: close should be in top (100 - candle_strength_pct)% of range
-                        # e.g. candle_strength_pct=70 → close_pos must be > 70
-                        candle_strong_buy = _close_pos >= candle_strength_pct
-                        candle_strong_sell = _close_pos <= (100.0 - candle_strength_pct)
+        current_body: float | None = None
+        current_close: float | None = None
+        current_open: float | None = None
+        if ohlcv_compact and isinstance(ohlcv_compact[-1], dict):
+            _c = ohlcv_compact[-1]
+            _high = helpers.extract_float(_c.get("high"))
+            _low = helpers.extract_float(_c.get("low"))
+            _close = helpers.extract_float(_c.get("close"))
+            _open = helpers.extract_float(_c.get("open"))
+            if _high is not None and _low is not None and _close is not None:
+                current_close = _close
+                _range = _high - _low
+                if _range > 0:
+                    # Close position in candle range: 0 = at low, 100 = at high
+                    _close_pos = (_close - _low) / _range * 100.0
+                    candle_strong_buy = _close_pos >= candle_strength_pct
+                    candle_strong_sell = _close_pos <= (100.0 - candle_strength_pct)
+                if _open is not None:
+                    current_body = abs(_close - _open)
+                    current_open = _open
+
+        # Momentum acceleration — current candle body must be larger than recent average
+        # This prevents entering at the top of a spike where the last candle is small
+        momentum_accelerating = False
+        avg_recent_body: float | None = None
+        body_ratio: float | None = None
+        if require_momentum_acceleration and current_body is not None and len(ohlcv_compact) >= 2:
+            lookback_candles = ohlcv_compact[-(acceleration_lookback + 1):-1]
+            recent_bodies: list[float] = []
+            for c in lookback_candles:
+                if isinstance(c, dict):
+                    _o = helpers.extract_float(c.get("open"))
+                    _cl = helpers.extract_float(c.get("close"))
+                    if _o is not None and _cl is not None:
+                        recent_bodies.append(abs(_cl - _o))
+            if recent_bodies:
+                avg_recent_body = sum(recent_bodies) / len(recent_bodies)
+                if avg_recent_body > 0:
+                    body_ratio = current_body / avg_recent_body
+                    momentum_accelerating = body_ratio >= acceleration_min_ratio
+
+        # RSI rising — momentum still building (direction-aware)
+        # For buys: current candle should be bullish (close > open) → RSI rising
+        # For sells: current candle should be bearish (close < open) → RSI falling
+        rsi_rising_buy = False
+        rsi_rising_sell = False
+        if require_rsi_rising and current_close is not None and current_open is not None:
+            rsi_rising_buy = current_close > current_open
+            rsi_rising_sell = current_close < current_open
+
+        # Volume RSI rising — volume momentum still building
+        volume_rsi_rising = False
+        if require_volume_rsi_rising and volume_rsi_value is not None and volume_rsi_prev is not None:
+            volume_rsi_rising = volume_rsi_value > volume_rsi_prev
+
+        # Spike extension — don't enter if price has already moved too far from spike origin
+        spike_extension_buy: float | None = None
+        spike_extension_sell: float | None = None
+        spike_extension_ok_buy = True
+        spike_extension_ok_sell = True
+        if max_spike_extension_pct > 0 and current_close is not None and len(ohlcv_compact) >= 2:
+            lookback_candles = ohlcv_compact[-(spike_lookback + 1):-1]
+            lows = [
+                helpers.extract_float(c.get("low"))
+                for c in lookback_candles
+                if isinstance(c, dict) and helpers.extract_float(c.get("low")) is not None
+            ]
+            highs = [
+                helpers.extract_float(c.get("high"))
+                for c in lookback_candles
+                if isinstance(c, dict) and helpers.extract_float(c.get("high")) is not None
+            ]
+            if lows:
+                spike_origin_low = min(lows)
+                if spike_origin_low > 0:
+                    spike_extension_buy = (current_close - spike_origin_low) / spike_origin_low * 100.0
+                    spike_extension_ok_buy = spike_extension_buy <= max_spike_extension_pct
+            if highs:
+                spike_origin_high = max(highs)
+                if spike_origin_high > 0:
+                    spike_extension_sell = (spike_origin_high - current_close) / spike_origin_high * 100.0
+                    spike_extension_ok_sell = spike_extension_sell <= max_spike_extension_pct
 
         # BB breakout checks
         bb_breakout_buy = (
@@ -143,18 +244,69 @@ class SpikeContinuationStrategy:
             )
             return None
 
+        # Momentum acceleration gate — prevents entering at the top of a spike
+        if require_momentum_acceleration:
+            if current_body is None or avg_recent_body is None or avg_recent_body <= 0:
+                helpers.emit_debug(
+                    f"SpikeContinuation: {symbol} — no signal (body data unavailable for acceleration check)"
+                )
+                return None
+            if body_ratio is not None and body_ratio < acceleration_min_ratio:
+                helpers.emit_debug(
+                    f"SpikeContinuation: {symbol} — no signal "
+                    f"(momentum decelerating: body_ratio={body_ratio:.2f} < min={acceleration_min_ratio:.2f} — "
+                    f"spike is peaking, not accelerating)"
+                )
+                return None
+
+        # RSI rising gate (direction-aware)
+        if require_rsi_rising and not rsi_rising_buy and not rsi_rising_sell:
+            helpers.emit_debug(
+                f"SpikeContinuation: {symbol} — no signal (RSI not rising/falling in direction — momentum fading)"
+            )
+            return None
+
+        # Volume RSI rising gate
+        if require_volume_rsi_rising and not volume_rsi_rising:
+            helpers.emit_debug(
+                f"SpikeContinuation: {symbol} — no signal "
+                f"(vol_rsi falling: {volume_rsi_prev:.1f} → {volume_rsi_value:.1f} — volume momentum fading)"
+                if volume_rsi_prev is not None else
+                f"SpikeContinuation: {symbol} — no signal (vol_rsi_prev unavailable)"
+            )
+            return None
+
+        # Spike extension gate — don't enter at the top of an extended move
+        if max_spike_extension_pct > 0:
+            if not spike_extension_ok_buy and not spike_extension_ok_sell:
+                _ext = spike_extension_buy if spike_extension_buy is not None else spike_extension_sell
+                helpers.emit_debug(
+                    f"SpikeContinuation: {symbol} — no signal "
+                    f"(spike already extended: {_ext:.2f}% > max={max_spike_extension_pct:.2f}% — "
+                    f"entering at the top, not the start)"
+                )
+                return None
+
         # Buy signal: RSI in momentum zone (not yet extreme), volume confirms,
-        # price beyond BB upper, candle closes strong
+        # price beyond BB upper, candle closes strong, momentum accelerating
         buy_signal = (
             rsi_min <= rsi <= rsi_max
             and bb_breakout_buy
             and (not require_candle_strength or candle_strong_buy)
+            and (not require_momentum_acceleration or momentum_accelerating)
+            and (not require_rsi_rising or rsi_rising_buy)
+            and (not require_volume_rsi_rising or volume_rsi_rising)
+            and spike_extension_ok_buy
         )
         # Sell signal: mirror
         sell_signal = (
             (100.0 - rsi_max) <= rsi <= (100.0 - rsi_min)
             and bb_breakout_sell
             and (not require_candle_strength or candle_strong_sell)
+            and (not require_momentum_acceleration or momentum_accelerating)
+            and (not require_rsi_rising or rsi_rising_sell)
+            and (not require_volume_rsi_rising or volume_rsi_rising)
+            and spike_extension_ok_sell
         )
 
         if buy_signal:
@@ -163,7 +315,8 @@ class SpikeContinuationStrategy:
                 strategy_name=self.name,
                 tp_pct=helpers.extract_float(config.get("tp_pct")),
                 sl_pct=helpers.extract_float(config.get("sl_pct")),
-                rationale=f"SpikeContinuation BUY: RSI={rsi:.1f} vol_rsi={volume_rsi_value:.1f}",
+                rationale=f"SpikeContinuation BUY: RSI={rsi:.1f} vol_rsi={volume_rsi_value:.1f} "
+                          f"(accelerating, not peaking)",
             )
         if sell_signal:
             return StrategySignal(
@@ -171,7 +324,8 @@ class SpikeContinuationStrategy:
                 strategy_name=self.name,
                 tp_pct=helpers.extract_float(config.get("tp_pct")),
                 sl_pct=helpers.extract_float(config.get("sl_pct")),
-                rationale=f"SpikeContinuation SELL: RSI={rsi:.1f} vol_rsi={volume_rsi_value:.1f}",
+                rationale=f"SpikeContinuation SELL: RSI={rsi:.1f} vol_rsi={volume_rsi_value:.1f} "
+                          f"(accelerating, not peaking)",
             )
 
         # Debug breakdown
@@ -181,6 +335,15 @@ class SpikeContinuationStrategy:
             parts.append(f"BB breakout={'ok' if (bb_breakout_buy or bb_breakout_sell) else 'blocked'}")
         if require_candle_strength:
             parts.append(f"candle_strong={'ok' if (candle_strong_buy or candle_strong_sell) else 'blocked'}")
+        if require_momentum_acceleration and body_ratio is not None:
+            parts.append(f"accel={body_ratio:.2f}x (min {acceleration_min_ratio:.2f}x)")
+        if require_rsi_rising:
+            parts.append(f"rsi_rising={'ok' if (rsi_rising_buy or rsi_rising_sell) else 'blocked'}")
+        if require_volume_rsi_rising:
+            parts.append(f"vol_rsi_rising={'ok' if volume_rsi_rising else 'blocked'}")
+        if max_spike_extension_pct > 0:
+            _ext = spike_extension_buy if spike_extension_buy is not None else spike_extension_sell
+            parts.append(f"spike_ext={_ext:.2f}%" if _ext is not None else "spike_ext=n/a")
         if min_bb_bandwidth > 0:
             parts.append(f"BB_bw={bb_bandwidth:.2f}%" if bb_bandwidth is not None else "BB_bw=n/a")
         if max_adx > 0:

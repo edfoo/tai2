@@ -242,61 +242,66 @@ These three filters together prevent the pattern where RSI > 80 triggers a short
 
 All configurable from the STRATEGY page → Mean Reversion Scalping section.
 
+### Spike Continuation (Momentum Scalping)
+
+The Spike Continuation strategy rides momentum spikes for 3-5% gains before reversion. It complements Mean Reversion by catching the spike that MR fades.
+
+**Entry conditions** (all must agree):
+
+| Indicator | Buy | Sell | Configurable |
+|---|---|---|
+| Volume RSI (required) | > volume_rsi_min (default 80) | > volume_rsi_min (default 80) | Yes |
+| Volume RSI max (optional) | < volume_rsi_max (default 95) | < volume_rsi_max (default 95) | Yes |
+| BB position (optional) | price ≥ upper band × (1 − proximity%) | price ≤ lower band × (1 + proximity%) | Toggle `require_bb_position` |
+| Candle shape (optional) | Close near high (≥ 70% of range) | Close near low (≤ 30% of range) | Toggle `require_candle_shape` |
+
+**Exit conditions** (any triggers exit):
+- Fixed TP at `tp_pct` (default 3-5%)
+- Fixed SL at `sl_pct` (default 2-3%)
+- Candle shows rejection (opposite wick ≥ 30% of range)
+- Volume RSI drops below `volume_rsi_min`
+
+**Spike Continuation recommended settings** (STRATEGY page → Spike Continuation):
+
+| Setting | Recommended value | Rationale |
+|---|---|---|
+| `volume_rsi_min` | `80` | Only enter when volume momentum is strong — confirms spike is real |
+| `volume_rsi_max` | `95` | Avoid entering when volume RSI is already exhausted — may be too late |
+| `require_bb_position` | `true` | Core filter: only enter when price is at or beyond a BB extreme |
+| `bb_proximity_pct` | `0.0` | Must be at or beyond the band — no tolerance for being "near" |
+| `require_candle_shape` | `true` | Require candle to close in direction of spike — confirms momentum |
+| `tp_pct` | `3`–`5` | Take-profit as % price move — ride the spike for 3-5% before reversion |
+| `sl_pct` | `2`–`3` | Stop-loss as % price move — tight SL since we're entering late in the move |
+
+**Momentum acceleration filters** — prevent entering at the TOP of a spike (critical):
+
+| Setting | Recommended value | Rationale |
+|---|---|---|
+| `require_momentum_acceleration` | `true` | Current candle body must be larger than recent average — spike is still accelerating, not peaking |
+| `acceleration_lookback` | `3` | Compare current body to average of last 3 candles |
+| `acceleration_min_ratio` | `1.5` | Current body must be at least 1.5× the recent average (50% larger) |
+| `require_rsi_rising` | `true` | RSI must be moving in the spike direction (bullish candle for buys, bearish for sells) — momentum still building, not fading |
+| `require_volume_rsi_rising` | `true` | Volume RSI must be rising vs previous candle — volume momentum still building |
+| `max_spike_extension_pct` | `3.0` | Block entry if price already moved more than 3% from spike origin — prevents entering at the top |
+| `spike_lookback` | `5` | Candles to look back to find the spike origin (lowest low for buys, highest high for sells) |
+
+These filters together prevent the pattern where the strategy enters a long at the top of a spike right before price reverts. Instead, it only enters when the spike is still accelerating with building volume momentum and hasn't extended too far from its origin.
+
+**When to use Spike Continuation vs Mean Reversion:**
+- Use **Spike Continuation** when you see a strong momentum spike with high volume RSI and want to ride it for 3-5%
+- Use **Mean Reversion** when you see price at BB extremes with RSI oversold/overbought and want to fade the move
+- Both can run concurrently — they target different market conditions
+
 ## Future Strategies
 
 Here are some strategies that could be implemented using existing indicators, ranked by implementation effort:
 
 | Priority | Strategy | Why | Effort |
 |---|---|---|---|
-| 1 | **Spike Continuation** | Directly complements Mean Reversion — catches the spike that MR fades | Low (existing indicators) |
-| 2 | **Liquidity Sweep Reversal** | Highest win-rate signal, detection already built | Low (existing indicators) |
-| 3 | **VWAP Fade** | Stronger magnet than BB, institutional level | Low (existing indicators) |
-| 4 | **CVD Divergence** | Catches exhaustion before RSI does | Medium (needs series comparison) |
-| 5 | **Stoch RSI Snapback** | Faster signals, more trades | Low (existing indicators) |
-
-## Configuration Controls
-
-Open the `CFG` page in the NiceGUI UI to tune the runtime behavior. Key controls and their impact:
-
-- **Execution Guardrails** – Max leverage, max position pct, daily loss cap, cooldown/hold period, hourly trade limit, and alignment switch are enforced before any OKX order is attempted. They prevent the LLM from overtrading or flipping sides without closing a position.
-- **ATR Risk Per Trade %** – Caps position size so that a full stop-out (measured as ATR × 1.5 from entry) loses at most this percentage of equity. Implements the 1% risk model: `max_notional = (equity × risk%) / (ATR_stop / price)`. Leave blank to disable.
-- **CVD Guard** – Blocks BUY/SELL entries when Cumulative Volume Delta momentum conflicts with the trade direction. Configurable lookback window and minimum slope threshold; neutral CVD never blocks.
-- **OB Wall Guard** – Blocks BUY/SELL entries when a dominant resting limit-order wall on the opposing side sits within a configurable % of current price. A level qualifies as a wall when its size exceeds N× the average level size across the full book depth.
-- **Snapshot Max Age** – Blocks prompt generation and trading decisions if the cached market snapshot is older than the threshold, forcing fresh data before acting.
-- **WS Update Interval** – Sets the background poller cadence (`POLL_INTERVAL`) in seconds. The poller runs continuously regardless of the scheduler and is the sole refresh source when the scheduler is off. It also runs fill reconciliation against the DB every other tick. When the scheduler is enabled, each tick forces its own full snapshot rebuild before evaluating signals, so indicators (RSI, ADX, BB, etc.) are at most one scheduler-interval old — not one poller-interval old. The poller then acts as a fallback safety net and keeps data fresh for the UI and strategy loops between ticks.
-- **Live Websocket Stream** – Toggles the high-frequency OKX websocket listener. Disable it to rely solely on the poller (quieter logs, lower network use) while keeping periodic snapshots.
-- **Auto Prompt Scheduler + Interval** – Enables periodic, automatic prompt execution for every enabled symbol. Interval must stay above 30 seconds to avoid rate limits.
-- **Model Select + Response Schema** – Choose the OpenRouter model and optionally override the response schema JSON used to parse structured reasoning outputs.
-- **Trading Pairs** – Defines which perpetual instruments the engine tracks. Changing this updates Redis snapshots, indicators, and scheduler coverage.
-- **Live Execution Switch** – Master toggle for automated OKX order placement. Trade mode (cross/isolated) and default min order size live here as well.
-- **Per-Symbol Min Sizes** – Optional overrides to enforce instrument-specific minimum contract sizes. The helper converts USDT budgets into contract sizes using the latest price snapshot.
-- **Fee Window Hours** – Controls how many trailing hours of OKX fees are aggregated in the LIVE view.
-- **OKX Sub-Account + Routing** – Lets you target a specific OKX sub-account and declare whether the API key belongs to the master account (so `subAcct` is appended to requests).
-- **OKX Environment Flag** – Chooses between live trading (`0`) and the OKX demo environment (`1`). Clients are rebuilt automatically when the flag changes.
-- **Prompt Versions** – Load prior prompt templates, clone them, or save new immutable versions for A/B testing. The preview pane updates in real time.
-
-Open the `STRATEGY` page to configure autonomous position-management strategies that run independently of LLM decisions on a fast refresh loop:
-
-- **Mean Reversion Scalping** – Launcher entry strategy: rule-based RSI mean-reversion entries with optional CMF, HTF trend, ADX, BB position, and footprint-delta filters. Has its own TP/SL and Dynamic TP (BB bandwidth) settings. Enable/disable independently; the Launcher must also be set to `launcher_only` or `llm_with_filter` mode on the CFG page.
-- **Skimming** – Closes any position whose unrealised PnL ratio crosses a configurable threshold.
-- **Protector** – Locks in a portion of profit by ratcheting the stop-loss upward as the position gains.
-- **Commutator** – Reverses a losing position once after a configurable drawdown.
-- **Alternator** – Oscillates between long and short on profit/loss thresholds. Supports dynamic thresholds (based on average candle amplitude), trailing-reverse mode, trailing-close, candle-position filter, footprint-delta filter, continuous LLM supervision, and **OB Wall Suppression** (blocks flips when a dominant opposing order-book wall is detected within proximity of the current price).
-- **OB Wall Dynamic Stop-Loss** – Independent of Alternator; anchors stop-losses to the nearest dominant supporting limit-order wall (bid wall for LONGs, ask wall for SHORTs). The stop only ever moves in the profit direction; it is never loosened. Configurable proximity, wall-ratio threshold, minimum improvement gate, and buffer behind the wall.
-
-When you click **Save**, the app persists the configuration (PostgreSQL for guardrails/prompt versions/execution settings, Redis for runtime snapshot state) and rehydrates all services in-place: MarketService gets new symbols, websocket or poll intervals, and OKX credentials; the scheduler updates its cadence; the LLM service swaps models; and the UI log buffers announce the change.
-
-## Future Strategies
-
-Here are some strategies that could be implemented using existing indicators, ranked by implementation effort:
-
-| Priority | Strategy | Why | Effort |
-|---|---|---|---|
-| 1 | **Spike Continuation** | Directly complements Mean Reversion — catches the spike that MR fades | Low (existing indicators) |
-| 2 | **Liquidity Sweep Reversal** | Highest win-rate signal, detection already built | Low (existing indicators) |
-| 3 | **VWAP Fade** | Stronger magnet than BB, institutional level | Low (existing indicators) |
-| 4 | **CVD Divergence** | Catches exhaustion before RSI does | Medium (needs series comparison) |
-| 5 | **Stoch RSI Snapback** | Faster signals, more trades | Low (existing indicators) |
+| 1 | **Liquidity Sweep Reversal** | Highest win-rate signal, detection already built | Low (existing indicators) |
+| 2 | **VWAP Fade** | Stronger magnet than BB, institutional level | Low (existing indicators) |
+| 3 | **CVD Divergence** | Catches exhaustion before RSI does | Medium (needs series comparison) |
+| 4 | **Stoch RSI Snapback** | Faster signals, more trades | Low (existing indicators) |
 
 ## Configuration Controls
 

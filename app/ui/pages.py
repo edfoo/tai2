@@ -3333,6 +3333,59 @@ def register_pages(app: FastAPI) -> None:
                             ).classes("w-32").props(
                                 "hint='Skip if trend too strong (wont revert)' persistent-hint"
                             )
+                        # ── Momentum acceleration filters (prevent entering at the top) ──
+                        ui.separator().classes("my-2")
+                        ui.label("Momentum acceleration filters").classes("text-xs font-semibold text-slate-600")
+                        ui.label(
+                            "These filters prevent entering at the TOP of a spike. "
+                            "They verify the spike is still accelerating, not peaking."
+                        ).classes("text-xs text-slate-500 mb-2")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            sc_momentum_accel_switch = ui.switch(
+                                "Require momentum acceleration",
+                                value=bool(_sc_cfg.get("require_momentum_acceleration", True)),
+                            ).props("dense color=primary")
+                            ui.label("Current candle body must be larger than recent average — spike is accelerating, not peaking.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            sc_accel_lookback_input = ui.number(
+                                label="Acceleration lookback",
+                                value=float(_sc_cfg.get("acceleration_lookback") or 3),
+                                min=1, max=10, step=1, format="%.0f",
+                            ).classes("w-40").props("dense")
+                            ui.label("Number of prior candles to average for the acceleration comparison.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            sc_accel_min_ratio_input = ui.number(
+                                label="Acceleration min ratio",
+                                value=float(_sc_cfg.get("acceleration_min_ratio") or 1.5),
+                                min=1.0, max=5.0, step=0.1, format="%.1f",
+                            ).classes("w-40").props("dense")
+                            ui.label("Current body must be at least this multiple of recent average (1.5 = 50% larger).").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            sc_rsi_rising_switch = ui.switch(
+                                "Require RSI rising",
+                                value=bool(_sc_cfg.get("require_rsi_rising", True)),
+                            ).props("dense color=primary")
+                            ui.label("RSI must be rising (bullish candle) — momentum still building, not fading.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            sc_vol_rsi_rising_switch = ui.switch(
+                                "Require volume RSI rising",
+                                value=bool(_sc_cfg.get("require_volume_rsi_rising", True)),
+                            ).props("dense color=primary")
+                            ui.label("Volume RSI must be rising vs previous candle — volume momentum still building.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            sc_max_spike_ext_input = ui.number(
+                                label="Max spike extension %",
+                                value=float(_sc_cfg.get("max_spike_extension_pct") or 3.0),
+                                min=0.0, max=20.0, step=0.5, format="%.1f",
+                            ).classes("w-48").props("dense")
+                            ui.label("Block entry if price already moved more than this % from spike origin (0 = disabled). Prevents entering at the top.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            sc_spike_lookback_input = ui.number(
+                                label="Spike lookback",
+                                value=float(_sc_cfg.get("spike_lookback") or 5),
+                                min=2, max=20, step=1, format="%.0f",
+                            ).classes("w-40").props("dense")
+                            ui.label("Candles to look back to find the spike origin (lowest low for buys, highest high for sells).").classes("text-xs text-slate-500")
                     _active_badge_sc = ui.badge("Active", color="positive").bind_visibility_from(
                         sc_enabled_switch, "value"
                     )
@@ -4140,6 +4193,13 @@ def register_pages(app: FastAPI) -> None:
                 "candle_strength_pct": float(sc_candle_strength_pct_input.value or 70.0),
                 "min_bb_bandwidth": float(sc_min_bb_bw_input.value or 3.0),
                 "max_adx": float(sc_max_adx_input.value or 40.0),
+                "require_momentum_acceleration": bool(sc_momentum_accel_switch.value),
+                "acceleration_lookback": int(sc_accel_lookback_input.value or 3),
+                "acceleration_min_ratio": float(sc_accel_min_ratio_input.value or 1.5),
+                "require_rsi_rising": bool(sc_rsi_rising_switch.value),
+                "require_volume_rsi_rising": bool(sc_vol_rsi_rising_switch.value),
+                "max_spike_extension_pct": float(sc_max_spike_ext_input.value or 3.0),
+                "spike_lookback": int(sc_spike_lookback_input.value or 5),
             }
             _launcher_cfg["strategies"] = _strategies_cfg
             config["launcher"] = _launcher_cfg
