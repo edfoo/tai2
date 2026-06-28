@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from . import StrategyHelpers
+from . import StrategyHelpers, StrategySignal
 
 
 class MeanReversionStrategy:
@@ -51,8 +51,8 @@ class MeanReversionStrategy:
         snapshot: dict[str, Any],
         config: dict[str, Any],
         helpers: StrategyHelpers,
-    ) -> str | None:
-        """Return "buy", "sell", or None based on mean-reversion filters."""
+    ) -> StrategySignal | None:
+        """Return a StrategySignal for mean-reversion, or None."""
         if not bool(config.get("enabled", False)):
             return None
 
@@ -274,9 +274,21 @@ class MeanReversionStrategy:
             and volume_cooling_ok
         )
         if buy_signal:
-            return "buy"
+            return StrategySignal(
+                direction="buy",
+                strategy_name=self.name,
+                tp_pct=helpers.extract_float(config.get("tp_pct")),
+                sl_pct=helpers.extract_float(config.get("sl_pct")),
+                rationale=f"MeanReversion BUY: RSI={rsi:.1f}<{rsi_oversold}",
+            )
         if sell_signal:
-            return "sell"
+            return StrategySignal(
+                direction="sell",
+                strategy_name=self.name,
+                tp_pct=helpers.extract_float(config.get("tp_pct")),
+                sl_pct=helpers.extract_float(config.get("sl_pct")),
+                rationale=f"MeanReversion SELL: RSI={rsi:.1f}>{rsi_overbought}",
+            )
 
         # Build a human-readable breakdown of which filters blocked the signal.
         rsi_str = f"RSI={rsi:.1f} (need <{rsi_oversold} or >{rsi_overbought})"

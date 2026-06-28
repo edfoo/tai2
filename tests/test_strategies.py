@@ -18,7 +18,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from app.services.market_service import MarketService
-from app.services.strategies import Strategy, StrategyHelpers
+from app.services.strategies import Strategy, StrategyHelpers, StrategySignal
 from app.services.strategies.mean_reversion import MeanReversionStrategy
 
 
@@ -193,7 +193,8 @@ class TestMeanReversionStrategy:
             "require_htf_trend": True,
         }
         result = mr.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers())
-        assert result == "buy"
+        assert result is not None
+        assert result.direction == "buy"
 
     def test_sell_signal_when_rsi_overbought(self) -> None:
         mr = MeanReversionStrategy()
@@ -206,7 +207,8 @@ class TestMeanReversionStrategy:
             "require_htf_trend": True,
         }
         result = mr.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers())
-        assert result == "sell"
+        assert result is not None
+        assert result.direction == "sell"
 
     def test_no_signal_when_rsi_neutral(self) -> None:
         mr = MeanReversionStrategy()
@@ -242,7 +244,8 @@ class TestMeanReversionStrategy:
             "require_htf_trend": False,
         }
         result = mr.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers())
-        assert result == "buy"
+        assert result is not None
+        assert result.direction == "buy"
 
     def test_adx_min_filter_blocks(self) -> None:
         mr = MeanReversionStrategy()
@@ -271,7 +274,8 @@ class TestMeanReversionStrategy:
         config = {"enabled": True, "require_bb_position": True, "bb_proximity_pct": 1.0,
                   "require_cmf": False, "require_htf_trend": False}
         result = mr.evaluate("BTC-USDT-SWAP", snapshot, config, helpers)
-        assert result == "buy"
+        assert result is not None
+        assert result.direction == "buy"
 
     def test_bb_position_filter_blocks_long_above_band(self) -> None:
         mr = MeanReversionStrategy()
@@ -316,7 +320,8 @@ class TestMeanReversionStrategy:
         snapshot = _make_snapshot(rsi=20.0, htf_cmf=0.1)
         config = {"enabled": True, "require_htf_cmf": True, "require_cmf": False, "require_htf_trend": False}
         result = mr.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers())
-        assert result == "buy"
+        assert result is not None
+        assert result.direction == "buy"
 
     def test_htf_cmf_filter_blocks(self) -> None:
         mr = MeanReversionStrategy()
@@ -332,7 +337,8 @@ class TestMeanReversionStrategy:
         snapshot = _make_snapshot(rsi=20.0, cmf_value=0.1, cmf_series=[-0.3, -0.2, -0.1, -0.1, 0.1])
         config = {"enabled": True, "require_cmf_cross": True, "require_cmf": False, "require_htf_trend": False}
         result = mr.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers())
-        assert result == "buy"
+        assert result is not None
+        assert result.direction == "buy"
 
     def test_cmf_cross_filter_blocks_when_no_cross(self) -> None:
         mr = MeanReversionStrategy()
@@ -363,7 +369,8 @@ class TestMeanReversionStrategy:
         snapshot = _make_snapshot(rsi=34.0)
         config = {"enabled": True, "require_cmf": False, "require_htf_trend": False}
         result = mr.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers())
-        assert result == "buy"
+        assert result is not None
+        assert result.direction == "buy"
 
     def test_footprint_delta_filter(self) -> None:
         mr = MeanReversionStrategy()
@@ -371,7 +378,8 @@ class TestMeanReversionStrategy:
         snapshot["market_data"]["BTC-USDT-SWAP"]["custom_metrics"]["footprint"] = {"net_delta": 50.0}
         config = {"enabled": True, "require_footprint_delta": True, "require_cmf": False, "require_htf_trend": False}
         result = mr.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers())
-        assert result == "buy"
+        assert result is not None
+        assert result.direction == "buy"
 
     def test_footprint_delta_filter_blocks(self) -> None:
         mr = MeanReversionStrategy()
@@ -393,7 +401,8 @@ class TestMeanReversionStrategy:
         )
         config = {"enabled": True, "require_footprint_delta": True, "require_cmf": False, "require_htf_trend": False}
         result = mr.evaluate("BTC-USDT-SWAP", snapshot, config, helpers)
-        assert result == "buy"
+        assert result is not None
+        assert result.direction == "buy"
 
 
 # ── MarketService Strategy Registry ──────────────────────────────────────────
@@ -431,10 +440,12 @@ class TestMarketServiceStrategyRegistry:
         # Set up a snapshot with RSI oversold
         service._last_full_snapshot = _make_snapshot(rsi=20.0)
 
-        signal = service._launcher_evaluate_signal("BTC-USDT-SWAP")
-        assert signal == "buy"
+        signals = service._launcher_evaluate_signals("BTC-USDT-SWAP")
+        assert len(signals) == 1
+        assert signals[0].direction == "buy"
+        assert signals[0].strategy_name == "mean_reversion"
 
-    def test_launcher_evaluate_signal_returns_none_when_no_strategy_fires(self) -> None:
+    def test_launcher_evaluate_signal_returns_empty_when_no_strategy_fires(self) -> None:
         service = _make_service()
         service.set_launcher_config({
             "mode": "launcher_only",
@@ -447,10 +458,10 @@ class TestMarketServiceStrategyRegistry:
         })
         service._last_full_snapshot = _make_snapshot(rsi=50.0)
 
-        signal = service._launcher_evaluate_signal("BTC-USDT-SWAP")
-        assert signal is None
+        signals = service._launcher_evaluate_signals("BTC-USDT-SWAP")
+        assert signals == []
 
-    def test_launcher_evaluate_signal_returns_none_when_all_disabled(self) -> None:
+    def test_launcher_evaluate_signal_returns_empty_when_all_disabled(self) -> None:
         service = _make_service()
         service.set_launcher_config({
             "mode": "launcher_only",
@@ -460,43 +471,49 @@ class TestMarketServiceStrategyRegistry:
         })
         service._last_full_snapshot = _make_snapshot(rsi=5.0)  # extremely oversold
 
-        signal = service._launcher_evaluate_signal("BTC-USDT-SWAP")
-        assert signal is None
+        signals = service._launcher_evaluate_signals("BTC-USDT-SWAP")
+        assert signals == []
 
-    def test_launcher_evaluate_signal_returns_none_when_no_snapshot(self) -> None:
+    def test_launcher_evaluate_signal_returns_empty_when_no_snapshot(self) -> None:
         service = _make_service()
         service._last_full_snapshot = None
-        signal = service._launcher_evaluate_signal("BTC-USDT-SWAP")
-        assert signal is None
+        signals = service._launcher_evaluate_signals("BTC-USDT-SWAP")
+        assert signals == []
 
-    def test_first_strategy_to_fire_wins(self) -> None:
-        """When multiple strategies are registered, the first signal wins."""
+    def test_multiple_strategies_fire_concurrently(self) -> None:
+        """When multiple strategies fire, all signals are returned."""
         service = _make_service()
 
         class AlwaysBuy:
             name = "always_buy"
             def evaluate(self, symbol, snapshot, config, helpers):
-                return "buy" if config.get("enabled") else None
+                return StrategySignal(direction="buy", strategy_name="always_buy") if config.get("enabled") else None
 
         class AlwaysSell:
             name = "always_sell"
             def evaluate(self, symbol, snapshot, config, helpers):
-                return "sell" if config.get("enabled") else None
+                return StrategySignal(direction="sell", strategy_name="always_sell") if config.get("enabled") else None
 
-        # Insert AlwaysBuy before AlwaysSell
         service._strategies = [AlwaysBuy(), AlwaysSell(), MeanReversionStrategy()]
         service.set_launcher_config({
             "strategies": {
                 "always_buy": {"enabled": True},
                 "always_sell": {"enabled": True},
-                "mean_reversion": {"enabled": True},
+                "mean_reversion": {
+                    "enabled": True,
+                    "rsi_overbought": 70.0,
+                    "require_cmf": False,
+                    "require_htf_trend": False,
+                },
             },
         })
         service._last_full_snapshot = _make_snapshot(rsi=80.0)  # would trigger MR sell
 
-        signal = service._launcher_evaluate_signal("BTC-USDT-SWAP")
-        # AlwaysBuy fires first → "buy" wins even though MR would say "sell"
-        assert signal == "buy"
+        signals = service._launcher_evaluate_signals("BTC-USDT-SWAP")
+        # All three strategies fire: AlwaysBuy, AlwaysSell, MeanReversion(sell)
+        assert len(signals) == 3
+        directions = {s.direction for s in signals}
+        assert directions == {"buy", "sell"}
 
 
 # ── build_launcher_decision with strategy config ─────────────────────────────
@@ -529,8 +546,9 @@ class TestBuildLauncherDecision:
         })
         service._last_full_snapshot = _make_snapshot(rsi=20.0)
 
-        decision = service.build_launcher_decision("BTC-USDT-SWAP")
-        assert decision is not None
+        decisions = service.build_launcher_decisions("BTC-USDT-SWAP")
+        assert len(decisions) == 1
+        decision = decisions[0]
         assert decision["action"] == "BUY"
         # TP should be 3% above last price (100 * 1.03 = 103)
         assert abs(decision["take_profit"] - 103.0) < 0.01
@@ -558,14 +576,15 @@ class TestBuildLauncherDecision:
         })
         service._last_full_snapshot = _make_snapshot(rsi=20.0)
 
-        decision = service.build_launcher_decision("BTC-USDT-SWAP")
-        assert decision is not None
+        decisions = service.build_launcher_decisions("BTC-USDT-SWAP")
+        assert len(decisions) == 1
+        decision = decisions[0]
         # TP should be 5% above (launcher-level fallback)
         assert abs(decision["take_profit"] - 105.0) < 0.01
         # SL should be 15% below (launcher-level fallback)
         assert abs(decision["stop_loss"] - 85.0) < 0.01
 
-    def test_returns_none_when_strategy_disabled(self) -> None:
+    def test_returns_empty_when_strategy_disabled(self) -> None:
         service = _make_service()
         self._setup_service_with_price(service, 100.0)
         service.set_launcher_config({
@@ -577,8 +596,8 @@ class TestBuildLauncherDecision:
         })
         service._last_full_snapshot = _make_snapshot(rsi=5.0)
 
-        decision = service.build_launcher_decision("BTC-USDT-SWAP")
-        assert decision is None
+        decisions = service.build_launcher_decisions("BTC-USDT-SWAP")
+        assert decisions == []
 
     def test_reads_dynamic_tp_from_strategy_config(self) -> None:
         service = _make_service()
@@ -604,8 +623,9 @@ class TestBuildLauncherDecision:
         # effective_tp = min(10%, 3.5%) = 3.5%
         service._last_full_snapshot = _make_snapshot(rsi=20.0, bb_lower=95.0, bb_upper=105.0, bb_middle=100.0)
 
-        decision = service.build_launcher_decision("BTC-USDT-SWAP")
-        assert decision is not None
+        decisions = service.build_launcher_decisions("BTC-USDT-SWAP")
+        assert len(decisions) == 1
+        decision = decisions[0]
         # TP should be 3.5% above 100 = 103.5
         assert abs(decision["take_profit"] - 103.5) < 0.01
 
@@ -628,8 +648,9 @@ class TestBuildLauncherDecision:
         })
         service._last_full_snapshot = _make_snapshot(rsi=20.0)
 
-        decision = service.build_launcher_decision("BTC-USDT-SWAP")
-        assert decision is not None
+        decisions = service.build_launcher_decisions("BTC-USDT-SWAP")
+        assert len(decisions) == 1
+        decision = decisions[0]
         # RSI oversold → buy signal, but flip "both" → SELL
         assert decision["action"] == "SELL"
 
@@ -650,6 +671,7 @@ class TestBuildLauncherDecision:
         })
         service._last_full_snapshot = _make_snapshot(rsi=20.0)
 
-        decision = service.build_launcher_decision("BTC-USDT-SWAP")
-        assert decision is not None
+        decisions = service.build_launcher_decisions("BTC-USDT-SWAP")
+        assert len(decisions) == 1
+        decision = decisions[0]
         assert decision["_decision_origin"] == "launcher"

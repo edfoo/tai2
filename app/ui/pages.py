@@ -3244,6 +3244,99 @@ def register_pages(app: FastAPI) -> None:
                         mr_enabled_switch, "value"
                     )
 
+            # ── Spike Continuation ───────────────────────────────────────────────────
+            _sc_cfg = ((config.get("launcher") or {}).get("strategies") or {}).get("spike_continuation") or {}
+            with ui.card().classes("w-full rounded-lg border border-slate-200 mb-1"):
+                with ui.row().classes("w-full items-center gap-2 flex-nowrap"):
+                    sc_enabled_switch = ui.switch(
+                        value=bool(_sc_cfg.get("enabled", False)),
+                    ).props("dense color=primary")
+                    with ui.expansion("Spike Continuation").classes("flex-1 text-sm font-medium"):
+                        ui.label(
+                            "Momentum scalp: rides volume-driven spikes for 3-5% before they revert. "
+                            "Enters WITH the spike (not against it). Mirror image of Mean Reversion. "
+                            "Launcher mode must also be enabled on the CFG page."
+                        ).classes("text-xs text-slate-500 mb-3")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-start"):
+                            _sc_tp_raw = _sc_cfg.get("tp_pct")
+                            sc_tp_input = ui.number(
+                                label="Take profit (%)",
+                                value=float(_sc_tp_raw) if _sc_tp_raw is not None else 3.0,
+                                min=0.5, step=0.5, precision=1,
+                            ).classes("w-40").props(
+                                "hint='Exit after this % price move' persistent-hint clearable"
+                            )
+                            _sc_sl_raw = _sc_cfg.get("sl_pct")
+                            sc_sl_input = ui.number(
+                                label="Stop loss (%)",
+                                value=float(_sc_sl_raw) if _sc_sl_raw is not None else 5.0,
+                                min=0.5, step=0.5, precision=1,
+                            ).classes("w-40").props(
+                                "hint='Exit if spike fails and reverses this %' persistent-hint clearable"
+                            )
+                        with ui.row().classes("w-full flex-wrap gap-4 items-start"):
+                            _sc_vrsi_raw = _sc_cfg.get("volume_rsi_min")
+                            sc_volume_rsi_min_input = ui.number(
+                                label="Volume RSI min",
+                                value=float(_sc_vrsi_raw) if _sc_vrsi_raw is not None else 75.0,
+                                min=50, max=99, step=1, precision=0,
+                            ).classes("w-40").props(
+                                "hint='Volume RSI must be above this to confirm spike' persistent-hint"
+                            )
+                            _sc_rsi_min_raw = _sc_cfg.get("rsi_min")
+                            sc_rsi_min_input = ui.number(
+                                label="RSI min (buy zone)",
+                                value=float(_sc_rsi_min_raw) if _sc_rsi_min_raw is not None else 55.0,
+                                min=40, max=70, step=1, precision=0,
+                            ).classes("w-40").props(
+                                "hint='RSI must be above this for buys (momentum confirmed)' persistent-hint"
+                            )
+                            _sc_rsi_max_raw = _sc_cfg.get("rsi_max")
+                            sc_rsi_max_input = ui.number(
+                                label="RSI max (buy zone)",
+                                value=float(_sc_rsi_max_raw) if _sc_rsi_max_raw is not None else 75.0,
+                                min=60, max=90, step=1, precision=0,
+                            ).classes("w-40").props(
+                                "hint='Dont enter if RSI above this (Mean Reversion territory)' persistent-hint"
+                            )
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            sc_bb_breakout_switch = ui.switch(
+                                "Require BB breakout",
+                                value=bool(_sc_cfg.get("require_bb_breakout", True)),
+                            ).props("dense color=primary")
+                            ui.label("Price must be beyond the BB band to confirm the spike.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            sc_candle_strength_switch = ui.switch(
+                                "Require candle strength",
+                                value=bool(_sc_cfg.get("require_candle_strength", True)),
+                            ).props("dense color=primary")
+                            ui.label("Candle must close near its high (buy) or low (sell) — strong momentum, no rejection.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            sc_candle_strength_pct_input = ui.number(
+                                label="Candle strength %",
+                                value=float(_sc_cfg.get("candle_strength_pct") or 70.0),
+                                min=50, max=95, step=5, format="%.0f",
+                            ).classes("w-48").props("dense")
+                            ui.label("Close must be in this % of the candle range from the direction (70 = top 30% for buys).").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            sc_min_bb_bw_input = ui.number(
+                                label="Min BB Bandwidth %",
+                                value=float(_sc_cfg.get("min_bb_bandwidth") or 3.0),
+                                min=0.0, max=20.0, step=0.5, format="%.1f",
+                            ).classes("w-48").props("dense")
+                            ui.label("Only enter when bands are wide enough to suggest real volatility expansion.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            sc_max_adx_input = ui.number(
+                                label="Max ADX",
+                                value=float(_sc_cfg.get("max_adx") or 40.0),
+                                min=0, max=100, step=5, precision=0,
+                            ).classes("w-32").props(
+                                "hint='Skip if trend too strong (wont revert)' persistent-hint"
+                            )
+                    _active_badge_sc = ui.badge("Active", color="positive").bind_visibility_from(
+                        sc_enabled_switch, "value"
+                    )
+
             with ui.card().classes("w-full rounded-lg border border-slate-200 mb-1"):
                 with ui.row().classes("w-full items-center gap-2 flex-nowrap"):
                     shotgun_switch = ui.switch(
@@ -4034,6 +4127,19 @@ def register_pages(app: FastAPI) -> None:
                 "vwap_min_distance_pct": float(mr_vwap_min_dist_input.value or 1.0),
                 "require_volume_cooling": bool(mr_volume_cooling_switch.value),
                 "volume_rsi_max": float(mr_volume_rsi_max_input.value or 70.0),
+            }
+            _strategies_cfg["spike_continuation"] = {
+                "enabled": bool(sc_enabled_switch.value),
+                "tp_pct": float(sc_tp_input.value) if sc_tp_input.value not in (None, "") else None,
+                "sl_pct": float(sc_sl_input.value) if sc_sl_input.value not in (None, "") else None,
+                "volume_rsi_min": float(sc_volume_rsi_min_input.value or 75.0),
+                "rsi_min": float(sc_rsi_min_input.value or 55.0),
+                "rsi_max": float(sc_rsi_max_input.value or 75.0),
+                "require_bb_breakout": bool(sc_bb_breakout_switch.value),
+                "require_candle_strength": bool(sc_candle_strength_switch.value),
+                "candle_strength_pct": float(sc_candle_strength_pct_input.value or 70.0),
+                "min_bb_bandwidth": float(sc_min_bb_bw_input.value or 3.0),
+                "max_adx": float(sc_max_adx_input.value or 40.0),
             }
             _launcher_cfg["strategies"] = _strategies_cfg
             config["launcher"] = _launcher_cfg

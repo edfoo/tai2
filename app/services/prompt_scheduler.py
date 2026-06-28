@@ -480,7 +480,11 @@ class PromptScheduler:
         symbols: Iterable[str],
         market_service: Any,
     ) -> list[tuple[str, None, dict[str, Any], None]]:
-        """Return Launcher-mode decision tuples for all symbols that have a signal.
+        """Return Launcher-mode decision tuples for all symbols that have signals.
+
+        Calls build_launcher_decisions() which returns a list of decisions
+        (one per firing strategy).  Multiple strategies can fire on the same
+        symbol concurrently.
 
         bundle=None in each tuple signals Phase 3 to call handle_llm_decision()
         directly instead of apply_llm_decision().
@@ -490,11 +494,11 @@ class PromptScheduler:
         results: list[tuple[str, None, dict[str, Any], None]] = []
         for symbol in symbols:
             try:
-                decision = market_service.build_launcher_decision(symbol)
+                decisions = market_service.build_launcher_decisions(symbol)
             except Exception as exc:  # pragma: no cover - defensive
                 logger.debug("Launcher decision build failed for %s: %s", symbol, exc)
-                decision = None
-            if decision is not None:
+                decisions = []
+            for decision in decisions:
                 results.append((symbol, None, decision, None))
         return results
 

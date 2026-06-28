@@ -31,8 +31,9 @@ from app.db.postgres import (
 from app.models.trade import ExecutedTrade
 from app.services.okx_sdk_adapter import OkxAccountAdapter, OkxTradeAdapter
 from app.services.state_service import StateService
-from app.services.strategies import Strategy, StrategyHelpers
+from app.services.strategies import Strategy, StrategyHelpers, StrategySignal
 from app.services.strategies.mean_reversion import MeanReversionStrategy
+from app.services.strategies.spike_continuation import SpikeContinuationStrategy
 
 
 def _ensure_httpx_proxies_compat() -> None:
@@ -327,10 +328,12 @@ class MarketService:
         # Tracks when the bot itself recorded a close (is_close=True) so the WS
         # pos=0 handler can skip a duplicate notification for the same symbol.
         self._last_bot_close_recorded: dict[str, float] = {}
-        # _launcher_entering: per-symbol in-flight entry guard.
+        # _launcher_entering: per-(strategy, symbol) in-flight entry guard.
+        #   key → f"{strategy_name}:{symbol}"
         self._launcher_entering: set[str] = set()
-        # _launcher_in_position: symbols where Launcher opened a trade.
-        #   value → {"side": "long"|"short", "pos_side": str|None}
+        # _launcher_in_position: per-(strategy, symbol) position tracking.
+        #   key → f"{strategy_name}:{symbol}"
+        #   value → {"side": "long"|"short", "pos_side": str|None, "strategy": str}
         self._launcher_in_position: dict[str, dict[str, Any]] = {}
         # Scheduling state (launcher_only mode).
         self._launcher_last_entry_check: float = 0.0
@@ -340,7 +343,9 @@ class MarketService:
         self._launcher_had_positions: bool = False
         # Strategy registry: pluggable signal evaluators.
         # Each strategy reads from config["strategies"][<strategy_name>].
-        self._strategies: list[Strategy] = [MeanReversionStrategy()]
+        # All enabled strategies run concurrently — multiple can fire on the
+        # same symbol at the same time, each opening its own position.
+        self._strategies: list[Strategy] = [MeanReversionStrategy(), SpikeContinuationStrategy()]
         self._strategy_helpers = StrategyHelpers(
             extract_float=self._extract_float,
             emit_debug=self._emit_debug,
@@ -2120,23 +2125,25 @@ class MarketService:
 
     # ── Launcher ──────────────────────────────────────────────────────────────
 
-    def _launcher_evaluate_signal(self, symbol: str) -> str | None:
-        """Return "buy", "sell", or None by delegating to the strategy registry.
+    def _launcher_evaluate_signals(self, symbol: str) -> list[StrategySignal]:
+        """Return all strategy signals for a symbol (concurrent evaluation).
 
-        Iterates through all registered strategies; the first to fire wins.
+        All enabled strategies are evaluated; each can fire independently.
         Each strategy reads its own namespaced config from
         ``_launcher_config["strategies"][<name>]``.
         """
         snapshot = self._last_full_snapshot
         if not snapshot:
-            return None
+            return []
         strategies_cfg = self._launcher_config.get("strategies") or {}
+        signals: list[StrategySignal] = []
         for strategy in self._strategies:
             strat_cfg = strategies_cfg.get(strategy.name) or {}
             signal = strategy.evaluate(symbol, snapshot, strat_cfg, self._strategy_helpers)
             if signal is not None:
-                return signal
-        return None
+                signal.strategy_name = strategy.name
+                signals.append(signal)
+        return signals
 
     async def _check_launcher(self) -> None:
         """Update Launcher position-tracking state for the scheduler's on_close trigger.
@@ -2162,11 +2169,15 @@ class MarketService:
             if isinstance(p, dict) and self._extract_float(p.get("pos"))
         }
 
-        # Prune stale tracking (position settled externally)
-        for sym in list(self._launcher_in_position):
-            if sym not in active_symbols:
-                self._emit_debug(f"Launcher: {sym} no longer in positions — clearing tracking")
-                self._launcher_in_position.pop(sym, None)
+        # Prune stale tracking (position settled externally).
+        # Keys are "strategy_name:SYMBOL" — extract the symbol part to check.
+        for strat_key in list(self._launcher_in_position):
+            # strat_key format: "strategy_name:SYMBOL-USDT-SWAP"
+            _parts = strat_key.split(":", 1)
+            _sym = _parts[1] if len(_parts) > 1 else strat_key
+            if _sym not in active_symbols:
+                self._emit_debug(f"Launcher: {strat_key} no longer in positions — clearing tracking")
+                self._launcher_in_position.pop(strat_key, None)
 
         self._launcher_had_positions = bool(active_symbols)
 
@@ -2178,9 +2189,11 @@ class MarketService:
         contracts: float,
         trade_mode: str,
         attach_algo_orders: list[dict[str, Any]] | None,
+        strategy_name: str = "",
     ) -> None:
         """Submit a Launcher entry order and record position tracking on success."""
         coid = self._generate_client_order_id("gov")
+        strat_key = f"{strategy_name}:{symbol.upper()}" if strategy_name else symbol.upper()
         try:
             result = await self._submit_order(
                 symbol=symbol,
@@ -2198,17 +2211,18 @@ class MarketService:
                 return
             order_result = result[0] if isinstance(result, tuple) else result
             if order_result:
-                self._emit_debug(f"Launcher: {symbol} entry accepted ({side})")
-                self._launcher_in_position[symbol] = {
+                self._emit_debug(f"Launcher: {symbol} [{strategy_name}] entry accepted ({side})")
+                self._launcher_in_position[strat_key] = {
                     "side": "long" if side == "buy" else "short",
                     "pos_side": pos_side,
+                    "strategy": strategy_name,
                 }
             else:
-                self._emit_debug(f"Launcher: {symbol} entry rejected")
+                self._emit_debug(f"Launcher: {symbol} [{strategy_name}] entry rejected")
         except Exception as exc:
             logger.warning("Launcher entry error for %s: %s", symbol, exc)
         finally:
-            self._launcher_entering.discard(symbol)
+            self._launcher_entering.discard(strat_key)
 
     async def _launcher_close_position(
         self,
@@ -2243,17 +2257,17 @@ class MarketService:
         except Exception as exc:
             logger.warning("Launcher close error for %s: %s", symbol, exc)
 
-    def build_launcher_decision(self, symbol: str) -> dict[str, Any] | None:
-        """Build a synthetic decision dict using the Launcher's signal evaluation.
+    def build_launcher_decisions(self, symbol: str) -> list[dict[str, Any]]:
+        """Build decision dicts for all strategies that fire on a symbol.
 
         Called by PromptScheduler._tick() in launcher_only mode.  Returns a
-        decision compatible with handle_llm_decision(), or None if no signal
-        fires or the symbol is not eligible for entry.
+        list of decisions compatible with handle_llm_decision(), one per
+        firing strategy.  Multiple strategies can fire concurrently.
         """
         gov = self._launcher_config
         snapshot = self._last_full_snapshot
         if not snapshot:
-            return None
+            return []
 
         positions: list[dict[str, Any]] = snapshot.get("positions") or []
         active_symbols = {
@@ -2263,115 +2277,120 @@ class MarketService:
         }
         symbol_upper = symbol.upper()
 
-        if symbol_upper in self._launcher_entering:
-            self._emit_debug(f"Launcher: {symbol} entry in-flight — skipping")
-            return None
-        if symbol_upper in self._launcher_in_position:
-            self._emit_debug(f"Launcher: {symbol} already tracked — skipping")
-            return None
-        if symbol_upper in active_symbols:
-            self._emit_debug(f"Launcher: {symbol} has open position — skipping")
-            return None
-
-        signal = self._launcher_evaluate_signal(symbol)
-        if signal is None:
-            return None
-
         notional_usd = self._extract_float(gov.get("notional_usd"))
         if not notional_usd or notional_usd <= 0:
             self._emit_debug(f"Launcher: notional_usd not configured — skipping {symbol}")
-            return None
+            return []
 
         last_price = self.get_last_price(symbol)
         if not last_price or last_price <= 0:
             self._emit_debug(f"Launcher: {symbol} no last price — skipping")
-            return None
+            return []
 
-        # TP/SL: read from strategy-specific config if available, fall back to launcher-level.
-        _mr_cfg = (gov.get("strategies") or {}).get("mean_reversion") or {}
-        tp_pct = self._extract_float(_mr_cfg.get("tp_pct") if _mr_cfg.get("tp_pct") is not None else gov.get("tp_pct"))
-        sl_pct = self._extract_float(_mr_cfg.get("sl_pct") if _mr_cfg.get("sl_pct") is not None else gov.get("sl_pct"))
-        # Dynamic TP: when enabled, tighten the static TP using current BB bandwidth.
-        # Formula: effective_tp_pct = min(static_tp_pct, (bb_bandwidth / 2) × fraction × leverage)
-        # The dynamic value can only lower the target (close earlier in narrow bandwidth);
-        # it never raises it above the user-configured static TP.
-        dynamic_tp = bool(_mr_cfg.get("dynamic_tp") if _mr_cfg.get("dynamic_tp") is not None else gov.get("dynamic_tp", False))
-        dynamic_tp_fraction = self._extract_float(_mr_cfg.get("dynamic_tp_fraction") if _mr_cfg.get("dynamic_tp_fraction") is not None else gov.get("dynamic_tp_fraction")) or 0.7
-        effective_tp_pct = tp_pct
-        dynamic_tp_source = "static"
-        if dynamic_tp and tp_pct and tp_pct > 0:
-            sym_indicators = ((self._last_full_snapshot or {}).get("market_data") or {}).get(symbol) or {}
-            sym_indicators = sym_indicators.get("indicators") or {}
-            _bb = sym_indicators.get("bollinger_bands") or {}
-            _bb_lower = self._extract_float(_bb.get("lower"))
-            _bb_upper = self._extract_float(_bb.get("upper"))
-            _bb_middle = self._extract_float(_bb.get("middle"))
-            if _bb_lower is not None and _bb_upper is not None and _bb_middle and _bb_middle > 0:
-                _bw = (_bb_upper - _bb_lower) / _bb_middle * 100.0
-                # Leverage unknown at signal time; default to 1.0 (conservative — wider TP).
-                _lever = 1.0
-                _dyn = (_bw / 2.0) * dynamic_tp_fraction * _lever
-                if _dyn > 0:
-                    effective_tp_pct = min(tp_pct, _dyn)
-                    dynamic_tp_source = (
-                        f"dynamic(bw={_bw:.2f}%,frac={dynamic_tp_fraction}) "
-                        f"→ {_dyn:.2f}% → min={effective_tp_pct:.2f}%"
-                    )
-            else:
-                dynamic_tp_source = "dynamic(BB unavailable, fallback to static)"
-        tp_price: float | None = None
-        sl_price: float | None = None
-        if effective_tp_pct and effective_tp_pct > 0:
-            tp_price = (
-                last_price * (1 + effective_tp_pct / 100.0)
-                if signal == "buy"
-                else last_price * (1 - effective_tp_pct / 100.0)
-            )
-        if sl_pct and sl_pct > 0:
-            sl_price = (
-                last_price * (1 - sl_pct / 100.0)
-                if signal == "buy"
-                else last_price * (1 + sl_pct / 100.0)
-            )
+        signals = self._launcher_evaluate_signals(symbol)
+        if not signals:
+            return []
 
-        self._emit_debug(
-            f"Launcher signal: {symbol} {signal.upper()} last={last_price} "
-            f"notional={notional_usd} tp={tp_price} sl={sl_price} [{dynamic_tp_source}]"
-        )
-        action = "BUY" if signal == "buy" else "SELL"
+        decisions: list[dict[str, Any]] = []
+        for signal in signals:
+            strat_key = f"{signal.strategy_name}:{symbol_upper}"
 
-        # --- Flip Launcher direction if configured ---
-        # Read from strategy-specific config if available, fall back to launcher-level.
-        flip_dir = str(_mr_cfg.get("flip_launcher_direction") if _mr_cfg.get("flip_launcher_direction") is not None else gov.get("flip_launcher_direction") or "").strip().lower()
-        if flip_dir in ("both", "from_long", "from_short"):
-            should_flip = (
-                flip_dir == "both"
-                or (flip_dir == "from_long" and action == "BUY")
-                or (flip_dir == "from_short" and action == "SELL")
-            )
-            if should_flip:
-                orig_action = action
-                action = "SELL" if action == "BUY" else "BUY"
-                # Mirror TP/SL through the current price to preserve the distance.
-                if last_price and last_price > 0:
-                    tp_price = round(2 * last_price - tp_price, 10) if tp_price else None
-                    sl_price = round(2 * last_price - sl_price, 10) if sl_price else None
-                self._emit_debug(
-                    f"Launcher flip ({flip_dir}): {symbol} {orig_action} → {action} "
-                    f"tp={tp_price} sl={sl_price}"
+            # Per-strategy position guard: skip if this strategy already has
+            # an open or in-flight position on this symbol.
+            if strat_key in self._launcher_entering:
+                self._emit_debug(f"Launcher: {symbol} [{signal.strategy_name}] entry in-flight — skipping")
+                continue
+            if strat_key in self._launcher_in_position:
+                self._emit_debug(f"Launcher: {symbol} [{signal.strategy_name}] already tracked — skipping")
+                continue
+
+            # TP/SL from the strategy signal, falling back to launcher-level.
+            tp_pct = signal.tp_pct if signal.tp_pct is not None else self._extract_float(gov.get("tp_pct"))
+            sl_pct = signal.sl_pct if signal.sl_pct is not None else self._extract_float(gov.get("sl_pct"))
+
+            # Dynamic TP (Mean Reversion only): tighten TP using BB bandwidth.
+            effective_tp_pct = tp_pct
+            dynamic_tp_source = "static"
+            _mr_cfg = (gov.get("strategies") or {}).get("mean_reversion") or {}
+            if signal.strategy_name == "mean_reversion":
+                dynamic_tp = bool(_mr_cfg.get("dynamic_tp", False))
+                dynamic_tp_fraction = self._extract_float(_mr_cfg.get("dynamic_tp_fraction")) or 0.7
+                if dynamic_tp and tp_pct and tp_pct > 0:
+                    sym_indicators = ((self._last_full_snapshot or {}).get("market_data") or {}).get(symbol) or {}
+                    sym_indicators = sym_indicators.get("indicators") or {}
+                    _bb = sym_indicators.get("bollinger_bands") or {}
+                    _bb_lower = self._extract_float(_bb.get("lower"))
+                    _bb_upper = self._extract_float(_bb.get("upper"))
+                    _bb_middle = self._extract_float(_bb.get("middle"))
+                    if _bb_lower is not None and _bb_upper is not None and _bb_middle and _bb_middle > 0:
+                        _bw = (_bb_upper - _bb_lower) / _bb_middle * 100.0
+                        _lever = 1.0
+                        _dyn = (_bw / 2.0) * dynamic_tp_fraction * _lever
+                        if _dyn > 0:
+                            effective_tp_pct = min(tp_pct, _dyn)
+                            dynamic_tp_source = (
+                                f"dynamic(bw={_bw:.2f}%,frac={dynamic_tp_fraction}) "
+                                f"→ {_dyn:.2f}% → min={effective_tp_pct:.2f}%"
+                            )
+                    else:
+                        dynamic_tp_source = "dynamic(BB unavailable, fallback to static)"
+
+            tp_price: float | None = None
+            sl_price: float | None = None
+            if effective_tp_pct and effective_tp_pct > 0:
+                tp_price = (
+                    last_price * (1 + effective_tp_pct / 100.0)
+                    if signal.direction == "buy"
+                    else last_price * (1 - effective_tp_pct / 100.0)
+                )
+            if sl_pct and sl_pct > 0:
+                sl_price = (
+                    last_price * (1 - sl_pct / 100.0)
+                    if signal.direction == "buy"
+                    else last_price * (1 + sl_pct / 100.0)
                 )
 
-        return {
-            "action": action,
-            "symbol": symbol,
-            "notional_usd": notional_usd,
-            "confidence": 1.0,
-            "risk_score": 0.5,
-            "take_profit": tp_price,
-            "stop_loss": sl_price,
-            "rationale": f"Launcher signal: {action}",
-            "_decision_origin": "launcher",
-        }
+            action = "BUY" if signal.direction == "buy" else "SELL"
+
+            # Flip direction (Mean Reversion only).
+            if signal.strategy_name == "mean_reversion":
+                flip_dir = str(_mr_cfg.get("flip_launcher_direction") or "").strip().lower()
+                if flip_dir in ("both", "from_long", "from_short"):
+                    should_flip = (
+                        flip_dir == "both"
+                        or (flip_dir == "from_long" and action == "BUY")
+                        or (flip_dir == "from_short" and action == "SELL")
+                    )
+                    if should_flip:
+                        orig_action = action
+                        action = "SELL" if action == "BUY" else "BUY"
+                        if last_price and last_price > 0:
+                            tp_price = round(2 * last_price - tp_price, 10) if tp_price else None
+                            sl_price = round(2 * last_price - sl_price, 10) if sl_price else None
+                        self._emit_debug(
+                            f"Launcher flip ({flip_dir}): {symbol} {orig_action} → {action} "
+                            f"tp={tp_price} sl={sl_price}"
+                        )
+
+            self._emit_debug(
+                f"Launcher signal: {symbol} {action} [{signal.strategy_name}] "
+                f"last={last_price} notional={notional_usd} tp={tp_price} sl={sl_price} [{dynamic_tp_source}]"
+            )
+
+            decisions.append({
+                "action": action,
+                "symbol": symbol,
+                "notional_usd": notional_usd,
+                "confidence": 1.0,
+                "risk_score": 0.5,
+                "take_profit": tp_price,
+                "stop_loss": sl_price,
+                "rationale": signal.rationale or f"Launcher signal: {action}",
+                "_decision_origin": "launcher",
+                "_strategy_name": signal.strategy_name,
+            })
+
+        return decisions
 
     async def _check_alternator(self) -> None:
         """Oscillate between long/short positions on profit and loss thresholds.
@@ -6925,9 +6944,11 @@ class MarketService:
         # ── Launcher LLM filter (llm_with_filter mode) ───────────────────────
         _gov = self._launcher_config
         if str(_gov.get("mode") or "disabled").lower() == "llm_with_filter":
-            gov_signal = self._launcher_evaluate_signal(symbol)
+            _all_signals = self._launcher_evaluate_signals(symbol)
             llm_direction = "buy" if action == "BUY" else "sell"
-            if gov_signal != llm_direction:
+            # Check if any strategy agrees with the LLM direction
+            _agreeing = [s for s in _all_signals if s.direction == llm_direction]
+            if not _agreeing:
                 # Distinguish: no data vs neutral vs conflicting.
                 _snap = self._last_full_snapshot
                 _sym_indicators = (
@@ -6937,10 +6958,11 @@ class MarketService:
                 _rsi = self._extract_float(_sym_indicators.get("rsi"))
                 if _snap is None or _rsi is None:
                     veto_detail = "no indicator data available"
-                elif gov_signal is None:
+                elif not _all_signals:
                     veto_detail = f"indicators neutral (RSI={_rsi:.1f}), no directional alignment"
                 else:
-                    veto_detail = f"conflicting indicator signal={gov_signal!r}"
+                    _dirs = [s.direction for s in _all_signals]
+                    veto_detail = f"conflicting strategy signals={_dirs!r}"
                 veto_reason = (
                     f"Launcher vetoed LLM {action} for {symbol}: {veto_detail}"
                 )
@@ -6949,14 +6971,14 @@ class MarketService:
                     symbol,
                     veto_reason,
                     level="warning",
-                    meta={"action": action, "launcher_signal": gov_signal},
+                    meta={"action": action, "launcher_signals": [s.direction for s in _all_signals]},
                 )
                 return False
-            # Launcher agrees — amend trade with Launcher's TP/SL if configured.
-            # Read TP/SL from strategy-specific config if available, fall back to launcher-level.
-            _mr_gov = (_gov.get("strategies") or {}).get("mean_reversion") or {}
-            gov_tp_pct = self._extract_float(_mr_gov.get("tp_pct") if _mr_gov.get("tp_pct") is not None else _gov.get("tp_pct"))
-            gov_sl_pct = self._extract_float(_mr_gov.get("sl_pct") if _mr_gov.get("sl_pct") is not None else _gov.get("sl_pct"))
+            # Launcher agrees — amend trade with the first agreeing strategy's TP/SL.
+            _agreeing_signal = _agreeing[0]
+            _strat_cfg = (_gov.get("strategies") or {}).get(_agreeing_signal.strategy_name) or {}
+            gov_tp_pct = _agreeing_signal.tp_pct if _agreeing_signal.tp_pct is not None else self._extract_float(_strat_cfg.get("tp_pct", _gov.get("tp_pct")))
+            gov_sl_pct = _agreeing_signal.sl_pct if _agreeing_signal.sl_pct is not None else self._extract_float(_strat_cfg.get("sl_pct", _gov.get("sl_pct")))
             gov_notional = self._extract_float(_gov.get("notional_usd"))
             _amended: list[str] = []
             if gov_notional and gov_notional > 0:

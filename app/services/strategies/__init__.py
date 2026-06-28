@@ -1,13 +1,14 @@
 """Pluggable strategy interface for the Launcher.
 
 Each strategy evaluates the current market snapshot and returns a directional
-signal ("buy", "sell", or None).  The Launcher iterates through all enabled
-strategies on each scheduler tick; the first strategy to fire wins.
+signal ("buy", "sell", or None).  All enabled strategies run concurrently on
+each scheduler tick — multiple strategies can fire on the same symbol at the
+same time, each opening its own position with its own TP/SL.
 
 To add a new strategy:
   1. Create a new file in ``app/services/strategies/`` implementing the
      ``Strategy`` protocol.
-  2. Register it in ``STRATEGY_REGISTRY`` below.
+  2. Register it in ``MarketService._strategies``.
   3. Add a card on the STRATEGY page in ``pages.py`` with its own
      enable/disable switch and config fields.
   4. The config is namespaced under ``config["strategies"][<strategy_name>]``.
@@ -15,7 +16,34 @@ To add a new strategy:
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
+
+
+@dataclass
+class StrategySignal:
+    """Signal returned by a strategy evaluation.
+
+    Attributes
+    ----------
+    direction:
+        "buy" or "sell".
+    strategy_name:
+        Name of the strategy that fired (set automatically by the registry).
+    tp_pct:
+        Optional take-profit % for this strategy.  If None, the Launcher's
+        global TP/SL or algo orders are used.
+    sl_pct:
+        Optional stop-loss % for this strategy.
+    rationale:
+        Human-readable reason for the signal (shown in logs/notifications).
+    """
+
+    direction: str
+    strategy_name: str = ""
+    tp_pct: float | None = None
+    sl_pct: float | None = None
+    rationale: str = ""
 
 
 @runtime_checkable
@@ -30,8 +58,8 @@ class Strategy(Protocol):
         snapshot: dict[str, Any],
         config: dict[str, Any],
         helpers: StrategyHelpers,
-    ) -> str | None:
-        """Return "buy", "sell", or None.
+    ) -> StrategySignal | None:
+        """Return a StrategySignal, or None if no signal fires.
 
         Parameters
         ----------
@@ -49,7 +77,7 @@ class Strategy(Protocol):
 
         Returns
         -------
-        ``"buy"``, ``"sell"``, or ``None`` (no signal).
+        A ``StrategySignal`` with direction "buy" or "sell", or ``None``.
         """
         ...
 
