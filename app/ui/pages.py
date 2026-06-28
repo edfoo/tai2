@@ -3190,6 +3190,45 @@ def register_pages(app: FastAPI) -> None:
                             ).classes("w-48").props("dense")
                             ui.label("Block when BB bandwidth is outside this range. 0 = off.").classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            mr_candle_rejection_switch = ui.switch(
+                                "Require candle rejection",
+                                value=bool(_mr_cfg.get("require_candle_rejection", False)),
+                            ).props("dense color=primary")
+                            ui.label("Require upper wick for shorts / lower wick for longs (exhaustion confirmation).").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            mr_candle_rejection_pct_input = ui.number(
+                                label="Candle rejection %",
+                                value=float(_mr_cfg.get("candle_rejection_pct") or 30.0),
+                                min=5.0, max=90.0, step=5.0, format="%.0f",
+                            ).classes("w-48").props("dense")
+                            ui.label("Minimum wick size as % of candle range (30 = wick is 30%+ of the candle).").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            mr_vwap_reversion_switch = ui.switch(
+                                "Require VWAP reversion",
+                                value=bool(_mr_cfg.get("require_vwap_reversion", False)),
+                            ).props("dense color=primary")
+                            ui.label("Require price extended from VWAP AND closing back toward it.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            mr_vwap_min_dist_input = ui.number(
+                                label="VWAP min distance %",
+                                value=float(_mr_cfg.get("vwap_min_distance_pct") or 1.0),
+                                min=0.1, max=20.0, step=0.1, format="%.1f",
+                            ).classes("w-48").props("dense")
+                            ui.label("Minimum % distance from VWAP to qualify as 'extended'.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            mr_volume_cooling_switch = ui.switch(
+                                "Require volume cooling",
+                                value=bool(_mr_cfg.get("require_volume_cooling", False)),
+                            ).props("dense color=primary")
+                            ui.label("Block when volume RSI is still high (spike still being driven by heavy volume).").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            mr_volume_rsi_max_input = ui.number(
+                                label="Volume RSI max",
+                                value=float(_mr_cfg.get("volume_rsi_max") or 70.0),
+                                min=10.0, max=99.0, step=5.0, format="%.0f",
+                            ).classes("w-48").props("dense")
+                            ui.label("Maximum volume RSI to allow entry (below = volume momentum fading).").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             _mr_flip_enabled = bool(_mr_cfg.get("flip_launcher_direction"))
                             mr_flip_switch = ui.switch(
                                 "Flip Launcher Decision",
@@ -3989,6 +4028,12 @@ def register_pages(app: FastAPI) -> None:
                 "flip_launcher_direction": str(mr_flip_select.value) if mr_flip_switch.value else None,
                 "dynamic_tp": bool(mr_dynamic_tp_switch.value),
                 "dynamic_tp_fraction": float(mr_dynamic_tp_fraction_input.value or 0.7),
+                "require_candle_rejection": bool(mr_candle_rejection_switch.value),
+                "candle_rejection_pct": float(mr_candle_rejection_pct_input.value or 30.0),
+                "require_vwap_reversion": bool(mr_vwap_reversion_switch.value),
+                "vwap_min_distance_pct": float(mr_vwap_min_dist_input.value or 1.0),
+                "require_volume_cooling": bool(mr_volume_cooling_switch.value),
+                "volume_rsi_max": float(mr_volume_rsi_max_input.value or 70.0),
             }
             _launcher_cfg["strategies"] = _strategies_cfg
             config["launcher"] = _launcher_cfg

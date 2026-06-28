@@ -30,6 +30,17 @@ class MeanReversionStrategy:
       - ``max_bb_bandwidth`` (float, default 0.0)
       - ``min_adx`` (float, default 0.0)
       - ``max_adx`` (float, default 0.0)
+      - ``require_candle_rejection`` (bool, default False): require upper wick
+        for shorts, lower wick for longs (exhaustion confirmation)
+      - ``candle_rejection_pct`` (float, default 0.3): minimum wick size as %
+        of candle range (30 = wick is 30%+ of the candle)
+      - ``require_vwap_reversion`` (bool, default False): require price extended
+        from VWAP AND closing back toward it
+      - ``vwap_min_distance_pct`` (float, default 1.0): minimum % distance from
+        VWAP to qualify as "extended"
+      - ``require_volume_cooling`` (bool, default False): require volume RSI
+        below threshold (volume momentum fading)
+      - ``volume_rsi_max`` (float, default 70.0): maximum volume RSI to allow entry
     """
 
     name = "mean_reversion"
@@ -54,6 +65,12 @@ class MeanReversionStrategy:
         require_cmf_no_divergence = bool(config.get("require_cmf_no_divergence", False))
         require_footprint_delta = bool(config.get("require_footprint_delta", False))
         require_bb_position = bool(config.get("require_bb_position", False))
+        require_candle_rejection = bool(config.get("require_candle_rejection", False))
+        candle_rejection_pct = helpers.extract_float(config.get("candle_rejection_pct")) or 0.3
+        require_vwap_reversion = bool(config.get("require_vwap_reversion", False))
+        vwap_min_distance_pct = helpers.extract_float(config.get("vwap_min_distance_pct")) or 1.0
+        require_volume_cooling = bool(config.get("require_volume_cooling", False))
+        volume_rsi_max = helpers.extract_float(config.get("volume_rsi_max")) or 70.0
         bb_proximity_pct = helpers.extract_float(config.get("bb_proximity_pct")) or 0.0
         min_bb_bandwidth = helpers.extract_float(config.get("min_bb_bandwidth")) or 0.0
         max_bb_bandwidth = helpers.extract_float(config.get("max_bb_bandwidth")) or 0.0
@@ -134,6 +151,72 @@ class MeanReversionStrategy:
             if fp_data:
                 fp_net_delta = helpers.extract_float(fp_data.get("net_delta"))
 
+        # ── Candle rejection filter ──────────────────────────────────────────
+        # Requires the current candle to show a rejection wick — i.e., the close
+        # is significantly below the high (for shorts) or above the low (for longs).
+        # This prevents entering mid-spike; the candle must show exhaustion.
+        # candle_rejection_pct = minimum wick size as % of candle range.
+        candle_rejection_long_ok = False
+        candle_rejection_short_ok = False
+        if require_candle_rejection:
+            ohlcv_compact = indicators.get("ohlcv") or []
+            if ohlcv_compact and isinstance(ohlcv_compact[-1], dict):
+                _c = ohlcv_compact[-1]
+                _high = helpers.extract_float(_c.get("high"))
+                _low = helpers.extract_float(_c.get("low"))
+                _close = helpers.extract_float(_c.get("close"))
+                if _high is not None and _low is not None and _close is not None:
+                    _range = _high - _low
+                    if _range > 0:
+                        # Upper wick = high - max(close, open); we use close for simplicity.
+                        _upper_wick = _high - _close
+                        _lower_wick = _close - _low
+                        _upper_wick_pct = (_upper_wick / _range) * 100.0
+                        _lower_wick_pct = (_lower_wick / _range) * 100.0
+                        candle_rejection_long_ok = _lower_wick_pct >= candle_rejection_pct
+                        candle_rejection_short_ok = _upper_wick_pct >= candle_rejection_pct
+
+        # ── VWAP reversion filter ────────────────────────────────────────────
+        # Requires price to be extended from VWAP (confirming the spike) AND
+        # the current candle closing back toward VWAP (confirming reversion started).
+        # vwap_min_distance_pct = minimum % distance from VWAP to qualify as "extended".
+        vwap_value = helpers.extract_float(indicators.get("vwap"))
+        vwap_long_ok = False
+        vwap_short_ok = False
+        if require_vwap_reversion and vwap_value is not None and vwap_value > 0 and bb_last_price is not None:
+            _vwap_dist_pct = abs(bb_last_price - vwap_value) / vwap_value * 100.0
+            if _vwap_dist_pct >= vwap_min_distance_pct:
+                # Price is extended from VWAP. Now check if this candle is closing
+                # back toward VWAP (reversion started).
+                ohlcv_compact = indicators.get("ohlcv") or []
+                if len(ohlcv_compact) >= 2 and isinstance(ohlcv_compact[-1], dict):
+                    _prev_close = helpers.extract_float(ohlcv_compact[-2].get("close"))
+                    _curr_close = helpers.extract_float(ohlcv_compact[-1].get("close"))
+                    if _prev_close is not None and _curr_close is not None:
+                        # For longs: price below VWAP, closing up toward it
+                        vwap_long_ok = (
+                            bb_last_price < vwap_value
+                            and _curr_close > _prev_close
+                        )
+                        # For shorts: price above VWAP, closing down toward it
+                        vwap_short_ok = (
+                            bb_last_price > vwap_value
+                            and _curr_close < _prev_close
+                        )
+
+        # ── Volume RSI cooling filter ────────────────────────────────────────
+        # Volume RSI measures volume momentum. When extremely high, the spike
+        # is still being driven by heavy volume. Wait for it to cool below
+        # volume_rsi_max before entering — this signals buying pressure is fading.
+        volume_rsi_series = indicators.get("volume_rsi_series") or []
+        volume_rsi_value: float | None = None
+        if volume_rsi_series:
+            volume_rsi_value = helpers.extract_float(volume_rsi_series[-1])
+        volume_cooling_ok = (
+            not require_volume_cooling
+            or (volume_rsi_value is not None and volume_rsi_value < volume_rsi_max)
+        )
+
         if rsi is None:
             helpers.emit_debug(f"MeanReversion: {symbol} — no entry signal (RSI unavailable)")
             return None
@@ -173,6 +256,9 @@ class MeanReversionStrategy:
             and (not require_htf_trend or htf_bullish)
             and (not require_footprint_delta or (fp_net_delta is not None and fp_net_delta > 0))
             and (not require_bb_position or bb_long_ok)
+            and (not require_candle_rejection or candle_rejection_long_ok)
+            and (not require_vwap_reversion or vwap_long_ok)
+            and volume_cooling_ok
         )
         sell_signal = (
             rsi > rsi_overbought
@@ -183,6 +269,9 @@ class MeanReversionStrategy:
             and (not require_htf_trend or htf_bearish)
             and (not require_footprint_delta or (fp_net_delta is not None and fp_net_delta < 0))
             and (not require_bb_position or bb_short_ok)
+            and (not require_candle_rejection or candle_rejection_short_ok)
+            and (not require_vwap_reversion or vwap_short_ok)
+            and volume_cooling_ok
         )
         if buy_signal:
             return "buy"
@@ -224,5 +313,15 @@ class MeanReversionStrategy:
             parts.append(
                 f"BB_bw={bb_bandwidth:.2f}%" if bb_bandwidth is not None else "BB_bw=n/a"
             )
+        if require_candle_rejection:
+            parts.append(f"candle_rej={'ok' if (candle_rejection_long_ok or candle_rejection_short_ok) else 'blocked'}")
+        if require_vwap_reversion:
+            if vwap_value is not None and bb_last_price is not None:
+                _vwap_dist = abs(bb_last_price - vwap_value) / vwap_value * 100.0 if vwap_value > 0 else 0.0
+                parts.append(f"VWAP={vwap_value:.4g}/dist={_vwap_dist:.2f}% (long={'ok' if vwap_long_ok else 'blocked'}, short={'ok' if vwap_short_ok else 'blocked'})")
+            else:
+                parts.append("VWAP=n/a")
+        if require_volume_cooling:
+            parts.append(f"vol_rsi={volume_rsi_value:.1f}" if volume_rsi_value is not None else "vol_rsi=n/a")
         helpers.emit_debug(f"MeanReversion: {symbol} — no entry signal ({', '.join(parts)})")
         return None
