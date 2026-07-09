@@ -3002,7 +3002,9 @@ def register_pages(app: FastAPI) -> None:
         })
 
         with wrapper:
-            ui.label("Strategy").classes("text-2xl font-bold")
+            with ui.row().classes("w-full justify-between items-center"):
+                ui.label("Strategy").classes("text-2xl font-bold")
+                save_button = ui.button("Save", icon="save", color="primary")
             ui.label(
                 "Configure automated trading strategies that run independently of LLM decisions."
             ).classes("text-sm text-slate-500 mb-2")
@@ -4029,9 +4031,6 @@ def register_pages(app: FastAPI) -> None:
                 _active_badge_ob_stops = ui.badge("Active", color="positive").bind_visibility_from(
                     ob_wall_stops_switch, "value"
                 )
-
-            ui.separator().classes("w-full my-2")
-            save_button = ui.button("Save", icon="save", color="primary")
 
         # Only one of these three can be enabled at a time.  When the user turns
         # one ON the others are silently disabled and a notification is shown.
