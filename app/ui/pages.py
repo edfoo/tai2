@@ -5055,7 +5055,21 @@ def register_pages(app: FastAPI) -> None:
         with wrapper:
             with ui.row().classes("w-full justify-between items-center"):
                 ui.label("Engine Configuration").classes("text-2xl font-bold")
-                save_button = ui.button("Save", icon="save", color="primary")
+                with ui.row().classes("gap-2 items-center"):
+                    # Hidden file upload used by the Import button (accepts JSON only).
+                    import_upload = ui.upload(
+                        label="import",
+                        auto_upload=True,
+                        multiple=False,
+                        on_upload=lambda e: None,  # replaced below with real handler
+                    ).props("accept=.json hidden").classes("hidden")
+                    ui.button("Export", icon="download", color="secondary").on(
+                        "click", lambda _e: export_config()
+                    )
+                    ui.button("Import", icon="upload", color="secondary").on(
+                        "click", lambda _e: _trigger_upload()
+                    )
+                    save_button = ui.button("Save", icon="save", color="primary")
             ui.label("Notifications").classes("text-xl font-semibold")
             ui.label("Send Telegram alerts when trades are opened or closed (requires TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in .env)").classes("text-sm text-slate-500")
             _notifications_cfg = config.get("notifications") or {}
@@ -6318,6 +6332,107 @@ def register_pages(app: FastAPI) -> None:
             apply_model_change(getattr(e, "value", None))
 
         model_select.on_value_change(on_model_change)
+
+        # ── Config export / import ────────────────────────────────────────────
+        # Keys excluded from export because they are account/environment-specific
+        # (OKX routing), runtime-only state, or prompt text (managed separately).
+        _CONFIG_EXPORT_EXCLUDED = {
+            "okx_sub_account",
+            "okx_sub_account_use_master",
+            "okx_api_flag",
+            "risk_locks",
+            "llm_response_schemas",
+            "llm_system_prompt",
+            "llm_decision_prompt",
+            "prompt_sections",
+            "prompt_version_id",
+            "prompt_version_name",
+        }
+
+        def _build_export_payload() -> dict[str, Any]:
+            """Return a sanitized snapshot of runtime_config safe for export."""
+            runtime = getattr(app.state, "runtime_config", {}) or {}
+            sanitized = {
+                key: value
+                for key, value in runtime.items()
+                if key not in _CONFIG_EXPORT_EXCLUDED
+            }
+            return {
+                "version": 1,
+                "exported_at": datetime.now(timezone.utc).isoformat(),
+                "config": sanitized,
+            }
+
+        def export_config() -> None:
+            """Serialize the current runtime config to a downloadable JSON file."""
+            try:
+                payload = _build_export_payload()
+                content = json.dumps(payload, indent=2, default=str, sort_keys=True)
+                stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+                filename = f"tai2-config-{stamp}.json"
+                ui.download(content.encode("utf-8"), filename=filename)
+                ui.notify(f"Exported config to {filename}", color="positive")
+            except Exception as exc:  # pragma: no cover - defensive
+                ui.notify(f"Failed to export config: {exc}", color="negative")
+
+        def _trigger_upload() -> None:
+            """Programmatically open the hidden upload's file picker."""
+            try:
+                import_upload.run_method("pickFiles")
+            except Exception as exc:  # pragma: no cover - defensive
+                ui.notify(f"Failed to open file picker: {exc}", color="negative")
+
+        async def _handle_import(e: Any) -> None:
+            """Read the uploaded JSON, validate, and apply to runtime_config."""
+            try:
+                file_obj = getattr(e, "file", None)
+                if file_obj is None:
+                    ui.notify("No file content received", color="negative")
+                    return
+                # FileUpload.read() is async in NiceGUI 3.x
+                raw = await file_obj.read()
+                text = raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
+                payload = json.loads(text)
+            except json.JSONDecodeError as exc:
+                ui.notify(f"Invalid JSON: {exc}", color="negative")
+                return
+            except Exception as exc:  # pragma: no cover - defensive
+                ui.notify(f"Failed to read import file: {exc}", color="negative")
+                return
+            if not isinstance(payload, dict) or payload.get("version") != 1:
+                ui.notify(
+                    "Unrecognized config file (missing version=1). Import aborted.",
+                    color="negative",
+                )
+                return
+            imported_config = payload.get("config")
+            if not isinstance(imported_config, dict) or not imported_config:
+                ui.notify("Config file contains no config object", color="negative")
+                return
+            # Reject any keys that should never be imported.
+            forbidden = imported_config.keys() & _CONFIG_EXPORT_EXCLUDED
+            if forbidden:
+                ui.notify(
+                    f"Config file contains protected keys ({', '.join(sorted(forbidden))}); "
+                    "import aborted.",
+                    color="negative",
+                )
+                return
+            # Replace all included keys in runtime_config (missing keys keep current values).
+            runtime = getattr(app.state, "runtime_config", {}) or {}
+            runtime.update(imported_config)
+            app.state.runtime_config = runtime
+            # Mirror into the local `config` dict so the current page reflects the
+            # imported values until the next full reload.
+            config.update(imported_config)
+            ui.notify(
+                "Config imported into runtime. Click Save to persist to the database, "
+                "or reload the page to review the applied values.",
+                color="positive",
+                timeout=8000,
+            )
+
+        import_upload.on_upload(_handle_import)
 
         async def save_settings(event: Any | None = None) -> None:
             def _safe_notify(message: str, **kwargs: Any) -> None:
