@@ -82,6 +82,19 @@ class BacktestEngine:
         )
         self._current_prices: dict[str, float] = {}
 
+        # Warn if any enabled strategy config requires footprint data — it's
+        # never available in backtest (no historical trade tape), so the filter
+        # is silently skipped. This makes backtests with that flag a lower
+        # bound on filtering (more trades than live).
+        _strat_cfg = self._config.strategy_config or {}
+        _mr = (_strat_cfg.get("strategies") or {}).get("mean_reversion") or {}
+        if bool(_mr.get("require_footprint_delta", False)):
+            logger.warning(
+                "Backtest: mean_reversion.require_footprint_delta=True — "
+                "footprint data is never available historically; the footprint "
+                "filter will be skipped. Backtest may show more trades than live."
+            )
+
     # ── Public API ────────────────────────────────────────────────────
 
     async def run(

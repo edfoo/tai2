@@ -145,10 +145,15 @@ class MeanReversionStrategy:
                 bullish_div = not price_up and cmf_up   # price lower, CMF higher → hidden strength
 
         # Footprint net delta from the live market metrics (populated by _compute_custom_metrics)
+        # When footprint data is structurally absent (e.g. backtest — no historical
+        # trade tape), the filter is skipped rather than blocking every signal.
+        # When footprint data IS present, the delta must agree with direction.
         fp_net_delta: float | None = None
+        fp_data_available = False
         if require_footprint_delta:
             fp_data = (sym_data.get("custom_metrics") or {}).get("footprint") or helpers.compute_footprint(symbol)
             if fp_data:
+                fp_data_available = True
                 fp_net_delta = helpers.extract_float(fp_data.get("net_delta"))
 
         # ── Candle rejection filter ──────────────────────────────────────────
@@ -254,7 +259,7 @@ class MeanReversionStrategy:
             and (not require_cmf_cross or cmf_crossed_up)
             and (not require_cmf_no_divergence or not bearish_div)
             and (not require_htf_trend or htf_bullish)
-            and (not require_footprint_delta or (fp_net_delta is not None and fp_net_delta > 0))
+            and (not require_footprint_delta or not fp_data_available or (fp_net_delta is not None and fp_net_delta > 0))
             and (not require_bb_position or bb_long_ok)
             and (not require_candle_rejection or candle_rejection_long_ok)
             and (not require_vwap_reversion or vwap_long_ok)
@@ -267,7 +272,7 @@ class MeanReversionStrategy:
             and (not require_cmf_cross or cmf_crossed_down)
             and (not require_cmf_no_divergence or not bullish_div)
             and (not require_htf_trend or htf_bearish)
-            and (not require_footprint_delta or (fp_net_delta is not None and fp_net_delta < 0))
+            and (not require_footprint_delta or not fp_data_available or (fp_net_delta is not None and fp_net_delta < 0))
             and (not require_bb_position or bb_short_ok)
             and (not require_candle_rejection or candle_rejection_short_ok)
             and (not require_vwap_reversion or vwap_short_ok)
@@ -312,7 +317,12 @@ class MeanReversionStrategy:
             else:
                 parts.append("HTF EMA=n/a")
         if require_footprint_delta:
-            parts.append(f"fp_delta={fp_net_delta:.2f}" if fp_net_delta is not None else "fp_delta=n/a")
+            if not fp_data_available:
+                parts.append("fp_delta=skipped(no data)")
+            elif fp_net_delta is not None:
+                parts.append(f"fp_delta={fp_net_delta:.2f}")
+            else:
+                parts.append("fp_delta=n/a")
         if require_bb_position:
             if bb_last_price is not None and bb_lower is not None and bb_upper is not None:
                 parts.append(
