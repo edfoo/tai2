@@ -52,6 +52,7 @@ app/
   models/          # Pydantic schemas (e.g., ExecutedTrade)
   services/        # Redis state + OKX/LLM logic
     strategies/    # Pluggable Launcher strategies (Mean Reversion, …)
+    backtest/      # Backtesting engine (data fetcher, simulator, metrics)
   ui/              # NiceGUI components and pages
   main.py          # FastAPI entry point
 
@@ -64,8 +65,9 @@ tests/             # pytest suites
 2. **Data Layer** – TimescaleDB schema, asyncpg pool, Redis `StateService`.
 3. **Market Engine** – OKX REST/WebSocket, indicators, Redis snapshots.
 4. **Reasoning Engine** – OpenRouter-based LLM decisions and trade execution.
-5. **Frontend** – NiceGUI pages for LIVE/TA/STRATEGY/HISTORY/DEBUG/PROMPT/CFG.
+5. **Frontend** – NiceGUI pages for LIVE/TA/STRATEGY/BACKTEST/HISTORY/DEBUG/PROMPT/CFG.
 6. **Integration** – FastAPI startup orchestration, global error surface, final docs/tests.
+7. **Backtesting** – Historical strategy backtesting with simulated broker and metrics.
 
 ## Notes
 
@@ -348,3 +350,52 @@ Don't widen SL further. Instead
 Drop RSI to 18 (even deeper entries)
 Or enable OB Wall Dynamic Stop-Loss on the STRATEGY page — it places the SL at the nearest order-book wall, which adapts to market structure rather than a fixed %
 ```
+
+## Backtesting
+
+The **BACKTEST** page (`/backtest`) lets you run historical backtests of your strategies using the current config values from the STRATEGY and CFG pages. Data is fetched from OKX and cached locally for instant re-runs.
+
+### How it works
+
+1. **Data fetching** — Historical OHLCV candles (LTF + HTF) are fetched from OKX using paginated REST calls (max 300 candles/request, walking backward from the end date). Fetched data is cached to `backtest_cache/` as JSON, keyed by `symbol_timeframe_start_end`, so re-running a backtest with different strategy parameters is instant.
+2. **Indicator computation** — The engine reuses the same `MarketService._compute_indicators()` and `_compute_structure()` static methods used in live trading, ensuring indicators are calculated identically.
+3. **Strategy evaluation** — The engine reuses the live `Strategy.evaluate()` protocol. Each selected strategy is evaluated against a synthetic snapshot built from the historical candle window, exactly matching the snapshot shape strategies expect.
+4. **Simulated broker** — The simulator replicates OKX algo-order TP/SL behaviour: when a candle's high/low crosses the TP or SL price, the position closes at that price. If both TP and SL are hit within the same candle, SL is assumed to trigger first (pessimistic assumption).
+5. **Metrics** — After the run, the engine computes: net profit, total return %, win rate, profit factor, max drawdown, Sharpe ratio per candle, average win/loss, expectancy, win/loss streaks, and a per-strategy breakdown.
+
+### Configuration
+
+On the BACKTEST page:
+- **Symbol** — multi-select from current trading pairs
+- **Timeframe** — 15m, 1H, 4H, or 1D (matches the live `ta_timeframe` options)
+- **Initial Capital** — starting account equity in USDT
+- **Lookback (days)** — backtest period = last N days from now (200 warmup candles are automatically added before the start for indicator stabilisation)
+- **Strategies** — toggle which strategies to backtest (uses current config values from the STRATEGY page)
+
+### Results
+
+- **Summary metrics** — cards showing net profit, total trades, win rate, profit factor, max drawdown, final equity, Sharpe/candle, average win/loss, and expectancy
+- **Per-strategy breakdown** — table with trades, win rate, net profit, and profit factor per strategy
+- **Equity curve** — line chart of account equity over the backtest period
+- **Trade table** — detailed list of all closed trades with entry/exit prices, close reason, PnL, and PnL %
+
+### Limitations
+
+- **CVD / Footprint / OFI** — These metrics derive from live WebSocket tick-level trade data and are not available in backtest. Strategies with `require_footprint_delta` or `require_cmf_no_divergence` filters should disable those filters for backtesting.
+- **Position-management strategies** — The current phase simulates the OKX algo-order TP/SL close mechanism. Position-management strategies (Skimming, Protector, Commutator, Alternator) are not yet simulated but the simulator includes extension hooks (`on_entry` and per-candle `check`) for a future phase.
+- **Order book** — Historical L2 order book data is not available, so OB Wall Guard and OB Wall Stops are not simulated.
+
+### Architecture
+
+```
+app/services/backtest/
+  __init__.py
+  models.py          # Candle, SimPosition, EquityPoint, BacktestConfig, BacktestResult
+  data_fetcher.py    # Paginated OKX historical OHLCV fetcher with file cache
+  snapshot_builder.py# Builds synthetic snapshots from historical candles
+  simulator.py       # Simulated broker (TP/SL close, equity tracking, PM hooks)
+  metrics.py         # Performance metrics (Sharpe, max DD, win rate, etc.)
+  engine.py          # Orchestrator: fetch → window-slide → evaluate → simulate → metrics
+```
+
+The engine runs entirely in Python memory — no Redis or PostgreSQL involvement. It does not interfere with live trading since it uses its own data fetcher and simulated broker, sharing only the read-only strategy config values.
