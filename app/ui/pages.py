@@ -3380,18 +3380,18 @@ def register_pages(app: FastAPI) -> None:
                                 "Fraction of the half-bandwidth to use as TP (0.7 = 70% reversion toward midline)."
                             ).classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-start"):
-                            _mr_rsi_os_raw = _mr_cfg.get("rsi_oversold", 35.0)
+                            _mr_rsi_os_raw = _mr_cfg.get("rsi_oversold", 30.0)
                             mr_rsi_oversold_input = ui.number(
                                 label="RSI oversold (BUY)",
-                                value=float(_mr_rsi_os_raw) if _mr_rsi_os_raw is not None else 35.0,
+                                value=float(_mr_rsi_os_raw) if _mr_rsi_os_raw is not None else 30.0,
                                 min=1, max=49, step=1, precision=0,
                             ).classes("w-40").props(
                                 "hint='BUY signal when RSI < this' persistent-hint"
                             )
-                            _mr_rsi_ob_raw = _mr_cfg.get("rsi_overbought", 65.0)
+                            _mr_rsi_ob_raw = _mr_cfg.get("rsi_overbought", 70.0)
                             mr_rsi_overbought_input = ui.number(
                                 label="RSI overbought (SELL)",
-                                value=float(_mr_rsi_ob_raw) if _mr_rsi_ob_raw is not None else 65.0,
+                                value=float(_mr_rsi_ob_raw) if _mr_rsi_ob_raw is not None else 70.0,
                                 min=51, max=99, step=1, precision=0,
                             ).classes("w-40").props(
                                 "hint='SELL signal when RSI > this' persistent-hint"
@@ -3545,7 +3545,7 @@ def register_pages(app: FastAPI) -> None:
                             _sc_tp_raw = _sc_cfg.get("tp_pct")
                             sc_tp_input = ui.number(
                                 label="Take profit (%)",
-                                value=float(_sc_tp_raw) if _sc_tp_raw is not None else 3.0,
+                                value=float(_sc_tp_raw) if _sc_tp_raw is not None else 5.0,
                                 min=0.5, step=0.5, precision=1,
                             ).classes("w-40").props(
                                 "hint='Exit after this % price move' persistent-hint clearable"
@@ -3553,7 +3553,7 @@ def register_pages(app: FastAPI) -> None:
                             _sc_sl_raw = _sc_cfg.get("sl_pct")
                             sc_sl_input = ui.number(
                                 label="Stop loss (%)",
-                                value=float(_sc_sl_raw) if _sc_sl_raw is not None else 5.0,
+                                value=float(_sc_sl_raw) if _sc_sl_raw is not None else 3.0,
                                 min=0.5, step=0.5, precision=1,
                             ).classes("w-40").props(
                                 "hint='Exit if spike fails and reverses this %' persistent-hint clearable"
@@ -3612,10 +3612,10 @@ def register_pages(app: FastAPI) -> None:
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             sc_max_adx_input = ui.number(
                                 label="Max ADX",
-                                value=float(_sc_cfg.get("max_adx") or 40.0),
+                                value=float(_sc_cfg.get("max_adx") or 0.0),
                                 min=0, max=100, step=5, precision=0,
                             ).classes("w-32").props(
-                                "hint='Skip if trend too strong (wont revert)' persistent-hint"
+                                "hint='Skip if trend too strong (0 = off; acceleration/extension filters already prevent late entry)' persistent-hint"
                             )
                         # ── Momentum acceleration filters (prevent entering at the top) ──
                         ui.separator().classes("my-2")
@@ -3659,7 +3659,7 @@ def register_pages(app: FastAPI) -> None:
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             sc_max_spike_ext_input = ui.number(
                                 label="Max spike extension %",
-                                value=float(_sc_cfg.get("max_spike_extension_pct") or 3.0),
+                                value=float(_sc_cfg.get("max_spike_extension_pct") or 2.0),
                                 min=0.0, max=20.0, step=0.5, format="%.1f",
                             ).classes("w-48").props("dense")
                             ui.label("Block entry if price already moved more than this % from spike origin (0 = disabled). Prevents entering at the top.").classes("text-xs text-slate-500")

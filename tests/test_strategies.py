@@ -366,8 +366,8 @@ class TestMeanReversionStrategy:
 
     def test_uses_default_thresholds_when_config_missing(self) -> None:
         mr = MeanReversionStrategy()
-        # RSI=34 → below default oversold of 35 → buy (with no other filters)
-        snapshot = _make_snapshot(rsi=34.0)
+        # RSI=29 → below default oversold of 30 → buy (with no other filters)
+        snapshot = _make_snapshot(rsi=29.0)
         config = {"enabled": True, "require_cmf": False, "require_htf_trend": False}
         result = mr.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers())
         assert result is not None
@@ -690,12 +690,15 @@ def _make_spike_snapshot(
     bb_middle: float | None = 100.0,
     last_price: float = 106.0,
     volume_rsi_series: list[float] | None = None,
+    rsi_series: list[float] | None = None,
     ohlcv: list[dict[str, Any]] | None = None,
     symbol: str = "BTC-USDT-SWAP",
 ) -> dict[str, Any]:
     """Build a snapshot for Spike Continuation tests."""
     if volume_rsi_series is None:
         volume_rsi_series = [70.0, 82.0]  # rising by default
+    if rsi_series is None:
+        rsi_series = [60.0, 65.0]  # rising by default (matches rsi=65.0)
     if ohlcv is None:
         # Default: current candle is a strong bullish candle with large body.
         # Spike origin (lowest low) is at 103.0, current close at 106.5 → ~3.4% extension.
@@ -711,6 +714,7 @@ def _make_spike_snapshot(
 
     indicators: dict[str, Any] = {
         "rsi": rsi,
+        "rsi_series": rsi_series,
         "adx": {"value": adx_value},
         "bollinger_bands": {
             "lower": bb_lower,
@@ -977,3 +981,94 @@ class TestSpikeContinuationStrategy:
         signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, helpers)
         assert signal is not None
         assert signal.direction == "buy"
+
+    def test_blocks_when_rsi_falling_via_series(self) -> None:
+        """If RSI is falling (via rsi_series), don't enter — momentum fading."""
+        strategy = SpikeContinuationStrategy()
+        helpers = _make_helpers(last_price=106.0)
+        snapshot = _make_spike_snapshot(
+            rsi=65.0,
+            last_price=106.0,
+            volume_rsi_series=[70.0, 82.0],
+            rsi_series=[70.0, 65.0],  # falling: prev=70, current=65
+        )
+        config = {
+            "enabled": True,
+            "volume_rsi_min": 75.0,
+            "rsi_min": 55.0,
+            "rsi_max": 75.0,
+            "require_rsi_rising": True,
+            "require_volume_rsi_rising": True,
+            "max_spike_extension_pct": 0,  # disabled
+        }
+        signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, helpers)
+        assert signal is None  # blocked — RSI falling via series
+
+    def test_rsi_rising_falls_back_to_candle_direction(self) -> None:
+        """When rsi_series is unavailable, RSI rising falls back to candle direction."""
+        strategy = SpikeContinuationStrategy()
+        helpers = _make_helpers(last_price=106.0)
+        snapshot = _make_spike_snapshot(
+            rsi=65.0,
+            last_price=106.0,
+            volume_rsi_series=[70.0, 82.0],
+            rsi_series=None,  # no series — will be removed from indicators
+        )
+        # Remove rsi_series to simulate unavailable data
+        del snapshot["market_data"]["BTC-USDT-SWAP"]["indicators"]["rsi_series"]
+        config = {
+            "enabled": True,
+            "volume_rsi_min": 75.0,
+            "rsi_min": 55.0,
+            "rsi_max": 75.0,
+            "require_rsi_rising": True,
+            "require_volume_rsi_rising": True,
+            "max_spike_extension_pct": 5.0,
+        }
+        signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, helpers)
+        # Current candle is bullish (close > open) → fallback says RSI rising → buy
+        assert signal is not None
+        assert signal.direction == "buy"
+
+
+# ── Mean Reversion HTF-absent guard ──────────────────────────────────────────
+
+
+class TestMeanReversionHtfAbsent:
+    """Tests for the HTF-absent auto-disable guard in Mean Reversion."""
+
+    def test_htf_absent_auto_disables_htf_trend_filter(self) -> None:
+        """require_htf_trend should auto-disable when no HTF data (e.g. 1D LTF)."""
+        mr = MeanReversionStrategy()
+        # Snapshot with no htf_indicators (simulates 1D LTF)
+        snapshot = _make_snapshot(rsi=20.0, htf_ema50=None, htf_ema200=None)
+        # Remove htf_indicators entirely to simulate 1D
+        indicators = snapshot["market_data"]["BTC-USDT-SWAP"]["indicators"]
+        if "htf_indicators" in indicators:
+            del indicators["htf_indicators"]
+        config = {
+            "enabled": True,
+            "require_htf_trend": True,  # would normally block without HTF
+            "require_cmf": False,
+        }
+        result = mr.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers())
+        assert result is not None
+        assert result.direction == "buy"
+
+    def test_htf_absent_auto_disables_htf_cmf_filter(self) -> None:
+        """require_htf_cmf should auto-disable when no HTF data."""
+        mr = MeanReversionStrategy()
+        snapshot = _make_snapshot(rsi=20.0, htf_cmf=None)
+        # Remove htf_indicators entirely
+        indicators = snapshot["market_data"]["BTC-USDT-SWAP"]["indicators"]
+        if "htf_indicators" in indicators:
+            del indicators["htf_indicators"]
+        config = {
+            "enabled": True,
+            "require_htf_cmf": True,  # would normally block without HTF
+            "require_cmf": False,
+            "require_htf_trend": False,
+        }
+        result = mr.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers())
+        assert result is not None
+        assert result.direction == "buy"

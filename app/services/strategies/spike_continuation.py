@@ -36,10 +36,13 @@ class SpikeContinuationStrategy:
         % of the candle range from the direction (70 = close is in top 30% for buys)
       - ``min_bb_bandwidth`` (float, default 3.0): only enter when bands are wide
         enough to suggest a real volatility expansion
-      - ``tp_pct`` (float, default 3.0): take-profit as % price move
-      - ``sl_pct`` (float, default 5.0): stop-loss as % price move
-      - ``max_adx`` (float, default 40): don't enter if trend is too strong
-        (we want momentum spikes, not full trends — those won't revert)
+      - ``tp_pct`` (float, default 5.0): take-profit as % price move — wider than
+        SL so winners run (momentum continuation favors letting trades breathe)
+      - ``sl_pct`` (float, default 3.0): stop-loss as % price move — cut losers
+        fast; one failed spike shouldn't wipe out a winner
+      - ``max_adx`` (float, default 0): don't enter if trend is too strong.
+        0 = disabled. The acceleration + extension + candle-strength filters
+        already prevent late entry; strong trends actually favor continuation.
 
     Momentum acceleration filters (prevent entering at the top of a spike):
       - ``require_momentum_acceleration`` (bool, default True): current candle
@@ -49,10 +52,11 @@ class SpikeContinuationStrategy:
       - ``acceleration_min_ratio`` (float, default 1.5): current body must be
         at least this multiple of the average recent body (1.5 = 50% larger)
       - ``require_rsi_rising`` (bool, default True): RSI must be rising vs the
-        previous candle (momentum still building, not fading)
+        previous candle (momentum still building, not fading). Uses the actual
+        RSI series, not a candle-direction proxy.
       - ``require_volume_rsi_rising`` (bool, default True): volume RSI must be
         rising vs the previous candle (volume momentum still building)
-      - ``max_spike_extension_pct`` (float, default 3.0): block entry if price
+      - ``max_spike_extension_pct`` (float, default 2.0): block entry if price
         has already moved more than this % from the start of the spike.
         Prevents entering at the top of an extended move. 0 = disabled.
       - ``spike_lookback`` (int, default 5): candles to look back to find the
@@ -72,23 +76,41 @@ class SpikeContinuationStrategy:
         if not bool(config.get("enabled", False)):
             return None
 
-        volume_rsi_min = helpers.extract_float(config.get("volume_rsi_min")) or 75.0
-        rsi_min = helpers.extract_float(config.get("rsi_min")) or 55.0
-        rsi_max = helpers.extract_float(config.get("rsi_max")) or 75.0
+        volume_rsi_min = helpers.extract_float(config.get("volume_rsi_min"))
+        if volume_rsi_min is None:
+            volume_rsi_min = 75.0
+        rsi_min = helpers.extract_float(config.get("rsi_min"))
+        if rsi_min is None:
+            rsi_min = 55.0
+        rsi_max = helpers.extract_float(config.get("rsi_max"))
+        if rsi_max is None:
+            rsi_max = 75.0
         require_bb_breakout = bool(config.get("require_bb_breakout", True))
         require_candle_strength = bool(config.get("require_candle_strength", True))
-        candle_strength_pct = helpers.extract_float(config.get("candle_strength_pct")) or 70.0
-        min_bb_bandwidth = helpers.extract_float(config.get("min_bb_bandwidth")) or 3.0
-        max_adx = helpers.extract_float(config.get("max_adx")) or 40.0
+        candle_strength_pct = helpers.extract_float(config.get("candle_strength_pct"))
+        if candle_strength_pct is None:
+            candle_strength_pct = 70.0
+        min_bb_bandwidth = helpers.extract_float(config.get("min_bb_bandwidth"))
+        if min_bb_bandwidth is None:
+            min_bb_bandwidth = 3.0
+        max_adx = helpers.extract_float(config.get("max_adx"))
+        if max_adx is None:
+            max_adx = 0.0
 
         # Momentum acceleration filters
         require_momentum_acceleration = bool(config.get("require_momentum_acceleration", True))
-        acceleration_lookback = int(helpers.extract_float(config.get("acceleration_lookback")) or 3)
-        acceleration_min_ratio = helpers.extract_float(config.get("acceleration_min_ratio")) or 1.5
+        _acceleration_lookback = helpers.extract_float(config.get("acceleration_lookback"))
+        acceleration_lookback = int(_acceleration_lookback) if _acceleration_lookback is not None else 3
+        acceleration_min_ratio = helpers.extract_float(config.get("acceleration_min_ratio"))
+        if acceleration_min_ratio is None:
+            acceleration_min_ratio = 1.5
         require_rsi_rising = bool(config.get("require_rsi_rising", True))
         require_volume_rsi_rising = bool(config.get("require_volume_rsi_rising", True))
-        max_spike_extension_pct = helpers.extract_float(config.get("max_spike_extension_pct")) or 3.0
-        spike_lookback = int(helpers.extract_float(config.get("spike_lookback")) or 5)
+        max_spike_extension_pct = helpers.extract_float(config.get("max_spike_extension_pct"))
+        if max_spike_extension_pct is None:
+            max_spike_extension_pct = 2.0
+        _spike_lookback = helpers.extract_float(config.get("spike_lookback"))
+        spike_lookback = int(_spike_lookback) if _spike_lookback is not None else 5
 
         market_data: dict[str, Any] = snapshot.get("market_data") or {}
         sym_data = market_data.get(symbol) or {}
@@ -166,13 +188,22 @@ class SpikeContinuationStrategy:
                     momentum_accelerating = body_ratio >= acceleration_min_ratio
 
         # RSI rising — momentum still building (direction-aware)
-        # For buys: current candle should be bullish (close > open) → RSI rising
-        # For sells: current candle should be bearish (close < open) → RSI falling
+        # Uses the actual RSI series: rsi_series[-1] > rsi_series[-2] for buys,
+        # rsi_series[-1] < rsi_series[-2] for sells. Falls back to candle
+        # direction (close > open) when the RSI series is unavailable.
+        rsi_series_vals: list[float] = indicators.get("rsi_series") or []
         rsi_rising_buy = False
         rsi_rising_sell = False
-        if require_rsi_rising and current_close is not None and current_open is not None:
-            rsi_rising_buy = current_close > current_open
-            rsi_rising_sell = current_close < current_open
+        if require_rsi_rising:
+            if len(rsi_series_vals) >= 2:
+                _rsi_prev = helpers.extract_float(rsi_series_vals[-2])
+                if rsi is not None and _rsi_prev is not None:
+                    rsi_rising_buy = rsi > _rsi_prev
+                    rsi_rising_sell = rsi < _rsi_prev
+            elif current_close is not None and current_open is not None:
+                # Fallback: no RSI series available (e.g. insufficient warmup)
+                rsi_rising_buy = current_close > current_open
+                rsi_rising_sell = current_close < current_open
 
         # Volume RSI rising — volume momentum still building
         volume_rsi_rising = False

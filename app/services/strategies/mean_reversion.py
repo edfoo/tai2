@@ -16,12 +16,16 @@ class MeanReversionStrategy:
 
     Config keys (all live under ``config["strategies"]["mean_reversion"]``):
       - ``enabled`` (bool): master switch
-      - ``rsi_oversold`` (float, default 35): BUY when RSI < this
-      - ``rsi_overbought`` (float, default 65): SELL when RSI > this
-      - ``require_htf_trend`` (bool, default True)
-      - ``require_cmf`` (bool, default True)
+      - ``rsi_oversold`` (float, default 30): BUY when RSI < this
+      - ``rsi_overbought`` (float, default 70): SELL when RSI > this
+      - ``require_htf_trend`` (bool, default True): auto-disabled when no
+        HTF data is available (e.g. 1D LTF has no higher timeframe).
+      - ``require_cmf`` (bool, default True): requires CMF already positive
+        for BUY / negative for SELL — enters AFTER the turn. For catching
+        the bottom, prefer ``require_cmf_cross`` instead.
       - ``require_htf_cmf`` (bool, default False)
-      - ``require_cmf_cross`` (bool, default False)
+      - ``require_cmf_cross`` (bool, default False): CMF must have just
+        crossed zero this bar — catches the turn earlier than require_cmf.
       - ``require_cmf_no_divergence`` (bool, default False)
       - ``require_footprint_delta`` (bool, default False)
       - ``require_bb_position`` (bool, default False)
@@ -29,10 +33,16 @@ class MeanReversionStrategy:
       - ``min_bb_bandwidth`` (float, default 0.0)
       - ``max_bb_bandwidth`` (float, default 0.0)
       - ``min_adx`` (float, default 0.0)
-      - ``max_adx`` (float, default 0.0)
+      - ``max_adx`` (float, default 0.0): set ~25-30 to filter out strong
+        trending regimes where mean reversion fails.
+      - ``tp_pct`` (float, default None): strategy-level TP %. Mean reversion
+        typically wants a tight TP (reversion to midline). Falls back to
+        launcher-level if None.
+      - ``sl_pct`` (float, default None): strategy-level SL %. Mean reversion
+        typically wants a wider SL (allow exhaustion wick to extend).
       - ``require_candle_rejection`` (bool, default False): require upper wick
         for shorts, lower wick for longs (exhaustion confirmation)
-      - ``candle_rejection_pct`` (float, default 0.3): minimum wick size as %
+      - ``candle_rejection_pct`` (float, default 30): minimum wick size as %
         of candle range (30 = wick is 30%+ of the candle)
       - ``require_vwap_reversion`` (bool, default False): require price extended
         from VWAP AND closing back toward it
@@ -56,8 +66,12 @@ class MeanReversionStrategy:
         if not bool(config.get("enabled", False)):
             return None
 
-        rsi_oversold = helpers.extract_float(config.get("rsi_oversold")) or 35.0
-        rsi_overbought = helpers.extract_float(config.get("rsi_overbought")) or 65.0
+        rsi_oversold = helpers.extract_float(config.get("rsi_oversold"))
+        if rsi_oversold is None:
+            rsi_oversold = 30.0
+        rsi_overbought = helpers.extract_float(config.get("rsi_overbought"))
+        if rsi_overbought is None:
+            rsi_overbought = 70.0
         require_htf_trend = bool(config.get("require_htf_trend", True))
         require_cmf = bool(config.get("require_cmf", True))
         require_htf_cmf = bool(config.get("require_htf_cmf", False))
@@ -66,16 +80,32 @@ class MeanReversionStrategy:
         require_footprint_delta = bool(config.get("require_footprint_delta", False))
         require_bb_position = bool(config.get("require_bb_position", False))
         require_candle_rejection = bool(config.get("require_candle_rejection", False))
-        candle_rejection_pct = helpers.extract_float(config.get("candle_rejection_pct")) or 0.3
+        candle_rejection_pct = helpers.extract_float(config.get("candle_rejection_pct"))
+        if candle_rejection_pct is None:
+            candle_rejection_pct = 30.0
         require_vwap_reversion = bool(config.get("require_vwap_reversion", False))
-        vwap_min_distance_pct = helpers.extract_float(config.get("vwap_min_distance_pct")) or 1.0
+        vwap_min_distance_pct = helpers.extract_float(config.get("vwap_min_distance_pct"))
+        if vwap_min_distance_pct is None:
+            vwap_min_distance_pct = 1.0
         require_volume_cooling = bool(config.get("require_volume_cooling", False))
-        volume_rsi_max = helpers.extract_float(config.get("volume_rsi_max")) or 70.0
-        bb_proximity_pct = helpers.extract_float(config.get("bb_proximity_pct")) or 0.0
-        min_bb_bandwidth = helpers.extract_float(config.get("min_bb_bandwidth")) or 0.0
-        max_bb_bandwidth = helpers.extract_float(config.get("max_bb_bandwidth")) or 0.0
-        min_adx = helpers.extract_float(config.get("min_adx")) or 0.0
-        max_adx = helpers.extract_float(config.get("max_adx")) or 0.0
+        volume_rsi_max = helpers.extract_float(config.get("volume_rsi_max"))
+        if volume_rsi_max is None:
+            volume_rsi_max = 70.0
+        bb_proximity_pct = helpers.extract_float(config.get("bb_proximity_pct"))
+        if bb_proximity_pct is None:
+            bb_proximity_pct = 0.0
+        min_bb_bandwidth = helpers.extract_float(config.get("min_bb_bandwidth"))
+        if min_bb_bandwidth is None:
+            min_bb_bandwidth = 0.0
+        max_bb_bandwidth = helpers.extract_float(config.get("max_bb_bandwidth"))
+        if max_bb_bandwidth is None:
+            max_bb_bandwidth = 0.0
+        min_adx = helpers.extract_float(config.get("min_adx"))
+        if min_adx is None:
+            min_adx = 0.0
+        max_adx = helpers.extract_float(config.get("max_adx"))
+        if max_adx is None:
+            max_adx = 0.0
 
         market_data: dict[str, Any] = snapshot.get("market_data") or {}
         sym_data = market_data.get(symbol) or {}
@@ -117,6 +147,22 @@ class MeanReversionStrategy:
         htf_ema200 = helpers.extract_float(htf_ma.get("ema_200"))
         htf_bullish = htf_ema50 is not None and htf_ema200 is not None and htf_ema50 > htf_ema200
         htf_bearish = htf_ema50 is not None and htf_ema200 is not None and htf_ema50 < htf_ema200
+
+        # Auto-disable HTF filters when no HTF data is available (e.g. 1D LTF
+        # has no higher timeframe). Without this guard, require_htf_trend=True
+        # would silently block every signal on 1D because htf_bullish/bearish
+        # are both False when htf_indicators is absent.
+        htf_available = bool(htf_indicators)
+        if require_htf_trend and not htf_available:
+            helpers.emit_debug(
+                f"MeanReversion: {symbol} — HTF indicators unavailable, "
+                f"auto-disabling require_htf_trend for this evaluation"
+            )
+        if require_htf_cmf and not htf_available:
+            helpers.emit_debug(
+                f"MeanReversion: {symbol} — HTF indicators unavailable, "
+                f"auto-disabling require_htf_cmf for this evaluation"
+            )
 
         # HTF CMF governor (gap 1): HTF CMF must agree with trade direction.
         htf_cmf = helpers.extract_float((htf_indicators.get("cmf") or {}).get("value"))
@@ -255,10 +301,10 @@ class MeanReversionStrategy:
         buy_signal = (
             rsi < rsi_oversold
             and (not require_cmf or (cmf is not None and cmf > 0))
-            and (not require_htf_cmf or htf_cmf_bullish)
+            and (not require_htf_cmf or not htf_available or htf_cmf_bullish)
             and (not require_cmf_cross or cmf_crossed_up)
             and (not require_cmf_no_divergence or not bearish_div)
-            and (not require_htf_trend or htf_bullish)
+            and (not require_htf_trend or not htf_available or htf_bullish)
             and (not require_footprint_delta or not fp_data_available or (fp_net_delta is not None and fp_net_delta > 0))
             and (not require_bb_position or bb_long_ok)
             and (not require_candle_rejection or candle_rejection_long_ok)
@@ -268,10 +314,10 @@ class MeanReversionStrategy:
         sell_signal = (
             rsi > rsi_overbought
             and (not require_cmf or (cmf is not None and cmf < 0))
-            and (not require_htf_cmf or htf_cmf_bearish)
+            and (not require_htf_cmf or not htf_available or htf_cmf_bearish)
             and (not require_cmf_cross or cmf_crossed_down)
             and (not require_cmf_no_divergence or not bullish_div)
-            and (not require_htf_trend or htf_bearish)
+            and (not require_htf_trend or not htf_available or htf_bearish)
             and (not require_footprint_delta or not fp_data_available or (fp_net_delta is not None and fp_net_delta < 0))
             and (not require_bb_position or bb_short_ok)
             and (not require_candle_rejection or candle_rejection_short_ok)
@@ -301,7 +347,12 @@ class MeanReversionStrategy:
         if require_cmf:
             parts.append(f"CMF14={cmf:.3f}" if cmf is not None else "CMF14=n/a")
         if require_htf_cmf:
-            parts.append(f"HTF_CMF={htf_cmf:.3f}" if htf_cmf is not None else "HTF_CMF=n/a")
+            if not htf_available:
+                parts.append("HTF_CMF=skipped(no HTF data)")
+            elif htf_cmf is not None:
+                parts.append(f"HTF_CMF={htf_cmf:.3f}")
+            else:
+                parts.append("HTF_CMF=n/a")
         if require_cmf_cross:
             parts.append(f"CMF_cross={'up' if cmf_crossed_up else 'down' if cmf_crossed_down else 'none'}")
         if require_cmf_no_divergence:
@@ -312,7 +363,9 @@ class MeanReversionStrategy:
             else:
                 parts.append("CMF_div=none")
         if require_htf_trend:
-            if htf_ema50 is not None and htf_ema200 is not None:
+            if not htf_available:
+                parts.append("HTF EMA=skipped(no HTF data)")
+            elif htf_ema50 is not None and htf_ema200 is not None:
                 parts.append(f"HTF EMA50={htf_ema50:.4g}/EMA200={htf_ema200:.4g} ({'bull' if htf_bullish else 'bear' if htf_bearish else 'flat'})")
             else:
                 parts.append("HTF EMA=n/a")

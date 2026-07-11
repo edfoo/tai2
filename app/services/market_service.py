@@ -4763,6 +4763,7 @@ class MarketService:
                 "d": MarketService._last_value(stoch, "STOCHRSId_14_14_3_3"),
             },
             "rsi": float(rsi_series.iloc[-1]) if rsi_series is not None and not rsi_series.empty else None,
+            "rsi_series": MarketService._series_to_list(rsi_series),
             "macd": {
                 "value": MarketService._last_value(macd_df, "MACD_12_26_9"),
                 "signal": MarketService._last_value(macd_df, "MACDs_12_26_9"),
