@@ -3339,6 +3339,15 @@ def register_pages(app: FastAPI) -> None:
                             "Rule-based RSI mean-reversion entries run by the Launcher. "
                             "Launcher mode must also be enabled on the CFG page."
                         ).classes("text-xs text-slate-500 mb-3")
+                        with ui.row().classes("w-full items-center gap-2 mb-2"):
+                            ui.button(
+                                "Set Recommended Defaults",
+                                icon="tune",
+                                on_click=lambda _: _set_mr_defaults(),
+                            ).props("dense flat color=primary size=sm").tooltip(
+                                "Fill all fields with the recommended Mean Reversion configuration. "
+                                "You still need to click Save to persist."
+                            )
                         with ui.row().classes("w-full flex-wrap gap-4 items-start"):
                             _mr_tp_raw = _mr_cfg.get("tp_pct")
                             mr_tp_input = ui.number(
@@ -3528,6 +3537,36 @@ def register_pages(app: FastAPI) -> None:
                         mr_enabled_switch, "value"
                     )
 
+            def _set_mr_defaults() -> None:
+                """Fill all Mean Reversion fields with the recommended configuration."""
+                mr_tp_input.value = 3.0
+                mr_sl_input.value = 4.0
+                mr_dynamic_tp_switch.value = True
+                mr_dynamic_tp_fraction_input.value = 0.7
+                mr_rsi_oversold_input.value = 30.0
+                mr_rsi_overbought_input.value = 70.0
+                mr_min_adx_input.value = 0.0
+                mr_max_adx_input.value = 25.0
+                mr_require_htf_switch.value = True
+                mr_require_cmf_switch.value = True
+                mr_require_htf_cmf_switch.value = False
+                mr_require_cmf_cross_switch.value = False
+                mr_require_cmf_no_div_switch.value = False
+                mr_require_fp_delta_switch.value = False
+                mr_require_bb_switch.value = True
+                mr_bb_proximity_input.value = 0.5
+                mr_min_bb_bw_input.value = 2.0
+                mr_max_bb_bw_input.value = 0.0
+                mr_candle_rejection_switch.value = True
+                mr_candle_rejection_pct_input.value = 30.0
+                mr_vwap_reversion_switch.value = False
+                mr_vwap_min_dist_input.value = 1.0
+                mr_volume_cooling_switch.value = True
+                mr_volume_rsi_max_input.value = 70.0
+                mr_flip_switch.value = False
+                mr_flip_select.value = "both"
+                ui.notify("Mean Reversion fields set to recommended defaults — click Save to persist", color="info")
+
             # ── Spike Continuation ───────────────────────────────────────────────────
             _sc_cfg = ((config.get("launcher") or {}).get("strategies") or {}).get("spike_continuation") or {}
             with ui.card().classes("w-full rounded-lg border border-slate-200 mb-1"):
@@ -3541,6 +3580,15 @@ def register_pages(app: FastAPI) -> None:
                             "Enters WITH the spike (not against it). Mirror image of Mean Reversion. "
                             "Launcher mode must also be enabled on the CFG page."
                         ).classes("text-xs text-slate-500 mb-3")
+                        with ui.row().classes("w-full items-center gap-2 mb-2"):
+                            ui.button(
+                                "Set Recommended Defaults",
+                                icon="tune",
+                                on_click=lambda _: _set_sc_defaults(),
+                            ).props("dense flat color=primary size=sm").tooltip(
+                                "Fill all fields with the recommended Spike Continuation configuration. "
+                                "You still need to click Save to persist."
+                            )
                         with ui.row().classes("w-full flex-wrap gap-4 items-start"):
                             _sc_tp_raw = _sc_cfg.get("tp_pct")
                             sc_tp_input = ui.number(
@@ -3673,6 +3721,27 @@ def register_pages(app: FastAPI) -> None:
                     _active_badge_sc = ui.badge("Active", color="positive").bind_visibility_from(
                         sc_enabled_switch, "value"
                     )
+
+            def _set_sc_defaults() -> None:
+                """Fill all Spike Continuation fields with the recommended configuration."""
+                sc_tp_input.value = 5.0
+                sc_sl_input.value = 3.0
+                sc_volume_rsi_min_input.value = 75.0
+                sc_rsi_min_input.value = 55.0
+                sc_rsi_max_input.value = 75.0
+                sc_bb_breakout_switch.value = True
+                sc_candle_strength_switch.value = True
+                sc_candle_strength_pct_input.value = 70.0
+                sc_min_bb_bw_input.value = 3.0
+                sc_max_adx_input.value = 0.0
+                sc_momentum_accel_switch.value = True
+                sc_accel_lookback_input.value = 3
+                sc_accel_min_ratio_input.value = 1.5
+                sc_rsi_rising_switch.value = True
+                sc_vol_rsi_rising_switch.value = True
+                sc_max_spike_ext_input.value = 2.0
+                sc_spike_lookback_input.value = 5
+                ui.notify("Spike Continuation fields set to recommended defaults — click Save to persist", color="info")
 
             with ui.card().classes("w-full rounded-lg border border-slate-200 mb-1"):
                 with ui.row().classes("w-full items-center gap-2 flex-nowrap"):
@@ -4438,8 +4507,8 @@ def register_pages(app: FastAPI) -> None:
                 "enabled": bool(mr_enabled_switch.value),
                 "tp_pct": float(mr_tp_input.value) if mr_tp_input.value not in (None, "") else None,
                 "sl_pct": float(mr_sl_input.value) if mr_sl_input.value not in (None, "") else None,
-                "rsi_oversold": float(mr_rsi_oversold_input.value or 35.0),
-                "rsi_overbought": float(mr_rsi_overbought_input.value or 65.0),
+                "rsi_oversold": float(mr_rsi_oversold_input.value or 30.0),
+                "rsi_overbought": float(mr_rsi_overbought_input.value or 70.0),
                 "min_adx": float(mr_min_adx_input.value or 0.0),
                 "max_adx": float(mr_max_adx_input.value or 0.0),
                 "require_htf_trend": bool(mr_require_htf_switch.value),
@@ -4473,13 +4542,13 @@ def register_pages(app: FastAPI) -> None:
                 "require_candle_strength": bool(sc_candle_strength_switch.value),
                 "candle_strength_pct": float(sc_candle_strength_pct_input.value or 70.0),
                 "min_bb_bandwidth": float(sc_min_bb_bw_input.value or 3.0),
-                "max_adx": float(sc_max_adx_input.value or 40.0),
+                "max_adx": float(sc_max_adx_input.value or 0.0),
                 "require_momentum_acceleration": bool(sc_momentum_accel_switch.value),
                 "acceleration_lookback": int(sc_accel_lookback_input.value or 3),
                 "acceleration_min_ratio": float(sc_accel_min_ratio_input.value or 1.5),
                 "require_rsi_rising": bool(sc_rsi_rising_switch.value),
                 "require_volume_rsi_rising": bool(sc_vol_rsi_rising_switch.value),
-                "max_spike_extension_pct": float(sc_max_spike_ext_input.value or 3.0),
+                "max_spike_extension_pct": float(sc_max_spike_ext_input.value or 2.0),
                 "spike_lookback": int(sc_spike_lookback_input.value or 5),
             }
             _launcher_cfg["strategies"] = _strategies_cfg
