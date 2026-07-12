@@ -3242,6 +3242,60 @@ def register_pages(app: FastAPI) -> None:
                                 min=10.0, max=99.0, step=5.0, format="%.0f",
                             ).classes("w-48").props("dense")
                             ui.label("Maximum volume RSI to allow entry (below = volume momentum fading).").classes("text-xs text-slate-500")
+                        # ── Regime gate (BB bandwidth percentile) ──────────────
+                        ui.separator().classes("my-2")
+                        ui.label("Regime Gate (BB Bandwidth Percentile)").classes("text-xs font-semibold text-slate-600")
+                        ui.label(
+                            "MR works best in low-volatility chop. When enabled, the current BB bandwidth "
+                            "must be below the percentile threshold relative to recent history."
+                        ).classes("text-xs text-slate-500 mb-2")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            mr_require_regime_switch = ui.switch(
+                                "Require regime (chop)",
+                                value=bool(_mr_cfg.get("require_regime", False)),
+                            ).props("dense color=primary")
+                            ui.label("Only enter when BB bandwidth is in the low percentile (chop regime).").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            mr_max_bw_pct_input = ui.number(
+                                label="Max BB bandwidth percentile",
+                                value=float(_mr_cfg.get("max_bb_bandwidth_percentile") or 40.0),
+                                min=5.0, max=95.0, step=5.0, format="%.0f",
+                            ).classes("w-48").props("dense")
+                            ui.label("Current bandwidth must be below this percentile (e.g. 40 = below 40th percentile).").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            mr_regime_lookback_input = ui.number(
+                                label="Regime lookback",
+                                value=float(_mr_cfg.get("regime_lookback") or 50),
+                                min=10, max=200, step=10, format="%.0f",
+                            ).classes("w-40").props("dense")
+                            ui.label("Number of historical candles to compute the percentile over.").classes("text-xs text-slate-500")
+                        # ── ATR-scaled TP/SL ────────────────────────────────────
+                        ui.separator().classes("my-2")
+                        ui.label("ATR-Scaled TP/SL").classes("text-xs font-semibold text-slate-600")
+                        ui.label(
+                            "When enabled, TP/SL are computed as multiplier × ATR% instead of fixed %. "
+                            "Adapts to volatility regime (tighter in low-vol, wider in high-vol)."
+                        ).classes("text-xs text-slate-500 mb-2")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            mr_use_atr_sizing_switch = ui.switch(
+                                "Use ATR sizing",
+                                value=bool(_mr_cfg.get("use_atr_sizing", False)),
+                            ).props("dense color=primary")
+                            ui.label("Override static TP/SL with ATR-scaled values.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            mr_atr_tp_mult_input = ui.number(
+                                label="ATR TP multiplier",
+                                value=float(_mr_cfg.get("atr_tp_multiplier") or 1.0),
+                                min=0.1, max=10.0, step=0.1, format="%.1f",
+                            ).classes("w-40").props("dense")
+                            ui.label("TP = multiplier × ATR% (e.g. 1.0 = 1 ATR).").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            mr_atr_sl_mult_input = ui.number(
+                                label="ATR SL multiplier",
+                                value=float(_mr_cfg.get("atr_sl_multiplier") or 1.5),
+                                min=0.1, max=10.0, step=0.1, format="%.1f",
+                            ).classes("w-40").props("dense")
+                            ui.label("SL = multiplier × ATR% (e.g. 1.5 = 1.5 ATR).").classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             _mr_flip_enabled = bool(_mr_cfg.get("flip_launcher_direction"))
                             mr_flip_switch = ui.switch(
@@ -3284,6 +3338,12 @@ def register_pages(app: FastAPI) -> None:
                 mr_vwap_min_dist_input.value = 1.0
                 mr_volume_cooling_switch.value = True
                 mr_volume_rsi_max_input.value = 70.0
+                mr_require_regime_switch.value = True
+                mr_max_bw_pct_input.value = 40.0
+                mr_regime_lookback_input.value = 50
+                mr_use_atr_sizing_switch.value = True
+                mr_atr_tp_mult_input.value = 1.0
+                mr_atr_sl_mult_input.value = 1.5
                 mr_flip_switch.value = False
                 mr_flip_select.value = "both"
                 ui.notify("Mean Reversion fields set to recommended defaults — click Save to persist", color="info")
@@ -3439,6 +3499,60 @@ def register_pages(app: FastAPI) -> None:
                                 min=2, max=20, step=1, format="%.0f",
                             ).classes("w-40").props("dense")
                             ui.label("Candles to look back to find the spike origin (lowest low for buys, highest high for sells).").classes("text-xs text-slate-500")
+                        # ── Regime gate (BB bandwidth percentile) ──────────────
+                        ui.separator().classes("my-2")
+                        ui.label("Regime Gate (BB Bandwidth Percentile)").classes("text-xs font-semibold text-slate-600")
+                        ui.label(
+                            "SC works best in high-volatility expansion. When enabled, the current BB bandwidth "
+                            "must be above the percentile threshold relative to recent history."
+                        ).classes("text-xs text-slate-500 mb-2")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            sc_require_regime_switch = ui.switch(
+                                "Require regime (expansion)",
+                                value=bool(_sc_cfg.get("require_regime", False)),
+                            ).props("dense color=primary")
+                            ui.label("Only enter when BB bandwidth is in the high percentile (expansion regime).").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            sc_min_bw_pct_input = ui.number(
+                                label="Min BB bandwidth percentile",
+                                value=float(_sc_cfg.get("min_bb_bandwidth_percentile") or 60.0),
+                                min=5.0, max=95.0, step=5.0, format="%.0f",
+                            ).classes("w-48").props("dense")
+                            ui.label("Current bandwidth must be above this percentile (e.g. 60 = above 60th percentile).").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            sc_regime_lookback_input = ui.number(
+                                label="Regime lookback",
+                                value=float(_sc_cfg.get("regime_lookback") or 50),
+                                min=10, max=200, step=10, format="%.0f",
+                            ).classes("w-40").props("dense")
+                            ui.label("Number of historical candles to compute the percentile over.").classes("text-xs text-slate-500")
+                        # ── ATR-scaled TP/SL ────────────────────────────────────
+                        ui.separator().classes("my-2")
+                        ui.label("ATR-Scaled TP/SL").classes("text-xs font-semibold text-slate-600")
+                        ui.label(
+                            "When enabled, TP/SL are computed as multiplier × ATR% instead of fixed %. "
+                            "Adapts to volatility regime."
+                        ).classes("text-xs text-slate-500 mb-2")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            sc_use_atr_sizing_switch = ui.switch(
+                                "Use ATR sizing",
+                                value=bool(_sc_cfg.get("use_atr_sizing", False)),
+                            ).props("dense color=primary")
+                            ui.label("Override static TP/SL with ATR-scaled values.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            sc_atr_tp_mult_input = ui.number(
+                                label="ATR TP multiplier",
+                                value=float(_sc_cfg.get("atr_tp_multiplier") or 2.0),
+                                min=0.1, max=10.0, step=0.1, format="%.1f",
+                            ).classes("w-40").props("dense")
+                            ui.label("TP = multiplier × ATR% (e.g. 2.0 = 2 ATR).").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            sc_atr_sl_mult_input = ui.number(
+                                label="ATR SL multiplier",
+                                value=float(_sc_cfg.get("atr_sl_multiplier") or 1.2),
+                                min=0.1, max=10.0, step=0.1, format="%.1f",
+                            ).classes("w-40").props("dense")
+                            ui.label("SL = multiplier × ATR% (e.g. 1.2 = 1.2 ATR).").classes("text-xs text-slate-500")
                     _active_badge_sc = ui.badge("Active", color="positive").bind_visibility_from(
                         sc_enabled_switch, "value"
                     )
@@ -3462,6 +3576,12 @@ def register_pages(app: FastAPI) -> None:
                 sc_vol_rsi_rising_switch.value = True
                 sc_max_spike_ext_input.value = 5.0
                 sc_spike_lookback_input.value = 5
+                sc_require_regime_switch.value = True
+                sc_min_bw_pct_input.value = 60.0
+                sc_regime_lookback_input.value = 50
+                sc_use_atr_sizing_switch.value = True
+                sc_atr_tp_mult_input.value = 2.0
+                sc_atr_sl_mult_input.value = 1.2
                 ui.notify("Spike Continuation fields set to recommended defaults — click Save to persist", color="info")
 
             with ui.card().classes("w-full rounded-lg border border-slate-200 mb-1"):
@@ -4251,6 +4371,12 @@ def register_pages(app: FastAPI) -> None:
                 "vwap_min_distance_pct": float(mr_vwap_min_dist_input.value or 1.0),
                 "require_volume_cooling": bool(mr_volume_cooling_switch.value),
                 "volume_rsi_max": float(mr_volume_rsi_max_input.value or 70.0),
+                "require_regime": bool(mr_require_regime_switch.value),
+                "max_bb_bandwidth_percentile": float(mr_max_bw_pct_input.value or 40.0),
+                "regime_lookback": int(mr_regime_lookback_input.value or 50),
+                "use_atr_sizing": bool(mr_use_atr_sizing_switch.value),
+                "atr_tp_multiplier": float(mr_atr_tp_mult_input.value or 1.0),
+                "atr_sl_multiplier": float(mr_atr_sl_mult_input.value or 1.5),
             }
             _strategies_cfg["spike_continuation"] = {
                 "enabled": bool(sc_enabled_switch.value),
@@ -4271,6 +4397,12 @@ def register_pages(app: FastAPI) -> None:
                 "require_volume_rsi_rising": bool(sc_vol_rsi_rising_switch.value),
                 "max_spike_extension_pct": float(sc_max_spike_ext_input.value or 2.0),
                 "spike_lookback": int(sc_spike_lookback_input.value or 5),
+                "require_regime": bool(sc_require_regime_switch.value),
+                "min_bb_bandwidth_percentile": float(sc_min_bw_pct_input.value or 60.0),
+                "regime_lookback": int(sc_regime_lookback_input.value or 50),
+                "use_atr_sizing": bool(sc_use_atr_sizing_switch.value),
+                "atr_tp_multiplier": float(sc_atr_tp_mult_input.value or 2.0),
+                "atr_sl_multiplier": float(sc_atr_sl_mult_input.value or 1.2),
             }
             _launcher_cfg["strategies"] = _strategies_cfg
             config["launcher"] = _launcher_cfg
@@ -5676,6 +5808,17 @@ def register_pages(app: FastAPI) -> None:
                 ).classes("w-full md:w-40").props(
                     "hint='Margin mode for Launcher-opened positions' persistent-hint"
                 )
+                _gov_max_hold_raw = _gov_cfg.get("max_hold_candles")
+                gov_max_hold_input = ui.number(
+                    label="Max hold (candles)",
+                    value=float(_gov_max_hold_raw) if _gov_max_hold_raw is not None else 0,
+                    min=0,
+                    max=500,
+                    step=1,
+                    precision=0,
+                ).classes("w-full md:w-40").props(
+                    "hint='Force-close positions after this many candles (0 = disabled). Backtest only — does not affect live.' persistent-hint"
+                )
             ui.label("Signal filters and TP/SL are configured on the STRATEGY page → Mean Reversion Scalping section.").classes("text-xs text-slate-400 mt-1")
             ui.separator().classes("w-full my-4")
             ui.label("Candle settings").classes("text-sm text-slate-500")
@@ -6806,6 +6949,7 @@ def register_pages(app: FastAPI) -> None:
                 "entry_interval_seconds": max(30.0, _coerce(gov_interval_input.value, 300, float)),
                 "trade_mode": str(gov_trade_mode_select.value or "isolated"),
                 "notional_usd": float(gov_notional_input.value) if gov_notional_input.value not in (None, "") else None,
+                "max_hold_candles": int(gov_max_hold_input.value or 0),
             }
             try:
                 await save_launcher_config(config["launcher"])

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from . import StrategyHelpers, StrategySignal
+from . import StrategyHelpers, StrategySignal, compute_bb_bandwidth_percentile
 
 
 class MeanReversionStrategy:
@@ -91,6 +91,28 @@ class MeanReversionStrategy:
         volume_rsi_max = helpers.extract_float(config.get("volume_rsi_max"))
         if volume_rsi_max is None:
             volume_rsi_max = 70.0
+        # ── Regime gate (BB bandwidth percentile) ──────────────────────
+        # MR works best in low-volatility chop.  When require_regime is True,
+        # the current BB bandwidth must be below max_bb_bandwidth_percentile
+        # relative to the last N candles (e.g. < 40th percentile = chop).
+        require_regime = bool(config.get("require_regime", False))
+        max_bb_bandwidth_percentile = helpers.extract_float(config.get("max_bb_bandwidth_percentile"))
+        if max_bb_bandwidth_percentile is None:
+            max_bb_bandwidth_percentile = 40.0
+        regime_lookback = helpers.extract_float(config.get("regime_lookback"))
+        if regime_lookback is None:
+            regime_lookback = 50
+        # ── ATR-scaled TP/SL ────────────────────────────────────────────
+        # When use_atr_sizing is True, TP/SL are computed as
+        # multiplier × ATR% instead of fixed percentages.  This adapts to
+        # the volatility regime (tighter in low-vol, wider in high-vol).
+        use_atr_sizing = bool(config.get("use_atr_sizing", False))
+        atr_tp_multiplier = helpers.extract_float(config.get("atr_tp_multiplier"))
+        if atr_tp_multiplier is None:
+            atr_tp_multiplier = 1.0
+        atr_sl_multiplier = helpers.extract_float(config.get("atr_sl_multiplier"))
+        if atr_sl_multiplier is None:
+            atr_sl_multiplier = 1.5
         bb_proximity_pct = helpers.extract_float(config.get("bb_proximity_pct"))
         if bb_proximity_pct is None:
             bb_proximity_pct = 0.0
@@ -268,6 +290,17 @@ class MeanReversionStrategy:
             or (volume_rsi_value is not None and volume_rsi_value < volume_rsi_max)
         )
 
+        # ── Regime gate: BB bandwidth percentile ──────────────────────
+        # MR works best in low-volatility chop (low bandwidth percentile).
+        ohlcv_compact = indicators.get("ohlcv") or []
+        bw_percentile = compute_bb_bandwidth_percentile(
+            ohlcv_compact, bb_bandwidth, lookback=int(regime_lookback)
+        )
+        regime_ok = (
+            not require_regime
+            or (bw_percentile is not None and bw_percentile <= max_bb_bandwidth_percentile)
+        )
+
         if rsi is None:
             helpers.emit_debug(f"MeanReversion: {symbol} — no entry signal (RSI unavailable)")
             return None
@@ -310,6 +343,7 @@ class MeanReversionStrategy:
             and (not require_candle_rejection or candle_rejection_long_ok)
             and (not require_vwap_reversion or vwap_long_ok)
             and volume_cooling_ok
+            and regime_ok
         )
         sell_signal = (
             rsi > rsi_overbought
@@ -323,21 +357,34 @@ class MeanReversionStrategy:
             and (not require_candle_rejection or candle_rejection_short_ok)
             and (not require_vwap_reversion or vwap_short_ok)
             and volume_cooling_ok
+            and regime_ok
         )
+        # ── Compute effective TP/SL ────────────────────────────────────
+        # ATR-scaled TP/SL overrides the static config values when enabled.
+        _static_tp = helpers.extract_float(config.get("tp_pct"))
+        _static_sl = helpers.extract_float(config.get("sl_pct"))
+        _effective_tp = _static_tp
+        _effective_sl = _static_sl
+        if use_atr_sizing:
+            atr_pct = helpers.extract_float(indicators.get("atr_pct"))
+            if atr_pct is not None and atr_pct > 0:
+                _effective_tp = atr_tp_multiplier * atr_pct
+                _effective_sl = atr_sl_multiplier * atr_pct
+
         if buy_signal:
             return StrategySignal(
                 direction="buy",
                 strategy_name=self.name,
-                tp_pct=helpers.extract_float(config.get("tp_pct")),
-                sl_pct=helpers.extract_float(config.get("sl_pct")),
+                tp_pct=_effective_tp,
+                sl_pct=_effective_sl,
                 rationale=f"MeanReversion BUY: RSI={rsi:.1f}<{rsi_oversold}",
             )
         if sell_signal:
             return StrategySignal(
                 direction="sell",
                 strategy_name=self.name,
-                tp_pct=helpers.extract_float(config.get("tp_pct")),
-                sl_pct=helpers.extract_float(config.get("sl_pct")),
+                tp_pct=_effective_tp,
+                sl_pct=_effective_sl,
                 rationale=f"MeanReversion SELL: RSI={rsi:.1f}>{rsi_overbought}",
             )
 

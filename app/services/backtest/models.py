@@ -55,6 +55,9 @@ class SimPosition:
     close_reason: str = ""  # "tp" | "sl" | "pm_skimming" | "end_of_data" | ...
     pnl: float = 0.0
     pnl_pct: float = 0.0
+    # Number of candles the position has been held through (incremented
+    # by the simulator on each update_multi/update tick).
+    candles_held: int = 0
 
     @property
     def is_open(self) -> bool:

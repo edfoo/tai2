@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from . import StrategyHelpers, StrategySignal
+from . import StrategyHelpers, StrategySignal, compute_bb_bandwidth_percentile
 
 
 class SpikeContinuationStrategy:
@@ -96,6 +96,28 @@ class SpikeContinuationStrategy:
         max_adx = helpers.extract_float(config.get("max_adx"))
         if max_adx is None:
             max_adx = 0.0
+        # ── Regime gate (BB bandwidth percentile) ──────────────────────
+        # SC works best in high-volatility expansion.  When require_regime
+        # is True, the current BB bandwidth must be above
+        # min_bb_bandwidth_percentile relative to the last N candles
+        # (e.g. > 60th percentile = volatility expansion).
+        require_regime = bool(config.get("require_regime", False))
+        min_bb_bandwidth_percentile = helpers.extract_float(config.get("min_bb_bandwidth_percentile"))
+        if min_bb_bandwidth_percentile is None:
+            min_bb_bandwidth_percentile = 60.0
+        regime_lookback = helpers.extract_float(config.get("regime_lookback"))
+        if regime_lookback is None:
+            regime_lookback = 50
+        # ── ATR-scaled TP/SL ────────────────────────────────────────────
+        # When use_atr_sizing is True, TP/SL are computed as
+        # multiplier × ATR% instead of fixed percentages.
+        use_atr_sizing = bool(config.get("use_atr_sizing", False))
+        atr_tp_multiplier = helpers.extract_float(config.get("atr_tp_multiplier"))
+        if atr_tp_multiplier is None:
+            atr_tp_multiplier = 2.0
+        atr_sl_multiplier = helpers.extract_float(config.get("atr_sl_multiplier"))
+        if atr_sl_multiplier is None:
+            atr_sl_multiplier = 1.2
 
         # Momentum acceleration filters
         require_momentum_acceleration = bool(config.get("require_momentum_acceleration", True))
@@ -320,6 +342,17 @@ class SpikeContinuationStrategy:
 
         # Buy signal: RSI in momentum zone (not yet extreme), volume confirms,
         # price beyond BB upper, candle closes strong, momentum accelerating
+
+        # ── Regime gate: BB bandwidth percentile ──────────────────────
+        # SC works best in high-volatility expansion (high bandwidth percentile).
+        bw_percentile = compute_bb_bandwidth_percentile(
+            ohlcv_compact, bb_bandwidth, lookback=int(regime_lookback)
+        )
+        regime_ok = (
+            not require_regime
+            or (bw_percentile is not None and bw_percentile >= min_bb_bandwidth_percentile)
+        )
+
         buy_signal = (
             rsi_min <= rsi <= rsi_max
             and bb_breakout_buy
@@ -328,6 +361,7 @@ class SpikeContinuationStrategy:
             and (not require_rsi_rising or rsi_rising_buy)
             and (not require_volume_rsi_rising or volume_rsi_rising)
             and spike_extension_ok_buy
+            and regime_ok
         )
         # Sell signal: mirror
         sell_signal = (
@@ -338,14 +372,27 @@ class SpikeContinuationStrategy:
             and (not require_rsi_rising or rsi_rising_sell)
             and (not require_volume_rsi_rising or volume_rsi_rising)
             and spike_extension_ok_sell
+            and regime_ok
         )
+
+        # ── Compute effective TP/SL ────────────────────────────────────
+        # ATR-scaled TP/SL overrides the static config values when enabled.
+        _static_tp = helpers.extract_float(config.get("tp_pct"))
+        _static_sl = helpers.extract_float(config.get("sl_pct"))
+        _effective_tp = _static_tp
+        _effective_sl = _static_sl
+        if use_atr_sizing:
+            atr_pct = helpers.extract_float(indicators.get("atr_pct"))
+            if atr_pct is not None and atr_pct > 0:
+                _effective_tp = atr_tp_multiplier * atr_pct
+                _effective_sl = atr_sl_multiplier * atr_pct
 
         if buy_signal:
             return StrategySignal(
                 direction="buy",
                 strategy_name=self.name,
-                tp_pct=helpers.extract_float(config.get("tp_pct")),
-                sl_pct=helpers.extract_float(config.get("sl_pct")),
+                tp_pct=_effective_tp,
+                sl_pct=_effective_sl,
                 rationale=f"SpikeContinuation BUY: RSI={rsi:.1f} vol_rsi={volume_rsi_value:.1f} "
                           f"(accelerating, not peaking)",
             )
@@ -353,8 +400,8 @@ class SpikeContinuationStrategy:
             return StrategySignal(
                 direction="sell",
                 strategy_name=self.name,
-                tp_pct=helpers.extract_float(config.get("tp_pct")),
-                sl_pct=helpers.extract_float(config.get("sl_pct")),
+                tp_pct=_effective_tp,
+                sl_pct=_effective_sl,
                 rationale=f"SpikeContinuation SELL: RSI={rsi:.1f} vol_rsi={volume_rsi_value:.1f} "
                           f"(accelerating, not peaking)",
             )

@@ -112,6 +112,10 @@ class Simulator:
         self._equity_curve: list[EquityPoint] = []
         self._cash = initial_capital
         self._pm_strategies: list[PositionManagementStrategy] = []  # future phase
+        # Max candles a position may be held before forced close (0 = disabled).
+        # Read from the strategy config: launcher-level or per-strategy.
+        _launcher = self._strategy_config or {}
+        self._max_hold_candles = int(_launcher.get("max_hold_candles") or 0)
 
     # ── Properties ────────────────────────────────────────────────────
 
@@ -225,8 +229,13 @@ class Simulator:
                 # This position is for a different symbol — skip TP/SL check
                 # (multi-symbol backtests pass candles for each symbol).
                 continue
+            position.candles_held += 1
             if self._check_tp_sl(position, candle):
                 continue  # position was closed
+            # 1b. Max-hold-time timeout — close at candle close.
+            if self._max_hold_candles > 0 and position.candles_held >= self._max_hold_candles:
+                self._close_position(position, candle.close, candle.ts, "timeout")
+                continue
             # 2. Position-management strategies (future phase — no-ops now).
             for pm in self._pm_strategies:
                 action = pm.check(position, candle, self._strategy_config, self)
@@ -250,7 +259,12 @@ class Simulator:
             candle = prices.get(position.symbol)
             if candle is None:
                 continue
+            position.candles_held += 1
             if self._check_tp_sl(position, candle):
+                continue
+            # 1b. Max-hold-time timeout — close at candle close.
+            if self._max_hold_candles > 0 and position.candles_held >= self._max_hold_candles:
+                self._close_position(position, candle.close, candle.ts, "timeout")
                 continue
             for pm in self._pm_strategies:
                 action = pm.check(position, candle, self._strategy_config, self)

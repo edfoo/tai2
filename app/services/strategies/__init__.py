@@ -20,6 +20,75 @@ from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
 
+def compute_bb_bandwidth_percentile(
+    ohlcv_compact: list[dict[str, Any]],
+    current_bandwidth: float | None,
+    lookback: int = 50,
+) -> float | None:
+    """Compute the percentile rank of the current BB bandwidth.
+
+    Uses a simple rolling standard deviation of close prices over a 20-bar
+    window as a proxy for BB bandwidth at each historical bar.  This avoids
+    recomputing full pandas-ta BB for every historical candle (expensive in
+    backtest where this runs on every step).
+
+    Parameters
+    ----------
+    ohlcv_compact:
+        List of candle dicts with ``"close"`` keys (from the snapshot's
+        ``indicators["ohlcv"]``).
+    current_bandwidth:
+        The current BB bandwidth % (from ``bollinger_bands``).  If None,
+        the function returns None (regime gate will be skipped).
+    lookback:
+        Number of historical candles to compute the percentile over.
+
+    Returns
+    -------
+    Percentile rank (0–100) of the current bandwidth relative to the
+    last ``lookback`` bars' bandwidths.  Low values (< 30) = low-volatility
+    chop regime (good for mean reversion).  High values (> 60) = volatility
+    expansion (good for spike continuation).
+    """
+    if current_bandwidth is None or not ohlcv_compact or lookback < 5:
+        return None
+
+    closes: list[float] = []
+    for c in ohlcv_compact:
+        if isinstance(c, dict):
+            _cl = c.get("close")
+            if _cl is not None:
+                try:
+                    closes.append(float(_cl))
+                except (TypeError, ValueError):
+                    pass
+
+    if len(closes) < lookback + 20:
+        return None
+
+    # Compute rolling 20-bar standard deviation as a BB-bandwidth proxy.
+    # BB bandwidth ≈ 4 * stdev / mean * 100 (for 2-std BB).
+    window = 20
+    bandwidths: list[float] = []
+    for i in range(window - 1, len(closes)):
+        chunk = closes[i - window + 1 : i + 1]
+        _mean = sum(chunk) / window
+        if _mean <= 0:
+            continue
+        _var = sum((x - _mean) ** 2 for x in chunk) / window
+        _std = _var ** 0.5
+        _bw = (4.0 * _std / _mean) * 100.0  # 2-std upper+lower / middle * 100
+        bandwidths.append(_bw)
+
+    if len(bandwidths) < 5:
+        return None
+
+    # Use only the last `lookback` bandwidths for the percentile.
+    recent = bandwidths[-lookback:]
+    count_below = sum(1 for b in recent if b < current_bandwidth)
+    return (count_below / len(recent)) * 100.0
+
+
 @dataclass
 class StrategySignal:
     """Signal returned by a strategy evaluation.

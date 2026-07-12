@@ -70,7 +70,7 @@ class BacktestEngine:
             notional_per_trade=float(
                 (config.launcher_config or {}).get("notional_usd") or 10.0
             ),
-            strategy_config=config.strategy_config,
+            strategy_config=config.launcher_config or {},
         )
         # Build the list of strategy instances to evaluate.
         self._strategies: list[Strategy] = [
