@@ -299,7 +299,7 @@ class BacktestEngine:
             self._simulator.update_multi(step_candles)
 
             candles_processed += 1
-            if progress_cb and step % 50 == 0:
+            if progress_cb and step % 10 == 0:
                 progress_cb(BacktestProgress(phase="backtest", current=step + 1, total=max_len, message=f"Processed {step + 1}/{max_len} candles"))
 
         return candles_processed
