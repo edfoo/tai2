@@ -286,6 +286,34 @@ def _timeframe_to_ms(timeframe: str) -> int:
     return 3_600_000  # default 1H
 
 
+def timeframe_ms(timeframe: str) -> int:
+    """Public alias for :func:`_timeframe_to_ms`.
+
+    Converts an OKX bar string (e.g. ``"1m"``, ``"15m"``, ``"1H"``, ``"4H"``)
+    to milliseconds.  Used by the finer-LTF engine to compute LTF bucket
+    boundaries from eval-candle timestamps.
+    """
+    return _timeframe_to_ms(timeframe)
+
+
+def ltf_bucket_ts(eval_ts: int, ltf_timeframe: str) -> int:
+    """Return the start ts of the LTF bucket containing ``eval_ts``.
+
+    OKX candles are aligned to timeframe boundaries, so the bucket start is
+    simply ``eval_ts`` rounded down to the nearest LTF period.  This works
+    for any aligned eval candle (1m, 5m, etc.) within a coarser LTF (15m, 1H).
+    """
+    ltf_ms = _timeframe_to_ms(ltf_timeframe)
+    if ltf_ms <= 0:
+        return eval_ts
+    return eval_ts - (eval_ts % ltf_ms)
+
+
+def is_finer_than(eval_timeframe: str, ltf_timeframe: str) -> bool:
+    """Return True if ``eval_timeframe`` is strictly finer than ``ltf_timeframe``."""
+    return _timeframe_to_ms(eval_timeframe) < _timeframe_to_ms(ltf_timeframe)
+
+
 def htf_for(timeframe: str) -> str:
     """Return the higher timeframe for a given LTF, matching ``_HTF_MAP``."""
     tf = timeframe.strip().upper()

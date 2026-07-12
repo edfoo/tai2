@@ -103,6 +103,77 @@ class SnapshotBuilder:
             "total_account_value": 0.0,
         }
 
+    def build_with_incomplete_ltf(
+        self,
+        closed_ltf_window: list[Candle],
+        incomplete_candle: Candle,
+        current_ts: int,
+    ) -> dict[str, Any]:
+        """Build a snapshot where the last LTF candle is INCOMPLETE.
+
+        This mirrors live behaviour: the bot polls mid-candle and the
+        snapshot's last_price = real-time ticker price.  Here, the
+        ``incomplete_candle`` is a synthetic LTF bar whose close = the
+        current eval-candle close (the real-time proxy).
+
+        Parameters
+        ----------
+        closed_ltf_window:
+            Fully-closed LTF candles occurring before the current LTF bucket.
+            These are appended before ``incomplete_candle`` for indicator
+            computation.
+        incomplete_candle:
+            Synthetic LTF candle representing the in-progress bar.  Its
+            ``close`` is the current eval-candle close; ``open``/``high``/
+            ``low``/``volume`` are aggregated from eval candles seen so far
+            in this LTF bucket.
+        current_ts:
+            Timestamp of the current eval candle (ms epoch).  Used for HTF
+            alignment — HTF candles with ``ts <= current_ts`` are included.
+        """
+        # ── LTF indicators (closed window + incomplete last candle) ───
+        ltf_raw = [self._candle_to_row(c) for c in closed_ltf_window]
+        ltf_raw.append(self._candle_to_row(incomplete_candle))
+        indicators = MarketService._compute_indicators(ltf_raw)
+        indicators["structure"] = MarketService._compute_structure(ltf_raw)
+
+        # ── HTF alignment ─────────────────────────────────────────────
+        htf_window_raw: list[list[Any]] = []
+        htf_bar = ""
+        if self._htf_candles and self._htf_timeframe:
+            htf_window = [c for c in self._htf_candles if c.ts <= current_ts]
+            if htf_window:
+                htf_window_raw = [self._candle_to_row(c) for c in htf_window]
+                htf_bar = self._htf_timeframe
+                indicators["ohlcv_htf"] = htf_window_raw
+                indicators["htf_indicators"] = MarketService._compute_indicators(htf_window_raw)
+                indicators["ohlcv_htf_bar"] = htf_bar
+
+        # ── Assemble snapshot ─────────────────────────────────────────
+        last_price = float(incomplete_candle.close)
+        return {
+            "generated_at": incomplete_candle.dt.isoformat(),
+            "symbol": self._symbol,
+            "symbols": [self._symbol],
+            "last_price": last_price,
+            "market_data": {
+                self._symbol: {
+                    "ticker": {"last": str(last_price)},
+                    "indicators": indicators,
+                    "custom_metrics": {
+                        "cumulative_volume_delta": 0.0,
+                        "cvd_series": [],
+                        "order_flow_imbalance": {},
+                        "footprint": {},
+                        "market_long_short_ratio": {},
+                    },
+                },
+            },
+            "positions": [],
+            "account_equity": 0.0,
+            "total_account_value": 0.0,
+        }
+
     @staticmethod
     def _candle_to_row(c: Candle) -> list[Any]:
         """Convert a Candle to the raw OKX row format ``[ts, o, h, l, c, v]``."""

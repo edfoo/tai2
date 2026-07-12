@@ -6964,9 +6964,23 @@ def register_pages(app: FastAPI) -> None:
                         max=365,
                         step=1,
                     ).classes("w-32")
+
+                    # Evaluation step (finer-LTF mode)
+                    eval_step_select = ui.select(
+                        options={
+                            "1m": "1m (finest, matches live)",
+                            "5m": "5m (faster)",
+                            "closed": "Closed candles (legacy)",
+                        },
+                        value="1m",
+                        label="Evaluation Step",
+                    ).classes("w-56")
+
                     ui.label(
                         "Backtest period = last N days from now. "
-                        "A warmup of 200 candles is automatically added before the start."
+                        "A warmup of 200 candles is automatically added before the start. "
+                        "Evaluation Step = how often strategies are evaluated; finer steps "
+                        "replicate live intra-candle behaviour."
                     ).classes("text-xs text-slate-500")
 
                 # Strategy selection
@@ -7017,10 +7031,22 @@ def register_pages(app: FastAPI) -> None:
             timeframe = timeframe_select.value or "4H"
             capital = float(capital_input.value or 1000.0)
             days_back = int(days_back_input.value or 30)
+            eval_step = eval_step_select.value or "1m"
 
             # Compute start/end timestamps (ms epoch).
             now_ms = int(time.time() * 1000)
             start_ms = now_ms - days_back * 86_400_000
+
+            # Resolve evaluation mode + timeframe.
+            # "closed" → legacy closed-candle mode (step on LTF candles).
+            # "1m" / "5m" → finer-LTF mode (step on eval candles, indicators
+            #                on LTF with the last candle incomplete).
+            if eval_step == "closed":
+                evaluation_mode = "closed"
+                evaluation_timeframe = timeframe
+            else:
+                evaluation_mode = "finer_ltf"
+                evaluation_timeframe = eval_step
 
             bt_config = BacktestConfig(
                 symbols=symbols,
@@ -7033,6 +7059,8 @@ def register_pages(app: FastAPI) -> None:
                 strategy_config=dict(strategy_config),
                 warmup_candles=200,
                 disable_live_execution=True,
+                evaluation_mode=evaluation_mode,
+                evaluation_timeframe=evaluation_timeframe,
             )
 
             app.state.backtest_running["flag"] = True

@@ -495,3 +495,325 @@ class TestModels:
         assert pos.is_open is True
         pos.close_price = 51000.0
         assert pos.is_open is False
+
+
+# ── Finer-LTF evaluation tests ───────────────────────────────────────────────
+
+
+class TestFinerLtfHelpers:
+    """Test the finer-LTF helper functions in data_fetcher."""
+
+    def test_timeframe_ms_public_alias(self) -> None:
+        """Public timeframe_ms should match _timeframe_to_ms."""
+        from app.services.backtest.data_fetcher import timeframe_ms
+        assert timeframe_ms("1m") == 60_000
+        assert timeframe_ms("15m") == 900_000
+        assert timeframe_ms("1H") == 3_600_000
+        assert timeframe_ms("4H") == 14_400_000
+
+    def test_ltf_bucket_ts_aligned(self) -> None:
+        """ltf_bucket_ts should round down to the LTF period boundary."""
+        from app.services.backtest.data_fetcher import ltf_bucket_ts
+        # 15m bucket: 00:15:00 → 00:15:00 (already aligned)
+        assert ltf_bucket_ts(0, "15m") == 0
+        # 00:07:30 (450_000 ms) → 00:00:00
+        assert ltf_bucket_ts(450_000, "15m") == 0
+        # 00:17:30 (1_050_000 ms) → 00:15:00 (900_000 ms)
+        assert ltf_bucket_ts(1_050_000, "15m") == 900_000
+        # 01:00:00 (3_600_000 ms) → 01:00:00
+        assert ltf_bucket_ts(3_600_000, "1H") == 3_600_000
+
+    def test_is_finer_than(self) -> None:
+        """is_finer_than should compare timeframe durations."""
+        from app.services.backtest.data_fetcher import is_finer_than
+        assert is_finer_than("1m", "15m") is True
+        assert is_finer_than("5m", "15m") is True
+        assert is_finer_than("15m", "1H") is True
+        assert is_finer_than("15m", "15m") is False
+        assert is_finer_than("1H", "15m") is False
+
+
+class TestSnapshotBuilderIncompleteLtf:
+    """Test SnapshotBuilder.build_with_incomplete_ltf."""
+
+    def _make_candles(self, n: int, base_price: float = 100.0, tf_ms: int = 3_600_000) -> list[Candle]:
+        candles = []
+        for i in range(n):
+            ts = 1000 + i * tf_ms
+            price = base_price + i * 0.1
+            candles.append(Candle(
+                ts=ts, open=price, high=price + 0.5, low=price - 0.5,
+                close=price, volume=1000.0,
+            ))
+        return candles
+
+    def test_build_with_incomplete_returns_expected_shape(self) -> None:
+        """Snapshot should contain market_data[symbol].indicators."""
+        closed = self._make_candles(250)
+        incomplete = Candle(ts=closed[-1].ts + 3_600_000, open=125.0, high=126.0,
+                           low=124.0, close=125.5, volume=500.0)
+        builder = SnapshotBuilder("BTC-USDT-SWAP", closed, None, "4H")
+        snapshot = builder.build_with_incomplete_ltf(
+            closed_ltf_window=closed,
+            incomplete_candle=incomplete,
+            current_ts=incomplete.ts,
+        )
+        assert "market_data" in snapshot
+        assert "BTC-USDT-SWAP" in snapshot["market_data"]
+        indicators = snapshot["market_data"]["BTC-USDT-SWAP"]["indicators"]
+        assert "rsi" in indicators
+        assert "bollinger_bands" in indicators
+        assert "adx" in indicators
+        assert "structure" in indicators
+
+    def test_build_with_incomplete_last_price_uses_incomplete_close(self) -> None:
+        """last_price should be the incomplete candle's close, not the last closed candle."""
+        closed = self._make_candles(250)
+        incomplete = Candle(ts=closed[-1].ts + 3_600_000, open=125.0, high=126.0,
+                           low=124.0, close=125.5, volume=500.0)
+        builder = SnapshotBuilder("BTC-USDT-SWAP", closed, None, "4H")
+        snapshot = builder.build_with_incomplete_ltf(
+            closed_ltf_window=closed,
+            incomplete_candle=incomplete,
+            current_ts=incomplete.ts,
+        )
+        assert snapshot["last_price"] == 125.5
+
+    def test_build_with_incomplete_includes_incomplete_in_indicators(self) -> None:
+        """The incomplete candle should be part of the indicator window.
+
+        We verify this by checking that the OHLCV compact series in the
+        indicators dict has one more entry than the closed window alone.
+        """
+        closed = self._make_candles(250)
+        incomplete = Candle(ts=closed[-1].ts + 3_600_000, open=125.0, high=126.0,
+                           low=124.0, close=125.5, volume=500.0)
+        builder = SnapshotBuilder("BTC-USDT-SWAP", closed, None, "4H")
+
+        # Build with closed-only (legacy) for comparison.
+        snapshot_closed = builder.build(window_end_idx=249)
+        ohlcv_closed = snapshot_closed["market_data"]["BTC-USDT-SWAP"]["indicators"]["ohlcv"]
+
+        # Build with incomplete candle appended.
+        snapshot_inc = builder.build_with_incomplete_ltf(
+            closed_ltf_window=closed,
+            incomplete_candle=incomplete,
+            current_ts=incomplete.ts,
+        )
+        ohlcv_inc = snapshot_inc["market_data"]["BTC-USDT-SWAP"]["indicators"]["ohlcv"]
+
+        assert len(ohlcv_inc) == len(ohlcv_closed) + 1
+        # The last entry should be the incomplete candle.
+        last_row = ohlcv_inc[-1]
+        assert last_row["close"] == 125.5
+        assert last_row["open"] == 125.0
+
+
+class TestFinerLtfEngineLoop:
+    """Integration test: finer-LTF loop fires signals that closed mode misses."""
+
+    def test_finer_ltf_signal_fires_mid_candle(self) -> None:
+        """A signal that fires mid-LTF-candle should be caught in finer_ltf mode.
+
+        We construct a scenario where:
+          - 250 warmup candles at a steady price (RSI ~50, no signal).
+          - Then a sharp drop on the first eval candle of a new LTF bucket
+            that pushes RSI below 30 mid-candle.
+          - Then a recovery by the LTF candle close that brings RSI back above 30.
+
+        In finer_ltf mode, the signal should fire on the eval candle where
+        RSI < 30.  In closed mode, the LTF candle's close has RSI >= 30, so
+        no signal fires.
+
+        This is a regression test for the OPN-USDT divergence.
+        """
+        from app.services.backtest.engine import BacktestEngine
+        from app.services.backtest.models import BacktestConfig
+
+        # Build 1m eval candles: 250 warmup (steady), then a sharp drop,
+        # then recovery within the same 15m bucket.
+        # 15m bucket = 15 * 1m candles = 900_000 ms.
+        tf_ms = 60_000  # 1m
+        base_price = 100.0
+        eval_candles: list[Candle] = []
+        # 250 warmup candles at steady price 100
+        for i in range(250):
+            ts = i * tf_ms
+            eval_candles.append(Candle(
+                ts=ts, open=base_price, high=base_price + 0.1,
+                low=base_price - 0.1, close=base_price, volume=1000.0,
+            ))
+        # Now a new 15m bucket starts at ts=250*60_000 = 15_000_000.
+        # First eval candle: sharp drop to 90 (RSI should dip below 30).
+        eval_candles.append(Candle(
+            ts=250 * tf_ms, open=100.0, high=100.0, low=90.0, close=90.0, volume=5000.0,
+        ))
+        # Remaining 14 eval candles in this 15m bucket: recovery to 99.
+        for j in range(1, 15):
+            ts = (250 + j) * tf_ms
+            eval_candles.append(Candle(
+                ts=ts, open=90.0 + j * 0.6, high=91.0 + j * 0.6,
+                low=89.0 + j * 0.6, close=90.0 + j * 0.6, volume=1000.0,
+            ))
+
+        # Build the corresponding 15m LTF candles.  The warmup 250 1m candles
+        # span 250 minutes ≈ 16.67 15m candles, so we need ~17 warmup 15m
+        # candles.  We'll build 20 to be safe, all at steady price 100.
+        ltf_ms = 900_000  # 15m
+        ltf_candles: list[Candle] = []
+        for i in range(20):
+            ts = i * ltf_ms
+            ltf_candles.append(Candle(
+                ts=ts, open=base_price, high=base_price + 0.1,
+                low=base_price - 0.1, close=base_price, volume=15_000.0,
+            ))
+        # The 15m bucket starting at ts=15_000_000 (bucket index 16) contains
+        # our drop+recovery.  Its closed form: open=100, low=90, close=99.
+        ltf_candles.append(Candle(
+            ts=16 * ltf_ms, open=100.0, high=100.0, low=90.0, close=99.0, volume=19_000.0,
+        ))
+
+        # We need a fake fetcher that returns our candles.  Patch the engine's
+        # _fetcher to return the right candles per symbol/timeframe.
+        class _FakeFetcher:
+            async def fetch_candles(self, *, symbol, timeframe, start_ts, end_ts,
+                                    warmup_candles=0, progress_cb=None):
+                if timeframe == "15m":
+                    return ltf_candles
+                return eval_candles
+
+            async def fetch_htf_candles(self, *, symbol, ltf_timeframe, htf_timeframe,
+                                        start_ts, end_ts, warmup_candles=0, progress_cb=None):
+                return []
+
+        launcher_config = {
+            "notional_usd": 10.0,
+            "tp_pct": 5.0,
+            "sl_pct": 3.0,
+            "strategies": {
+                "mean_reversion": {
+                    "enabled": True,
+                    "rsi_oversold": 30.0,
+                    "rsi_overbought": 70.0,
+                    "require_htf_trend": False,  # no HTF in this test
+                    "require_cmf": False,  # simplify: only RSI gate
+                },
+                "spike_continuation": {"enabled": False},
+            },
+        }
+
+        # ── Finer-LTF mode ──
+        config_finer = BacktestConfig(
+            symbols=["BTC-USDT-SWAP"],
+            timeframe="15m",
+            start_ts=250 * tf_ms,  # start at the drop
+            end_ts=(250 + 15) * tf_ms,
+            initial_capital=1000.0,
+            strategy_names=["mean_reversion"],
+            launcher_config=launcher_config,
+            strategy_config={},
+            warmup_candles=200,
+            evaluation_mode="finer_ltf",
+            evaluation_timeframe="1m",
+        )
+        engine_finer = BacktestEngine(config_finer)
+        engine_finer._fetcher = _FakeFetcher()
+        result_finer = asyncio_run(engine_finer.run())
+
+        # ── Closed mode ──
+        config_closed = BacktestConfig(
+            symbols=["BTC-USDT-SWAP"],
+            timeframe="15m",
+            start_ts=16 * ltf_ms,  # start at the 15m bucket with the drop
+            end_ts=17 * ltf_ms,
+            initial_capital=1000.0,
+            strategy_names=["mean_reversion"],
+            launcher_config=launcher_config,
+            strategy_config={},
+            warmup_candles=200,
+            evaluation_mode="closed",
+            evaluation_timeframe="15m",
+        )
+        engine_closed = BacktestEngine(config_closed)
+        engine_closed._fetcher = _FakeFetcher()
+        result_closed = asyncio_run(engine_closed.run())
+
+        # The finer-LTF mode should have opened at least one trade (the
+        # signal fired when RSI dipped below 30 on the 1m drop candle).
+        # Closed mode should have opened zero trades (RSI recovered by close).
+        # NOTE: this is the core regression test — if it fails, the finer-LTF
+        # loop is not replicating live intra-candle behaviour.
+        assert len(result_finer.trades) >= 1, (
+            f"Finer-LTF mode should have opened a trade on the intra-candle "
+            f"RSI dip, but got {len(result_finer.trades)} trades. "
+            f"Error: {result_finer.error}"
+        )
+        assert len(result_closed.trades) == 0, (
+            f"Closed mode should have opened 0 trades (RSI recovered by close), "
+            f"but got {len(result_closed.trades)} trades."
+        )
+
+    def test_legacy_closed_mode_unchanged(self) -> None:
+        """Closed mode should produce the same results as before the finer-LTF change.
+
+        Runs a simple backtest in closed mode and verifies the engine doesn't
+        crash and produces a valid result structure.
+        """
+        from app.services.backtest.engine import BacktestEngine
+        from app.services.backtest.models import BacktestConfig
+
+        # 250 steady candles, no signals expected.
+        candles: list[Candle] = []
+        for i in range(250):
+            ts = i * 3_600_000
+            candles.append(Candle(
+                ts=ts, open=100.0, high=100.1, low=99.9, close=100.0, volume=1000.0,
+            ))
+
+        class _FakeFetcher:
+            async def fetch_candles(self, *, symbol, timeframe, start_ts, end_ts,
+                                    warmup_candles=0, progress_cb=None):
+                return candles
+
+            async def fetch_htf_candles(self, *, symbol, ltf_timeframe, htf_timeframe,
+                                        start_ts, end_ts, warmup_candles=0, progress_cb=None):
+                return []
+
+        config = BacktestConfig(
+            symbols=["BTC-USDT-SWAP"],
+            timeframe="1H",
+            start_ts=0,
+            end_ts=250 * 3_600_000,
+            initial_capital=1000.0,
+            strategy_names=["mean_reversion"],
+            launcher_config={
+                "notional_usd": 10.0,
+                "tp_pct": 5.0,
+                "sl_pct": 3.0,
+                "strategies": {
+                    "mean_reversion": {"enabled": True, "require_htf_trend": False, "require_cmf": False},
+                    "spike_continuation": {"enabled": False},
+                },
+            },
+            strategy_config={},
+            warmup_candles=200,
+            evaluation_mode="closed",
+            evaluation_timeframe="1H",
+        )
+        engine = BacktestEngine(config)
+        engine._fetcher = _FakeFetcher()
+        result = asyncio_run(engine.run())
+
+        assert result.error is None, f"Closed-mode backtest failed: {result.error}"
+        assert result.candles_processed > 0
+        assert len(result.trades) == 0  # steady price → no signals
+
+
+def asyncio_run(coro):
+    """Helper to run an async coroutine in a test (no pytest-asyncio needed)."""
+    import asyncio as _asyncio
+    loop = _asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()

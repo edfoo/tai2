@@ -19,7 +19,13 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Callable
 
-from app.services.backtest.data_fetcher import HistoricalDataFetcher, htf_for
+from app.services.backtest.data_fetcher import (
+    HistoricalDataFetcher,
+    htf_for,
+    is_finer_than,
+    ltf_bucket_ts,
+    timeframe_ms,
+)
 from app.services.backtest.metrics import compute_metrics, compute_per_strategy_metrics
 from app.services.backtest.models import (
     BacktestConfig,
@@ -83,6 +89,21 @@ class BacktestEngine:
         self._current_prices: dict[str, float] = {}
         self._last_candle_ts: int = 0
 
+        # ── Finer-LTF evaluation mode ─────────────────────────────────
+        # Resolve the effective evaluation mode.  If the user requested
+        # "finer_ltf" but the eval TF is not strictly finer than the LTF,
+        # fall back to "closed" mode (no benefit to finer stepping).
+        self._eval_tf = config.evaluation_timeframe
+        self._eval_mode = config.evaluation_mode
+        if self._eval_mode == "finer_ltf" and not is_finer_than(self._eval_tf, config.timeframe):
+            logger.info(
+                "Backtest: evaluation_timeframe=%s is not finer than timeframe=%s — "
+                "falling back to closed-candle mode.",
+                self._eval_tf,
+                config.timeframe,
+            )
+            self._eval_mode = "closed"
+
         # Warn if any enabled strategy config requires footprint data — it's
         # never available in backtest (no historical trade tape), so the filter
         # is silently skipped. This makes backtests with that flag a lower
@@ -114,7 +135,9 @@ class BacktestEngine:
 
             symbol_candles: dict[str, list[Candle]] = {}
             symbol_htf_candles: dict[str, list[Candle]] = {}
+            symbol_eval_candles: dict[str, list[Candle]] = {}
             htf_tf = htf_for(self._config.timeframe)
+            use_finer_ltf = self._eval_mode == "finer_ltf"
 
             for idx, symbol in enumerate(self._config.symbols):
                 candles = await self._fetcher.fetch_candles(
@@ -140,6 +163,19 @@ class BacktestEngine:
                     )
                     symbol_htf_candles[symbol] = htf_candles
 
+                # Fetch the finer evaluation timeframe (e.g. 1m) for stepping.
+                # These candles drive the loop; indicators are still computed
+                # on the LTF (with the last LTF candle incomplete).
+                if use_finer_ltf:
+                    eval_candles = await self._fetcher.fetch_candles(
+                        symbol=symbol,
+                        timeframe=self._eval_tf,
+                        start_ts=self._config.start_ts,
+                        end_ts=self._config.end_ts,
+                        warmup_candles=self._config.warmup_candles,
+                    )
+                    symbol_eval_candles[symbol] = eval_candles
+
                 if progress_cb:
                     progress_cb(BacktestProgress(phase="fetch", current=idx + 1, total=len(self._config.symbols), message=f"{symbol}: {len(candles)} candles"))
 
@@ -156,9 +192,10 @@ class BacktestEngine:
             # ── Phase 3: Determine backtest window ────────────────────
             # Find the index of the first candle at or after start_ts for
             # each symbol (after warmup).
+            stepping_candles = symbol_eval_candles if use_finer_ltf else symbol_candles
             start_indices: dict[str, int] = {}
             for symbol in self._config.symbols:
-                candles = symbol_candles[symbol]
+                candles = stepping_candles[symbol]
                 start_idx = 0
                 for i, c in enumerate(candles):
                     if c.ts >= self._config.start_ts:
@@ -168,9 +205,9 @@ class BacktestEngine:
 
             # Total candles to process = max length across symbols.
             max_len = max(
-                len(symbol_candles[s]) - start_indices[s]
+                len(stepping_candles[s]) - start_indices[s]
                 for s in self._config.symbols
-                if symbol_candles[s]
+                if stepping_candles[s]
             ) if self._config.symbols else 0
 
             if max_len == 0:
@@ -188,14 +225,25 @@ class BacktestEngine:
             if progress_cb:
                 progress_cb(BacktestProgress(phase="backtest", current=0, total=max_len, message="Running backtest"))
 
-            candles_processed = await asyncio.to_thread(
-                self._run_backtest_loop,
-                symbol_candles=symbol_candles,
-                snapshot_builders=snapshot_builders,
-                start_indices=start_indices,
-                max_len=max_len,
-                progress_cb=progress_cb,
-            )
+            if use_finer_ltf:
+                candles_processed = await asyncio.to_thread(
+                    self._run_finer_ltf_loop,
+                    symbol_candles=symbol_candles,
+                    symbol_eval_candles=symbol_eval_candles,
+                    snapshot_builders=snapshot_builders,
+                    start_indices=start_indices,
+                    max_len=max_len,
+                    progress_cb=progress_cb,
+                )
+            else:
+                candles_processed = await asyncio.to_thread(
+                    self._run_backtest_loop,
+                    symbol_candles=symbol_candles,
+                    snapshot_builders=snapshot_builders,
+                    start_indices=start_indices,
+                    max_len=max_len,
+                    progress_cb=progress_cb,
+                )
 
             # ── Phase 5: Close remaining positions at last price ──────
             self._simulator.close_all_at_market(self._current_prices, self._last_candle_ts)
@@ -307,6 +355,175 @@ class BacktestEngine:
             # Without this, the worker thread hogs the GIL during the
             # pandas-ta indicator computations and the websocket disconnects.
             # time.sleep(0) in a thread releases the GIL for one scheduler tick.
+            if step % 5 == 0:
+                time.sleep(0)
+
+        return candles_processed
+
+    def _run_finer_ltf_loop(
+        self,
+        *,
+        symbol_candles: dict[str, list[Candle]],
+        symbol_eval_candles: dict[str, list[Candle]],
+        snapshot_builders: dict[str, SnapshotBuilder],
+        start_indices: dict[str, int],
+        max_len: int,
+        progress_cb: Callable[[BacktestProgress], None] | None = None,
+    ) -> int:
+        """Finer-LTF backtest loop — steps on eval candles, indicators on LTF.
+
+        At each eval-candle step, the last LTF candle in the indicator window
+        is INCOMPLETE: its close = current eval candle close (real-time proxy),
+        and its open/high/low/volume are aggregated from eval candles seen so
+        far in the current LTF bucket.  This mirrors live behaviour where the
+        scheduler polls mid-candle and ``last_price`` = real-time ticker.
+
+        When the eval candle crosses into a new LTF bucket, the previous
+        accumulator is appended to ``closed_ltf_window`` as a fully-closed
+        LTF candle, and a new accumulator is started.
+        """
+        candles_processed = 0
+        strategies_cfg = (self._config.launcher_config.get("strategies") or {})
+        ltf_tf = self._config.timeframe
+        ltf_ms = timeframe_ms(ltf_tf)
+
+        # Per-symbol state for the in-progress LTF bucket.
+        # closed_window[symbol]  → list of fully-closed LTF candles (grows).
+        # acc[symbol]             → current in-progress LTF accumulator, or None.
+        closed_window: dict[str, list[Candle]] = {s: [] for s in self._config.symbols}
+        acc: dict[str, dict[str, Any] | None] = {s: None for s in self._config.symbols}
+
+        # Pre-seed closed_window with LTF candles whose ts < the first eval
+        # candle's LTF bucket.  This gives indicators enough warmup history
+        # on the first step (the LTF fetch already includes warmup_candles).
+        for symbol in self._config.symbols:
+            ltf_candles = symbol_candles[symbol]
+            eval_candles = symbol_eval_candles[symbol]
+            start_idx = start_indices[symbol]
+            if start_idx >= len(eval_candles):
+                continue
+            first_eval_ts = eval_candles[start_idx].ts
+            first_bucket = ltf_bucket_ts(first_eval_ts, ltf_tf)
+            # All LTF candles strictly before the first eval bucket are closed.
+            for c in ltf_candles:
+                if c.ts < first_bucket:
+                    closed_window[symbol].append(c)
+                else:
+                    break
+
+        for step in range(max_len):
+            # Build the set of eval candles at this time-step across symbols.
+            step_candles: dict[str, Candle] = {}
+            for symbol in self._config.symbols:
+                eval_candles = symbol_eval_candles[symbol]
+                idx = start_indices[symbol] + step
+                if idx < len(eval_candles):
+                    step_candles[symbol] = eval_candles[idx]
+
+            if not step_candles:
+                continue
+
+            # Update current prices for equity calculation.
+            for symbol, candle in step_candles.items():
+                self._current_prices[symbol] = candle.close
+                if candle.ts > self._last_candle_ts:
+                    self._last_candle_ts = candle.ts
+
+            # Update each symbol's LTF accumulator with its eval candle.
+            for symbol, eval_candle in step_candles.items():
+                bucket = ltf_bucket_ts(eval_candle.ts, ltf_tf)
+                cur = acc[symbol]
+                if cur is None:
+                    # Start a new accumulator for this bucket.
+                    acc[symbol] = {
+                        "ts": bucket,
+                        "open": eval_candle.open,
+                        "high": eval_candle.high,
+                        "low": eval_candle.low,
+                        "close": eval_candle.close,
+                        "volume": eval_candle.volume,
+                    }
+                elif cur["ts"] == bucket:
+                    # Same bucket — update the accumulator.
+                    cur["high"] = max(cur["high"], eval_candle.high)
+                    cur["low"] = min(cur["low"], eval_candle.low)
+                    cur["close"] = eval_candle.close  # real-time proxy
+                    cur["volume"] += eval_candle.volume
+                else:
+                    # New bucket — close out the previous accumulator and
+                    # append it to the closed window, then start fresh.
+                    closed_window[symbol].append(Candle(
+                        ts=cur["ts"],
+                        open=cur["open"],
+                        high=cur["high"],
+                        low=cur["low"],
+                        close=cur["close"],
+                        volume=cur["volume"],
+                    ))
+                    acc[symbol] = {
+                        "ts": bucket,
+                        "open": eval_candle.open,
+                        "high": eval_candle.high,
+                        "low": eval_candle.low,
+                        "close": eval_candle.close,
+                        "volume": eval_candle.volume,
+                    }
+
+            # Evaluate strategies for each symbol using the incomplete LTF candle.
+            for symbol, eval_candle in step_candles.items():
+                cur = acc[symbol]
+                if cur is None:
+                    continue  # no accumulator yet (shouldn't happen)
+                incomplete = Candle(
+                    ts=cur["ts"],
+                    open=cur["open"],
+                    high=cur["high"],
+                    low=cur["low"],
+                    close=cur["close"],
+                    volume=cur["volume"],
+                )
+                builder = snapshot_builders[symbol]
+                snapshot = builder.build_with_incomplete_ltf(
+                    closed_ltf_window=closed_window[symbol],
+                    incomplete_candle=incomplete,
+                    current_ts=eval_candle.ts,
+                )
+
+                # Evaluate each selected strategy.
+                for strategy in self._strategies:
+                    strat_cfg = strategies_cfg.get(strategy.name) or {}
+                    if not strat_cfg.get("enabled", False):
+                        continue
+                    # Per-strategy position guard: skip if already in position.
+                    if self._simulator.has_open_position(symbol, strategy.name):
+                        continue
+                    signal = strategy.evaluate(symbol, snapshot, strat_cfg, self._helpers)
+                    if signal is None:
+                        continue
+                    # Compute TP/SL prices from signal (matching live logic).
+                    tp_price, sl_price = self._compute_tp_sl(
+                        signal, eval_candle.close, self._config.launcher_config
+                    )
+                    direction = "long" if signal.direction == "buy" else "short"
+                    self._simulator.open_position(
+                        symbol=symbol,
+                        direction=direction,
+                        entry_price=eval_candle.close,
+                        entry_ts=eval_candle.ts,
+                        tp_price=tp_price,
+                        sl_price=sl_price,
+                        strategy_name=strategy.name,
+                    )
+
+            # Update simulator (check TP/SL at eval granularity, record equity).
+            self._simulator.update_multi(step_candles)
+
+            candles_processed += 1
+            if progress_cb and step % 50 == 0:
+                progress_cb(BacktestProgress(phase="backtest", current=step + 1, total=max_len, message=f"Processed {step + 1}/{max_len} eval candles"))
+
+            # Release the GIL periodically so the asyncio event loop thread
+            # (which runs NiceGUI's websocket keepalive) gets CPU time.
             if step % 5 == 0:
                 time.sleep(0)
 

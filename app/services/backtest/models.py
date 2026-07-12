@@ -112,6 +112,20 @@ class BacktestConfig:
     warmup_candles: int = 200
     # Whether to disable live execution during the backtest.
     disable_live_execution: bool = True
+    # ── Finer-LTF evaluation (replicates live intra-candle behaviour) ──
+    # evaluation_mode:
+    #   "finer_ltf" (default) — step the backtest loop on `evaluation_timeframe`
+    #                           candles (e.g. 1m) while computing indicators on
+    #                           `timeframe` (e.g. 15m) with the last LTF candle
+    #                           INCOMPLETE (close = current eval candle close).
+    #                           Mirrors live where the scheduler polls mid-candle
+    #                           and last_price = real-time ticker.
+    #   "closed"               — legacy: step on closed `timeframe` candles only.
+    evaluation_mode: str = "finer_ltf"
+    # Fine timeframe used for loop stepping when evaluation_mode="finer_ltf".
+    # Must be strictly finer than `timeframe`. If equal or coarser, the engine
+    # falls back to "closed" mode automatically.
+    evaluation_timeframe: str = "1m"
 
 
 # ── Backtest result ─────────────────────────────────────────────────────
