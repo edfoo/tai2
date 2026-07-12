@@ -89,286 +89,6 @@ if DEFAULT_FRONTEND_TIMEZONE not in TIMEZONE_OPTIONS:
     TIMEZONE_OPTIONS.insert(0, DEFAULT_FRONTEND_TIMEZONE)
 
 
-def render_backtest_page() -> None:
-    """BACKTEST page — run historical strategy backtests.
-
-    Lets the user select strategies, date range, and capital, then runs a
-    backtest using the current strategy config values.  Results show an
-    equity curve, trade table, and summary metrics.
-    """
-    from app.services.backtest.engine import BacktestEngine, available_strategy_names
-    from app.services.backtest.models import BacktestConfig
-
-    navigation("BACKTEST")
-    wrapper = page_container()
-    config = getattr(app.state, "runtime_config", {}) or {}
-    trading_pairs = config.get("trading_pairs") or []
-    launcher_config = config.get("launcher") or {}
-    strategy_config = config.get("strategy") or {}
-    strategy_names = available_strategy_names()
-
-    # ── State ─────────────────────────────────────────────────────────
-    backtest_running = {"flag": False}
-    backtest_result = {"value": None}
-
-    with wrapper:
-        ui.label("Backtesting").classes("text-2xl font-bold")
-        ui.label(
-            "Run historical backtests of your strategies using current config values. "
-            "Data is fetched from OKX and cached locally for re-runs."
-        ).classes("text-sm text-slate-500 mb-2")
-        ui.separator().classes("w-full my-2")
-
-        # ── Configuration form ────────────────────────────────────────
-        with ui.card().classes("w-full rounded-lg border border-slate-200 mb-2"):
-            ui.label("Configuration").classes("text-lg font-semibold mb-2")
-
-            with ui.row().classes("w-full gap-4 items-start"):
-                # Symbol selection
-                symbol_select = ui.select(
-                    options={s: s for s in trading_pairs} if trading_pairs else {"BTC-USDT-SWAP": "BTC-USDT-SWAP"},
-                    value=trading_pairs[0] if trading_pairs else "BTC-USDT-SWAP",
-                    label="Symbol",
-                    multiple=True,
-                ).classes("w-64")
-
-                # Timeframe
-                timeframe_select = ui.select(
-                    options={tf: tf for tf in TA_TIMEFRAME_OPTIONS},
-                    value=config.get("ta_timeframe") or "4H",
-                    label="Timeframe",
-                ).classes("w-32")
-
-                # Initial capital
-                capital_input = ui.number(
-                    label="Initial Capital (USDT)",
-                    value=1000.0,
-                    min=1.0,
-                    step=100.0,
-                    precision=2,
-                ).classes("w-40")
-
-            with ui.row().classes("w-full gap-4 items-start"):
-                # Date range
-                days_back_input = ui.number(
-                    label="Lookback (days)",
-                    value=30,
-                    min=1,
-                    max=365,
-                    step=1,
-                ).classes("w-32")
-                ui.label(
-                    "Backtest period = last N days from now. "
-                    "A warmup of 200 candles is automatically added before the start."
-                ).classes("text-xs text-slate-500")
-
-            # Strategy selection
-            with ui.row().classes("w-full gap-4 items-center mt-2"):
-                ui.label("Strategies:").classes("text-sm font-medium")
-                strategy_toggles: dict[str, ui.switch] = {}
-                for name in strategy_names:
-                    # Check if the strategy is enabled in current config
-                    strat_cfg = (launcher_config.get("strategies") or {}).get(name) or {}
-                    strategy_toggles[name] = ui.switch(
-                        name,
-                        value=bool(strat_cfg.get("enabled", False)),
-                    ).props("dense color=primary")
-                    strategy_toggles[name]
-
-            # Run button + progress
-            with ui.row().classes("w-full items-center gap-4 mt-2"):
-                run_button = ui.button("Run Backtest", icon="play_arrow", color="primary")
-                progress_label = ui.label("").classes("text-sm text-slate-500")
-
-        # ── Results area ──────────────────────────────────────────────
-        results_container = ui.column().classes("w-full gap-2")
-
-    # ── Backtest runner ───────────────────────────────────────────────
-
-    async def run_backtest() -> None:
-        if backtest_running["flag"]:
-            ui.notify("A backtest is already running", color="warning")
-            return
-
-        symbols = symbol_select.value or []
-        if isinstance(symbols, str):
-            symbols = [symbols]
-        symbols = [s.upper() for s in symbols if s]
-        if not symbols:
-            ui.notify("Select at least one symbol", color="negative")
-            return
-
-        selected_strategies = [
-            name for name, toggle in strategy_toggles.items() if toggle.value
-        ]
-        if not selected_strategies:
-            ui.notify("Select at least one strategy", color="negative")
-            return
-
-        timeframe = timeframe_select.value or "4H"
-        capital = float(capital_input.value or 1000.0)
-        days_back = int(days_back_input.value or 30)
-
-        # Compute start/end timestamps (ms epoch).
-        now_ms = int(time.time() * 1000)
-        start_ms = now_ms - days_back * 86_400_000
-
-        bt_config = BacktestConfig(
-            symbols=symbols,
-            timeframe=timeframe,
-            start_ts=start_ms,
-            end_ts=now_ms,
-            initial_capital=capital,
-            strategy_names=selected_strategies,
-            launcher_config=dict(launcher_config),
-            strategy_config=dict(strategy_config),
-            warmup_candles=200,
-            disable_live_execution=True,
-        )
-
-        backtest_running["flag"] = True
-        run_button.disable()
-        progress_label.set_text("Starting...")
-        results_container.clear()
-
-        def progress_cb(progress: Any) -> None:
-            """Update the progress label from the engine."""
-            phase = getattr(progress, "phase", "")
-            current = getattr(progress, "current", 0)
-            total = getattr(progress, "total", 0)
-            msg = getattr(progress, "message", "")
-            if phase == "fetch":
-                progress_label.set_text(f"Fetching data: {msg}")
-            elif phase == "backtest":
-                pct = (current / total * 100) if total > 0 else 0
-                progress_label.set_text(f"Backtest: {pct:.0f}% ({current}/{total} candles)")
-            elif phase == "metrics":
-                progress_label.set_text("Computing metrics...")
-            elif phase == "done":
-                progress_label.set_text("Done")
-            elif phase == "error":
-                progress_label.set_text(f"Error: {msg}")
-
-        engine = BacktestEngine(bt_config)
-        result = await engine.run(progress_cb=progress_cb)
-
-        backtest_running["flag"] = False
-        run_button.enable()
-
-        if result.is_error:
-            ui.notify(f"Backtest failed: {result.error}", color="negative")
-            progress_label.set_text(f"Error: {result.error}")
-            return
-
-        backtest_result["value"] = result
-        ui.notify(
-            f"Backtest complete: {len(result.trades)} trades, "
-            f"net PnL {result.metrics.get('net_profit', 0):.2f} USDT",
-            color="positive",
-        )
-        _render_results(result, results_container)
-
-    def _render_results(result: Any, container: ui.column) -> None:
-        """Render the backtest results into the results container."""
-        with container:
-            # ── Summary metrics ──────────────────────────────────────
-            with ui.card().classes("w-full rounded-lg border border-slate-200 mb-2"):
-                ui.label("Summary").classes("text-lg font-semibold mb-2")
-                m = result.metrics
-                with ui.row().classes("w-full flex-wrap gap-4"):
-                    _metric_card("Net Profit", f"{m.get('net_profit', 0):.2f} USDT", f"{m.get('net_profit_pct', 0):.1f}%")
-                    _metric_card("Total Trades", str(m.get("total_trades", 0)), "")
-                    _metric_card("Win Rate", f"{m.get('win_rate', 0):.1f}%", "")
-                    _metric_card("Profit Factor", f"{m.get('profit_factor', 0):.2f}", "")
-                    _metric_card("Max Drawdown", f"{m.get('max_drawdown', 0):.2f} USDT", f"{m.get('max_drawdown_pct', 0):.1f}%")
-                    _metric_card("Final Equity", f"{m.get('final_equity', 0):.2f} USDT", "")
-                    _metric_card("Sharpe/Candle", f"{m.get('sharpe_per_candle', 0):.4f}", "")
-                    _metric_card("Avg Win", f"{m.get('average_win', 0):.2f}", "")
-                    _metric_card("Avg Loss", f"{m.get('average_loss', 0):.2f}", "")
-                    _metric_card("Expectancy", f"{m.get('expectancy', 0):.4f}", "")
-
-            # ── Per-strategy breakdown ────────────────────────────────
-            if result.per_strategy:
-                with ui.card().classes("w-full rounded-lg border border-slate-200 mb-2"):
-                    ui.label("Per-Strategy Breakdown").classes("text-lg font-semibold mb-2")
-                    with ui.table(
-                        columns=[
-                            {"name": "strategy", "label": "Strategy", "field": "strategy", "align": "left"},
-                            {"name": "trades", "label": "Trades", "field": "trades", "align": "right"},
-                            {"name": "win_rate", "label": "Win Rate", "field": "win_rate", "align": "right"},
-                            {"name": "net_profit", "label": "Net Profit", "field": "net_profit", "align": "right"},
-                            {"name": "profit_factor", "label": "PF", "field": "profit_factor", "align": "right"},
-                        ],
-                        rows=[
-                            {
-                                "strategy": name,
-                                "trades": sm.get("trades", 0),
-                                "win_rate": f"{sm.get('win_rate', 0):.1f}%",
-                                "net_profit": f"{sm.get('net_profit', 0):.2f}",
-                                "profit_factor": f"{sm.get('profit_factor', 0):.2f}",
-                            }
-                            for name, sm in result.per_strategy.items()
-                        ],
-                    ).classes("w-full"):
-                        pass
-
-            # ── Equity curve ──────────────────────────────────────────
-            if result.equity_curve:
-                with ui.card().classes("w-full rounded-lg border border-slate-200 mb-2"):
-                    ui.label("Equity Curve").classes("text-lg font-semibold mb-2")
-                    eq_data = [
-                        {"x": i, "y": p.equity}
-                        for i, p in enumerate(result.equity_curve)
-                    ]
-                    ui.echart({
-                        "tooltip": {"trigger": "axis"},
-                        "xAxis": {"type": "category", "data": [p["x"] for p in eq_data]},
-                        "yAxis": {"type": "value"},
-                        "series": [{"data": [p["y"] for p in eq_data], "type": "line", "smooth": True}],
-                    }).classes("w-full h-64")
-
-            # ── Trade table ───────────────────────────────────────────
-            if result.trades:
-                with ui.card().classes("w-full rounded-lg border border-slate-200"):
-                    ui.label(f"Trades ({len(result.trades)})").classes("text-lg font-semibold mb-2")
-                    with ui.table(
-                        columns=[
-                            {"name": "symbol", "label": "Symbol", "field": "symbol", "align": "left"},
-                            {"name": "direction", "label": "Dir", "field": "direction", "align": "left"},
-                            {"name": "strategy", "label": "Strategy", "field": "strategy", "align": "left"},
-                            {"name": "entry", "label": "Entry", "field": "entry", "align": "right"},
-                            {"name": "close", "label": "Close", "field": "close", "align": "right"},
-                            {"name": "reason", "label": "Reason", "field": "reason", "align": "left"},
-                            {"name": "pnl", "label": "PnL", "field": "pnl", "align": "right"},
-                            {"name": "pnl_pct", "label": "PnL %", "field": "pnl_pct", "align": "right"},
-                        ],
-                        rows=[
-                            {
-                                "symbol": t.symbol,
-                                "direction": t.direction,
-                                "strategy": t.strategy_name,
-                                "entry": f"{t.entry_price:.4f}",
-                                "close": f"{t.close_price:.4f}" if t.close_price else "—",
-                                "reason": t.close_reason,
-                                "pnl": f"{t.pnl:.2f}",
-                                "pnl_pct": f"{t.pnl_pct:.2f}%",
-                            }
-                            for t in result.trades
-                        ],
-                    ).classes("w-full"):
-                        pass
-
-    def _metric_card(label: str, value: str, sub: str) -> None:
-        """Render a small metric card."""
-        with ui.column().classes("bg-slate-50 rounded-lg px-4 py-2 min-w-[120px]"):
-            ui.label(label).classes("text-xs text-slate-500")
-            ui.label(value).classes("text-lg font-bold")
-            if sub:
-                ui.label(sub).classes("text-xs text-slate-400")
-
-    run_button.on("click", run_backtest)
-
-
 def register_pages(app: FastAPI) -> None:
     settings = get_settings()
     try:
@@ -7169,6 +6889,285 @@ def register_pages(app: FastAPI) -> None:
     @ui.page("/backtest")
     def backtest() -> None:
         render_backtest_page()
+
+    def render_backtest_page() -> None:
+        """BACKTEST page — run historical strategy backtests.
+
+        Lets the user select strategies, date range, and capital, then runs a
+        backtest using the current strategy config values.  Results show an
+        equity curve, trade table, and summary metrics.
+        """
+        from app.services.backtest.engine import BacktestEngine, available_strategy_names
+        from app.services.backtest.models import BacktestConfig
+
+        navigation("BACKTEST")
+        wrapper = page_container()
+        config = getattr(app.state, "runtime_config", {}) or {}
+        trading_pairs = config.get("trading_pairs") or []
+        launcher_config = config.get("launcher") or {}
+        strategy_config = config.get("strategy") or {}
+        strategy_names = available_strategy_names()
+
+        # ── State ─────────────────────────────────────────────────────────
+        backtest_running = {"flag": False}
+        backtest_result = {"value": None}
+
+        with wrapper:
+            ui.label("Backtesting").classes("text-2xl font-bold")
+            ui.label(
+                "Run historical backtests of your strategies using current config values. "
+                "Data is fetched from OKX and cached locally for re-runs."
+            ).classes("text-sm text-slate-500 mb-2")
+            ui.separator().classes("w-full my-2")
+
+            # ── Configuration form ────────────────────────────────────────
+            with ui.card().classes("w-full rounded-lg border border-slate-200 mb-2"):
+                ui.label("Configuration").classes("text-lg font-semibold mb-2")
+
+                with ui.row().classes("w-full gap-4 items-start"):
+                    # Symbol selection
+                    symbol_select = ui.select(
+                        options={s: s for s in trading_pairs} if trading_pairs else {"BTC-USDT-SWAP": "BTC-USDT-SWAP"},
+                        value=trading_pairs[0] if trading_pairs else "BTC-USDT-SWAP",
+                        label="Symbol",
+                        multiple=True,
+                    ).classes("w-64")
+
+                    # Timeframe
+                    timeframe_select = ui.select(
+                        options={tf: tf for tf in TA_TIMEFRAME_OPTIONS},
+                        value=config.get("ta_timeframe") or "4H",
+                        label="Timeframe",
+                    ).classes("w-32")
+
+                    # Initial capital
+                    capital_input = ui.number(
+                        label="Initial Capital (USDT)",
+                        value=1000.0,
+                        min=1.0,
+                        step=100.0,
+                        precision=2,
+                    ).classes("w-40")
+
+                with ui.row().classes("w-full gap-4 items-start"):
+                    # Date range
+                    days_back_input = ui.number(
+                        label="Lookback (days)",
+                        value=30,
+                        min=1,
+                        max=365,
+                        step=1,
+                    ).classes("w-32")
+                    ui.label(
+                        "Backtest period = last N days from now. "
+                        "A warmup of 200 candles is automatically added before the start."
+                    ).classes("text-xs text-slate-500")
+
+                # Strategy selection
+                with ui.row().classes("w-full gap-4 items-center mt-2"):
+                    ui.label("Strategies:").classes("text-sm font-medium")
+                    strategy_toggles: dict[str, ui.switch] = {}
+                    for name in strategy_names:
+                        # Check if the strategy is enabled in current config
+                        strat_cfg = (launcher_config.get("strategies") or {}).get(name) or {}
+                        strategy_toggles[name] = ui.switch(
+                            name,
+                            value=bool(strat_cfg.get("enabled", False)),
+                        ).props("dense color=primary")
+                        strategy_toggles[name]
+
+                # Run button + progress
+                with ui.row().classes("w-full items-center gap-4 mt-2"):
+                    run_button = ui.button("Run Backtest", icon="play_arrow", color="primary")
+                    progress_label = ui.label("").classes("text-sm text-slate-500")
+
+            # ── Results area ──────────────────────────────────────────────
+            results_container = ui.column().classes("w-full gap-2")
+
+        # ── Backtest runner ───────────────────────────────────────────────
+
+        async def run_backtest() -> None:
+            if backtest_running["flag"]:
+                ui.notify("A backtest is already running", color="warning")
+                return
+
+            symbols = symbol_select.value or []
+            if isinstance(symbols, str):
+                symbols = [symbols]
+            symbols = [s.upper() for s in symbols if s]
+            if not symbols:
+                ui.notify("Select at least one symbol", color="negative")
+                return
+
+            selected_strategies = [
+                name for name, toggle in strategy_toggles.items() if toggle.value
+            ]
+            if not selected_strategies:
+                ui.notify("Select at least one strategy", color="negative")
+                return
+
+            timeframe = timeframe_select.value or "4H"
+            capital = float(capital_input.value or 1000.0)
+            days_back = int(days_back_input.value or 30)
+
+            # Compute start/end timestamps (ms epoch).
+            now_ms = int(time.time() * 1000)
+            start_ms = now_ms - days_back * 86_400_000
+
+            bt_config = BacktestConfig(
+                symbols=symbols,
+                timeframe=timeframe,
+                start_ts=start_ms,
+                end_ts=now_ms,
+                initial_capital=capital,
+                strategy_names=selected_strategies,
+                launcher_config=dict(launcher_config),
+                strategy_config=dict(strategy_config),
+                warmup_candles=200,
+                disable_live_execution=True,
+            )
+
+            backtest_running["flag"] = True
+            run_button.disable()
+            progress_label.set_text("Starting...")
+            results_container.clear()
+
+            def progress_cb(progress: Any) -> None:
+                """Update the progress label from the engine."""
+                phase = getattr(progress, "phase", "")
+                current = getattr(progress, "current", 0)
+                total = getattr(progress, "total", 0)
+                msg = getattr(progress, "message", "")
+                if phase == "fetch":
+                    progress_label.set_text(f"Fetching data: {msg}")
+                elif phase == "backtest":
+                    pct = (current / total * 100) if total > 0 else 0
+                    progress_label.set_text(f"Backtest: {pct:.0f}% ({current}/{total} candles)")
+                elif phase == "metrics":
+                    progress_label.set_text("Computing metrics...")
+                elif phase == "done":
+                    progress_label.set_text("Done")
+                elif phase == "error":
+                    progress_label.set_text(f"Error: {msg}")
+
+            engine = BacktestEngine(bt_config)
+            result = await engine.run(progress_cb=progress_cb)
+
+            backtest_running["flag"] = False
+            run_button.enable()
+
+            if result.is_error:
+                ui.notify(f"Backtest failed: {result.error}", color="negative")
+                progress_label.set_text(f"Error: {result.error}")
+                return
+
+            backtest_result["value"] = result
+            ui.notify(
+                f"Backtest complete: {len(result.trades)} trades, "
+                f"net PnL {result.metrics.get('net_profit', 0):.2f} USDT",
+                color="positive",
+            )
+            _render_results(result, results_container)
+
+        def _render_results(result: Any, container: ui.column) -> None:
+            """Render the backtest results into the results container."""
+            with container:
+                # ── Summary metrics ──────────────────────────────────────
+                with ui.card().classes("w-full rounded-lg border border-slate-200 mb-2"):
+                    ui.label("Summary").classes("text-lg font-semibold mb-2")
+                    m = result.metrics
+                    with ui.row().classes("w-full flex-wrap gap-4"):
+                        _metric_card("Net Profit", f"{m.get('net_profit', 0):.2f} USDT", f"{m.get('net_profit_pct', 0):.1f}%")
+                        _metric_card("Total Trades", str(m.get("total_trades", 0)), "")
+                        _metric_card("Win Rate", f"{m.get('win_rate', 0):.1f}%", "")
+                        _metric_card("Profit Factor", f"{m.get('profit_factor', 0):.2f}", "")
+                        _metric_card("Max Drawdown", f"{m.get('max_drawdown', 0):.2f} USDT", f"{m.get('max_drawdown_pct', 0):.1f}%")
+                        _metric_card("Final Equity", f"{m.get('final_equity', 0):.2f} USDT", "")
+                        _metric_card("Sharpe/Candle", f"{m.get('sharpe_per_candle', 0):.4f}", "")
+                        _metric_card("Avg Win", f"{m.get('average_win', 0):.2f}", "")
+                        _metric_card("Avg Loss", f"{m.get('average_loss', 0):.2f}", "")
+                        _metric_card("Expectancy", f"{m.get('expectancy', 0):.4f}", "")
+
+                # ── Per-strategy breakdown ────────────────────────────────
+                if result.per_strategy:
+                    with ui.card().classes("w-full rounded-lg border border-slate-200 mb-2"):
+                        ui.label("Per-Strategy Breakdown").classes("text-lg font-semibold mb-2")
+                        with ui.table(
+                            columns=[
+                                {"name": "strategy", "label": "Strategy", "field": "strategy", "align": "left"},
+                                {"name": "trades", "label": "Trades", "field": "trades", "align": "right"},
+                                {"name": "win_rate", "label": "Win Rate", "field": "win_rate", "align": "right"},
+                                {"name": "net_profit", "label": "Net Profit", "field": "net_profit", "align": "right"},
+                                {"name": "profit_factor", "label": "PF", "field": "profit_factor", "align": "right"},
+                            ],
+                            rows=[
+                                {
+                                    "strategy": name,
+                                    "trades": sm.get("trades", 0),
+                                    "win_rate": f"{sm.get('win_rate', 0):.1f}%",
+                                    "net_profit": f"{sm.get('net_profit', 0):.2f}",
+                                    "profit_factor": f"{sm.get('profit_factor', 0):.2f}",
+                                }
+                                for name, sm in result.per_strategy.items()
+                            ],
+                        ).classes("w-full"):
+                            pass
+
+                # ── Equity curve ──────────────────────────────────────────
+                if result.equity_curve:
+                    with ui.card().classes("w-full rounded-lg border border-slate-200 mb-2"):
+                        ui.label("Equity Curve").classes("text-lg font-semibold mb-2")
+                        eq_data = [
+                            {"x": i, "y": p.equity}
+                            for i, p in enumerate(result.equity_curve)
+                        ]
+                        ui.echart({
+                            "tooltip": {"trigger": "axis"},
+                            "xAxis": {"type": "category", "data": [p["x"] for p in eq_data]},
+                            "yAxis": {"type": "value"},
+                            "series": [{"data": [p["y"] for p in eq_data], "type": "line", "smooth": True}],
+                        }).classes("w-full h-64")
+
+                # ── Trade table ───────────────────────────────────────────
+                if result.trades:
+                    with ui.card().classes("w-full rounded-lg border border-slate-200"):
+                        ui.label(f"Trades ({len(result.trades)})").classes("text-lg font-semibold mb-2")
+                        with ui.table(
+                            columns=[
+                                {"name": "symbol", "label": "Symbol", "field": "symbol", "align": "left"},
+                                {"name": "direction", "label": "Dir", "field": "direction", "align": "left"},
+                                {"name": "strategy", "label": "Strategy", "field": "strategy", "align": "left"},
+                                {"name": "entry", "label": "Entry", "field": "entry", "align": "right"},
+                                {"name": "close", "label": "Close", "field": "close", "align": "right"},
+                                {"name": "reason", "label": "Reason", "field": "reason", "align": "left"},
+                                {"name": "pnl", "label": "PnL", "field": "pnl", "align": "right"},
+                                {"name": "pnl_pct", "label": "PnL %", "field": "pnl_pct", "align": "right"},
+                            ],
+                            rows=[
+                                {
+                                    "symbol": t.symbol,
+                                    "direction": t.direction,
+                                    "strategy": t.strategy_name,
+                                    "entry": f"{t.entry_price:.4f}",
+                                    "close": f"{t.close_price:.4f}" if t.close_price else "—",
+                                    "reason": t.close_reason,
+                                    "pnl": f"{t.pnl:.2f}",
+                                    "pnl_pct": f"{t.pnl_pct:.2f}%",
+                                }
+                                for t in result.trades
+                            ],
+                        ).classes("w-full"):
+                            pass
+
+        def _metric_card(label: str, value: str, sub: str) -> None:
+            """Render a small metric card."""
+            with ui.column().classes("bg-slate-50 rounded-lg px-4 py-2 min-w-[120px]"):
+                ui.label(label).classes("text-xs text-slate-500")
+                ui.label(value).classes("text-lg font-bold")
+                if sub:
+                    ui.label(sub).classes("text-xs text-slate-400")
+
+        run_button.on("click", run_backtest)
 
 
 __all__ = ["register_pages"]
