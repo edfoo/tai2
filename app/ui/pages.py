@@ -6984,6 +6984,8 @@ def register_pages(app: FastAPI) -> None:
             # ── Results area ──────────────────────────────────────────────
             results_container = ui.column().classes("w-full gap-2")
 
+        page_client = ui.context.client
+
         # ── Backtest runner ───────────────────────────────────────────────
 
         async def run_backtest() -> None:
@@ -7054,20 +7056,21 @@ def register_pages(app: FastAPI) -> None:
             result = await engine.run(progress_cb=progress_cb)
 
             backtest_running["flag"] = False
-            run_button.enable()
+            with page_client:
+                run_button.enable()
 
-            if result.is_error:
-                ui.notify(f"Backtest failed: {result.error}", color="negative")
-                progress_label.set_text(f"Error: {result.error}")
-                return
+                if result.is_error:
+                    ui.notify(f"Backtest failed: {result.error}", color="negative")
+                    progress_label.set_text(f"Error: {result.error}")
+                    return
 
-            backtest_result["value"] = result
-            ui.notify(
-                f"Backtest complete: {len(result.trades)} trades, "
-                f"net PnL {result.metrics.get('net_profit', 0):.2f} USDT",
-                color="positive",
-            )
-            _render_results(result, results_container)
+                backtest_result["value"] = result
+                ui.notify(
+                    f"Backtest complete: {len(result.trades)} trades, "
+                    f"net PnL {result.metrics.get('net_profit', 0):.2f} USDT",
+                    color="positive",
+                )
+                _render_results(result, results_container)
 
         def _render_results(result: Any, container: ui.column) -> None:
             """Render the backtest results into the results container."""

@@ -240,6 +240,11 @@ class BacktestEngine:
                 if progress_cb and step % 50 == 0:
                     progress_cb(BacktestProgress(phase="backtest", current=step + 1, total=max_len, message=f"Processed {step + 1}/{max_len} candles"))
 
+                # Yield to the event loop periodically so the UI stays responsive.
+                # Without this, a long backtest freezes the NiceGUI websocket.
+                if step % 100 == 0:
+                    await asyncio.sleep(0)
+
             # ── Phase 5: Close remaining positions at last price ──────
             self._simulator.close_all_at_market(self._current_prices, max(
                 (c.ts for c in step_candles.values()), default=0
