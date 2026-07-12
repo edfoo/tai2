@@ -6984,7 +6984,16 @@ def register_pages(app: FastAPI) -> None:
             # ── Results area ──────────────────────────────────────────────
             results_container = ui.column().classes("w-full gap-2")
 
+        # Render any previously stored backtest result (survives page reload).
+        _stored_result = getattr(app.state, "backtest_result", None)
+        if _stored_result and not _stored_result.is_error:
+            _render_results(_stored_result, results_container)
+
         page_client = ui.context.client
+
+        def _client_alive() -> bool:
+            """Check if the NiceGUI client still exists (not deleted)."""
+            return not getattr(page_client, "is_deleted", False)
 
         # ── Backtest runner ───────────────────────────────────────────────
 
@@ -7053,13 +7062,22 @@ def register_pages(app: FastAPI) -> None:
                 elif phase == "error":
                     text = f"Error: {msg}"
                 if text:
-                    with page_client:
-                        progress_label.set_text(text)
+                    if _client_alive():
+                        with page_client:
+                            progress_label.set_text(text)
 
             engine = BacktestEngine(bt_config)
             result = await engine.run(progress_cb=progress_cb)
 
             backtest_running["flag"] = False
+            # Store result in app.state so it survives page reloads.
+            app.state.backtest_result = result
+
+            if not _client_alive():
+                # Client was deleted (page closed/refreshed during backtest).
+                # Result is stored in app.state — it will render on next visit.
+                return
+
             with page_client:
                 run_button.enable()
 
