@@ -302,6 +302,14 @@ class BacktestEngine:
             if progress_cb and step % 10 == 0:
                 progress_cb(BacktestProgress(phase="backtest", current=step + 1, total=max_len, message=f"Processed {step + 1}/{max_len} candles"))
 
+            # Release the GIL periodically so the asyncio event loop thread
+            # (which runs NiceGUI's websocket keepalive) gets CPU time.
+            # Without this, the worker thread hogs the GIL during the
+            # pandas-ta indicator computations and the websocket disconnects.
+            # time.sleep(0) in a thread releases the GIL for one scheduler tick.
+            if step % 5 == 0:
+                time.sleep(0)
+
         return candles_processed
 
     def _get_last_price(self, symbol: str) -> float | None:

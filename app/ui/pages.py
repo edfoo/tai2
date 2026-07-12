@@ -7072,15 +7072,38 @@ def register_pages(app: FastAPI) -> None:
                     app.state.backtest_progress["phase"] = phase
 
             engine = BacktestEngine(bt_config)
-            result = await engine.run(progress_cb=progress_cb)
 
-            app.state.backtest_running["flag"] = False
-            # Store result in app.state so it survives page reloads.
-            app.state.backtest_result = result
-            # Signal completion to the polling timer.
-            app.state.backtest_progress["text"] = "Done" if not result.is_error else f"Error: {result.error}"
-            app.state.backtest_progress["phase"] = "error" if result.is_error else "done"
-            app.state.backtest_progress["result"] = result
+            # Run the backtest as a detached background task that is NOT
+            # tied to this NiceGUI client's lifecycle.  If the client
+            # disconnects (which happens routinely during long CPU-bound
+            # runs), the task keeps running and stores its result on
+            # app.state, where any reconnected client can pick it up via
+            # the polling timer.
+            async def _run_and_store() -> None:
+                """Execute the backtest and store the result on app.state.
+
+                This coroutine is created via asyncio.create_task and never
+                awaited by the client — it runs independently and writes
+                its result to app.state.backtest_progress for the polling
+                timer to pick up.
+                """
+                try:
+                    result = await engine.run(progress_cb=progress_cb)
+                    app.state.backtest_result = result
+                    app.state.backtest_progress["text"] = "Done" if not result.is_error else f"Error: {result.error}"
+                    app.state.backtest_progress["phase"] = "error" if result.is_error else "done"
+                    app.state.backtest_progress["result"] = result
+                except Exception as exc:
+                    logger.exception("Backtest background task failed")
+                    app.state.backtest_progress["text"] = f"Error: {exc}"
+                    app.state.backtest_progress["phase"] = "error"
+                    app.state.backtest_progress["result"] = None
+                finally:
+                    app.state.backtest_running["flag"] = False
+
+            # Create the task on the event loop — it runs independently.
+            bt_task = asyncio.create_task(_run_and_store())
+            app.state.backtest_task = bt_task
 
         def _render_results(result: Any, container: ui.column) -> None:
             """Render the backtest results into the results container."""
@@ -7192,6 +7215,9 @@ def register_pages(app: FastAPI) -> None:
             _prog_text = app.state.backtest_progress.get("text", "")
             if _prog_text:
                 progress_label.set_text(_prog_text)
+        else:
+            # No backtest running — make sure the button is enabled.
+            run_button.enable()
 
         # ── Progress polling timer ───────────────────────────────────────
         # Polls app.state.backtest_progress and updates the UI label.  This
@@ -7207,6 +7233,10 @@ def register_pages(app: FastAPI) -> None:
             phase = bp.get("phase", "")
             if phase in ("done", "error"):
                 result = bp.pop("result", None)
+                # Fallback: if the result was already popped by a previous
+                # client instance, check app.state.backtest_result.
+                if result is None:
+                    result = getattr(app.state, "backtest_result", None)
                 if result is not None:
                     run_button.enable()
                     if result.is_error:
@@ -7229,25 +7259,27 @@ def register_pages(app: FastAPI) -> None:
         _t_progress = ui.timer(0.5, _poll_progress)
 
         # ── Lifecycle ────────────────────────────────────────────────────
-        # Only deactivate the timer on disconnect (the client may reconnect).
-        # Never cancel the backtest task on disconnect — it runs in a worker
-        # thread and the result is stored on app.state, so a reconnected
-        # client can pick it up.  On full page delete, cancel the task.
+        # The backtest runs as a detached background task on app.state — it
+        # is NOT cancelled when the client disconnects or the page is
+        # deleted.  The task stores its result on app.state.backtest_progress,
+        # so any client (reconnected or new) can pick it up via the polling
+        # timer.  We only deactivate the polling timer on teardown.
         def _on_disconnect(_: Any | None = None) -> None:
             _t_progress.deactivate()
 
         def _on_delete(_: Any | None = None) -> None:
             _t_progress.deactivate()
-            task = getattr(app.state, "backtest_task", None)
-            if task is not None and not task.done():
-                task.cancel()
 
         page_client.on_disconnect(_on_disconnect)
         page_client.on_delete(_on_delete)
 
         def _launch_backtest(_: Any) -> None:
-            task = asyncio.create_task(run_backtest())
-            app.state.backtest_task = task
+            # run_backtest() validates inputs, creates the engine, and
+            # launches a detached _run_and_store background task.  We don't
+            # need to track the run_backtest task itself — it completes
+            # almost instantly.  The long-lived task is stored on
+            # app.state.backtest_task by run_backtest().
+            asyncio.create_task(run_backtest())
 
         run_button.on("click", _launch_backtest)
 
