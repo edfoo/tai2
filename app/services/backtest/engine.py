@@ -240,10 +240,12 @@ class BacktestEngine:
                 if progress_cb and step % 50 == 0:
                     progress_cb(BacktestProgress(phase="backtest", current=step + 1, total=max_len, message=f"Processed {step + 1}/{max_len} candles"))
 
-                # Yield to the event loop periodically so the UI stays responsive.
-                # Without this, a long backtest freezes the NiceGUI websocket.
-                if step % 100 == 0:
-                    await asyncio.sleep(0)
+                # Yield to the event loop on every step so NiceGUI can flush
+                # pending websocket updates.  Without this, a long backtest
+                # freezes the UI.  asyncio.sleep(0) is a no-op context switch
+                # (not an actual sleep) — it just lets the event loop run
+                # pending tasks (like websocket flushes) before resuming.
+                await asyncio.sleep(0)
 
             # ── Phase 5: Close remaining positions at last price ──────
             self._simulator.close_all_at_market(self._current_prices, max(

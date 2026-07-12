@@ -7040,17 +7040,21 @@ def register_pages(app: FastAPI) -> None:
                 current = getattr(progress, "current", 0)
                 total = getattr(progress, "total", 0)
                 msg = getattr(progress, "message", "")
+                text = ""
                 if phase == "fetch":
-                    progress_label.set_text(f"Fetching data: {msg}")
+                    text = f"Fetching data: {msg}"
                 elif phase == "backtest":
                     pct = (current / total * 100) if total > 0 else 0
-                    progress_label.set_text(f"Backtest: {pct:.0f}% ({current}/{total} candles)")
+                    text = f"Backtest: {pct:.0f}% ({current}/{total} candles)"
                 elif phase == "metrics":
-                    progress_label.set_text("Computing metrics...")
+                    text = "Computing metrics..."
                 elif phase == "done":
-                    progress_label.set_text("Done")
+                    text = "Done"
                 elif phase == "error":
-                    progress_label.set_text(f"Error: {msg}")
+                    text = f"Error: {msg}"
+                if text:
+                    with page_client:
+                        progress_label.set_text(text)
 
             engine = BacktestEngine(bt_config)
             result = await engine.run(progress_cb=progress_cb)
@@ -7170,7 +7174,7 @@ def register_pages(app: FastAPI) -> None:
                 if sub:
                     ui.label(sub).classes("text-xs text-slate-400")
 
-        run_button.on("click", run_backtest)
+        run_button.on("click", lambda _: asyncio.create_task(run_backtest()))
 
 
 __all__ = ["register_pages"]
