@@ -330,7 +330,8 @@ class BacktestEngine:
                         continue
                     # Compute TP/SL prices from signal (matching live logic).
                     tp_price, sl_price = self._compute_tp_sl(
-                        signal, candle.close, self._config.launcher_config
+                        signal, candle.close, self._config.launcher_config,
+                        snapshot=snapshot, strat_cfg=strat_cfg,
                     )
                     direction = "long" if signal.direction == "buy" else "short"
                     self._simulator.open_position(
@@ -502,7 +503,8 @@ class BacktestEngine:
                         continue
                     # Compute TP/SL prices from signal (matching live logic).
                     tp_price, sl_price = self._compute_tp_sl(
-                        signal, eval_candle.close, self._config.launcher_config
+                        signal, eval_candle.close, self._config.launcher_config,
+                        snapshot=snapshot, strat_cfg=strat_cfg,
                     )
                     direction = "long" if signal.direction == "buy" else "short"
                     self._simulator.open_position(
@@ -538,12 +540,20 @@ class BacktestEngine:
         signal: Any,
         last_price: float,
         launcher_config: dict[str, Any],
+        snapshot: dict[str, Any] | None = None,
+        strat_cfg: dict[str, Any] | None = None,
     ) -> tuple[float | None, float | None]:
         """Compute TP/SL prices from a strategy signal.
 
         Mirrors ``build_launcher_decisions()`` in market_service.py:
             BUY:  tp = last * (1 + tp_pct/100),  sl = last * (1 - sl_pct/100)
             SELL: tp = last * (1 - tp_pct/100),  sl = last * (1 + sl_pct/100)
+
+        Also mirrors the **Dynamic TP** logic for Mean Reversion: when
+        ``strat_cfg["dynamic_tp"]`` is True, the effective TP is tightened
+        using the current BB bandwidth (``min(static_tp, bandwidth/2 × fraction)``).
+        This previously only existed in the live path, causing backtests to
+        diverge from live trade behaviour.
         """
         tp_pct = signal.tp_pct
         if tp_pct is None:
@@ -552,13 +562,51 @@ class BacktestEngine:
         if sl_pct is None:
             sl_pct = _extract_float(launcher_config.get("sl_pct"))
 
+        # ── Dynamic TP (Mean Reversion only) ──────────────────────────
+        # Tighten TP using BB bandwidth at entry.  Mirrors the live logic in
+        # ``MarketService.build_launcher_decisions`` so backtests reproduce
+        # live trade behaviour when dynamic_tp is enabled.
+        effective_tp_pct = tp_pct
+        if (
+            signal.strategy_name == "mean_reversion"
+            and snapshot is not None
+            and strat_cfg is not None
+            and bool(strat_cfg.get("dynamic_tp", False))
+            and tp_pct is not None
+            and tp_pct > 0
+        ):
+            dynamic_tp_fraction = _extract_float(strat_cfg.get("dynamic_tp_fraction")) or 0.7
+            # The snapshot is single-symbol in backtest — grab the first
+            # symbol's indicator block.
+            _md = snapshot.get("market_data") or {}
+            sym_data = next(iter(_md.values()), {}) or {}
+            sym_indicators = sym_data.get("indicators") or {}
+            _bb = sym_indicators.get("bollinger_bands") or {}
+            _bb_lower = _extract_float(_bb.get("lower"))
+            _bb_upper = _extract_float(_bb.get("upper"))
+            _bb_middle = _extract_float(_bb.get("middle"))
+            if (
+                _bb_lower is not None
+                and _bb_upper is not None
+                and _bb_middle is not None
+                and _bb_middle > 0
+            ):
+                _bw = (_bb_upper - _bb_lower) / _bb_middle * 100.0
+                _dyn = (_bw / 2.0) * dynamic_tp_fraction * 1.0  # leverage = 1.0
+                if _dyn > 0:
+                    effective_tp_pct = min(tp_pct, _dyn)
+                    logger.debug(
+                        "[backtest] Dynamic TP: bw=%.2f%% frac=%.2f → dyn=%.2f%% → eff=%.2f%%",
+                        _bw, dynamic_tp_fraction, _dyn, effective_tp_pct,
+                    )
+
         tp_price: float | None = None
         sl_price: float | None = None
-        if tp_pct and tp_pct > 0:
+        if effective_tp_pct and effective_tp_pct > 0:
             if signal.direction == "buy":
-                tp_price = last_price * (1 + tp_pct / 100.0)
+                tp_price = last_price * (1 + effective_tp_pct / 100.0)
             else:
-                tp_price = last_price * (1 - tp_pct / 100.0)
+                tp_price = last_price * (1 - effective_tp_pct / 100.0)
         if sl_pct and sl_pct > 0:
             if signal.direction == "buy":
                 sl_price = last_price * (1 - sl_pct / 100.0)

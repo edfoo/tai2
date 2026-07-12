@@ -3268,9 +3268,9 @@ def register_pages(app: FastAPI) -> None:
                 mr_min_adx_input.value = 0.0
                 mr_max_adx_input.value = 25.0
                 mr_require_htf_switch.value = True
-                mr_require_cmf_switch.value = True
+                mr_require_cmf_switch.value = False
                 mr_require_htf_cmf_switch.value = False
-                mr_require_cmf_cross_switch.value = False
+                mr_require_cmf_cross_switch.value = True
                 mr_require_cmf_no_div_switch.value = False
                 mr_require_fp_delta_switch.value = False
                 mr_require_bb_switch.value = True
@@ -3427,7 +3427,7 @@ def register_pages(app: FastAPI) -> None:
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             sc_max_spike_ext_input = ui.number(
                                 label="Max spike extension %",
-                                value=float(_sc_cfg.get("max_spike_extension_pct") or 2.0),
+                                value=float(_sc_cfg.get("max_spike_extension_pct") or 5.0),
                                 min=0.0, max=20.0, step=0.5, format="%.1f",
                             ).classes("w-48").props("dense")
                             ui.label("Block entry if price already moved more than this % from spike origin (0 = disabled). Prevents entering at the top.").classes("text-xs text-slate-500")
@@ -3456,10 +3456,10 @@ def register_pages(app: FastAPI) -> None:
                 sc_max_adx_input.value = 0.0
                 sc_momentum_accel_switch.value = True
                 sc_accel_lookback_input.value = 3
-                sc_accel_min_ratio_input.value = 1.5
+                sc_accel_min_ratio_input.value = 1.2
                 sc_rsi_rising_switch.value = True
                 sc_vol_rsi_rising_switch.value = True
-                sc_max_spike_ext_input.value = 2.0
+                sc_max_spike_ext_input.value = 5.0
                 sc_spike_lookback_input.value = 5
                 ui.notify("Spike Continuation fields set to recommended defaults — click Save to persist", color="info")
 
