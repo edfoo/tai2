@@ -6911,6 +6911,13 @@ def register_pages(app: FastAPI) -> None:
         # ── State ─────────────────────────────────────────────────────────
         backtest_running = {"flag": False}
         backtest_result = {"value": None}
+        # Shared progress state — written by the engine callback (no UI
+        # mutations) and polled by a ui.timer on the client side.  This
+        # avoids pushing UI updates from inside the engine coroutine, which
+        # is fragile when the NiceGUI client disconnects/reconnects.
+        backtest_progress = {"text": "", "phase": ""}
+        # Holds the active backtest task so it can be cancelled on disconnect.
+        backtest_task: dict[str, asyncio.Task | None] = {"task": None}
 
         with wrapper:
             ui.label("Backtesting").classes("text-2xl font-bold")
@@ -6984,16 +6991,7 @@ def register_pages(app: FastAPI) -> None:
             # ── Results area ──────────────────────────────────────────────
             results_container = ui.column().classes("w-full gap-2")
 
-        # Render any previously stored backtest result (survives page reload).
-        _stored_result = getattr(app.state, "backtest_result", None)
-        if _stored_result and not _stored_result.is_error:
-            _render_results(_stored_result, results_container)
-
         page_client = ui.context.client
-
-        def _client_alive() -> bool:
-            """Check if the NiceGUI client still exists (not deleted)."""
-            return not getattr(page_client, "is_deleted", False)
 
         # ── Backtest runner ───────────────────────────────────────────────
 
@@ -7042,9 +7040,17 @@ def register_pages(app: FastAPI) -> None:
             run_button.disable()
             progress_label.set_text("Starting...")
             results_container.clear()
+            backtest_progress["text"] = "Starting..."
+            backtest_progress["phase"] = "fetch"
 
             def progress_cb(progress: Any) -> None:
-                """Update the progress label from the engine."""
+                """Record progress into shared state (polled by the UI timer).
+
+                Deliberately does NOT touch any UI element directly — the
+                engine coroutine may outlive a NiceGUI client that disconnects
+                mid-run, and mutating UI from there causes the intermittent
+                disconnect/reconnect loop.
+                """
                 phase = getattr(progress, "phase", "")
                 current = getattr(progress, "current", 0)
                 total = getattr(progress, "total", 0)
@@ -7062,9 +7068,8 @@ def register_pages(app: FastAPI) -> None:
                 elif phase == "error":
                     text = f"Error: {msg}"
                 if text:
-                    if _client_alive():
-                        with page_client:
-                            progress_label.set_text(text)
+                    backtest_progress["text"] = text
+                    backtest_progress["phase"] = phase
 
             engine = BacktestEngine(bt_config)
             result = await engine.run(progress_cb=progress_cb)
@@ -7072,27 +7077,10 @@ def register_pages(app: FastAPI) -> None:
             backtest_running["flag"] = False
             # Store result in app.state so it survives page reloads.
             app.state.backtest_result = result
-
-            if not _client_alive():
-                # Client was deleted (page closed/refreshed during backtest).
-                # Result is stored in app.state — it will render on next visit.
-                return
-
-            with page_client:
-                run_button.enable()
-
-                if result.is_error:
-                    ui.notify(f"Backtest failed: {result.error}", color="negative")
-                    progress_label.set_text(f"Error: {result.error}")
-                    return
-
-                backtest_result["value"] = result
-                ui.notify(
-                    f"Backtest complete: {len(result.trades)} trades, "
-                    f"net PnL {result.metrics.get('net_profit', 0):.2f} USDT",
-                    color="positive",
-                )
-                _render_results(result, results_container)
+            # Signal completion to the polling timer.
+            backtest_progress["text"] = "Done" if not result.is_error else f"Error: {result.error}"
+            backtest_progress["phase"] = "error" if result.is_error else "done"
+            backtest_progress["result"] = result
 
         def _render_results(result: Any, container: ui.column) -> None:
             """Render the backtest results into the results container."""
@@ -7192,7 +7180,59 @@ def register_pages(app: FastAPI) -> None:
                 if sub:
                     ui.label(sub).classes("text-xs text-slate-400")
 
-        run_button.on("click", lambda _: asyncio.create_task(run_backtest()))
+        # Render any previously stored backtest result (survives page reload).
+        _stored_result = getattr(app.state, "backtest_result", None)
+        if _stored_result and not _stored_result.is_error:
+            _render_results(_stored_result, results_container)
+
+        # ── Progress polling timer ───────────────────────────────────────
+        # Polls the shared progress state and updates the UI label.  This
+        # decouples UI updates from the engine coroutine (which may outlive
+        # a disconnected client) and renders results when the run completes.
+        # Also re-enables the run button and renders results on completion.
+        def _poll_progress() -> None:
+            text = backtest_progress.get("text", "")
+            if text:
+                progress_label.set_text(text)
+            phase = backtest_progress.get("phase", "")
+            if phase in ("done", "error"):
+                result = backtest_progress.pop("result", None)
+                if result is not None:
+                    run_button.enable()
+                    if result.is_error:
+                        ui.notify(f"Backtest failed: {result.error}", color="negative")
+                        progress_label.set_text(f"Error: {result.error}")
+                    else:
+                        backtest_result["value"] = result
+                        ui.notify(
+                            f"Backtest complete: {len(result.trades)} trades, "
+                            f"net PnL {result.metrics.get('net_profit', 0):.2f} USDT",
+                            color="positive",
+                        )
+                        progress_label.set_text("")
+                        results_container.clear()
+                        _render_results(result, results_container)
+                    # Clear the phase so we don't re-render on every tick.
+                    backtest_progress["phase"] = ""
+                    backtest_progress["text"] = ""
+
+        _t_progress = ui.timer(0.5, _poll_progress)
+
+        # ── Lifecycle: cancel the backtest task on disconnect/delete ────
+        def _teardown_backtest_client(_: Any | None = None) -> None:
+            task = backtest_task.get("task")
+            if task is not None and not task.done():
+                task.cancel()
+            _t_progress.deactivate()
+
+        page_client.on_disconnect(_teardown_backtest_client)
+        page_client.on_delete(_teardown_backtest_client)
+
+        def _launch_backtest(_: Any) -> None:
+            task = asyncio.create_task(run_backtest())
+            backtest_task["task"] = task
+
+        run_button.on("click", _launch_backtest)
 
 
 __all__ = ["register_pages"]

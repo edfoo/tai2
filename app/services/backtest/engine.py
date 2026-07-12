@@ -81,6 +81,7 @@ class BacktestEngine:
             compute_footprint=lambda symbol: {},
         )
         self._current_prices: dict[str, float] = {}
+        self._last_candle_ts: int = 0
 
         # Warn if any enabled strategy config requires footprint data — it's
         # never available in backtest (no historical trade tape), so the filter
@@ -179,78 +180,25 @@ class BacktestEngine:
                 return result
 
             # ── Phase 4: Backtest loop ────────────────────────────────
+            # The loop is CPU-bound (each step recomputes a full set of
+            # pandas-ta indicators on the growing candle window), so running
+            # it directly in the event loop blocks NiceGUI's websocket
+            # keepalive and causes the client to disconnect.  We delegate it
+            # to a worker thread and communicate progress via the callback.
             if progress_cb:
                 progress_cb(BacktestProgress(phase="backtest", current=0, total=max_len, message="Running backtest"))
 
-            candles_processed = 0
-            for step in range(max_len):
-                # Build the set of candles at this time-step across symbols.
-                step_candles: dict[str, Candle] = {}
-                for symbol in self._config.symbols:
-                    candles = symbol_candles[symbol]
-                    idx = start_indices[symbol] + step
-                    if idx < len(candles):
-                        step_candles[symbol] = candles[idx]
-
-                if not step_candles:
-                    continue
-
-                # Update current prices for equity calculation.
-                for symbol, candle in step_candles.items():
-                    self._current_prices[symbol] = candle.close
-
-                # Evaluate strategies for each symbol.
-                for symbol, candle in step_candles.items():
-                    builder = snapshot_builders[symbol]
-                    # The window includes all candles up to the current one.
-                    candle_idx = start_indices[symbol] + step
-                    snapshot = builder.build(candle_idx)
-
-                    # Evaluate each selected strategy.
-                    strategies_cfg = (self._config.launcher_config.get("strategies") or {})
-                    for strategy in self._strategies:
-                        strat_cfg = strategies_cfg.get(strategy.name) or {}
-                        if not strat_cfg.get("enabled", False):
-                            continue
-                        # Per-strategy position guard: skip if already in position.
-                        if self._simulator.has_open_position(symbol, strategy.name):
-                            continue
-                        signal = strategy.evaluate(symbol, snapshot, strat_cfg, self._helpers)
-                        if signal is None:
-                            continue
-                        # Compute TP/SL prices from signal (matching live logic).
-                        tp_price, sl_price = self._compute_tp_sl(
-                            signal, candle.close, self._config.launcher_config
-                        )
-                        direction = "long" if signal.direction == "buy" else "short"
-                        self._simulator.open_position(
-                            symbol=symbol,
-                            direction=direction,
-                            entry_price=candle.close,
-                            entry_ts=candle.ts,
-                            tp_price=tp_price,
-                            sl_price=sl_price,
-                            strategy_name=strategy.name,
-                        )
-
-                # Update simulator (check TP/SL, record equity).
-                self._simulator.update_multi(step_candles)
-
-                candles_processed += 1
-                if progress_cb and step % 50 == 0:
-                    progress_cb(BacktestProgress(phase="backtest", current=step + 1, total=max_len, message=f"Processed {step + 1}/{max_len} candles"))
-
-                # Yield to the event loop on every step so NiceGUI can flush
-                # pending websocket updates.  Without this, a long backtest
-                # freezes the UI.  asyncio.sleep(0) is a no-op context switch
-                # (not an actual sleep) — it just lets the event loop run
-                # pending tasks (like websocket flushes) before resuming.
-                await asyncio.sleep(0)
+            candles_processed = await asyncio.to_thread(
+                self._run_backtest_loop,
+                symbol_candles=symbol_candles,
+                snapshot_builders=snapshot_builders,
+                start_indices=start_indices,
+                max_len=max_len,
+                progress_cb=progress_cb,
+            )
 
             # ── Phase 5: Close remaining positions at last price ──────
-            self._simulator.close_all_at_market(self._current_prices, max(
-                (c.ts for c in step_candles.values()), default=0
-            ))
+            self._simulator.close_all_at_market(self._current_prices, self._last_candle_ts)
 
             # ── Phase 6: Compute metrics ──────────────────────────────
             if progress_cb:
@@ -277,6 +225,84 @@ class BacktestEngine:
         return result
 
     # ── Internal helpers ──────────────────────────────────────────────
+
+    def _run_backtest_loop(
+        self,
+        *,
+        symbol_candles: dict[str, list[Candle]],
+        snapshot_builders: dict[str, SnapshotBuilder],
+        start_indices: dict[str, int],
+        max_len: int,
+        progress_cb: Callable[[BacktestProgress], None] | None = None,
+    ) -> int:
+        """Run the CPU-bound backtest loop (designed to run in a worker thread).
+
+        Returns the number of candles processed.  Progress is reported via
+        *progress_cb* (if provided) — the callback must be thread-safe (the
+        UI layer satisfies this by writing to a plain dict).
+        """
+        candles_processed = 0
+        strategies_cfg = (self._config.launcher_config.get("strategies") or {})
+
+        for step in range(max_len):
+            # Build the set of candles at this time-step across symbols.
+            step_candles: dict[str, Candle] = {}
+            for symbol in self._config.symbols:
+                candles = symbol_candles[symbol]
+                idx = start_indices[symbol] + step
+                if idx < len(candles):
+                    step_candles[symbol] = candles[idx]
+
+            if not step_candles:
+                continue
+
+            # Update current prices for equity calculation.
+            for symbol, candle in step_candles.items():
+                self._current_prices[symbol] = candle.close
+                if candle.ts > self._last_candle_ts:
+                    self._last_candle_ts = candle.ts
+
+            # Evaluate strategies for each symbol.
+            for symbol, candle in step_candles.items():
+                builder = snapshot_builders[symbol]
+                # The window includes all candles up to the current one.
+                candle_idx = start_indices[symbol] + step
+                snapshot = builder.build(candle_idx)
+
+                # Evaluate each selected strategy.
+                for strategy in self._strategies:
+                    strat_cfg = strategies_cfg.get(strategy.name) or {}
+                    if not strat_cfg.get("enabled", False):
+                        continue
+                    # Per-strategy position guard: skip if already in position.
+                    if self._simulator.has_open_position(symbol, strategy.name):
+                        continue
+                    signal = strategy.evaluate(symbol, snapshot, strat_cfg, self._helpers)
+                    if signal is None:
+                        continue
+                    # Compute TP/SL prices from signal (matching live logic).
+                    tp_price, sl_price = self._compute_tp_sl(
+                        signal, candle.close, self._config.launcher_config
+                    )
+                    direction = "long" if signal.direction == "buy" else "short"
+                    self._simulator.open_position(
+                        symbol=symbol,
+                        direction=direction,
+                        entry_price=candle.close,
+                        entry_ts=candle.ts,
+                        tp_price=tp_price,
+                        sl_price=sl_price,
+                        strategy_name=strategy.name,
+                    )
+
+            # Update simulator (check TP/SL, record equity).
+            self._simulator.update_multi(step_candles)
+
+            candles_processed += 1
+            if progress_cb and step % 50 == 0:
+                progress_cb(BacktestProgress(phase="backtest", current=step + 1, total=max_len, message=f"Processed {step + 1}/{max_len} candles"))
+
+        return candles_processed
 
     def _get_last_price(self, symbol: str) -> float | None:
         """Return the current price for a symbol (from the backtest window)."""
