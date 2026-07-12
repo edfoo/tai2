@@ -165,3 +165,110 @@ class BacktestProgress:
     current: int
     total: int
     message: str = ""
+
+
+# ── Parameter sweep (grid) models ───────────────────────────────────────
+
+
+@dataclass(slots=True)
+class GridParamDef:
+    """Definition of a single parameter to sweep.
+
+    Parameters
+    ----------
+    key:
+        Dotted path into the ``launcher_config`` dict, using ``strategies``
+        as the top-level key.  Examples:
+          - ``"strategies.mean_reversion.rsi_oversold"``
+          - ``"strategies.spike_continuation.max_spike_extension_pct"``
+          - ``"tp_pct"``  (launcher-level)
+    values:
+        List of values to try for this parameter.
+    label:
+        Human-readable label for the UI / results table.  Defaults to ``key``.
+    """
+
+    key: str
+    values: list[Any]
+    label: str = ""
+
+
+@dataclass(slots=True)
+class GridConfig:
+    """Configuration for a parameter-sweep (grid) backtest run.
+
+    Parameters
+    ----------
+    base_config:
+        A :class:`BacktestConfig` whose symbols, timeframe, date range,
+        capital, etc. are used as the template.  The ``launcher_config``
+        is deep-copied per combination and the swept parameters are
+        overridden.
+    params:
+        List of :class:`GridParamDef` definitions.  The grid is the
+        Cartesian product of all ``param.values``.
+    rank_by:
+        Metric key to rank results by (descending).  Common choices:
+        ``"sharpe_per_candle"``, ``"profit_factor"``, ``"net_profit"``,
+        ``"win_rate"``, ``"total_trades"``.
+    min_trades:
+        Minimum number of trades for a result to be included in the
+        ranking.  Results with fewer trades are still reported but
+        flagged as ``below_min_trades``.
+    """
+
+    base_config: BacktestConfig
+    params: list[GridParamDef] = field(default_factory=list)
+    rank_by: str = "sharpe_per_candle"
+    min_trades: int = 5
+
+
+@dataclass(slots=True)
+class GridRunResult:
+    """Result of a single grid combination.
+
+    Parameters
+    ----------
+    params:
+        The parameter values used for this run, as a ``{key: value}`` dict.
+    result:
+        The :class:`BacktestResult` from the engine, or ``None`` if the
+        run errored.
+    rank_score:
+        The value of the ``rank_by`` metric (or ``None`` if unavailable).
+    below_min_trades:
+        True if the run produced fewer than ``GridConfig.min_trades`` trades.
+    """
+
+    params: dict[str, Any]
+    result: BacktestResult | None
+    rank_score: float | None
+    below_min_trades: bool
+
+
+@dataclass(slots=True)
+class GridProgress:
+    """Progress update emitted during a grid run."""
+
+    phase: str  # "grid" | "done" | "error"
+    current: int
+    total: int
+    message: str = ""
+
+
+@dataclass(slots=True)
+class GridResult:
+    """Complete output of a parameter-sweep run."""
+
+    config: GridConfig
+    runs: list[GridRunResult] = field(default_factory=list)
+    # Runs sorted by rank_score descending (excluding below_min_trades).
+    ranked: list[GridRunResult] = field(default_factory=list)
+    started_at: str = ""
+    finished_at: str = ""
+    duration_seconds: float = 0.0
+    error: str | None = None
+
+    @property
+    def is_error(self) -> bool:
+        return self.error is not None

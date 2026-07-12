@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import time
 from datetime import datetime, timezone
@@ -7001,8 +7002,147 @@ def register_pages(app: FastAPI) -> None:
                     run_button = ui.button("Run Backtest", icon="play_arrow", color="primary")
                     progress_label = ui.label("").classes("text-sm text-slate-500")
 
+            # ── Parameter Sweep ───────────────────────────────────────────
+            with ui.card().classes("w-full rounded-lg border border-slate-200 mb-2"):
+                with ui.expansion("Parameter Sweep (Grid Backtest)").classes("w-full text-sm font-medium"):
+                    ui.label(
+                        "Sweep one or more strategy parameters across a range of values. "
+                        "Each combination runs a full backtest; results are ranked by the selected metric. "
+                        "Uses the same symbols, timeframe, date range, and capital as the main backtest above. "
+                        "Only enabled strategies participate in the sweep."
+                    ).classes("text-xs text-slate-500 mb-3")
+
+                    # ── Sweep parameter selection ──────────────────────
+                    ui.label("Parameters to sweep").classes("text-xs font-semibold text-slate-600 mt-1")
+                    ui.label(
+                        "Each row defines one parameter and its values (comma-separated). "
+                        "The grid is the Cartesian product of all rows."
+                    ).classes("text-xs text-slate-500 mb-2")
+
+                    # Predefined parameter presets for quick selection.
+                    _SWEEP_PRESETS = {
+                        "MR RSI oversold": ("strategies.mean_reversion.rsi_oversold", "25, 30, 35, 40"),
+                        "MR max ADX": ("strategies.mean_reversion.max_adx", "20, 25, 30, 0"),
+                        "MR TP %": ("strategies.mean_reversion.tp_pct", "1.5, 2.0, 3.0, 4.0"),
+                        "MR SL %": ("strategies.mean_reversion.sl_pct", "2.0, 3.0, 4.0, 5.0"),
+                        "SC volume RSI min": ("strategies.spike_continuation.volume_rsi_min", "70, 75, 80, 85"),
+                        "SC max spike ext %": ("strategies.spike_continuation.max_spike_extension_pct", "3.0, 5.0, 7.0, 10.0"),
+                        "SC accel min ratio": ("strategies.spike_continuation.acceleration_min_ratio", "1.0, 1.2, 1.5, 2.0"),
+                        "SC TP %": ("strategies.spike_continuation.tp_pct", "3.0, 5.0, 7.0, 10.0"),
+                        "SC SL %": ("strategies.spike_continuation.sl_pct", "2.0, 3.0, 4.0, 5.0"),
+                        "Launcher TP %": ("tp_pct", "1.0, 2.0, 3.0, 5.0"),
+                        "Launcher SL %": ("sl_pct", "1.0, 2.0, 3.0, 4.0"),
+                    }
+
+                    # Dynamic list of sweep rows (key input + values input).
+                    # Each row stores its NiceGUI container element so it can
+                    # be deleted individually without rebuilding the others.
+                    sweep_rows: list[dict[str, Any]] = []
+
+                    sweep_params_container = ui.column().classes("w-full gap-1")
+
+                    def _add_sweep_row(key: str = "", values: str = "") -> None:
+                        """Add a sweep parameter row with key + values inputs."""
+                        with sweep_params_container:
+                            row_container = ui.row().classes("w-full gap-2 items-center")
+                            with row_container:
+                                _preset_select = ui.select(
+                                    options=_SWEEP_PRESETS,
+                                    value=None,
+                                    label="Preset",
+                                ).classes("w-56").props("dense")
+                                _key_input = ui.input(
+                                    label="Parameter key",
+                                    value=key,
+                                ).classes("w-72").props("dense")
+                                _values_input = ui.input(
+                                    label="Values (comma-sep)",
+                                    value=values,
+                                ).classes("w-48").props("dense")
+
+                        row: dict[str, Any] = {
+                            "key_input": _key_input,
+                            "values_input": _values_input,
+                            "preset_select": _preset_select,
+                            "container": row_container,
+                        }
+
+                        def _on_preset_change(e: Any, _ki=_key_input, _vi=_values_input) -> None:
+                            val = e.value if hasattr(e, "value") else e
+                            if val and isinstance(val, tuple) and len(val) == 2:
+                                _ki.value = val[0]
+                                _vi.value = val[1]
+
+                        _preset_select.on("update:model-value", lambda e: _on_preset_change(e))
+
+                        # Remove button — created after `row` so the closure
+                        # captures the actual dict, not an undefined name.
+                        with row_container:
+                            ui.button(
+                                icon="close",
+                                on_click=lambda _, _r=row: _remove_sweep_row(_r),
+                            ).props("dense flat negative size=sm")
+
+                        sweep_rows.append(row)
+
+                    def _remove_sweep_row(row: dict[str, Any]) -> None:
+                        """Remove a sweep row from the UI and the list."""
+                        if row in sweep_rows:
+                            sweep_rows.remove(row)
+                        container = row.get("container")
+                        if container is not None:
+                            container.delete()
+
+                    with ui.row().classes("w-full gap-2 items-center mt-2"):
+                        ui.button(
+                            "Add Parameter",
+                            icon="add",
+                            on_click=lambda _: _add_sweep_row(),
+                        ).props("dense outline color=primary size=sm")
+                        ui.button(
+                            "Add MR RSI Sweep",
+                            on_click=lambda _: _add_sweep_row(
+                                "strategies.mean_reversion.rsi_oversold", "25, 30, 35, 40"
+                            ),
+                        ).props("dense flat color=primary size=sm")
+                        ui.button(
+                            "Add SC Extension Sweep",
+                            on_click=lambda _: _add_sweep_row(
+                                "strategies.spike_continuation.max_spike_extension_pct", "3.0, 5.0, 7.0, 10.0"
+                            ),
+                        ).props("dense flat color=primary size=sm")
+
+                    # ── Sweep options ───────────────────────────────────
+                    with ui.row().classes("w-full gap-4 items-center mt-3"):
+                        rank_by_select = ui.select(
+                            options={
+                                "sharpe_per_candle": "Sharpe / candle",
+                                "profit_factor": "Profit factor",
+                                "net_profit": "Net profit (USDT)",
+                                "net_profit_pct": "Net profit (%)",
+                                "win_rate": "Win rate",
+                                "total_trades": "Total trades",
+                                "expectancy": "Expectancy",
+                            },
+                            value="sharpe_per_candle",
+                            label="Rank by",
+                        ).classes("w-48")
+                        min_trades_input = ui.number(
+                            label="Min trades to rank",
+                            value=5,
+                            min=0,
+                            step=1,
+                            precision=0,
+                        ).classes("w-32")
+
+                    # ── Sweep run button + progress ─────────────────────
+                    with ui.row().classes("w-full items-center gap-4 mt-2"):
+                        sweep_run_button = ui.button("Run Sweep", icon="grid_view", color="secondary")
+                        sweep_progress_label = ui.label("").classes("text-sm text-slate-500")
+
             # ── Results area ──────────────────────────────────────────────
             results_container = ui.column().classes("w-full gap-2")
+            sweep_results_container = ui.column().classes("w-full gap-2")
 
         page_client = ui.context.client
 
@@ -7133,6 +7273,206 @@ def register_pages(app: FastAPI) -> None:
             bt_task = asyncio.create_task(_run_and_store())
             app.state.backtest_task = bt_task
 
+        # ── Parameter sweep runner ────────────────────────────────────────
+
+        async def run_sweep() -> None:
+            """Run a parameter-sweep grid backtest."""
+            from app.services.backtest.grid import BacktestGrid
+            from app.services.backtest.models import GridConfig, GridParamDef
+
+            if app.state.backtest_running.get("flag"):
+                ui.notify("A backtest/sweep is already running", color="warning")
+                return
+
+            # ── Validate inputs (reuse the main backtest's inputs) ──────
+            symbols = symbol_select.value or []
+            if isinstance(symbols, str):
+                symbols = [symbols]
+            symbols = [s.upper() for s in symbols if s]
+            if not symbols:
+                ui.notify("Select at least one symbol", color="negative")
+                return
+
+            selected_strategies = [
+                name for name, toggle in strategy_toggles.items() if toggle.value
+            ]
+            if not selected_strategies:
+                ui.notify("Select at least one strategy", color="negative")
+                return
+
+            # ── Parse sweep rows ────────────────────────────────────────
+            params: list[GridParamDef] = []
+            for row in sweep_rows:
+                key = (row["key_input"].value or "").strip()
+                values_str = (row["values_input"].value or "").strip()
+                if not key or not values_str:
+                    continue
+                # Parse comma-separated values — try float, fall back to string.
+                parsed: list[Any] = []
+                for v in values_str.split(","):
+                    v = v.strip()
+                    if not v:
+                        continue
+                    try:
+                        parsed.append(float(v))
+                    except ValueError:
+                        parsed.append(v)
+                if parsed:
+                    params.append(GridParamDef(key=key, values=parsed))
+
+            if not params:
+                ui.notify("Add at least one parameter to sweep", color="negative")
+                return
+
+            # ── Build the base config (same as main backtest) ───────────
+            timeframe = timeframe_select.value or "4H"
+            capital = float(capital_input.value or 1000.0)
+            days_back = int(days_back_input.value or 30)
+            eval_step = eval_step_select.value or "1m"
+
+            now_ms = int(time.time() * 1000)
+            start_ms = now_ms - days_back * 86_400_000
+
+            if eval_step == "closed":
+                evaluation_mode = "closed"
+                evaluation_timeframe = timeframe
+            else:
+                evaluation_mode = "finer_ltf"
+                evaluation_timeframe = eval_step
+
+            base_config = BacktestConfig(
+                symbols=symbols,
+                timeframe=timeframe,
+                start_ts=start_ms,
+                end_ts=now_ms,
+                initial_capital=capital,
+                strategy_names=selected_strategies,
+                launcher_config=copy.deepcopy(launcher_config),
+                strategy_config=dict(strategy_config),
+                warmup_candles=200,
+                disable_live_execution=True,
+                evaluation_mode=evaluation_mode,
+                evaluation_timeframe=evaluation_timeframe,
+            )
+
+            grid_cfg = GridConfig(
+                base_config=base_config,
+                params=params,
+                rank_by=rank_by_select.value or "sharpe_per_candle",
+                min_trades=int(min_trades_input.value or 5),
+            )
+
+            # ── Run the sweep ───────────────────────────────────────────
+            app.state.backtest_running["flag"] = True
+            sweep_run_button.disable()
+            run_button.disable()
+            sweep_progress_label.set_text("Starting sweep...")
+            sweep_results_container.clear()
+
+            grid = BacktestGrid(grid_cfg)
+
+            def grid_progress_cb(progress: Any) -> None:
+                """Record sweep progress into app.state (polled by UI timer)."""
+                phase = getattr(progress, "phase", "")
+                current = getattr(progress, "current", 0)
+                total = getattr(progress, "total", 0)
+                msg = getattr(progress, "message", "")
+                if phase == "grid":
+                    text = f"Sweep: {current + 1}/{total} — {msg}"
+                elif phase == "done":
+                    text = "Sweep complete"
+                elif phase == "error":
+                    text = f"Sweep error: {msg}"
+                else:
+                    text = msg
+                app.state.backtest_progress["text"] = text
+                app.state.backtest_progress["phase"] = phase
+
+            async def _run_sweep_and_store() -> None:
+                """Execute the sweep and render results when done."""
+                try:
+                    result = await grid.run(progress_cb=grid_progress_cb)
+                    app.state.sweep_result = result
+                    app.state.backtest_progress["text"] = "Sweep complete"
+                    app.state.backtest_progress["phase"] = "sweep_done"
+                    app.state.backtest_progress["sweep_result"] = result
+                except Exception as exc:
+                    logger.exception("Sweep background task failed")
+                    app.state.backtest_progress["text"] = f"Sweep error: {exc}"
+                    app.state.backtest_progress["phase"] = "error"
+                    app.state.backtest_progress["sweep_result"] = None
+                finally:
+                    app.state.backtest_running["flag"] = False
+
+            sweep_task = asyncio.create_task(_run_sweep_and_store())
+            app.state.sweep_task = sweep_task
+
+        def _render_sweep_results(result: Any, container: ui.column) -> None:
+            """Render parameter-sweep results into the container."""
+            with container:
+                with ui.card().classes("w-full rounded-lg border border-slate-200 mb-2"):
+                    ui.label("Parameter Sweep Results").classes("text-lg font-semibold mb-2")
+                    rank_by = result.config.rank_by
+                    ui.label(
+                        f"{len(result.runs)} combinations run in {result.duration_seconds:.1f}s — "
+                        f"ranked by {rank_by} (min {result.config.min_trades} trades)"
+                    ).classes("text-xs text-slate-500 mb-2")
+
+                    # ── Ranked results table ────────────────────────────
+                    if result.ranked:
+                        # Build columns: one per parameter + metrics.
+                        param_keys = list(result.ranked[0].params.keys()) if result.ranked else []
+                        columns = []
+                        for pk in param_keys:
+                            columns.append({
+                                "name": pk,
+                                "label": pk.split(".")[-1],
+                                "field": pk,
+                                "align": "left",
+                                "sortable": True,
+                            })
+                        columns.extend([
+                            {"name": "trades", "label": "Trades", "field": "trades", "align": "right", "sortable": True},
+                            {"name": "win_rate", "label": "Win %", "field": "win_rate", "align": "right", "sortable": True},
+                            {"name": "net_profit", "label": "Net PnL", "field": "net_profit", "align": "right", "sortable": True},
+                            {"name": "profit_factor", "label": "PF", "field": "profit_factor", "align": "right", "sortable": True},
+                            {"name": "sharpe", "label": "Sharpe", "field": "sharpe", "align": "right", "sortable": True},
+                            {"name": "max_dd", "label": "Max DD %", "field": "max_dd", "align": "right", "sortable": True},
+                            {"name": "rank_score", "label": rank_by, "field": "rank_score", "align": "right", "sortable": True},
+                        ])
+
+                        rows = []
+                        for run in result.ranked:
+                            r: dict[str, Any] = {}
+                            for pk in param_keys:
+                                r[pk] = run.params.get(pk, "")
+                            if run.result is not None and not run.result.is_error:
+                                m = run.result.metrics
+                                r["trades"] = m.get("total_trades", 0)
+                                r["win_rate"] = f"{m.get('win_rate', 0):.1f}%"
+                                r["net_profit"] = f"{m.get('net_profit', 0):.2f}"
+                                r["profit_factor"] = f"{m.get('profit_factor', 0):.2f}"
+                                r["sharpe"] = f"{m.get('sharpe_per_candle', 0):.4f}"
+                                r["max_dd"] = f"{m.get('max_drawdown_pct', 0):.1f}%"
+                            else:
+                                r["trades"] = 0
+                                r["win_rate"] = "—"
+                                r["net_profit"] = "—"
+                                r["profit_factor"] = "—"
+                                r["sharpe"] = "—"
+                                r["max_dd"] = "—"
+                            r["rank_score"] = f"{run.rank_score:.4f}" if run.rank_score is not None else "—"
+                            if run.below_min_trades:
+                                r["trades"] = f"{r['trades']} *"
+                            rows.append(r)
+
+                        with ui.table(columns=columns, rows=rows).classes("w-full"):
+                            pass
+
+                        ui.label("* = below min trades (not ranked)").classes("text-xs text-slate-400 mt-1")
+                    else:
+                        ui.label("No valid results to rank.").classes("text-sm text-slate-500")
+
         def _render_results(result: Any, container: ui.column) -> None:
             """Render the backtest results into the results container."""
             with container:
@@ -7240,12 +7580,15 @@ def register_pages(app: FastAPI) -> None:
         # instance that disconnected), reflect that in the UI.
         if app.state.backtest_running.get("flag"):
             run_button.disable()
+            sweep_run_button.disable()
             _prog_text = app.state.backtest_progress.get("text", "")
             if _prog_text:
                 progress_label.set_text(_prog_text)
+                sweep_progress_label.set_text(_prog_text)
         else:
-            # No backtest running — make sure the button is enabled.
+            # No backtest running — make sure the buttons are enabled.
             run_button.enable()
+            sweep_run_button.enable()
 
         # ── Progress polling timer ───────────────────────────────────────
         # Polls app.state.backtest_progress and updates the UI label.  This
@@ -7258,6 +7601,7 @@ def register_pages(app: FastAPI) -> None:
             text = bp.get("text", "")
             if text:
                 progress_label.set_text(text)
+                sweep_progress_label.set_text(text)
             phase = bp.get("phase", "")
             if phase in ("done", "error"):
                 result = bp.pop("result", None)
@@ -7267,6 +7611,7 @@ def register_pages(app: FastAPI) -> None:
                     result = getattr(app.state, "backtest_result", None)
                 if result is not None:
                     run_button.enable()
+                    sweep_run_button.enable()
                     if result.is_error:
                         ui.notify(f"Backtest failed: {result.error}", color="negative")
                         progress_label.set_text(f"Error: {result.error}")
@@ -7281,6 +7626,27 @@ def register_pages(app: FastAPI) -> None:
                         results_container.clear()
                         _render_results(result, results_container)
                     # Clear the phase so we don't re-render on every tick.
+                    bp["phase"] = ""
+                    bp["text"] = ""
+            elif phase == "sweep_done":
+                sweep_result = bp.pop("sweep_result", None)
+                if sweep_result is None:
+                    sweep_result = getattr(app.state, "sweep_result", None)
+                if sweep_result is not None:
+                    run_button.enable()
+                    sweep_run_button.enable()
+                    if sweep_result.is_error:
+                        ui.notify(f"Sweep failed: {sweep_result.error}", color="negative")
+                        sweep_progress_label.set_text(f"Error: {sweep_result.error}")
+                    else:
+                        ui.notify(
+                            f"Sweep complete: {len(sweep_result.runs)} runs, "
+                            f"{len(sweep_result.ranked)} ranked",
+                            color="positive",
+                        )
+                        sweep_progress_label.set_text("")
+                        sweep_results_container.clear()
+                        _render_sweep_results(sweep_result, sweep_results_container)
                     bp["phase"] = ""
                     bp["text"] = ""
 
@@ -7310,6 +7676,16 @@ def register_pages(app: FastAPI) -> None:
             asyncio.create_task(run_backtest())
 
         run_button.on("click", _launch_backtest)
+
+        def _launch_sweep(_: Any) -> None:
+            asyncio.create_task(run_sweep())
+
+        sweep_run_button.on("click", _launch_sweep)
+
+        # Render any previously stored sweep result (survives page reload).
+        _stored_sweep = getattr(app.state, "sweep_result", None)
+        if _stored_sweep and not _stored_sweep.is_error:
+            _render_sweep_results(_stored_sweep, sweep_results_container)
 
 
 __all__ = ["register_pages"]
