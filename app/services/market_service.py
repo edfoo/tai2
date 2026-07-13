@@ -2309,11 +2309,17 @@ class MarketService:
             sl_pct = signal.sl_pct if signal.sl_pct is not None else self._extract_float(gov.get("sl_pct"))
 
             # Dynamic TP (Mean Reversion only): tighten TP using BB bandwidth.
+            # Disabled when use_atr_sizing is True — ATR sizing already adapts
+            # TP to volatility, so dynamic_tp would double-tighten it.
             effective_tp_pct = tp_pct
             dynamic_tp_source = "static"
             _mr_cfg = (gov.get("strategies") or {}).get("mean_reversion") or {}
             if signal.strategy_name == "mean_reversion":
                 dynamic_tp = bool(_mr_cfg.get("dynamic_tp", False))
+                _mr_use_atr = bool(_mr_cfg.get("use_atr_sizing", False))
+                if _mr_use_atr and dynamic_tp:
+                    dynamic_tp = False
+                    dynamic_tp_source = "skipped(atr_sizing active)"
                 dynamic_tp_fraction = self._extract_float(_mr_cfg.get("dynamic_tp_fraction")) or 0.7
                 if dynamic_tp and tp_pct and tp_pct > 0:
                     sym_indicators = ((self._last_full_snapshot or {}).get("market_data") or {}).get(symbol) or {}

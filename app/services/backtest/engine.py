@@ -566,12 +566,15 @@ class BacktestEngine:
         # Tighten TP using BB bandwidth at entry.  Mirrors the live logic in
         # ``MarketService.build_launcher_decisions`` so backtests reproduce
         # live trade behaviour when dynamic_tp is enabled.
+        # Disabled when use_atr_sizing is True — ATR sizing already adapts
+        # TP to volatility, so dynamic_tp would double-tighten it.
         effective_tp_pct = tp_pct
         if (
             signal.strategy_name == "mean_reversion"
             and snapshot is not None
             and strat_cfg is not None
             and bool(strat_cfg.get("dynamic_tp", False))
+            and not bool(strat_cfg.get("use_atr_sizing", False))
             and tp_pct is not None
             and tp_pct > 0
         ):

@@ -106,13 +106,21 @@ class MeanReversionStrategy:
         # When use_atr_sizing is True, TP/SL are computed as
         # multiplier × ATR% instead of fixed percentages.  This adapts to
         # the volatility regime (tighter in low-vol, wider in high-vol).
+        # MR inverts the typical R:R: wider TP (reversion to midline) and
+        # tighter SL (invalidation at the wick extreme).
         use_atr_sizing = bool(config.get("use_atr_sizing", False))
         atr_tp_multiplier = helpers.extract_float(config.get("atr_tp_multiplier"))
         if atr_tp_multiplier is None:
-            atr_tp_multiplier = 1.0
+            atr_tp_multiplier = 1.5
         atr_sl_multiplier = helpers.extract_float(config.get("atr_sl_multiplier"))
         if atr_sl_multiplier is None:
-            atr_sl_multiplier = 1.5
+            atr_sl_multiplier = 1.0
+        # ── Minimum ATR% filter ───────────────────────────────────────
+        # Skip entries on coins with ATR% below this threshold — too quiet
+        # for a meaningful reversion.  0 = disabled.
+        min_atr_pct = helpers.extract_float(config.get("min_atr_pct"))
+        if min_atr_pct is None:
+            min_atr_pct = 0.0
         bb_proximity_pct = helpers.extract_float(config.get("bb_proximity_pct"))
         if bb_proximity_pct is None:
             bb_proximity_pct = 0.0
@@ -301,6 +309,14 @@ class MeanReversionStrategy:
             or (bw_percentile is not None and bw_percentile <= max_bb_bandwidth_percentile)
         )
 
+        # ── Minimum ATR% filter ──────────────────────────────────────
+        # Skip entries on coins too quiet for a meaningful reversion.
+        atr_pct_value = helpers.extract_float(indicators.get("atr_pct"))
+        atr_ok = (
+            min_atr_pct <= 0
+            or (atr_pct_value is not None and atr_pct_value >= min_atr_pct)
+        )
+
         if rsi is None:
             helpers.emit_debug(f"MeanReversion: {symbol} — no entry signal (RSI unavailable)")
             return None
@@ -344,6 +360,7 @@ class MeanReversionStrategy:
             and (not require_vwap_reversion or vwap_long_ok)
             and volume_cooling_ok
             and regime_ok
+            and atr_ok
         )
         sell_signal = (
             rsi > rsi_overbought
@@ -358,6 +375,7 @@ class MeanReversionStrategy:
             and (not require_vwap_reversion or vwap_short_ok)
             and volume_cooling_ok
             and regime_ok
+            and atr_ok
         )
         # ── Compute effective TP/SL ────────────────────────────────────
         # ATR-scaled TP/SL overrides the static config values when enabled.

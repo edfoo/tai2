@@ -111,13 +111,20 @@ class SpikeContinuationStrategy:
         # ── ATR-scaled TP/SL ────────────────────────────────────────────
         # When use_atr_sizing is True, TP/SL are computed as
         # multiplier × ATR% instead of fixed percentages.
+        # SC uses wider SL (1.5 ATR) to avoid being stopped by noise.
         use_atr_sizing = bool(config.get("use_atr_sizing", False))
         atr_tp_multiplier = helpers.extract_float(config.get("atr_tp_multiplier"))
         if atr_tp_multiplier is None:
             atr_tp_multiplier = 2.0
         atr_sl_multiplier = helpers.extract_float(config.get("atr_sl_multiplier"))
         if atr_sl_multiplier is None:
-            atr_sl_multiplier = 1.2
+            atr_sl_multiplier = 1.5
+        # ── Minimum ATR% filter ───────────────────────────────────────
+        # Skip entries on coins with ATR% below this threshold — too quiet
+        # for a real spike.  0 = disabled.
+        min_atr_pct = helpers.extract_float(config.get("min_atr_pct"))
+        if min_atr_pct is None:
+            min_atr_pct = 0.0
 
         # Momentum acceleration filters
         require_momentum_acceleration = bool(config.get("require_momentum_acceleration", True))
@@ -353,6 +360,14 @@ class SpikeContinuationStrategy:
             or (bw_percentile is not None and bw_percentile >= min_bb_bandwidth_percentile)
         )
 
+        # ── Minimum ATR% filter ──────────────────────────────────────
+        # Skip entries on coins too quiet for a real spike.
+        atr_pct_value = helpers.extract_float(indicators.get("atr_pct"))
+        atr_ok = (
+            min_atr_pct <= 0
+            or (atr_pct_value is not None and atr_pct_value >= min_atr_pct)
+        )
+
         buy_signal = (
             rsi_min <= rsi <= rsi_max
             and bb_breakout_buy
@@ -362,6 +377,7 @@ class SpikeContinuationStrategy:
             and (not require_volume_rsi_rising or volume_rsi_rising)
             and spike_extension_ok_buy
             and regime_ok
+            and atr_ok
         )
         # Sell signal: mirror
         sell_signal = (
@@ -373,6 +389,7 @@ class SpikeContinuationStrategy:
             and (not require_volume_rsi_rising or volume_rsi_rising)
             and spike_extension_ok_sell
             and regime_ok
+            and atr_ok
         )
 
         # ── Compute effective TP/SL ────────────────────────────────────

@@ -3288,14 +3288,21 @@ def register_pages(app: FastAPI) -> None:
                                 value=float(_mr_cfg.get("atr_tp_multiplier") or 1.0),
                                 min=0.1, max=10.0, step=0.1, format="%.1f",
                             ).classes("w-40").props("dense")
-                            ui.label("TP = multiplier × ATR% (e.g. 1.0 = 1 ATR).").classes("text-xs text-slate-500")
+                            ui.label("TP = multiplier × ATR% (e.g. 1.5 = 1.5 ATR, wider for reversion to midline).").classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             mr_atr_sl_mult_input = ui.number(
                                 label="ATR SL multiplier",
-                                value=float(_mr_cfg.get("atr_sl_multiplier") or 1.5),
+                                value=float(_mr_cfg.get("atr_sl_multiplier") or 1.0),
                                 min=0.1, max=10.0, step=0.1, format="%.1f",
                             ).classes("w-40").props("dense")
-                            ui.label("SL = multiplier × ATR% (e.g. 1.5 = 1.5 ATR).").classes("text-xs text-slate-500")
+                            ui.label("SL = multiplier × ATR% (e.g. 1.0 = 1 ATR, tight invalidation at wick).").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            mr_min_atr_pct_input = ui.number(
+                                label="Min ATR%",
+                                value=float(_mr_cfg.get("min_atr_pct") or 0.0),
+                                min=0.0, max=10.0, step=0.1, format="%.1f",
+                            ).classes("w-40").props("dense")
+                            ui.label("Skip entries when ATR% is below this (0 = disabled). Filters out dead coins.").classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             _mr_flip_enabled = bool(_mr_cfg.get("flip_launcher_direction"))
                             mr_flip_switch = ui.switch(
@@ -3342,8 +3349,9 @@ def register_pages(app: FastAPI) -> None:
                 mr_max_bw_pct_input.value = 40.0
                 mr_regime_lookback_input.value = 50
                 mr_use_atr_sizing_switch.value = True
-                mr_atr_tp_mult_input.value = 1.0
-                mr_atr_sl_mult_input.value = 1.5
+                mr_atr_tp_mult_input.value = 1.5
+                mr_atr_sl_mult_input.value = 1.0
+                mr_min_atr_pct_input.value = 1.0
                 mr_flip_switch.value = False
                 mr_flip_select.value = "both"
                 ui.notify("Mean Reversion fields set to recommended defaults — click Save to persist", color="info")
@@ -3549,10 +3557,17 @@ def register_pages(app: FastAPI) -> None:
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             sc_atr_sl_mult_input = ui.number(
                                 label="ATR SL multiplier",
-                                value=float(_sc_cfg.get("atr_sl_multiplier") or 1.2),
+                                value=float(_sc_cfg.get("atr_sl_multiplier") or 1.5),
                                 min=0.1, max=10.0, step=0.1, format="%.1f",
                             ).classes("w-40").props("dense")
-                            ui.label("SL = multiplier × ATR% (e.g. 1.2 = 1.2 ATR).").classes("text-xs text-slate-500")
+                            ui.label("SL = multiplier × ATR% (e.g. 1.5 = 1.5 ATR, room to breathe).").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            sc_min_atr_pct_input = ui.number(
+                                label="Min ATR%",
+                                value=float(_sc_cfg.get("min_atr_pct") or 0.0),
+                                min=0.0, max=10.0, step=0.1, format="%.1f",
+                            ).classes("w-40").props("dense")
+                            ui.label("Skip entries when ATR% is below this (0 = disabled). Filters out dead coins.").classes("text-xs text-slate-500")
                     _active_badge_sc = ui.badge("Active", color="positive").bind_visibility_from(
                         sc_enabled_switch, "value"
                     )
@@ -3581,7 +3596,8 @@ def register_pages(app: FastAPI) -> None:
                 sc_regime_lookback_input.value = 50
                 sc_use_atr_sizing_switch.value = True
                 sc_atr_tp_mult_input.value = 2.0
-                sc_atr_sl_mult_input.value = 1.2
+                sc_atr_sl_mult_input.value = 1.5
+                sc_min_atr_pct_input.value = 1.0
                 ui.notify("Spike Continuation fields set to recommended defaults — click Save to persist", color="info")
 
             with ui.card().classes("w-full rounded-lg border border-slate-200 mb-1"):
@@ -4375,8 +4391,9 @@ def register_pages(app: FastAPI) -> None:
                 "max_bb_bandwidth_percentile": float(mr_max_bw_pct_input.value or 40.0),
                 "regime_lookback": int(mr_regime_lookback_input.value or 50),
                 "use_atr_sizing": bool(mr_use_atr_sizing_switch.value),
-                "atr_tp_multiplier": float(mr_atr_tp_mult_input.value or 1.0),
-                "atr_sl_multiplier": float(mr_atr_sl_mult_input.value or 1.5),
+                "atr_tp_multiplier": float(mr_atr_tp_mult_input.value or 1.5),
+                "atr_sl_multiplier": float(mr_atr_sl_mult_input.value or 1.0),
+                "min_atr_pct": float(mr_min_atr_pct_input.value or 0.0),
             }
             _strategies_cfg["spike_continuation"] = {
                 "enabled": bool(sc_enabled_switch.value),
@@ -4402,7 +4419,8 @@ def register_pages(app: FastAPI) -> None:
                 "regime_lookback": int(sc_regime_lookback_input.value or 50),
                 "use_atr_sizing": bool(sc_use_atr_sizing_switch.value),
                 "atr_tp_multiplier": float(sc_atr_tp_mult_input.value or 2.0),
-                "atr_sl_multiplier": float(sc_atr_sl_mult_input.value or 1.2),
+                "atr_sl_multiplier": float(sc_atr_sl_mult_input.value or 1.5),
+                "min_atr_pct": float(sc_min_atr_pct_input.value or 0.0),
             }
             _launcher_cfg["strategies"] = _strategies_cfg
             config["launcher"] = _launcher_cfg
