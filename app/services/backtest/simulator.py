@@ -116,6 +116,13 @@ class Simulator:
         # Read from the strategy config: launcher-level or per-strategy.
         _launcher = self._strategy_config or {}
         self._max_hold_candles = int(_launcher.get("max_hold_candles") or 0)
+        # Trade-management config (mirrors live strategy.trade_management).
+        # May live under strategy_config["trade_management"] or top-level.
+        self._tm = (
+            (_launcher.get("trade_management") or {})
+            if isinstance(_launcher.get("trade_management"), dict)
+            else {}
+        )
 
     # ── Properties ────────────────────────────────────────────────────
 
@@ -190,6 +197,7 @@ class Simulator:
             tp_price=tp_price,
             sl_price=sl_price,
             strategy_name=strategy_name,
+            initial_size=size,
         )
         # Entry-time hook for position-management strategies (future phase).
         for pm in self._pm_strategies:
@@ -203,18 +211,69 @@ class Simulator:
         close_price: float,
         close_ts: int,
         reason: str,
+        *,
+        size_fraction: float = 1.0,
     ) -> None:
-        """Close a position and record realised PnL."""
-        position.close_price = close_price
-        position.close_ts = close_ts
-        position.close_reason = reason
-        position.pnl = position.unrealised_pnl(close_price)
-        if position.entry_price > 0:
-            position.pnl_pct = position.unrealised_pnl_pct(close_price)
-        # Realise PnL into cash.
-        self._cash += position.pnl
-        self._open_positions.remove(position)
-        self._closed_positions.append(position)
+        """Close a position (fully or partially) and record realised PnL.
+
+        Parameters
+        ----------
+        size_fraction:
+            1.0 = full close (default).  Values in (0, 1) close that fraction
+            of the remaining size and leave the rest open (partial TP).
+        """
+        if size_fraction <= 0:
+            return
+        if size_fraction >= 1.0:
+            position.close_price = close_price
+            position.close_ts = close_ts
+            position.close_reason = reason
+            position.pnl = position.unrealised_pnl(close_price)
+            if position.entry_price > 0:
+                position.pnl_pct = position.unrealised_pnl_pct(close_price)
+            self._cash += position.pnl
+            self._open_positions.remove(position)
+            self._closed_positions.append(position)
+            return
+
+        # Partial close: realise PnL on the closed fraction, keep remainder open.
+        closed_size = position.size * size_fraction
+        if position.is_long:
+            partial_pnl = (close_price - position.entry_price) * closed_size
+        else:
+            partial_pnl = (position.entry_price - close_price) * closed_size
+        self._cash += partial_pnl
+        # Record a closed leg for metrics.
+        closed_leg = SimPosition(
+            symbol=position.symbol,
+            direction=position.direction,
+            size=closed_size,
+            entry_price=position.entry_price,
+            entry_ts=position.entry_ts,
+            tp_price=position.tp_price,
+            sl_price=position.sl_price,
+            strategy_name=position.strategy_name,
+            close_price=close_price,
+            close_ts=close_ts,
+            close_reason=reason,
+            pnl=partial_pnl,
+            pnl_pct=(
+                (close_price - position.entry_price) / position.entry_price * 100.0
+                if position.is_long and position.entry_price > 0
+                else (
+                    (position.entry_price - close_price) / position.entry_price * 100.0
+                    if position.entry_price > 0
+                    else 0.0
+                )
+            ),
+            candles_held=position.candles_held,
+            initial_size=position.initial_size,
+            breakeven_done=position.breakeven_done,
+            partial_done=True,
+        )
+        self._closed_positions.append(closed_leg)
+        position.size = position.size - closed_size
+        position.partial_done = True
 
     # ── Per-candle update ────────────────────────────────────────────
 
@@ -232,7 +291,10 @@ class Simulator:
             position.candles_held += 1
             if self._check_tp_sl(position, candle):
                 continue  # position was closed
-            # 1b. Max-hold-time timeout — close at candle close.
+            # 1b. Trade management (breakeven / partial / time-stop).
+            if self._apply_trade_management(position, candle):
+                continue
+            # 1c. Max-hold-time timeout — close at candle close.
             if self._max_hold_candles > 0 and position.candles_held >= self._max_hold_candles:
                 self._close_position(position, candle.close, candle.ts, "timeout")
                 continue
@@ -262,7 +324,10 @@ class Simulator:
             position.candles_held += 1
             if self._check_tp_sl(position, candle):
                 continue
-            # 1b. Max-hold-time timeout — close at candle close.
+            # 1b. Trade management (breakeven / partial / time-stop).
+            if self._apply_trade_management(position, candle):
+                continue
+            # 1c. Max-hold-time timeout — close at candle close.
             if self._max_hold_candles > 0 and position.candles_held >= self._max_hold_candles:
                 self._close_position(position, candle.close, candle.ts, "timeout")
                 continue
@@ -279,6 +344,103 @@ class Simulator:
         self._equity_curve.append(
             EquityPoint(ts=ts, equity=eq, open_positions=len(self._open_positions))
         )
+
+    def _apply_trade_management(self, position: SimPosition, candle: Candle) -> bool:
+        """Apply breakeven / partial TP / time-stop.  Returns True if fully closed."""
+        tm = self._tm or {}
+        if not tm.get("enabled"):
+            return False
+
+        entry = position.entry_price
+        if entry <= 0:
+            return False
+
+        # Risk distance from entry to SL (used as 1R).
+        risk_pct: float | None = None
+        if position.sl_price is not None and position.sl_price > 0:
+            if position.is_long:
+                risk_pct = (entry - position.sl_price) / entry * 100.0
+            else:
+                risk_pct = (position.sl_price - entry) / entry * 100.0
+            if risk_pct is not None and risk_pct <= 0:
+                risk_pct = None
+
+        # Use candle close as mark for R-multiple (conservative vs high/low).
+        mark = candle.close
+        if position.is_long:
+            pnl_pct = (mark - entry) / entry * 100.0
+            # Best excursion this candle for BE/partial triggers.
+            best_pct = (candle.high - entry) / entry * 100.0
+        else:
+            pnl_pct = (entry - mark) / entry * 100.0
+            best_pct = (entry - candle.low) / entry * 100.0
+
+        r_multiple = (best_pct / risk_pct) if (risk_pct and risk_pct > 0) else None
+
+        # ── Breakeven stop ────────────────────────────────────────────
+        be_enabled = bool(tm.get("breakeven_enabled", True))
+        be_at_r = float(tm.get("breakeven_at_r") or 1.0)
+        be_buffer_pct = float(tm.get("breakeven_buffer_pct") or 0.05)
+        if (
+            be_enabled
+            and not position.breakeven_done
+            and r_multiple is not None
+            and r_multiple >= be_at_r
+        ):
+            if position.is_long:
+                new_sl = entry * (1.0 + be_buffer_pct / 100.0)
+                if position.sl_price is None or new_sl > position.sl_price:
+                    position.sl_price = new_sl
+            else:
+                new_sl = entry * (1.0 - be_buffer_pct / 100.0)
+                if position.sl_price is None or new_sl < position.sl_price:
+                    position.sl_price = new_sl
+            position.breakeven_done = True
+            # Re-check SL on this same candle after BE move.
+            if self._check_tp_sl(position, candle):
+                return True
+
+        # ── Partial take-profit ───────────────────────────────────────
+        partial_enabled = bool(tm.get("partial_tp_enabled", True))
+        partial_at_r = float(tm.get("partial_tp_at_r") or 1.0)
+        partial_frac = float(tm.get("partial_tp_fraction") or 0.5)
+        if (
+            partial_enabled
+            and not position.partial_done
+            and r_multiple is not None
+            and r_multiple >= partial_at_r
+            and 0.0 < partial_frac < 1.0
+        ):
+            # Close partial at the TP-side extreme of this candle (optimistic
+            # for partial fill once R is reached), clamped to candle range.
+            if position.is_long:
+                partial_px = min(candle.high, entry * (1.0 + (risk_pct or 0) * partial_at_r / 100.0))
+                if partial_px < candle.low:
+                    partial_px = candle.close
+            else:
+                partial_px = max(candle.low, entry * (1.0 - (risk_pct or 0) * partial_at_r / 100.0))
+                if partial_px > candle.high:
+                    partial_px = candle.close
+            self._close_position(
+                position, partial_px, candle.ts, "partial_tp", size_fraction=partial_frac
+            )
+            # Position remains open with reduced size.
+
+        # ── Time stop ────────────────────────────────────────────────
+        time_stop_enabled = bool(tm.get("time_stop_enabled", True))
+        # Prefer candle-count time stop in backtest (more stable than wall-clock).
+        time_stop_candles = int(tm.get("time_stop_candles") or 0)
+        time_stop_min_r = float(tm.get("time_stop_min_r") or 0.3)
+        if time_stop_enabled and time_stop_candles > 0:
+            progress_r = (pnl_pct / risk_pct) if (risk_pct and risk_pct > 0) else None
+            if (
+                position.candles_held >= time_stop_candles
+                and (progress_r is None or progress_r < time_stop_min_r)
+            ):
+                self._close_position(position, candle.close, candle.ts, "timeout")
+                return True
+
+        return False
 
     def _matches_symbol(self, position: SimPosition, candle: Candle) -> bool:
         """Check if a candle belongs to a position's symbol.

@@ -58,6 +58,10 @@ class SimPosition:
     # Number of candles the position has been held through (incremented
     # by the simulator on each update_multi/update tick).
     candles_held: int = 0
+    # Trade-management state (breakeven / partial TP).
+    initial_size: float | None = None
+    breakeven_done: bool = False
+    partial_done: bool = False
 
     @property
     def is_open(self) -> bool:

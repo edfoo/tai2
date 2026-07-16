@@ -2954,6 +2954,20 @@ def register_pages(app: FastAPI) -> None:
             "step_pct": 10.0,
             "lock_ratio": 0.5,
         })
+        trade_management = strategy.setdefault("trade_management", {
+            "enabled": True,
+            "breakeven_enabled": True,
+            "breakeven_at_r": 1.0,
+            "breakeven_buffer_pct": 0.05,
+            "partial_tp_enabled": True,
+            "partial_tp_at_r": 1.0,
+            "partial_tp_fraction": 0.5,
+            "time_stop_enabled": True,
+            "time_stop_seconds": 3600.0,
+            "time_stop_candles": 8,
+            "time_stop_min_r": 0.3,
+            "reentry_cooldown_seconds": 900.0,
+        })
         commutator = strategy.setdefault("commutator", {
             "enabled": False,
             "reverse_at_loss_pct": None,
@@ -3323,16 +3337,17 @@ def register_pages(app: FastAPI) -> None:
                 """Fill all Mean Reversion fields with the recommended configuration."""
                 mr_tp_input.value = 3.0
                 mr_sl_input.value = 4.0
-                mr_dynamic_tp_switch.value = True
+                # Dynamic TP is redundant/harmful when ATR sizing is on.
+                mr_dynamic_tp_switch.value = False
                 mr_dynamic_tp_fraction_input.value = 0.7
                 mr_rsi_oversold_input.value = 30.0
                 mr_rsi_overbought_input.value = 70.0
                 mr_min_adx_input.value = 0.0
-                mr_max_adx_input.value = 25.0
+                mr_max_adx_input.value = 30.0
                 mr_require_htf_switch.value = True
                 mr_require_cmf_switch.value = False
                 mr_require_htf_cmf_switch.value = False
-                mr_require_cmf_cross_switch.value = True
+                mr_require_cmf_cross_switch.value = False
                 mr_require_cmf_no_div_switch.value = False
                 mr_require_fp_delta_switch.value = False
                 mr_require_bb_switch.value = True
@@ -3346,7 +3361,7 @@ def register_pages(app: FastAPI) -> None:
                 mr_volume_cooling_switch.value = True
                 mr_volume_rsi_max_input.value = 70.0
                 mr_require_regime_switch.value = True
-                mr_max_bw_pct_input.value = 40.0
+                mr_max_bw_pct_input.value = 45.0
                 mr_regime_lookback_input.value = 50
                 mr_use_atr_sizing_switch.value = True
                 mr_atr_tp_mult_input.value = 1.5
@@ -3399,7 +3414,7 @@ def register_pages(app: FastAPI) -> None:
                             _sc_vrsi_raw = _sc_cfg.get("volume_rsi_min")
                             sc_volume_rsi_min_input = ui.number(
                                 label="Volume RSI min",
-                                value=float(_sc_vrsi_raw) if _sc_vrsi_raw is not None else 75.0,
+                                value=float(_sc_vrsi_raw) if _sc_vrsi_raw is not None else 70.0,
                                 min=50, max=99, step=1, precision=0,
                             ).classes("w-40").props(
                                 "hint='Volume RSI must be above this to confirm spike' persistent-hint"
@@ -3452,7 +3467,14 @@ def register_pages(app: FastAPI) -> None:
                                 value=float(_sc_cfg.get("max_adx") or 0.0),
                                 min=0, max=100, step=5, precision=0,
                             ).classes("w-32").props(
-                                "hint='Skip if trend too strong (0 = off; acceleration/extension filters already prevent late entry)' persistent-hint"
+                                "hint='Legacy hard ADX ceiling (0 = off)' persistent-hint"
+                            )
+                            sc_max_adx_entry_input = ui.number(
+                                label="Max ADX for entry",
+                                value=float(_sc_cfg.get("max_adx_for_entry") if _sc_cfg.get("max_adx_for_entry") is not None else 38.0),
+                                min=0, max=100, step=1, precision=0,
+                            ).classes("w-40").props(
+                                "hint='Late-entry killer: skip if ADX already this high (0 = off)' persistent-hint"
                             )
                         # ── Momentum acceleration filters (prevent entering at the top) ──
                         ui.separator().classes("my-2")
@@ -3477,10 +3499,10 @@ def register_pages(app: FastAPI) -> None:
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             sc_accel_min_ratio_input = ui.number(
                                 label="Acceleration min ratio",
-                                value=float(_sc_cfg.get("acceleration_min_ratio") or 1.5),
+                                value=float(_sc_cfg.get("acceleration_min_ratio") or 1.1),
                                 min=1.0, max=5.0, step=0.1, format="%.1f",
                             ).classes("w-40").props("dense")
-                            ui.label("Current body must be at least this multiple of recent average (1.5 = 50% larger).").classes("text-xs text-slate-500")
+                            ui.label("Current body must be at least this multiple of recent average (1.1 = 10% larger).").classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             sc_rsi_rising_switch = ui.switch(
                                 "Require RSI rising",
@@ -3496,7 +3518,7 @@ def register_pages(app: FastAPI) -> None:
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             sc_max_spike_ext_input = ui.number(
                                 label="Max spike extension %",
-                                value=float(_sc_cfg.get("max_spike_extension_pct") or 5.0),
+                                value=float(_sc_cfg.get("max_spike_extension_pct") or 4.0),
                                 min=0.0, max=20.0, step=0.5, format="%.1f",
                             ).classes("w-48").props("dense")
                             ui.label("Block entry if price already moved more than this % from spike origin (0 = disabled). Prevents entering at the top.").classes("text-xs text-slate-500")
@@ -3523,10 +3545,10 @@ def register_pages(app: FastAPI) -> None:
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             sc_min_bw_pct_input = ui.number(
                                 label="Min BB bandwidth percentile",
-                                value=float(_sc_cfg.get("min_bb_bandwidth_percentile") or 60.0),
+                                value=float(_sc_cfg.get("min_bb_bandwidth_percentile") or 55.0),
                                 min=5.0, max=95.0, step=5.0, format="%.0f",
                             ).classes("w-48").props("dense")
-                            ui.label("Current bandwidth must be above this percentile (e.g. 60 = above 60th percentile).").classes("text-xs text-slate-500")
+                            ui.label("Current bandwidth must be above this percentile (e.g. 55 = above 55th percentile).").classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             sc_regime_lookback_input = ui.number(
                                 label="Regime lookback",
@@ -3550,17 +3572,17 @@ def register_pages(app: FastAPI) -> None:
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             sc_atr_tp_mult_input = ui.number(
                                 label="ATR TP multiplier",
-                                value=float(_sc_cfg.get("atr_tp_multiplier") or 2.0),
+                                value=float(_sc_cfg.get("atr_tp_multiplier") or 2.5),
                                 min=0.1, max=10.0, step=0.1, format="%.1f",
                             ).classes("w-40").props("dense")
-                            ui.label("TP = multiplier × ATR% (e.g. 2.0 = 2 ATR).").classes("text-xs text-slate-500")
+                            ui.label("TP = multiplier × ATR% (e.g. 2.5 = 2.5 ATR).").classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             sc_atr_sl_mult_input = ui.number(
                                 label="ATR SL multiplier",
-                                value=float(_sc_cfg.get("atr_sl_multiplier") or 1.5),
+                                value=float(_sc_cfg.get("atr_sl_multiplier") or 1.8),
                                 min=0.1, max=10.0, step=0.1, format="%.1f",
                             ).classes("w-40").props("dense")
-                            ui.label("SL = multiplier × ATR% (e.g. 1.5 = 1.5 ATR, room to breathe).").classes("text-xs text-slate-500")
+                            ui.label("SL = multiplier × ATR% (e.g. 1.8 = 1.8 ATR, room to breathe).").classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             sc_min_atr_pct_input = ui.number(
                                 label="Min ATR%",
@@ -3576,7 +3598,7 @@ def register_pages(app: FastAPI) -> None:
                 """Fill all Spike Continuation fields with the recommended configuration."""
                 sc_tp_input.value = 5.0
                 sc_sl_input.value = 3.0
-                sc_volume_rsi_min_input.value = 75.0
+                sc_volume_rsi_min_input.value = 70.0
                 sc_rsi_min_input.value = 55.0
                 sc_rsi_max_input.value = 75.0
                 sc_bb_breakout_switch.value = True
@@ -3584,19 +3606,20 @@ def register_pages(app: FastAPI) -> None:
                 sc_candle_strength_pct_input.value = 70.0
                 sc_min_bb_bw_input.value = 3.0
                 sc_max_adx_input.value = 0.0
+                sc_max_adx_entry_input.value = 38.0
                 sc_momentum_accel_switch.value = True
                 sc_accel_lookback_input.value = 3
-                sc_accel_min_ratio_input.value = 1.2
+                sc_accel_min_ratio_input.value = 1.1
                 sc_rsi_rising_switch.value = True
                 sc_vol_rsi_rising_switch.value = True
-                sc_max_spike_ext_input.value = 5.0
+                sc_max_spike_ext_input.value = 4.0
                 sc_spike_lookback_input.value = 5
                 sc_require_regime_switch.value = True
-                sc_min_bw_pct_input.value = 60.0
+                sc_min_bw_pct_input.value = 55.0
                 sc_regime_lookback_input.value = 50
                 sc_use_atr_sizing_switch.value = True
-                sc_atr_tp_mult_input.value = 2.0
-                sc_atr_sl_mult_input.value = 1.5
+                sc_atr_tp_mult_input.value = 2.5
+                sc_atr_sl_mult_input.value = 1.8
                 sc_min_atr_pct_input.value = 1.0
                 ui.notify("Spike Continuation fields set to recommended defaults — click Save to persist", color="info")
 
@@ -3769,6 +3792,110 @@ def register_pages(app: FastAPI) -> None:
                     _active_badge_prot = ui.badge("Active", color="positive").bind_visibility_from(
                         protector_switch, "value"
                     )
+
+            # ── Trade Management (breakeven / partial / time-stop) ───────────
+            with ui.card().classes("w-full rounded-lg border border-slate-200 mb-1"):
+                with ui.row().classes("w-full items-center gap-2 flex-nowrap"):
+                    tm_enabled_switch = ui.switch(
+                        value=bool(trade_management.get("enabled", True)),
+                    ).props("dense color=primary")
+                    with ui.expansion("Trade Management").classes("flex-1 text-sm font-medium"):
+                        ui.label(
+                            "Post-entry management for launcher trades: move stop to breakeven after +1R, "
+                            "take a partial profit at +1R, time-stop stagnant trades, and block immediate re-entry."
+                        ).classes("text-xs text-slate-500 mb-3")
+                        with ui.row().classes("w-full items-center gap-2 mb-2"):
+                            ui.button(
+                                "Set Recommended Defaults",
+                                icon="tune",
+                                on_click=lambda _: _set_tm_defaults(),
+                            ).props("dense flat color=primary size=sm")
+                        ui.separator().classes("my-2")
+                        ui.label("Breakeven stop").classes("text-xs font-semibold text-slate-600")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            tm_be_switch = ui.switch(
+                                "Move SL to breakeven",
+                                value=bool(trade_management.get("breakeven_enabled", True)),
+                            ).props("dense color=primary")
+                            tm_be_at_r_input = ui.number(
+                                label="At R-multiple",
+                                value=float(trade_management.get("breakeven_at_r") or 1.0),
+                                min=0.1, max=5.0, step=0.1, format="%.1f",
+                            ).classes("w-32").props("dense")
+                            tm_be_buffer_input = ui.number(
+                                label="Buffer %",
+                                value=float(trade_management.get("breakeven_buffer_pct") or 0.05),
+                                min=0.0, max=1.0, step=0.01, format="%.2f",
+                            ).classes("w-32").props("dense")
+                        ui.label("After price reaches N× initial risk, move SL to entry ± buffer.").classes("text-xs text-slate-500")
+                        ui.separator().classes("my-2")
+                        ui.label("Partial take-profit").classes("text-xs font-semibold text-slate-600")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            tm_partial_switch = ui.switch(
+                                "Partial TP",
+                                value=bool(trade_management.get("partial_tp_enabled", True)),
+                            ).props("dense color=primary")
+                            tm_partial_at_r_input = ui.number(
+                                label="At R-multiple",
+                                value=float(trade_management.get("partial_tp_at_r") or 1.0),
+                                min=0.1, max=5.0, step=0.1, format="%.1f",
+                            ).classes("w-32").props("dense")
+                            tm_partial_frac_input = ui.number(
+                                label="Close fraction",
+                                value=float(trade_management.get("partial_tp_fraction") or 0.5),
+                                min=0.1, max=0.9, step=0.05, format="%.2f",
+                            ).classes("w-32").props("dense")
+                        ui.label("Close a fraction of the position at +N R; leave a runner with BE stop.").classes("text-xs text-slate-500")
+                        ui.separator().classes("my-2")
+                        ui.label("Time stop").classes("text-xs font-semibold text-slate-600")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            tm_time_switch = ui.switch(
+                                "Time stop",
+                                value=bool(trade_management.get("time_stop_enabled", True)),
+                            ).props("dense color=primary")
+                            tm_time_sec_input = ui.number(
+                                label="Max hold (seconds)",
+                                value=float(trade_management.get("time_stop_seconds") or 3600.0),
+                                min=60, max=86400, step=60, format="%.0f",
+                            ).classes("w-40").props("dense")
+                            tm_time_candles_input = ui.number(
+                                label="Max hold (candles, backtest)",
+                                value=float(trade_management.get("time_stop_candles") or 8),
+                                min=0, max=200, step=1, format="%.0f",
+                            ).classes("w-48").props("dense")
+                            tm_time_min_r_input = ui.number(
+                                label="Min R to keep",
+                                value=float(trade_management.get("time_stop_min_r") or 0.3),
+                                min=0.0, max=2.0, step=0.1, format="%.1f",
+                            ).classes("w-32").props("dense")
+                        ui.label("Close if held too long without reaching min R progress.").classes("text-xs text-slate-500")
+                        ui.separator().classes("my-2")
+                        ui.label("Re-entry cooldown").classes("text-xs font-semibold text-slate-600")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            tm_cooldown_input = ui.number(
+                                label="Cooldownoldown (seconds)",
+                                value=float(trade_management.get("reentry_cooldown_seconds") or 900.0),
+                                min=0, max=86400, step=60, format="%.0f",
+                            ).classes("w-40").props("dense")
+                        ui.label("Block new launcher entries on the same symbol after a close (0 = off).").classes("text-xs text-slate-500")
+                    _active_badge_tm = ui.badge("Active", color="positive").bind_visibility_from(
+                        tm_enabled_switch, "value"
+                    )
+
+            def _set_tm_defaults() -> None:
+                tm_enabled_switch.value = True
+                tm_be_switch.value = True
+                tm_be_at_r_input.value = 1.0
+                tm_be_buffer_input.value = 0.05
+                tm_partial_switch.value = True
+                tm_partial_at_r_input.value = 1.0
+                tm_partial_frac_input.value = 0.5
+                tm_time_switch.value = True
+                tm_time_sec_input.value = 3600.0
+                tm_time_candles_input.value = 8
+                tm_time_min_r_input.value = 0.3
+                tm_cooldown_input.value = 900.0
+                ui.notify("Trade Management fields set to recommended defaults — click Save to persist", color="info")
 
             with ui.card().classes("w-full rounded-lg border border-slate-200 mb-1"):
                 with ui.row().classes("w-full items-center gap-2 flex-nowrap"):
@@ -4302,6 +4429,20 @@ def register_pages(app: FastAPI) -> None:
                     "step_pct": float(protector_step.value or 10.0),
                     "lock_ratio": float(protector_lock.value or 0.5),
                 },
+                "trade_management": {
+                    "enabled": bool(tm_enabled_switch.value),
+                    "breakeven_enabled": bool(tm_be_switch.value),
+                    "breakeven_at_r": float(tm_be_at_r_input.value or 1.0),
+                    "breakeven_buffer_pct": float(tm_be_buffer_input.value or 0.05),
+                    "partial_tp_enabled": bool(tm_partial_switch.value),
+                    "partial_tp_at_r": float(tm_partial_at_r_input.value or 1.0),
+                    "partial_tp_fraction": float(tm_partial_frac_input.value or 0.5),
+                    "time_stop_enabled": bool(tm_time_switch.value),
+                    "time_stop_seconds": float(tm_time_sec_input.value or 3600.0),
+                    "time_stop_candles": int(tm_time_candles_input.value or 8),
+                    "time_stop_min_r": float(tm_time_min_r_input.value or 0.3),
+                    "reentry_cooldown_seconds": float(tm_cooldown_input.value or 900.0),
+                },
                 "commutator": {
                     "enabled": bool(commutator_switch.value),
                     "reverse_at_loss_pct": float(cmtr_loss_pct.value) if cmtr_loss_pct.value not in (None, "") else None,
@@ -4388,7 +4529,7 @@ def register_pages(app: FastAPI) -> None:
                 "require_volume_cooling": bool(mr_volume_cooling_switch.value),
                 "volume_rsi_max": float(mr_volume_rsi_max_input.value or 70.0),
                 "require_regime": bool(mr_require_regime_switch.value),
-                "max_bb_bandwidth_percentile": float(mr_max_bw_pct_input.value or 40.0),
+                "max_bb_bandwidth_percentile": float(mr_max_bw_pct_input.value or 45.0),
                 "regime_lookback": int(mr_regime_lookback_input.value or 50),
                 "use_atr_sizing": bool(mr_use_atr_sizing_switch.value),
                 "atr_tp_multiplier": float(mr_atr_tp_mult_input.value or 1.5),
@@ -4399,7 +4540,7 @@ def register_pages(app: FastAPI) -> None:
                 "enabled": bool(sc_enabled_switch.value),
                 "tp_pct": float(sc_tp_input.value) if sc_tp_input.value not in (None, "") else None,
                 "sl_pct": float(sc_sl_input.value) if sc_sl_input.value not in (None, "") else None,
-                "volume_rsi_min": float(sc_volume_rsi_min_input.value or 75.0),
+                "volume_rsi_min": float(sc_volume_rsi_min_input.value or 70.0),
                 "rsi_min": float(sc_rsi_min_input.value or 55.0),
                 "rsi_max": float(sc_rsi_max_input.value or 75.0),
                 "require_bb_breakout": bool(sc_bb_breakout_switch.value),
@@ -4407,19 +4548,20 @@ def register_pages(app: FastAPI) -> None:
                 "candle_strength_pct": float(sc_candle_strength_pct_input.value or 70.0),
                 "min_bb_bandwidth": float(sc_min_bb_bw_input.value or 3.0),
                 "max_adx": float(sc_max_adx_input.value or 0.0),
+                "max_adx_for_entry": float(sc_max_adx_entry_input.value or 0.0),
                 "require_momentum_acceleration": bool(sc_momentum_accel_switch.value),
                 "acceleration_lookback": int(sc_accel_lookback_input.value or 3),
-                "acceleration_min_ratio": float(sc_accel_min_ratio_input.value or 1.5),
+                "acceleration_min_ratio": float(sc_accel_min_ratio_input.value or 1.1),
                 "require_rsi_rising": bool(sc_rsi_rising_switch.value),
                 "require_volume_rsi_rising": bool(sc_vol_rsi_rising_switch.value),
-                "max_spike_extension_pct": float(sc_max_spike_ext_input.value or 2.0),
+                "max_spike_extension_pct": float(sc_max_spike_ext_input.value or 4.0),
                 "spike_lookback": int(sc_spike_lookback_input.value or 5),
                 "require_regime": bool(sc_require_regime_switch.value),
-                "min_bb_bandwidth_percentile": float(sc_min_bw_pct_input.value or 60.0),
+                "min_bb_bandwidth_percentile": float(sc_min_bw_pct_input.value or 55.0),
                 "regime_lookback": int(sc_regime_lookback_input.value or 50),
                 "use_atr_sizing": bool(sc_use_atr_sizing_switch.value),
-                "atr_tp_multiplier": float(sc_atr_tp_mult_input.value or 2.0),
-                "atr_sl_multiplier": float(sc_atr_sl_mult_input.value or 1.5),
+                "atr_tp_multiplier": float(sc_atr_tp_mult_input.value or 2.5),
+                "atr_sl_multiplier": float(sc_atr_sl_mult_input.value or 1.8),
                 "min_atr_pct": float(sc_min_atr_pct_input.value or 0.0),
             }
             _launcher_cfg["strategies"] = _strategies_cfg

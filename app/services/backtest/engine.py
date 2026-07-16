@@ -65,12 +65,18 @@ class BacktestEngine:
     def __init__(self, config: BacktestConfig) -> None:
         self._config = config
         self._fetcher = HistoricalDataFetcher()
+        # Merge launcher + strategy config so the simulator can read both
+        # max_hold_candles (launcher) and trade_management (strategy).
+        _sim_cfg = dict(config.launcher_config or {})
+        _strat_cfg = dict(config.strategy_config or {})
+        if "trade_management" in _strat_cfg and "trade_management" not in _sim_cfg:
+            _sim_cfg["trade_management"] = _strat_cfg["trade_management"]
         self._simulator = Simulator(
             initial_capital=config.initial_capital,
             notional_per_trade=float(
                 (config.launcher_config or {}).get("notional_usd") or 10.0
             ),
-            strategy_config=config.launcher_config or {},
+            strategy_config=_sim_cfg,
         )
         # Build the list of strategy instances to evaluate.
         self._strategies: list[Strategy] = [

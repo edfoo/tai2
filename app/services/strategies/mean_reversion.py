@@ -33,8 +33,8 @@ class MeanReversionStrategy:
       - ``min_bb_bandwidth`` (float, default 0.0)
       - ``max_bb_bandwidth`` (float, default 0.0)
       - ``min_adx`` (float, default 0.0)
-      - ``max_adx`` (float, default 0.0): set ~25-30 to filter out strong
-        trending regimes where mean reversion fails.
+      - ``max_adx`` (float, default 0.0): set ~30-32 on momentum universes
+        (or ~25 on pure chop universes) to filter strong trends.
       - ``tp_pct`` (float, default None): strategy-level TP %. Mean reversion
         typically wants a tight TP (reversion to midline). Falls back to
         launcher-level if None.

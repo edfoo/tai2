@@ -297,6 +297,13 @@ class MarketService:
         # Protector strategy: tracks symbols whose SL update task is in-flight
         # so concurrent refresh ticks don't spawn duplicate amendment tasks.
         self._protector_updating: set[str] = set()
+        # Trade management (breakeven / partial TP / time stop / re-entry cooldown).
+        # Keyed by symbol.  Tracks per-position lifecycle state for launcher trades.
+        self._trade_mgmt_state: dict[str, dict[str, Any]] = {}
+        self._trade_mgmt_partial_closing: set[str] = set()
+        self._trade_mgmt_time_closing: set[str] = set()
+        self._trade_mgmt_be_updating: set[str] = set()
+        self._reentry_cooldown_until: dict[str, float] = {}
         # Commutator strategy: when a position's loss hits the configured threshold,
         # close it and open the reversed side.  Tracks flips per position lifecycle
         # (counts are cleared automatically when the symbol leaves open positions).
@@ -1792,6 +1799,476 @@ class MarketService:
         finally:
             self._protector_updating.discard(symbol_key)
 
+    # ── Trade management (breakeven / partial TP / time stop / cooldown) ────
+
+    def _trade_mgmt_config(self) -> dict[str, Any]:
+        """Return the trade_management config block (under strategy.trade_management)."""
+        return (self._strategy_config.get("trade_management") or {}) if self._strategy_config else {}
+
+    def _seed_trade_mgmt_state(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        strategy_name: str = "",
+        attach_algo_orders: list[dict[str, Any]] | None = None,
+        entry_price: float | None = None,
+        tp_price: float | None = None,
+        sl_price: float | None = None,
+    ) -> None:
+        """Initialise trade-management state for a newly opened launcher position."""
+        symbol_key = symbol.upper()
+        tm = self._trade_mgmt_config()
+        if not tm.get("enabled"):
+            return
+        # Prefer explicit prices; fall back to attached algo orders / protection cache.
+        if tp_price is None or sl_price is None:
+            for algo in attach_algo_orders or []:
+                if not isinstance(algo, dict):
+                    continue
+                if tp_price is None:
+                    tp_price = self._extract_float(algo.get("tpTriggerPx") or algo.get("tpOrdPx"))
+                if sl_price is None:
+                    sl_price = self._extract_float(algo.get("slTriggerPx") or algo.get("slOrdPx"))
+        if tp_price is None or sl_price is None:
+            prot = self._position_protection.get(symbol_key) or {}
+            if tp_price is None:
+                tp_price = self._extract_float(prot.get("take_profit"))
+            if sl_price is None:
+                sl_price = self._extract_float(prot.get("stop_loss"))
+        if entry_price is None or entry_price <= 0:
+            entry_price = self.get_last_price(symbol_key)
+        risk_pct: float | None = None
+        if entry_price and entry_price > 0 and sl_price and sl_price > 0:
+            if side == "long":
+                risk_pct = (entry_price - sl_price) / entry_price * 100.0
+            else:
+                risk_pct = (sl_price - entry_price) / entry_price * 100.0
+            if risk_pct is not None and risk_pct <= 0:
+                risk_pct = None
+        self._trade_mgmt_state[symbol_key] = {
+            "side": side,
+            "strategy": strategy_name,
+            "entry_price": entry_price,
+            "entry_ts": time.time(),
+            "tp_price": tp_price,
+            "sl_price": sl_price,
+            "risk_pct": risk_pct,
+            "breakeven_done": False,
+            "partial_done": False,
+            "initial_contracts": None,
+        }
+        self._emit_debug(
+            f"TradeMgmt: seeded {symbol_key} side={side} entry={entry_price} "
+            f"tp={tp_price} sl={sl_price} risk_pct={risk_pct}"
+        )
+
+    def _clear_trade_mgmt_state(self, symbol: str, *, reason: str = "") -> None:
+        """Clear trade-management state and optionally start a re-entry cooldown."""
+        symbol_key = symbol.upper()
+        had_state = symbol_key in self._trade_mgmt_state
+        self._trade_mgmt_state.pop(symbol_key, None)
+        self._trade_mgmt_partial_closing.discard(symbol_key)
+        self._trade_mgmt_time_closing.discard(symbol_key)
+        self._trade_mgmt_be_updating.discard(symbol_key)
+        if not had_state:
+            return
+        tm = self._trade_mgmt_config()
+        cooldown_sec = self._extract_float(tm.get("reentry_cooldown_seconds")) or 0.0
+        if cooldown_sec > 0:
+            self._reentry_cooldown_until[symbol_key] = time.time() + cooldown_sec
+            self._emit_debug(
+                f"TradeMgmt: {symbol_key} cleared ({reason}); "
+                f"re-entry cooldown {cooldown_sec:.0f}s"
+            )
+        else:
+            self._emit_debug(f"TradeMgmt: {symbol_key} cleared ({reason})")
+
+    def _is_reentry_blocked(self, symbol: str) -> bool:
+        """Return True if *symbol* is still inside the re-entry cooldown window."""
+        symbol_key = symbol.upper()
+        until = self._reentry_cooldown_until.get(symbol_key)
+        if until is None:
+            return False
+        if time.time() >= until:
+            self._reentry_cooldown_until.pop(symbol_key, None)
+            return False
+        return True
+
+    async def _check_trade_management(self) -> None:
+        """Apply breakeven stop, partial take-profit, and time-stop rules.
+
+        Config lives under ``strategy.trade_management``:
+          enabled                  – bool
+          breakeven_enabled        – bool (default True)
+          breakeven_at_r           – float, move SL to entry after this R (default 1.0)
+          breakeven_buffer_pct     – float, tiny buffer beyond entry (default 0.05)
+          partial_tp_enabled       – bool (default True)
+          partial_tp_at_r          – float, take partial at this R (default 1.0)
+          partial_tp_fraction      – float, fraction of position to close (default 0.5)
+          time_stop_enabled        – bool (default True)
+          time_stop_seconds        – float, max hold time (default 3600 = 1h)
+          time_stop_min_r          – float, only time-stop if progress < this R (default 0.3)
+          reentry_cooldown_seconds – float, block re-entry after close (default 900)
+        """
+        tm = self._trade_mgmt_config()
+        if not tm.get("enabled"):
+            return
+        snapshot = self._last_full_snapshot
+        if not snapshot:
+            return
+        positions: list[dict[str, Any]] = snapshot.get("positions") or []
+        if not positions:
+            # No open positions — clear any orphaned state.
+            for sym in list(self._trade_mgmt_state):
+                self._clear_trade_mgmt_state(sym, reason="flat")
+            return
+
+        active_symbols = {
+            str(p.get("instId", "")).upper()
+            for p in positions
+            if isinstance(p, dict) and self._extract_float(p.get("pos"))
+        }
+        # Drop state for symbols that are no longer open.
+        for sym in list(self._trade_mgmt_state):
+            if sym not in active_symbols:
+                self._clear_trade_mgmt_state(sym, reason="position_closed")
+
+        be_enabled = bool(tm.get("breakeven_enabled", True))
+        be_at_r = self._extract_float(tm.get("breakeven_at_r"))
+        if be_at_r is None:
+            be_at_r = 1.0
+        be_buffer_pct = self._extract_float(tm.get("breakeven_buffer_pct"))
+        if be_buffer_pct is None:
+            be_buffer_pct = 0.05
+        partial_enabled = bool(tm.get("partial_tp_enabled", True))
+        partial_at_r = self._extract_float(tm.get("partial_tp_at_r"))
+        if partial_at_r is None:
+            partial_at_r = 1.0
+        partial_frac = self._extract_float(tm.get("partial_tp_fraction"))
+        if partial_frac is None:
+            partial_frac = 0.5
+        time_stop_enabled = bool(tm.get("time_stop_enabled", True))
+        time_stop_seconds = self._extract_float(tm.get("time_stop_seconds"))
+        if time_stop_seconds is None:
+            time_stop_seconds = 3600.0
+        time_stop_min_r = self._extract_float(tm.get("time_stop_min_r"))
+        if time_stop_min_r is None:
+            time_stop_min_r = 0.3
+
+        for pos in positions:
+            if not isinstance(pos, dict):
+                continue
+            symbol = str(pos.get("instId", "")).upper()
+            if not symbol:
+                continue
+            pos_val = self._extract_float(pos.get("pos"))
+            if not pos_val or pos_val == 0:
+                continue
+            state = self._trade_mgmt_state.get(symbol)
+            if state is None:
+                # Auto-seed for positions that opened before trade_mgmt was enabled,
+                # or for positions whose launcher tracking was lost.
+                pos_side = str(pos.get("posSide", "")).lower()
+                if pos_side == "long" or (not pos_side and pos_val > 0):
+                    side = "long"
+                elif pos_side == "short" or (not pos_side and pos_val < 0):
+                    side = "short"
+                else:
+                    continue
+                # Only manage symbols that are (or were) launcher-tracked.
+                is_launcher = any(
+                    k.endswith(f":{symbol}") or k == symbol
+                    for k in self._launcher_in_position
+                )
+                if not is_launcher:
+                    continue
+                avg_px = self._extract_float(pos.get("avgPx"))
+                self._seed_trade_mgmt_state(
+                    symbol=symbol,
+                    side=side,
+                    entry_price=avg_px,
+                )
+                state = self._trade_mgmt_state.get(symbol)
+                if state is None:
+                    continue
+
+            # Capture initial contracts on first observation.
+            if state.get("initial_contracts") is None:
+                state["initial_contracts"] = abs(pos_val)
+
+            avg_px = self._extract_float(pos.get("avgPx")) or state.get("entry_price")
+            if avg_px and avg_px > 0:
+                state["entry_price"] = avg_px
+            entry_price = state.get("entry_price")
+            if not entry_price or entry_price <= 0:
+                continue
+
+            last_price = self.get_last_price(symbol)
+            if last_price is None or last_price <= 0:
+                last_price = self._extract_float(pos.get("markPx") or pos.get("last"))
+            if last_price is None or last_price <= 0:
+                continue
+
+            side = state.get("side") or ("long" if pos_val > 0 else "short")
+            is_long = side == "long"
+            if is_long:
+                pnl_pct = (last_price - entry_price) / entry_price * 100.0
+            else:
+                pnl_pct = (entry_price - last_price) / entry_price * 100.0
+
+            risk_pct = state.get("risk_pct")
+            if risk_pct is None or risk_pct <= 0:
+                sl_price = state.get("sl_price") or self._extract_float(
+                    (self._position_protection.get(symbol) or {}).get("stop_loss")
+                )
+                if sl_price and sl_price > 0:
+                    if is_long:
+                        risk_pct = (entry_price - sl_price) / entry_price * 100.0
+                    else:
+                        risk_pct = (sl_price - entry_price) / entry_price * 100.0
+                    if risk_pct and risk_pct > 0:
+                        state["risk_pct"] = risk_pct
+                        state["sl_price"] = sl_price
+            r_multiple = (pnl_pct / risk_pct) if (risk_pct and risk_pct > 0) else None
+
+            pos_side = str(pos.get("posSide", "")).lower()
+            resolved_pos_side = pos_side if pos_side in ("long", "short") else None
+            trade_mode = str(pos.get("mgnMode") or "").lower() or "isolated"
+            action = "BUY" if is_long else "SELL"
+            close_side = "sell" if is_long else "buy"
+
+            # ── Breakeven stop ──────────────────────────────────────────
+            if (
+                be_enabled
+                and not state.get("breakeven_done")
+                and r_multiple is not None
+                and r_multiple >= be_at_r
+                and symbol not in self._trade_mgmt_be_updating
+            ):
+                if is_long:
+                    new_sl = entry_price * (1.0 + be_buffer_pct / 100.0)
+                else:
+                    new_sl = entry_price * (1.0 - be_buffer_pct / 100.0)
+                current_sl = self._extract_float(
+                    (self._position_protection.get(symbol) or {}).get("stop_loss")
+                ) or state.get("sl_price")
+                should_move = True
+                if current_sl is not None:
+                    if is_long and new_sl <= current_sl:
+                        should_move = False
+                    if not is_long and new_sl >= current_sl:
+                        should_move = False
+                if should_move:
+                    self._emit_debug(
+                        f"TradeMgmt BE: {symbol} R={r_multiple:.2f} ≥ {be_at_r:.2f} "
+                        f"→ move SL to {new_sl:.6f} (entry={entry_price:.6f})"
+                    )
+                    state["breakeven_done"] = True
+                    state["sl_price"] = new_sl
+                    self._trade_mgmt_be_updating.add(symbol)
+                    asyncio.create_task(
+                        self._trade_mgmt_move_sl(
+                            symbol=symbol,
+                            new_sl_price=new_sl,
+                            pos_side=resolved_pos_side,
+                            trade_mode=trade_mode,
+                            action=action,
+                        ),
+                        name=f"trade-mgmt-be-{symbol}",
+                    )
+
+            # ── Partial take-profit ─────────────────────────────────────
+            if (
+                partial_enabled
+                and not state.get("partial_done")
+                and r_multiple is not None
+                and r_multiple >= partial_at_r
+                and partial_frac > 0
+                and partial_frac < 1.0
+                and symbol not in self._trade_mgmt_partial_closing
+            ):
+                contracts = abs(pos_val)
+                close_sz = contracts * partial_frac
+                if close_sz > 0:
+                    self._emit_debug(
+                        f"TradeMgmt partial TP: {symbol} R={r_multiple:.2f} ≥ {partial_at_r:.2f} "
+                        f"→ close {partial_frac:.0%} ({close_sz:.4f} of {contracts:.4f})"
+                    )
+                    state["partial_done"] = True
+                    self._trade_mgmt_partial_closing.add(symbol)
+                    asyncio.create_task(
+                        self._trade_mgmt_partial_close(
+                            symbol=symbol,
+                            close_side=close_side,
+                            pos_side=resolved_pos_side,
+                            contracts=close_sz,
+                            trade_mode=trade_mode,
+                        ),
+                        name=f"trade-mgmt-partial-{symbol}",
+                    )
+
+            # ── Time stop ───────────────────────────────────────────────
+            if (
+                time_stop_enabled
+                and time_stop_seconds > 0
+                and symbol not in self._trade_mgmt_time_closing
+            ):
+                entry_ts = state.get("entry_ts") or 0.0
+                held_sec = time.time() - entry_ts if entry_ts else 0.0
+                progress_ok = (
+                    r_multiple is None
+                    or r_multiple < time_stop_min_r
+                )
+                if held_sec >= time_stop_seconds and progress_ok:
+                    self._emit_debug(
+                        f"TradeMgmt time-stop: {symbol} held {held_sec:.0f}s ≥ "
+                        f"{time_stop_seconds:.0f}s with R="
+                        f"{f'{r_multiple:.2f}' if r_multiple is not None else 'n/a'} "
+                        f"< {time_stop_min_r:.2f} — closing"
+                    )
+                    self._trade_mgmt_time_closing.add(symbol)
+                    asyncio.create_task(
+                        self._trade_mgmt_full_close(
+                            symbol=symbol,
+                            close_side=close_side,
+                            pos_side=resolved_pos_side,
+                            contracts=abs(pos_val),
+                            trade_mode=trade_mode,
+                        ),
+                        name=f"trade-mgmt-timeout-{symbol}",
+                    )
+
+    async def _trade_mgmt_move_sl(
+        self,
+        *,
+        symbol: str,
+        new_sl_price: float,
+        pos_side: str | None,
+        trade_mode: str,
+        action: str,
+    ) -> None:
+        """Move stop-loss to breakeven (or better), preserving existing TP."""
+        symbol_key = symbol.upper()
+        try:
+            current_protection = self._position_protection.get(symbol_key) or {}
+            current_tp = self._extract_float(current_protection.get("take_profit"))
+            await self._cancel_position_protection(symbol)
+            await asyncio.sleep(0.5)
+            result = await self._place_position_protection(
+                symbol=symbol,
+                trade_mode=trade_mode,
+                action=action,
+                take_profit_price=current_tp,
+                stop_loss_price=new_sl_price,
+                dual_side_mode=bool(pos_side),
+                pos_side=pos_side,
+            )
+            if result:
+                self._emit_debug(
+                    f"TradeMgmt BE: {symbol_key} SL moved to {new_sl_price:.6f} "
+                    f"(tp preserved={current_tp})"
+                )
+            else:
+                self._emit_debug(f"TradeMgmt BE: failed to place SL for {symbol_key}")
+                # Allow retry on next tick.
+                state = self._trade_mgmt_state.get(symbol_key)
+                if state is not None:
+                    state["breakeven_done"] = False
+        except Exception as exc:  # pragma: no cover - network safety
+            logger.warning("TradeMgmt BE SL update error for %s: %s", symbol_key, exc)
+            state = self._trade_mgmt_state.get(symbol_key)
+            if state is not None:
+                state["breakeven_done"] = False
+        finally:
+            self._trade_mgmt_be_updating.discard(symbol_key)
+
+    async def _trade_mgmt_partial_close(
+        self,
+        *,
+        symbol: str,
+        close_side: str,
+        pos_side: str | None,
+        contracts: float,
+        trade_mode: str,
+    ) -> None:
+        """Close a fraction of the position at market (partial TP)."""
+        symbol_key = symbol.upper()
+        coid = self._generate_client_order_id("tm-p")
+        try:
+            result = await self._submit_order(
+                symbol=symbol,
+                side=close_side,
+                pos_side=pos_side,
+                size=contracts,
+                trade_mode=trade_mode or "isolated",
+                order_type="market",
+                reduce_only=True,
+                client_order_id=coid,
+                attach_algo_orders=None,
+            )
+            if result is None:
+                self._emit_debug(f"TradeMgmt partial: {symbol_key} — trade API unavailable")
+                state = self._trade_mgmt_state.get(symbol_key)
+                if state is not None:
+                    state["partial_done"] = False
+            else:
+                order_result = result[0] if isinstance(result, tuple) else result
+                if order_result:
+                    self._emit_debug(
+                        f"TradeMgmt partial: {symbol_key} closed {contracts:.4f} contracts"
+                    )
+                else:
+                    self._emit_debug(f"TradeMgmt partial: {symbol_key} close rejected")
+                    state = self._trade_mgmt_state.get(symbol_key)
+                    if state is not None:
+                        state["partial_done"] = False
+        except Exception as exc:
+            logger.warning("TradeMgmt partial close error for %s: %s", symbol_key, exc)
+            state = self._trade_mgmt_state.get(symbol_key)
+            if state is not None:
+                state["partial_done"] = False
+        finally:
+            self._trade_mgmt_partial_closing.discard(symbol_key)
+
+    async def _trade_mgmt_full_close(
+        self,
+        *,
+        symbol: str,
+        close_side: str,
+        pos_side: str | None,
+        contracts: float,
+        trade_mode: str,
+    ) -> None:
+        """Fully close a position (time-stop)."""
+        symbol_key = symbol.upper()
+        coid = self._generate_client_order_id("tm-t")
+        try:
+            result = await self._submit_order(
+                symbol=symbol,
+                side=close_side,
+                pos_side=pos_side,
+                size=contracts,
+                trade_mode=trade_mode or "isolated",
+                order_type="market",
+                reduce_only=True,
+                client_order_id=coid,
+                attach_algo_orders=None,
+            )
+            if result is None:
+                self._emit_debug(f"TradeMgmt time-stop: {symbol_key} — trade API unavailable")
+            else:
+                order_result = result[0] if isinstance(result, tuple) else result
+                if order_result:
+                    self._emit_debug(f"TradeMgmt time-stop: {symbol_key} close accepted")
+                    self._clear_trade_mgmt_state(symbol_key, reason="time_stop")
+                else:
+                    self._emit_debug(f"TradeMgmt time-stop: {symbol_key} close rejected")
+        except Exception as exc:
+            logger.warning("TradeMgmt time-stop close error for %s: %s", symbol_key, exc)
+        finally:
+            self._trade_mgmt_time_closing.discard(symbol_key)
+
     # ── Commutator strategy ──────────────────────────────────────────────────
 
     async def _check_commutator(self) -> None:
@@ -2178,6 +2655,8 @@ class MarketService:
             if _sym not in active_symbols:
                 self._emit_debug(f"Launcher: {strat_key} no longer in positions — clearing tracking")
                 self._launcher_in_position.pop(strat_key, None)
+                # Clear trade-management state and start re-entry cooldown.
+                self._clear_trade_mgmt_state(_sym, reason="position_closed")
 
         self._launcher_had_positions = bool(active_symbols)
 
@@ -2212,11 +2691,19 @@ class MarketService:
             order_result = result[0] if isinstance(result, tuple) else result
             if order_result:
                 self._emit_debug(f"Launcher: {symbol} [{strategy_name}] entry accepted ({side})")
+                entry_side = "long" if side == "buy" else "short"
                 self._launcher_in_position[strat_key] = {
-                    "side": "long" if side == "buy" else "short",
+                    "side": entry_side,
                     "pos_side": pos_side,
                     "strategy": strategy_name,
                 }
+                # Seed trade-management state for BE / partial / time-stop.
+                self._seed_trade_mgmt_state(
+                    symbol=symbol,
+                    side=entry_side,
+                    strategy_name=strategy_name,
+                    attach_algo_orders=attach_algo_orders,
+                )
             else:
                 self._emit_debug(f"Launcher: {symbol} [{strategy_name}] entry rejected")
         except Exception as exc:
@@ -2302,6 +2789,15 @@ class MarketService:
                 continue
             if strat_key in self._launcher_in_position:
                 self._emit_debug(f"Launcher: {symbol} [{signal.strategy_name}] already tracked — skipping")
+                continue
+            # Re-entry cooldown after a recent close (trade management).
+            if self._is_reentry_blocked(symbol_upper):
+                until = self._reentry_cooldown_until.get(symbol_upper, 0.0)
+                remaining = max(0.0, until - time.time())
+                self._emit_debug(
+                    f"Launcher: {symbol} [{signal.strategy_name}] re-entry cooldown "
+                    f"({remaining:.0f}s remaining) — skipping"
+                )
                 continue
 
             # TP/SL from the strategy signal, falling back to launcher-level.
@@ -4001,6 +4497,12 @@ class MarketService:
                 raise
             except Exception as exc:  # pragma: no cover - best-effort
                 logger.debug("Protector check error: %s", exc)
+            try:
+                await self._check_trade_management()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # pragma: no cover - best-effort
+                logger.debug("Trade management check error: %s", exc)
             try:
                 await self._check_commutator()
             except asyncio.CancelledError:
