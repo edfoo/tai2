@@ -5769,9 +5769,9 @@ def register_pages(app: FastAPI) -> None:
             ui.label("Autonomous Symbol Screener").classes("text-sm font-semibold text-slate-600")
             ui.label(
                 "When enabled, replaces the manual trading pairs list by scoring all USDT-SWAP "
-                "instruments on OKX using three components: volume spike ratio vs. rolling average (50%), "
-                "24h high-low oscillation range (30%), and absolute price momentum (20%). "
-                "This favours coins with unusual activity and wide ranges rather than simply the largest by volume. "
+                "instruments on OKX. Dual-universe mode (recommended) builds two lists: "
+                "SC = expansion/momentum for Spike Continuation, MR = chop/range for Mean Reversion. "
+                "Strategies only evaluate their own universe. Soft overlap is allowed. "
                 "The manual list is ignored while this is on."
             ).classes("text-xs text-slate-500 mb-1")
             screener_cfg = (config.get("screener") or {})
@@ -5782,6 +5782,12 @@ def register_pages(app: FastAPI) -> None:
                 ).classes("w-full md:w-56").props(
                     "hint='Let the engine pick symbols by market activity instead of the manual list' persistent-hint"
                 )
+                screener_dual_switch = ui.switch(
+                    "Dual universe (SC + MR)",
+                    value=bool(screener_cfg.get("dual_universe", True)),
+                ).classes("w-full md:w-56").props(
+                    "hint='ON: separate SC expansion list and MR chop list. OFF: legacy single combined list.' persistent-hint"
+                )
             with ui.row().classes("w-full flex-wrap gap-4"):
                 screener_universe_input = ui.input(
                     label="Universe filter",
@@ -5790,13 +5796,31 @@ def register_pages(app: FastAPI) -> None:
                     "hint='Glob pattern for eligible instruments, e.g. *-USDT-SWAP' persistent-hint"
                 )
                 screener_max_symbols_input = ui.number(
-                    label="Max active symbols",
-                    value=int(screener_cfg.get("max_symbols") or 5),
+                    label="Max active symbols (union / legacy)",
+                    value=int(screener_cfg.get("max_symbols") or 10),
+                    min=1,
+                    max=40,
+                    step=1,
+                ).classes("w-full md:w-56").props(
+                    "hint='Legacy single-list size, or soft cap reference for dual mode' persistent-hint"
+                )
+                screener_sc_max_input = ui.number(
+                    label="SC max symbols",
+                    value=int(screener_cfg.get("sc_max_symbols") or 8),
                     min=1,
                     max=20,
                     step=1,
-                ).classes("w-full md:w-48").props(
-                    "hint='How many top-scoring symbols to trade at once' persistent-hint"
+                ).classes("w-full md:w-40").props(
+                    "hint='Top expansion/momentum names for Spike Continuation' persistent-hint"
+                )
+                screener_mr_max_input = ui.number(
+                    label="MR max symbols",
+                    value=int(screener_cfg.get("mr_max_symbols") or 8),
+                    min=1,
+                    max=20,
+                    step=1,
+                ).classes("w-full md:w-40").props(
+                    "hint='Top chop/range names for Mean Reversion' persistent-hint"
                 )
                 screener_interval_input = ui.number(
                     label="Selection interval (min)",
@@ -5815,21 +5839,49 @@ def register_pages(app: FastAPI) -> None:
                 ).classes("w-full md:w-56").props(
                     "hint='Exclude symbols below this 24h quote-volume — enter in millions, e.g. 0.5 = 500,000 USDT (0 = no filter)' persistent-hint"
                 )
+            ui.label("SC universe filters (expansion)").classes("text-xs font-semibold text-slate-600 mt-2")
+            with ui.row().classes("w-full flex-wrap gap-4"):
                 screener_min_momentum_input = ui.number(
-                    label="Min momentum (%)",
-                    value=float(screener_cfg.get("min_momentum_pct") or 0.5),
+                    label="SC min momentum (%)",
+                    value=float(
+                        screener_cfg.get("sc_min_momentum_pct")
+                        if screener_cfg.get("sc_min_momentum_pct") is not None
+                        else (screener_cfg.get("min_momentum_pct") or 0.5)
+                    ),
                     min=0,
                     step=0.1,
                 ).classes("w-full md:w-48").props(
-                    "hint='Exclude symbols whose absolute 24h price change is below this %' persistent-hint"
+                    "hint='SC: exclude symbols whose absolute 24h price change is below this %' persistent-hint"
                 )
                 screener_min_hl_range_input = ui.number(
-                    label="Min HL range (%)",
-                    value=float(screener_cfg.get("min_hl_range_pct") or 0.0),
+                    label="SC min HL range (%)",
+                    value=float(
+                        screener_cfg.get("sc_min_hl_range_pct")
+                        if screener_cfg.get("sc_min_hl_range_pct") is not None
+                        else (screener_cfg.get("min_hl_range_pct") or 0.0)
+                    ),
                     min=0,
                     step=0.1,
                 ).classes("w-full md:w-48").props(
-                    "hint='Exclude symbols whose 24h high-low range is below this % of open price (0 = no filter)' persistent-hint"
+                    "hint='SC: exclude symbols whose 24h high-low range is below this %' persistent-hint"
+                )
+            ui.label("MR universe filters (chop)").classes("text-xs font-semibold text-slate-600 mt-2")
+            with ui.row().classes("w-full flex-wrap gap-4"):
+                screener_mr_min_hl_input = ui.number(
+                    label="MR min HL range (%)",
+                    value=float(screener_cfg.get("mr_min_hl_range_pct") or 1.0),
+                    min=0,
+                    step=0.1,
+                ).classes("w-full md:w-48").props(
+                    "hint='MR: need enough range for reversion to be worthwhile' persistent-hint"
+                )
+                screener_mr_max_mom_input = ui.number(
+                    label="MR max momentum (%)",
+                    value=float(screener_cfg.get("mr_max_momentum_pct") or 8.0),
+                    min=0,
+                    step=0.5,
+                ).classes("w-full md:w-48").props(
+                    "hint='MR: exclude strong trends above this 24h absolute move %' persistent-hint"
                 )
             ui.separator().classes("w-full my-4")
             ui.label("Model, cadence, and prompt controls").classes("text-sm text-slate-500")
@@ -7092,12 +7144,21 @@ def register_pages(app: FastAPI) -> None:
                 _safe_notify(f"Failed to persist guardrails: {exc}", color="warning")
             config["screener"] = {
                 "enabled": bool(auto_select_symbols_switch.value),
+                "dual_universe": bool(screener_dual_switch.value),
                 "universe_filter": str(screener_universe_input.value or "*-USDT-SWAP").strip(),
-                "max_symbols": max(1, _coerce(screener_max_symbols_input.value, 5, int)),
+                "max_symbols": max(1, _coerce(screener_max_symbols_input.value, 10, int)),
+                "sc_max_symbols": max(1, _coerce(screener_sc_max_input.value, 8, int)),
+                "mr_max_symbols": max(1, _coerce(screener_mr_max_input.value, 8, int)),
                 "interval_minutes": max(5, _coerce(screener_interval_input.value, 60, int)),
                 "min_volume_usd": max(0.0, _coerce(screener_min_volume_input.value, 0.0, float) * 1_000_000),
+                # SC filters (also stored as legacy min_* for backward compatibility)
+                "sc_min_momentum_pct": max(0.0, _coerce(screener_min_momentum_input.value, 0.0, float)),
+                "sc_min_hl_range_pct": max(0.0, _coerce(screener_min_hl_range_input.value, 0.0, float)),
                 "min_momentum_pct": max(0.0, _coerce(screener_min_momentum_input.value, 0.0, float)),
                 "min_hl_range_pct": max(0.0, _coerce(screener_min_hl_range_input.value, 0.0, float)),
+                # MR filters
+                "mr_min_hl_range_pct": max(0.0, _coerce(screener_mr_min_hl_input.value, 1.0, float)),
+                "mr_max_momentum_pct": max(0.0, _coerce(screener_mr_max_mom_input.value, 8.0, float)),
             }
             # Preserve signal fields from config (edited on STRATEGY page) and
             # only overwrite the operational fields managed on this page.

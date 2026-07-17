@@ -225,6 +225,22 @@ def _create_lifespan(enable_background_services: bool):
             "ohlcv_snapshot_candles": 96,
             "ohlcv_snapshot_htf_candles": 48,
             "launcher": {},
+            "screener": {
+                "enabled": False,
+                "dual_universe": True,
+                "universe_filter": "*-USDT-SWAP",
+                "max_symbols": 10,
+                "sc_max_symbols": 8,
+                "mr_max_symbols": 8,
+                "interval_minutes": 60,
+                "min_volume_usd": 500_000,
+                "sc_min_momentum_pct": 0.5,
+                "sc_min_hl_range_pct": 0.0,
+                "min_momentum_pct": 0.5,
+                "min_hl_range_pct": 0.0,
+                "mr_min_hl_range_pct": 1.0,
+                "mr_max_momentum_pct": 8.0,
+            },
         }
         app.state.runtime_config["wait_for_tp_sl"] = bool(
             app.state.runtime_config["guardrails"].get("wait_for_tp_sl", False)

@@ -202,15 +202,25 @@ class PromptScheduler:
                 screener_fired = False
             if screener_fired:
                 new_symbols: list[str] = list(getattr(market_service, "symbols", []))
+                sc_symbols: list[str] = list(getattr(market_service, "_screener_sc_symbols", []) or [])
+                mr_symbols: list[str] = list(getattr(market_service, "_screener_mr_symbols", []) or [])
                 runtime_config = getattr(self._app.state, "runtime_config", None)
                 if runtime_config is not None:
                     runtime_config["trading_pairs"] = new_symbols
                     runtime_config["_screener_pairs_changed"] = True
+                    # Expose dual-universe lists for UI / debugging.
+                    runtime_config["_screener_sc_symbols"] = sc_symbols
+                    runtime_config["_screener_mr_symbols"] = mr_symbols
                 try:
                     from app.db.postgres import set_enabled_trading_pairs as _set_pairs
                     await _set_pairs(new_symbols)
                 except Exception as exc:  # pragma: no cover - DB optional
                     logger.debug("Screener: failed to persist symbols to DB: %s", exc)
+                if sc_symbols or mr_symbols:
+                    logger.info(
+                        "Screener dual universes: SC=%s MR=%s union=%s",
+                        sc_symbols, mr_symbols, new_symbols,
+                    )
         state_service = getattr(self._app.state, "state_service", None)
         if not state_service:
             logger.debug("Prompt scheduler: state service unavailable")
