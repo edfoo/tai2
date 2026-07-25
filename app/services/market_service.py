@@ -812,15 +812,27 @@ class MarketService:
         snapshot_symbols = list(self.symbols) + [
             s for s in sorted(position_symbols) if s not in set(self.symbols)
         ]
-        for symbol in snapshot_symbols:
-            order_book = await self._fetch_order_book(symbol)
-            ticker = await self._fetch_ticker(symbol)
-            funding = await self._fetch_funding_rate(symbol)
-            open_interest = await self._fetch_open_interest(symbol)
-            ohlcv = await self._fetch_ohlcv(symbol)
+
+        async def _fetch_symbol_data(symbol: str) -> tuple[str, dict[str, Any], dict[str, float] | None]:
+            """Fetch all market data for a single symbol concurrently.
+
+            Returns (symbol, market_data_entry, instrument_spec).
+            All network calls run in parallel via asyncio.gather so a single
+            slow/timeout response doesn't block the other symbols.
+            """
+            order_book, ticker, funding, open_interest, ohlcv, ohlcv_htf, market_ls_ratio = (
+                await asyncio.gather(
+                    self._fetch_order_book(symbol),
+                    self._fetch_ticker(symbol),
+                    self._fetch_funding_rate(symbol),
+                    self._fetch_open_interest(symbol),
+                    self._fetch_ohlcv(symbol),
+                    self._fetch_ohlcv_htf(symbol),
+                    self._fetch_long_short_ratio(symbol),
+                )
+            )
             indicators = self._compute_indicators(ohlcv)
             indicators["structure"] = self._compute_structure(ohlcv)
-            ohlcv_htf = await self._fetch_ohlcv_htf(symbol)
             if ohlcv_htf:
                 htf_bar, _ = self._HTF_MAP.get(self._ohlc_bar, ("", 0))
                 indicators["ohlcv_htf"] = ohlcv_htf
@@ -828,12 +840,11 @@ class MarketService:
                 if htf_bar:
                     indicators["ohlcv_htf_bar"] = htf_bar
             custom_metrics = self._compute_custom_metrics(symbol, order_book)
-            market_ls_ratio = await self._fetch_long_short_ratio(symbol)
             if market_ls_ratio:
                 custom_metrics["market_long_short_ratio"] = market_ls_ratio
             strategy_signal = self._derive_strategy_signal(indicators, custom_metrics, ticker)
             risk_metrics = self._derive_risk_metrics(indicators, ticker)
-            market_data[symbol] = {
+            entry: dict[str, Any] = {
                 "order_book": order_book,
                 "ticker": ticker,
                 "funding_rate": funding,
@@ -845,13 +856,32 @@ class MarketService:
                 "risk_metrics": risk_metrics,
             }
             spec = self._instrument_specs.get(symbol)
+            inst_spec: dict[str, float] | None = None
             if spec:
-                instrument_specs[symbol] = {
+                inst_spec = {
                     "lot_size": self._extract_float(spec.get("lot_size")),
                     "min_size": self._extract_float(spec.get("min_size")),
                     "tick_size": self._extract_float(spec.get("tick_size")),
                     "ct_val": spec.get("ct_val") or 1.0,
                 }
+            return symbol, entry, inst_spec
+
+        # Fetch all symbols concurrently — each symbol's 7 API calls run in
+        # parallel, and all symbols run in parallel too.  This reduces a
+        # 15-symbol × 7-call sequential chain (105 sequential timeouts) to
+        # a single concurrent batch.
+        symbol_results = await asyncio.gather(
+            *[_fetch_symbol_data(s) for s in snapshot_symbols],
+            return_exceptions=True,
+        )
+        for result in symbol_results:
+            if isinstance(result, Exception):
+                logger.warning("Symbol data fetch error: %s", result)
+                continue
+            symbol, entry, inst_spec = result
+            market_data[symbol] = entry
+            if inst_spec is not None:
+                instrument_specs[symbol] = inst_spec
 
         primary_symbol = self.symbols[0]
         primary_market = market_data.get(primary_symbol, {})
@@ -5310,12 +5340,19 @@ class MarketService:
         if not candle_api:
             return cached or []
         try:
-            response = await asyncio.to_thread(
-                candle_api.get_candlesticks,
-                instId=symbol,
-                bar=self._ohlc_bar,
-                limit=self._ohlcv_fetch_limit,
+            response = await asyncio.wait_for(
+                asyncio.to_thread(
+                    candle_api.get_candlesticks,
+                    instId=symbol,
+                    bar=self._ohlc_bar,
+                    limit=self._ohlcv_fetch_limit,
+                ),
+                timeout=15.0,
             )
+        except asyncio.TimeoutError:
+            logger.warning("OHLCV fetch timed out for %s (15s)", symbol)
+            self._emit_debug(f"OHLCV fetch fallback for {symbol}: timeout (15s)")
+            return cached or []
         except Exception as exc:  # pragma: no cover - network failures
             logger.warning("OHLCV fetch failed for %s: %s", symbol, exc)
             self._emit_debug(f"OHLCV fetch fallback for {symbol}: {exc}")
@@ -5340,12 +5377,18 @@ class MarketService:
         if not candle_api:
             return cached or []
         try:
-            response = await asyncio.to_thread(
-                candle_api.get_candlesticks,
-                instId=symbol,
-                bar=htf_bar,
-                limit=limit,
+            response = await asyncio.wait_for(
+                asyncio.to_thread(
+                    candle_api.get_candlesticks,
+                    instId=symbol,
+                    bar=htf_bar,
+                    limit=limit,
+                ),
+                timeout=15.0,
             )
+        except asyncio.TimeoutError:
+            logger.warning("HTF OHLCV fetch timed out for %s (%s) (15s)", symbol, htf_bar)
+            return cached or []
         except Exception as exc:  # pragma: no cover - network failures
             logger.warning("HTF OHLCV fetch failed for %s (%s): %s", symbol, htf_bar, exc)
             return cached or []
@@ -5806,13 +5849,19 @@ class MarketService:
             return cache
         period = "5m"
         try:
-            response = await asyncio.to_thread(
-                self._trading_api.get_long_short_ratio,
-                base_ccy,
-                "",
-                "",
-                period,
+            response = await asyncio.wait_for(
+                asyncio.to_thread(
+                    self._trading_api.get_long_short_ratio,
+                    base_ccy,
+                    "",
+                    "",
+                    period,
+                ),
+                timeout=10.0,
             )
+        except asyncio.TimeoutError:
+            logger.debug("Long/short ratio fetch timed out for %s (10s)", symbol)
+            return cache
         except Exception as exc:  # pragma: no cover - network dependency
             logger.debug("Long/short ratio fetch failed for %s: %s", symbol, exc)
             return cache
