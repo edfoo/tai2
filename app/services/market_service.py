@@ -1905,15 +1905,15 @@ class MarketService:
         Config lives under ``strategy.trade_management``:
           enabled                  – bool
           breakeven_enabled        – bool (default True)
-          breakeven_at_r           – float, move SL to entry after this R (default 1.0)
+          breakeven_at_r           – float, move SL to entry after this R (default 0.7)
           breakeven_buffer_pct     – float, tiny buffer beyond entry (default 0.05)
           partial_tp_enabled       – bool (default True)
-          partial_tp_at_r          – float, take partial at this R (default 1.0)
+          partial_tp_at_r          – float, take partial at this R (default 0.8)
           partial_tp_fraction      – float, fraction of position to close (default 0.5)
           time_stop_enabled        – bool (default True)
-          time_stop_seconds        – float, max hold time (default 3600 = 1h)
+          time_stop_seconds        – float, max hold time (default 2700 = 45m)
           time_stop_min_r          – float, only time-stop if progress < this R (default 0.3)
-          reentry_cooldown_seconds – float, block re-entry after close (default 900)
+          reentry_cooldown_seconds – float, block re-entry after close (default 1800)
         """
         tm = self._trade_mgmt_config()
         if not tm.get("enabled"):
@@ -1941,21 +1941,21 @@ class MarketService:
         be_enabled = bool(tm.get("breakeven_enabled", True))
         be_at_r = self._extract_float(tm.get("breakeven_at_r"))
         if be_at_r is None:
-            be_at_r = 1.0
+            be_at_r = 0.7
         be_buffer_pct = self._extract_float(tm.get("breakeven_buffer_pct"))
         if be_buffer_pct is None:
             be_buffer_pct = 0.05
         partial_enabled = bool(tm.get("partial_tp_enabled", True))
         partial_at_r = self._extract_float(tm.get("partial_tp_at_r"))
         if partial_at_r is None:
-            partial_at_r = 1.0
+            partial_at_r = 0.8
         partial_frac = self._extract_float(tm.get("partial_tp_fraction"))
         if partial_frac is None:
             partial_frac = 0.5
         time_stop_enabled = bool(tm.get("time_stop_enabled", True))
         time_stop_seconds = self._extract_float(tm.get("time_stop_seconds"))
         if time_stop_seconds is None:
-            time_stop_seconds = 3600.0
+            time_stop_seconds = 2700.0
         time_stop_min_r = self._extract_float(tm.get("time_stop_min_r"))
         if time_stop_min_r is None:
             time_stop_min_r = 0.3
@@ -4203,14 +4203,14 @@ class MarketService:
         min_volume_usd = float(cfg.get("min_volume_usd") or 0.0)
         # SC filters: want movement.
         sc_min_momentum_pct = float(
-            cfg.get("sc_min_momentum_pct", cfg.get("min_momentum_pct") or 0.5)
+            cfg.get("sc_min_momentum_pct", cfg.get("min_momentum_pct") or 1.5)
         )
         sc_min_hl_range_pct = float(
             cfg.get("sc_min_hl_range_pct", cfg.get("min_hl_range_pct") or 0.0)
         )
         # MR filters: want range but not strong trend.
-        mr_min_hl_range_pct = float(cfg.get("mr_min_hl_range_pct") or 1.0)
-        mr_max_momentum_pct = float(cfg.get("mr_max_momentum_pct") or 8.0)
+        mr_min_hl_range_pct = float(cfg.get("mr_min_hl_range_pct") or 2.5)
+        mr_max_momentum_pct = float(cfg.get("mr_max_momentum_pct") or 5.0)
         # Legacy single-list filters.
         min_momentum_pct = float(cfg.get("min_momentum_pct") or 0.0)
         min_hl_range_pct = float(cfg.get("min_hl_range_pct") or 0.0)

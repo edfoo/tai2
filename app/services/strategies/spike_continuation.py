@@ -23,25 +23,23 @@ class SpikeContinuationStrategy:
 
     Config keys (all live under ``config["strategies"]["spike_continuation"]``):
       - ``enabled`` (bool): master switch
-      - ``volume_rsi_min`` (float, default 70): volume RSI must be above this
+      - ``volume_rsi_min`` (float, default 75): volume RSI must be above this
         to confirm the spike is volume-driven (not just a thin wick)
-      - ``rsi_min`` (float, default 55): RSI must be above this for buys
-        (momentum confirmed but not yet extreme — we enter before RSI > 80)
-      - ``rsi_max`` (float, default 75): don't enter if RSI is already extreme
-        (that's Mean Reversion territory)
+      - ``rsi_min`` (float, default 58): RSI must be above this for buys
+        (momentum confirmed but not yet extreme)
+      - ``rsi_max`` (float, default 70): don't enter if RSI is already extreme
+        (that's Mean Reversion territory / late top)
       - ``require_bb_breakout`` (bool, default True): price must be beyond BB band
       - ``require_candle_strength`` (bool, default True): candle must close near
         its high (for buys) or low (for sells) — strong momentum, no rejection
-      - ``candle_strength_pct`` (float, default 70): close must be within this
-        % of the candle range from the direction (70 = close is in top 30% for buys)
+      - ``candle_strength_pct`` (float, default 75): close must be within this
+        % of the candle range from the direction (75 = close is in top 25% for buys)
       - ``min_bb_bandwidth`` (float, default 3.0): only enter when bands are wide
         enough to suggest a real volatility expansion
-      - ``tp_pct`` (float, default 5.0): take-profit as % price move — wider than
-        SL so winners run (momentum continuation favors letting trades breathe)
-      - ``sl_pct`` (float, default 3.0): stop-loss as % price move — cut losers
-        fast; one failed spike shouldn't wipe out a winner
+      - ``tp_pct`` (float, default 4.0): take-profit as % price move
+      - ``sl_pct`` (float, default 3.0): stop-loss as % price move
       - ``max_adx`` (float, default 0): legacy hard ADX ceiling. 0 = disabled.
-      - ``max_adx_for_entry`` (float, default 38): late-entry killer. Blocks when
+      - ``max_adx_for_entry`` (float, default 30): late-entry killer. Blocks when
         ADX is already this high (trend is mature). 0 = disabled.
 
     Momentum acceleration filters (prevent entering at the top of a spike):
@@ -49,18 +47,24 @@ class SpikeContinuationStrategy:
         body must be larger than the average body of the last N candles
       - ``acceleration_lookback`` (int, default 3): number of prior candles to
         average for the acceleration comparison
-      - ``acceleration_min_ratio`` (float, default 1.1): current body must be
+      - ``acceleration_min_ratio`` (float, default 1.5): current body must be
         at least this multiple of the average recent body
       - ``require_rsi_rising`` (bool, default True): RSI must be rising vs the
         previous candle (momentum still building, not fading). Uses the actual
         RSI series, not a candle-direction proxy.
       - ``require_volume_rsi_rising`` (bool, default True): volume RSI must be
         rising vs the previous candle (volume momentum still building)
-      - ``max_spike_extension_pct`` (float, default 4.0): block entry if price
+      - ``max_spike_extension_pct`` (float, default 2.5): block entry if price
         has already moved more than this % from the start of the spike.
         Prevents entering at the top of an extended move. 0 = disabled.
       - ``spike_lookback`` (int, default 5): candles to look back to find the
         spike origin (lowest low for buys, highest high for sells)
+      - ``require_regime`` (bool, default True)
+      - ``min_bb_bandwidth_percentile`` (float, default 60)
+      - ``use_atr_sizing`` (bool, default True)
+      - ``atr_tp_multiplier`` (float, default 2.2)
+      - ``atr_sl_multiplier`` (float, default 2.0)
+      - ``min_atr_pct`` (float, default 1.2)
     """
 
     name = "spike_continuation"
@@ -78,18 +82,18 @@ class SpikeContinuationStrategy:
 
         volume_rsi_min = helpers.extract_float(config.get("volume_rsi_min"))
         if volume_rsi_min is None:
-            volume_rsi_min = 70.0
+            volume_rsi_min = 75.0
         rsi_min = helpers.extract_float(config.get("rsi_min"))
         if rsi_min is None:
-            rsi_min = 55.0
+            rsi_min = 58.0
         rsi_max = helpers.extract_float(config.get("rsi_max"))
         if rsi_max is None:
-            rsi_max = 75.0
+            rsi_max = 70.0
         require_bb_breakout = bool(config.get("require_bb_breakout", True))
         require_candle_strength = bool(config.get("require_candle_strength", True))
         candle_strength_pct = helpers.extract_float(config.get("candle_strength_pct"))
         if candle_strength_pct is None:
-            candle_strength_pct = 70.0
+            candle_strength_pct = 75.0
         min_bb_bandwidth = helpers.extract_float(config.get("min_bb_bandwidth"))
         if min_bb_bandwidth is None:
             min_bb_bandwidth = 3.0
@@ -99,36 +103,36 @@ class SpikeContinuationStrategy:
         # Late-entry killer: ADX already this high means the move is mature.
         max_adx_for_entry = helpers.extract_float(config.get("max_adx_for_entry"))
         if max_adx_for_entry is None:
-            max_adx_for_entry = 38.0
+            max_adx_for_entry = 30.0
         # ── Regime gate (BB bandwidth percentile) ──────────────────────
         # SC works best in high-volatility expansion.  When require_regime
         # is True, the current BB bandwidth must be above
         # min_bb_bandwidth_percentile relative to the last N candles
-        # (e.g. > 55th percentile = volatility expansion).
-        require_regime = bool(config.get("require_regime", False))
+        # (e.g. > 60th percentile = volatility expansion).
+        require_regime = bool(config.get("require_regime", True))
         min_bb_bandwidth_percentile = helpers.extract_float(config.get("min_bb_bandwidth_percentile"))
         if min_bb_bandwidth_percentile is None:
-            min_bb_bandwidth_percentile = 55.0
+            min_bb_bandwidth_percentile = 60.0
         regime_lookback = helpers.extract_float(config.get("regime_lookback"))
         if regime_lookback is None:
             regime_lookback = 50
         # ── ATR-scaled TP/SL ────────────────────────────────────────────
         # When use_atr_sizing is True, TP/SL are computed as
         # multiplier × ATR% instead of fixed percentages.
-        # SC uses wider SL (1.8 ATR) to avoid being stopped by noise.
-        use_atr_sizing = bool(config.get("use_atr_sizing", False))
+        # SC uses wider SL (~2.0 ATR) to avoid being stopped by noise.
+        use_atr_sizing = bool(config.get("use_atr_sizing", True))
         atr_tp_multiplier = helpers.extract_float(config.get("atr_tp_multiplier"))
         if atr_tp_multiplier is None:
-            atr_tp_multiplier = 2.5
+            atr_tp_multiplier = 2.2
         atr_sl_multiplier = helpers.extract_float(config.get("atr_sl_multiplier"))
         if atr_sl_multiplier is None:
-            atr_sl_multiplier = 1.8
+            atr_sl_multiplier = 2.0
         # ── Minimum ATR% filter ───────────────────────────────────────
         # Skip entries on coins with ATR% below this threshold — too quiet
         # for a real spike.  0 = disabled.
         min_atr_pct = helpers.extract_float(config.get("min_atr_pct"))
         if min_atr_pct is None:
-            min_atr_pct = 0.0
+            min_atr_pct = 1.2
 
         # Momentum acceleration filters
         require_momentum_acceleration = bool(config.get("require_momentum_acceleration", True))
@@ -136,12 +140,12 @@ class SpikeContinuationStrategy:
         acceleration_lookback = int(_acceleration_lookback) if _acceleration_lookback is not None else 3
         acceleration_min_ratio = helpers.extract_float(config.get("acceleration_min_ratio"))
         if acceleration_min_ratio is None:
-            acceleration_min_ratio = 1.1
+            acceleration_min_ratio = 1.5
         require_rsi_rising = bool(config.get("require_rsi_rising", True))
         require_volume_rsi_rising = bool(config.get("require_volume_rsi_rising", True))
         max_spike_extension_pct = helpers.extract_float(config.get("max_spike_extension_pct"))
         if max_spike_extension_pct is None:
-            max_spike_extension_pct = 4.0
+            max_spike_extension_pct = 2.5
         _spike_lookback = helpers.extract_float(config.get("spike_lookback"))
         spike_lookback = int(_spike_lookback) if _spike_lookback is not None else 5
 

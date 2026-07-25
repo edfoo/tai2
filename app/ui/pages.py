@@ -2957,16 +2957,16 @@ def register_pages(app: FastAPI) -> None:
         trade_management = strategy.setdefault("trade_management", {
             "enabled": True,
             "breakeven_enabled": True,
-            "breakeven_at_r": 1.0,
+            "breakeven_at_r": 0.7,
             "breakeven_buffer_pct": 0.05,
             "partial_tp_enabled": True,
-            "partial_tp_at_r": 1.0,
+            "partial_tp_at_r": 0.8,
             "partial_tp_fraction": 0.5,
             "time_stop_enabled": True,
-            "time_stop_seconds": 3600.0,
-            "time_stop_candles": 8,
+            "time_stop_seconds": 2700.0,
+            "time_stop_candles": 5,
             "time_stop_min_r": 0.3,
-            "reentry_cooldown_seconds": 900.0,
+            "reentry_cooldown_seconds": 1800.0,
         })
         commutator = strategy.setdefault("commutator", {
             "enabled": False,
@@ -3148,10 +3148,10 @@ def register_pages(app: FastAPI) -> None:
                             ).classes("w-32").props(
                                 "hint='Skip if ADX below this (0 = off)' persistent-hint"
                             )
-                            _mr_max_adx_raw = _mr_cfg.get("max_adx", 0.0)
+                            _mr_max_adx_raw = _mr_cfg.get("max_adx", 25.0)
                             mr_max_adx_input = ui.number(
                                 label="Max ADX",
-                                value=float(_mr_max_adx_raw) if _mr_max_adx_raw is not None else 0.0,
+                                value=float(_mr_max_adx_raw) if _mr_max_adx_raw is not None else 25.0,
                                 min=0, max=100, step=5, precision=0,
                             ).classes("w-32").props(
                                 "hint='Skip if ADX above this (0 = off)' persistent-hint"
@@ -3177,7 +3177,7 @@ def register_pages(app: FastAPI) -> None:
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             mr_require_cmf_cross_switch = ui.switch(
                                 "Require CMF zero-line cross",
-                                value=bool(_mr_cfg.get("require_cmf_cross", False)),
+                                value=bool(_mr_cfg.get("require_cmf_cross", True)),
                             ).props("dense color=primary")
                             ui.label("LTF CMF must have just crossed zero this bar.").classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
@@ -3201,14 +3201,14 @@ def register_pages(app: FastAPI) -> None:
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             mr_bb_proximity_input = ui.number(
                                 label="BB Proximity %",
-                                value=float(_mr_cfg.get("bb_proximity_pct") or 0.0),
+                                value=float(_mr_cfg.get("bb_proximity_pct") if _mr_cfg.get("bb_proximity_pct") is not None else 0.25),
                                 min=0.0, max=5.0, step=0.1, format="%.1f",
                             ).classes("w-48").props("dense")
                             ui.label("How far inside the band price may still qualify (0 = must be at/beyond band).").classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             mr_min_bb_bw_input = ui.number(
                                 label="Min BB Bandwidth %",
-                                value=float(_mr_cfg.get("min_bb_bandwidth") or 0.0),
+                                value=float(_mr_cfg.get("min_bb_bandwidth") or 2.0),
                                 min=0.0, max=20.0, step=0.5, format="%.1f",
                             ).classes("w-48").props("dense")
                             mr_max_bb_bw_input = ui.number(
@@ -3220,7 +3220,7 @@ def register_pages(app: FastAPI) -> None:
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             mr_candle_rejection_switch = ui.switch(
                                 "Require candle rejection",
-                                value=bool(_mr_cfg.get("require_candle_rejection", False)),
+                                value=bool(_mr_cfg.get("require_candle_rejection", True)),
                             ).props("dense color=primary")
                             ui.label("Require upper wick for shorts / lower wick for longs (exhaustion confirmation).").classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
@@ -3233,7 +3233,7 @@ def register_pages(app: FastAPI) -> None:
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             mr_vwap_reversion_switch = ui.switch(
                                 "Require VWAP reversion",
-                                value=bool(_mr_cfg.get("require_vwap_reversion", False)),
+                                value=bool(_mr_cfg.get("require_vwap_reversion", True)),
                             ).props("dense color=primary")
                             ui.label("Require price extended from VWAP AND closing back toward it.").classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
@@ -3246,7 +3246,7 @@ def register_pages(app: FastAPI) -> None:
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             mr_volume_cooling_switch = ui.switch(
                                 "Require volume cooling",
-                                value=bool(_mr_cfg.get("require_volume_cooling", False)),
+                                value=bool(_mr_cfg.get("require_volume_cooling", True)),
                             ).props("dense color=primary")
                             ui.label("Block when volume RSI is still high (spike still being driven by heavy volume).").classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
@@ -3266,7 +3266,7 @@ def register_pages(app: FastAPI) -> None:
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             mr_require_regime_switch = ui.switch(
                                 "Require regime (chop)",
-                                value=bool(_mr_cfg.get("require_regime", False)),
+                                value=bool(_mr_cfg.get("require_regime", True)),
                             ).props("dense color=primary")
                             ui.label("Only enter when BB bandwidth is in the low percentile (chop regime).").classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
@@ -3293,27 +3293,27 @@ def register_pages(app: FastAPI) -> None:
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             mr_use_atr_sizing_switch = ui.switch(
                                 "Use ATR sizing",
-                                value=bool(_mr_cfg.get("use_atr_sizing", False)),
+                                value=bool(_mr_cfg.get("use_atr_sizing", True)),
                             ).props("dense color=primary")
                             ui.label("Override static TP/SL with ATR-scaled values.").classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             mr_atr_tp_mult_input = ui.number(
                                 label="ATR TP multiplier",
-                                value=float(_mr_cfg.get("atr_tp_multiplier") or 1.0),
+                                value=float(_mr_cfg.get("atr_tp_multiplier") or 1.3),
                                 min=0.1, max=10.0, step=0.1, format="%.1f",
                             ).classes("w-40").props("dense")
-                            ui.label("TP = multiplier × ATR% (e.g. 1.5 = 1.5 ATR, wider for reversion to midline).").classes("text-xs text-slate-500")
+                            ui.label("TP = multiplier × ATR% (e.g. 1.3 = 1.3 ATR, bank reversion sooner).").classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             mr_atr_sl_mult_input = ui.number(
                                 label="ATR SL multiplier",
-                                value=float(_mr_cfg.get("atr_sl_multiplier") or 1.0),
+                                value=float(_mr_cfg.get("atr_sl_multiplier") or 2.0),
                                 min=0.1, max=10.0, step=0.1, format="%.1f",
                             ).classes("w-40").props("dense")
-                            ui.label("SL = multiplier × ATR% (e.g. 1.0 = 1 ATR, tight invalidation at wick).").classes("text-xs text-slate-500")
+                            ui.label("SL = multiplier × ATR% (e.g. 2.0 = 2 ATR, room beyond 15m wick noise).").classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             mr_min_atr_pct_input = ui.number(
                                 label="Min ATR%",
-                                value=float(_mr_cfg.get("min_atr_pct") or 0.0),
+                                value=float(_mr_cfg.get("min_atr_pct") or 1.3),
                                 min=0.0, max=10.0, step=0.1, format="%.1f",
                             ).classes("w-40").props("dense")
                             ui.label("Skip entries when ATR% is below this (0 = disabled). Filters out dead coins.").classes("text-xs text-slate-500")
@@ -3335,38 +3335,39 @@ def register_pages(app: FastAPI) -> None:
 
             def _set_mr_defaults() -> None:
                 """Fill all Mean Reversion fields with the recommended configuration."""
-                mr_tp_input.value = 3.0
-                mr_sl_input.value = 4.0
+                # Wider invalidation, faster TP — harvest range noise, survive 15m wicks.
+                mr_tp_input.value = 2.0
+                mr_sl_input.value = 3.0
                 # Dynamic TP is redundant/harmful when ATR sizing is on.
                 mr_dynamic_tp_switch.value = False
                 mr_dynamic_tp_fraction_input.value = 0.7
-                mr_rsi_oversold_input.value = 30.0
-                mr_rsi_overbought_input.value = 70.0
+                mr_rsi_oversold_input.value = 28.0
+                mr_rsi_overbought_input.value = 72.0
                 mr_min_adx_input.value = 0.0
-                mr_max_adx_input.value = 30.0
+                mr_max_adx_input.value = 25.0
                 mr_require_htf_switch.value = True
                 mr_require_cmf_switch.value = False
                 mr_require_htf_cmf_switch.value = False
-                mr_require_cmf_cross_switch.value = False
+                mr_require_cmf_cross_switch.value = True
                 mr_require_cmf_no_div_switch.value = False
                 mr_require_fp_delta_switch.value = False
                 mr_require_bb_switch.value = True
-                mr_bb_proximity_input.value = 0.5
+                mr_bb_proximity_input.value = 0.25
                 mr_min_bb_bw_input.value = 2.0
                 mr_max_bb_bw_input.value = 0.0
                 mr_candle_rejection_switch.value = True
                 mr_candle_rejection_pct_input.value = 30.0
-                mr_vwap_reversion_switch.value = False
+                mr_vwap_reversion_switch.value = True
                 mr_vwap_min_dist_input.value = 1.0
                 mr_volume_cooling_switch.value = True
                 mr_volume_rsi_max_input.value = 70.0
                 mr_require_regime_switch.value = True
-                mr_max_bw_pct_input.value = 45.0
+                mr_max_bw_pct_input.value = 40.0
                 mr_regime_lookback_input.value = 50
                 mr_use_atr_sizing_switch.value = True
-                mr_atr_tp_mult_input.value = 1.5
-                mr_atr_sl_mult_input.value = 1.0
-                mr_min_atr_pct_input.value = 1.0
+                mr_atr_tp_mult_input.value = 1.3
+                mr_atr_sl_mult_input.value = 2.0
+                mr_min_atr_pct_input.value = 1.3
                 mr_flip_switch.value = False
                 mr_flip_select.value = "both"
                 ui.notify("Mean Reversion fields set to recommended defaults — click Save to persist", color="info")
@@ -3414,7 +3415,7 @@ def register_pages(app: FastAPI) -> None:
                             _sc_vrsi_raw = _sc_cfg.get("volume_rsi_min")
                             sc_volume_rsi_min_input = ui.number(
                                 label="Volume RSI min",
-                                value=float(_sc_vrsi_raw) if _sc_vrsi_raw is not None else 70.0,
+                                value=float(_sc_vrsi_raw) if _sc_vrsi_raw is not None else 75.0,
                                 min=50, max=99, step=1, precision=0,
                             ).classes("w-40").props(
                                 "hint='Volume RSI must be above this to confirm spike' persistent-hint"
@@ -3422,7 +3423,7 @@ def register_pages(app: FastAPI) -> None:
                             _sc_rsi_min_raw = _sc_cfg.get("rsi_min")
                             sc_rsi_min_input = ui.number(
                                 label="RSI min (buy zone)",
-                                value=float(_sc_rsi_min_raw) if _sc_rsi_min_raw is not None else 55.0,
+                                value=float(_sc_rsi_min_raw) if _sc_rsi_min_raw is not None else 58.0,
                                 min=40, max=70, step=1, precision=0,
                             ).classes("w-40").props(
                                 "hint='RSI must be above this for buys (momentum confirmed)' persistent-hint"
@@ -3430,7 +3431,7 @@ def register_pages(app: FastAPI) -> None:
                             _sc_rsi_max_raw = _sc_cfg.get("rsi_max")
                             sc_rsi_max_input = ui.number(
                                 label="RSI max (buy zone)",
-                                value=float(_sc_rsi_max_raw) if _sc_rsi_max_raw is not None else 75.0,
+                                value=float(_sc_rsi_max_raw) if _sc_rsi_max_raw is not None else 70.0,
                                 min=60, max=90, step=1, precision=0,
                             ).classes("w-40").props(
                                 "hint='Dont enter if RSI above this (Mean Reversion territory)' persistent-hint"
@@ -3450,10 +3451,10 @@ def register_pages(app: FastAPI) -> None:
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             sc_candle_strength_pct_input = ui.number(
                                 label="Candle strength %",
-                                value=float(_sc_cfg.get("candle_strength_pct") or 70.0),
+                                value=float(_sc_cfg.get("candle_strength_pct") or 75.0),
                                 min=50, max=95, step=5, format="%.0f",
                             ).classes("w-48").props("dense")
-                            ui.label("Close must be in this % of the candle range from the direction (70 = top 30% for buys).").classes("text-xs text-slate-500")
+                            ui.label("Close must be in this % of the candle range from the direction (75 = top 25% for buys).").classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             sc_min_bb_bw_input = ui.number(
                                 label="Min BB Bandwidth %",
@@ -3471,7 +3472,7 @@ def register_pages(app: FastAPI) -> None:
                             )
                             sc_max_adx_entry_input = ui.number(
                                 label="Max ADX for entry",
-                                value=float(_sc_cfg.get("max_adx_for_entry") if _sc_cfg.get("max_adx_for_entry") is not None else 38.0),
+                                value=float(_sc_cfg.get("max_adx_for_entry") if _sc_cfg.get("max_adx_for_entry") is not None else 30.0),
                                 min=0, max=100, step=1, precision=0,
                             ).classes("w-40").props(
                                 "hint='Late-entry killer: skip if ADX already this high (0 = off)' persistent-hint"
@@ -3499,10 +3500,10 @@ def register_pages(app: FastAPI) -> None:
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             sc_accel_min_ratio_input = ui.number(
                                 label="Acceleration min ratio",
-                                value=float(_sc_cfg.get("acceleration_min_ratio") or 1.1),
+                                value=float(_sc_cfg.get("acceleration_min_ratio") or 1.5),
                                 min=1.0, max=5.0, step=0.1, format="%.1f",
                             ).classes("w-40").props("dense")
-                            ui.label("Current body must be at least this multiple of recent average (1.1 = 10% larger).").classes("text-xs text-slate-500")
+                            ui.label("Current body must be at least this multiple of recent average (1.5 = 50% larger).").classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             sc_rsi_rising_switch = ui.switch(
                                 "Require RSI rising",
@@ -3518,7 +3519,7 @@ def register_pages(app: FastAPI) -> None:
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             sc_max_spike_ext_input = ui.number(
                                 label="Max spike extension %",
-                                value=float(_sc_cfg.get("max_spike_extension_pct") or 4.0),
+                                value=float(_sc_cfg.get("max_spike_extension_pct") or 2.5),
                                 min=0.0, max=20.0, step=0.5, format="%.1f",
                             ).classes("w-48").props("dense")
                             ui.label("Block entry if price already moved more than this % from spike origin (0 = disabled). Prevents entering at the top.").classes("text-xs text-slate-500")
@@ -3545,10 +3546,10 @@ def register_pages(app: FastAPI) -> None:
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             sc_min_bw_pct_input = ui.number(
                                 label="Min BB bandwidth percentile",
-                                value=float(_sc_cfg.get("min_bb_bandwidth_percentile") or 55.0),
+                                value=float(_sc_cfg.get("min_bb_bandwidth_percentile") or 60.0),
                                 min=5.0, max=95.0, step=5.0, format="%.0f",
                             ).classes("w-48").props("dense")
-                            ui.label("Current bandwidth must be above this percentile (e.g. 55 = above 55th percentile).").classes("text-xs text-slate-500")
+                            ui.label("Current bandwidth must be above this percentile (e.g. 60 = above 60th percentile).").classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             sc_regime_lookback_input = ui.number(
                                 label="Regime lookback",
@@ -3572,21 +3573,21 @@ def register_pages(app: FastAPI) -> None:
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             sc_atr_tp_mult_input = ui.number(
                                 label="ATR TP multiplier",
-                                value=float(_sc_cfg.get("atr_tp_multiplier") or 2.5),
+                                value=float(_sc_cfg.get("atr_tp_multiplier") or 2.2),
                                 min=0.1, max=10.0, step=0.1, format="%.1f",
                             ).classes("w-40").props("dense")
-                            ui.label("TP = multiplier × ATR% (e.g. 2.5 = 2.5 ATR).").classes("text-xs text-slate-500")
+                            ui.label("TP = multiplier × ATR% (e.g. 2.2 = 2.2 ATR).").classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             sc_atr_sl_mult_input = ui.number(
                                 label="ATR SL multiplier",
-                                value=float(_sc_cfg.get("atr_sl_multiplier") or 1.8),
+                                value=float(_sc_cfg.get("atr_sl_multiplier") or 2.0),
                                 min=0.1, max=10.0, step=0.1, format="%.1f",
                             ).classes("w-40").props("dense")
-                            ui.label("SL = multiplier × ATR% (e.g. 1.8 = 1.8 ATR, room to breathe).").classes("text-xs text-slate-500")
+                            ui.label("SL = multiplier × ATR% (e.g. 2.0 = 2.0 ATR, room to breathe).").classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             sc_min_atr_pct_input = ui.number(
                                 label="Min ATR%",
-                                value=float(_sc_cfg.get("min_atr_pct") or 0.0),
+                                value=float(_sc_cfg.get("min_atr_pct") or 1.2),
                                 min=0.0, max=10.0, step=0.1, format="%.1f",
                             ).classes("w-40").props("dense")
                             ui.label("Skip entries when ATR% is below this (0 = disabled). Filters out dead coins.").classes("text-xs text-slate-500")
@@ -3596,31 +3597,32 @@ def register_pages(app: FastAPI) -> None:
 
             def _set_sc_defaults() -> None:
                 """Fill all Spike Continuation fields with the recommended configuration."""
-                sc_tp_input.value = 5.0
+                # Earlier impulse entry, block late tops, give SL room for noise.
+                sc_tp_input.value = 4.0
                 sc_sl_input.value = 3.0
-                sc_volume_rsi_min_input.value = 70.0
-                sc_rsi_min_input.value = 55.0
-                sc_rsi_max_input.value = 75.0
+                sc_volume_rsi_min_input.value = 75.0
+                sc_rsi_min_input.value = 58.0
+                sc_rsi_max_input.value = 70.0
                 sc_bb_breakout_switch.value = True
                 sc_candle_strength_switch.value = True
-                sc_candle_strength_pct_input.value = 70.0
+                sc_candle_strength_pct_input.value = 75.0
                 sc_min_bb_bw_input.value = 3.0
                 sc_max_adx_input.value = 0.0
-                sc_max_adx_entry_input.value = 38.0
+                sc_max_adx_entry_input.value = 30.0
                 sc_momentum_accel_switch.value = True
                 sc_accel_lookback_input.value = 3
-                sc_accel_min_ratio_input.value = 1.1
+                sc_accel_min_ratio_input.value = 1.5
                 sc_rsi_rising_switch.value = True
                 sc_vol_rsi_rising_switch.value = True
-                sc_max_spike_ext_input.value = 4.0
+                sc_max_spike_ext_input.value = 2.5
                 sc_spike_lookback_input.value = 5
                 sc_require_regime_switch.value = True
-                sc_min_bw_pct_input.value = 55.0
+                sc_min_bw_pct_input.value = 60.0
                 sc_regime_lookback_input.value = 50
                 sc_use_atr_sizing_switch.value = True
-                sc_atr_tp_mult_input.value = 2.5
-                sc_atr_sl_mult_input.value = 1.8
-                sc_min_atr_pct_input.value = 1.0
+                sc_atr_tp_mult_input.value = 2.2
+                sc_atr_sl_mult_input.value = 2.0
+                sc_min_atr_pct_input.value = 1.2
                 ui.notify("Spike Continuation fields set to recommended defaults — click Save to persist", color="info")
 
             with ui.card().classes("w-full rounded-lg border border-slate-200 mb-1"):
@@ -3819,7 +3821,7 @@ def register_pages(app: FastAPI) -> None:
                             ).props("dense color=primary")
                             tm_be_at_r_input = ui.number(
                                 label="At R-multiple",
-                                value=float(trade_management.get("breakeven_at_r") or 1.0),
+                                value=float(trade_management.get("breakeven_at_r") or 0.7),
                                 min=0.1, max=5.0, step=0.1, format="%.1f",
                             ).classes("w-32").props("dense")
                             tm_be_buffer_input = ui.number(
@@ -3837,7 +3839,7 @@ def register_pages(app: FastAPI) -> None:
                             ).props("dense color=primary")
                             tm_partial_at_r_input = ui.number(
                                 label="At R-multiple",
-                                value=float(trade_management.get("partial_tp_at_r") or 1.0),
+                                value=float(trade_management.get("partial_tp_at_r") or 0.8),
                                 min=0.1, max=5.0, step=0.1, format="%.1f",
                             ).classes("w-32").props("dense")
                             tm_partial_frac_input = ui.number(
@@ -3855,12 +3857,12 @@ def register_pages(app: FastAPI) -> None:
                             ).props("dense color=primary")
                             tm_time_sec_input = ui.number(
                                 label="Max hold (seconds)",
-                                value=float(trade_management.get("time_stop_seconds") or 3600.0),
+                                value=float(trade_management.get("time_stop_seconds") or 2700.0),
                                 min=60, max=86400, step=60, format="%.0f",
                             ).classes("w-40").props("dense")
                             tm_time_candles_input = ui.number(
                                 label="Max hold (candles, backtest)",
-                                value=float(trade_management.get("time_stop_candles") or 8),
+                                value=float(trade_management.get("time_stop_candles") or 5),
                                 min=0, max=200, step=1, format="%.0f",
                             ).classes("w-48").props("dense")
                             tm_time_min_r_input = ui.number(
@@ -3874,7 +3876,7 @@ def register_pages(app: FastAPI) -> None:
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             tm_cooldown_input = ui.number(
                                 label="Cooldownoldown (seconds)",
-                                value=float(trade_management.get("reentry_cooldown_seconds") or 900.0),
+                                value=float(trade_management.get("reentry_cooldown_seconds") or 1800.0),
                                 min=0, max=86400, step=60, format="%.0f",
                             ).classes("w-40").props("dense")
                         ui.label("Block new launcher entries on the same symbol after a close (0 = off).").classes("text-xs text-slate-500")
@@ -3885,16 +3887,16 @@ def register_pages(app: FastAPI) -> None:
             def _set_tm_defaults() -> None:
                 tm_enabled_switch.value = True
                 tm_be_switch.value = True
-                tm_be_at_r_input.value = 1.0
+                tm_be_at_r_input.value = 0.7
                 tm_be_buffer_input.value = 0.05
                 tm_partial_switch.value = True
-                tm_partial_at_r_input.value = 1.0
+                tm_partial_at_r_input.value = 0.8
                 tm_partial_frac_input.value = 0.5
                 tm_time_switch.value = True
-                tm_time_sec_input.value = 3600.0
-                tm_time_candles_input.value = 8
+                tm_time_sec_input.value = 2700.0
+                tm_time_candles_input.value = 5
                 tm_time_min_r_input.value = 0.3
-                tm_cooldown_input.value = 900.0
+                tm_cooldown_input.value = 1800.0
                 ui.notify("Trade Management fields set to recommended defaults — click Save to persist", color="info")
 
             with ui.card().classes("w-full rounded-lg border border-slate-200 mb-1"):
@@ -5846,7 +5848,7 @@ def register_pages(app: FastAPI) -> None:
                     value=float(
                         screener_cfg.get("sc_min_momentum_pct")
                         if screener_cfg.get("sc_min_momentum_pct") is not None
-                        else (screener_cfg.get("min_momentum_pct") or 0.5)
+                        else (screener_cfg.get("min_momentum_pct") or 1.5)
                     ),
                     min=0,
                     step=0.1,
@@ -5869,7 +5871,7 @@ def register_pages(app: FastAPI) -> None:
             with ui.row().classes("w-full flex-wrap gap-4"):
                 screener_mr_min_hl_input = ui.number(
                     label="MR min HL range (%)",
-                    value=float(screener_cfg.get("mr_min_hl_range_pct") or 1.0),
+                    value=float(screener_cfg.get("mr_min_hl_range_pct") or 2.5),
                     min=0,
                     step=0.1,
                 ).classes("w-full md:w-48").props(
@@ -5877,7 +5879,7 @@ def register_pages(app: FastAPI) -> None:
                 )
                 screener_mr_max_mom_input = ui.number(
                     label="MR max momentum (%)",
-                    value=float(screener_cfg.get("mr_max_momentum_pct") or 8.0),
+                    value=float(screener_cfg.get("mr_max_momentum_pct") or 5.0),
                     min=0,
                     step=0.5,
                 ).classes("w-full md:w-48").props(
@@ -6023,13 +6025,13 @@ def register_pages(app: FastAPI) -> None:
                 _gov_max_hold_raw = _gov_cfg.get("max_hold_candles")
                 gov_max_hold_input = ui.number(
                     label="Max hold (candles)",
-                    value=float(_gov_max_hold_raw) if _gov_max_hold_raw is not None else 0,
+                    value=float(_gov_max_hold_raw) if _gov_max_hold_raw is not None else 6,
                     min=0,
                     max=500,
                     step=1,
                     precision=0,
                 ).classes("w-full md:w-40").props(
-                    "hint='Force-close positions after this many candles (0 = disabled). Backtest only — does not affect live.' persistent-hint"
+                    "hint='Force-close positions after this many candles (0 = disabled). Used by backtest and live trade management time-stop alignment.' persistent-hint"
                 )
             ui.label("Signal filters and TP/SL are configured on the STRATEGY page → Mean Reversion Scalping section.").classes("text-xs text-slate-400 mt-1")
             ui.separator().classes("w-full my-4")

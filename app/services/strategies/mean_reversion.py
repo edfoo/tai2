@@ -16,41 +16,47 @@ class MeanReversionStrategy:
 
     Config keys (all live under ``config["strategies"]["mean_reversion"]``):
       - ``enabled`` (bool): master switch
-      - ``rsi_oversold`` (float, default 30): BUY when RSI < this
-      - ``rsi_overbought`` (float, default 70): SELL when RSI > this
+      - ``rsi_oversold`` (float, default 28): BUY when RSI < this
+      - ``rsi_overbought`` (float, default 72): SELL when RSI > this
       - ``require_htf_trend`` (bool, default True): auto-disabled when no
         HTF data is available (e.g. 1D LTF has no higher timeframe).
       - ``require_cmf`` (bool, default True): requires CMF already positive
         for BUY / negative for SELL — enters AFTER the turn. For catching
         the bottom, prefer ``require_cmf_cross`` instead.
       - ``require_htf_cmf`` (bool, default False)
-      - ``require_cmf_cross`` (bool, default False): CMF must have just
+      - ``require_cmf_cross`` (bool, default True): CMF must have just
         crossed zero this bar — catches the turn earlier than require_cmf.
       - ``require_cmf_no_divergence`` (bool, default False)
       - ``require_footprint_delta`` (bool, default False)
-      - ``require_bb_position`` (bool, default False)
-      - ``bb_proximity_pct`` (float, default 0.0)
-      - ``min_bb_bandwidth`` (float, default 0.0)
+      - ``require_bb_position`` (bool, default True)
+      - ``bb_proximity_pct`` (float, default 0.25)
+      - ``min_bb_bandwidth`` (float, default 2.0)
       - ``max_bb_bandwidth`` (float, default 0.0)
       - ``min_adx`` (float, default 0.0)
-      - ``max_adx`` (float, default 0.0): set ~30-32 on momentum universes
-        (or ~25 on pure chop universes) to filter strong trends.
+      - ``max_adx`` (float, default 25.0): chop-only gate; lower = stricter
+        no-trend filter (recommended ~22-25).
       - ``tp_pct`` (float, default None): strategy-level TP %. Mean reversion
         typically wants a tight TP (reversion to midline). Falls back to
         launcher-level if None.
       - ``sl_pct`` (float, default None): strategy-level SL %. Mean reversion
         typically wants a wider SL (allow exhaustion wick to extend).
-      - ``require_candle_rejection`` (bool, default False): require upper wick
+      - ``require_candle_rejection`` (bool, default True): require upper wick
         for shorts, lower wick for longs (exhaustion confirmation)
       - ``candle_rejection_pct`` (float, default 30): minimum wick size as %
         of candle range (30 = wick is 30%+ of the candle)
-      - ``require_vwap_reversion`` (bool, default False): require price extended
+      - ``require_vwap_reversion`` (bool, default True): require price extended
         from VWAP AND closing back toward it
       - ``vwap_min_distance_pct`` (float, default 1.0): minimum % distance from
         VWAP to qualify as "extended"
-      - ``require_volume_cooling`` (bool, default False): require volume RSI
+      - ``require_volume_cooling`` (bool, default True): require volume RSI
         below threshold (volume momentum fading)
       - ``volume_rsi_max`` (float, default 70.0): maximum volume RSI to allow entry
+      - ``require_regime`` (bool, default True)
+      - ``max_bb_bandwidth_percentile`` (float, default 40)
+      - ``use_atr_sizing`` (bool, default True)
+      - ``atr_tp_multiplier`` (float, default 1.3)
+      - ``atr_sl_multiplier`` (float, default 2.0)
+      - ``min_atr_pct`` (float, default 1.3)
     """
 
     name = "mean_reversion"
@@ -68,26 +74,26 @@ class MeanReversionStrategy:
 
         rsi_oversold = helpers.extract_float(config.get("rsi_oversold"))
         if rsi_oversold is None:
-            rsi_oversold = 30.0
+            rsi_oversold = 28.0
         rsi_overbought = helpers.extract_float(config.get("rsi_overbought"))
         if rsi_overbought is None:
-            rsi_overbought = 70.0
+            rsi_overbought = 72.0
         require_htf_trend = bool(config.get("require_htf_trend", True))
         require_cmf = bool(config.get("require_cmf", True))
         require_htf_cmf = bool(config.get("require_htf_cmf", False))
-        require_cmf_cross = bool(config.get("require_cmf_cross", False))
+        require_cmf_cross = bool(config.get("require_cmf_cross", True))
         require_cmf_no_divergence = bool(config.get("require_cmf_no_divergence", False))
         require_footprint_delta = bool(config.get("require_footprint_delta", False))
-        require_bb_position = bool(config.get("require_bb_position", False))
-        require_candle_rejection = bool(config.get("require_candle_rejection", False))
+        require_bb_position = bool(config.get("require_bb_position", True))
+        require_candle_rejection = bool(config.get("require_candle_rejection", True))
         candle_rejection_pct = helpers.extract_float(config.get("candle_rejection_pct"))
         if candle_rejection_pct is None:
             candle_rejection_pct = 30.0
-        require_vwap_reversion = bool(config.get("require_vwap_reversion", False))
+        require_vwap_reversion = bool(config.get("require_vwap_reversion", True))
         vwap_min_distance_pct = helpers.extract_float(config.get("vwap_min_distance_pct"))
         if vwap_min_distance_pct is None:
             vwap_min_distance_pct = 1.0
-        require_volume_cooling = bool(config.get("require_volume_cooling", False))
+        require_volume_cooling = bool(config.get("require_volume_cooling", True))
         volume_rsi_max = helpers.extract_float(config.get("volume_rsi_max"))
         if volume_rsi_max is None:
             volume_rsi_max = 70.0
@@ -95,7 +101,7 @@ class MeanReversionStrategy:
         # MR works best in low-volatility chop.  When require_regime is True,
         # the current BB bandwidth must be below max_bb_bandwidth_percentile
         # relative to the last N candles (e.g. < 40th percentile = chop).
-        require_regime = bool(config.get("require_regime", False))
+        require_regime = bool(config.get("require_regime", True))
         max_bb_bandwidth_percentile = helpers.extract_float(config.get("max_bb_bandwidth_percentile"))
         if max_bb_bandwidth_percentile is None:
             max_bb_bandwidth_percentile = 40.0
@@ -105,28 +111,27 @@ class MeanReversionStrategy:
         # ── ATR-scaled TP/SL ────────────────────────────────────────────
         # When use_atr_sizing is True, TP/SL are computed as
         # multiplier × ATR% instead of fixed percentages.  This adapts to
-        # the volatility regime (tighter in low-vol, wider in high-vol).
-        # MR inverts the typical R:R: wider TP (reversion to midline) and
-        # tighter SL (invalidation at the wick extreme).
-        use_atr_sizing = bool(config.get("use_atr_sizing", False))
+        # the volatility regime.  Recommended: wider SL (survive noise)
+        # and modest TP (bank the snapback).
+        use_atr_sizing = bool(config.get("use_atr_sizing", True))
         atr_tp_multiplier = helpers.extract_float(config.get("atr_tp_multiplier"))
         if atr_tp_multiplier is None:
-            atr_tp_multiplier = 1.5
+            atr_tp_multiplier = 1.3
         atr_sl_multiplier = helpers.extract_float(config.get("atr_sl_multiplier"))
         if atr_sl_multiplier is None:
-            atr_sl_multiplier = 1.0
+            atr_sl_multiplier = 2.0
         # ── Minimum ATR% filter ───────────────────────────────────────
         # Skip entries on coins with ATR% below this threshold — too quiet
         # for a meaningful reversion.  0 = disabled.
         min_atr_pct = helpers.extract_float(config.get("min_atr_pct"))
         if min_atr_pct is None:
-            min_atr_pct = 0.0
+            min_atr_pct = 1.3
         bb_proximity_pct = helpers.extract_float(config.get("bb_proximity_pct"))
         if bb_proximity_pct is None:
-            bb_proximity_pct = 0.0
+            bb_proximity_pct = 0.25
         min_bb_bandwidth = helpers.extract_float(config.get("min_bb_bandwidth"))
         if min_bb_bandwidth is None:
-            min_bb_bandwidth = 0.0
+            min_bb_bandwidth = 2.0
         max_bb_bandwidth = helpers.extract_float(config.get("max_bb_bandwidth"))
         if max_bb_bandwidth is None:
             max_bb_bandwidth = 0.0
@@ -135,7 +140,7 @@ class MeanReversionStrategy:
             min_adx = 0.0
         max_adx = helpers.extract_float(config.get("max_adx"))
         if max_adx is None:
-            max_adx = 0.0
+            max_adx = 25.0
 
         market_data: dict[str, Any] = snapshot.get("market_data") or {}
         sym_data = market_data.get(symbol) or {}

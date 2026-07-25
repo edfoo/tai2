@@ -379,7 +379,7 @@ class Simulator:
 
         # ── Breakeven stop ────────────────────────────────────────────
         be_enabled = bool(tm.get("breakeven_enabled", True))
-        be_at_r = float(tm.get("breakeven_at_r") or 1.0)
+        be_at_r = float(tm.get("breakeven_at_r") or 0.7)
         be_buffer_pct = float(tm.get("breakeven_buffer_pct") or 0.05)
         if (
             be_enabled
@@ -402,7 +402,7 @@ class Simulator:
 
         # ── Partial take-profit ───────────────────────────────────────
         partial_enabled = bool(tm.get("partial_tp_enabled", True))
-        partial_at_r = float(tm.get("partial_tp_at_r") or 1.0)
+        partial_at_r = float(tm.get("partial_tp_at_r") or 0.8)
         partial_frac = float(tm.get("partial_tp_fraction") or 0.5)
         if (
             partial_enabled

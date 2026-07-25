@@ -44,6 +44,60 @@ def _make_helpers(last_price: float = 100.0) -> StrategyHelpers:
     )
 
 
+def _mr_bare(**overrides: Any) -> dict[str, Any]:
+    """MR config with recommended default-on filters explicitly disabled.
+
+    Production defaults are intentionally strict. Unit tests that isolate a
+    single filter must opt out of the rest so missing snapshot fields do not
+    block the signal under test.
+    """
+    cfg: dict[str, Any] = {
+        "enabled": True,
+        "require_cmf": False,
+        "require_cmf_cross": False,
+        "require_htf_trend": False,
+        "require_htf_cmf": False,
+        "require_bb_position": False,
+        "require_candle_rejection": False,
+        "require_vwap_reversion": False,
+        "require_volume_cooling": False,
+        "require_regime": False,
+        "use_atr_sizing": False,
+        "max_adx": 0.0,
+        "min_adx": 0.0,
+        "min_atr_pct": 0.0,
+        "min_bb_bandwidth": 0.0,
+        "max_bb_bandwidth": 0.0,
+        "bb_proximity_pct": 0.0,
+    }
+    cfg.update(overrides)
+    return cfg
+
+
+def _sc_bare(**overrides: Any) -> dict[str, Any]:
+    """SC config with recommended default-on filters explicitly disabled."""
+    cfg: dict[str, Any] = {
+        "enabled": True,
+        "require_regime": False,
+        "use_atr_sizing": False,
+        "min_atr_pct": 0.0,
+        "max_adx": 0.0,
+        "max_adx_for_entry": 0.0,
+        "require_bb_breakout": False,
+        "require_candle_strength": False,
+        "require_momentum_acceleration": False,
+        "require_rsi_rising": False,
+        "require_volume_rsi_rising": False,
+        "max_spike_extension_pct": 0.0,
+        "min_bb_bandwidth": 0.0,
+        "volume_rsi_min": 0.0,
+        "rsi_min": 0.0,
+        "rsi_max": 100.0,
+    }
+    cfg.update(overrides)
+    return cfg
+
+
 def _make_snapshot(
     *,
     rsi: float | None = 50.0,
@@ -186,13 +240,12 @@ class TestMeanReversionStrategy:
     def test_buy_signal_when_rsi_oversold(self) -> None:
         mr = MeanReversionStrategy()
         snapshot = _make_snapshot(rsi=20.0, cmf_value=0.1, htf_ema50=101.0, htf_ema200=99.0)
-        config = {
-            "enabled": True,
-            "rsi_oversold": 30.0,
-            "rsi_overbought": 70.0,
-            "require_cmf": True,
-            "require_htf_trend": True,
-        }
+        config = _mr_bare(
+            rsi_oversold=30.0,
+            rsi_overbought=70.0,
+            require_cmf=True,
+            require_htf_trend=True,
+        )
         result = mr.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers())
         assert result is not None
         assert result.direction == "buy"
@@ -200,13 +253,12 @@ class TestMeanReversionStrategy:
     def test_sell_signal_when_rsi_overbought(self) -> None:
         mr = MeanReversionStrategy()
         snapshot = _make_snapshot(rsi=80.0, cmf_value=-0.1, htf_ema50=99.0, htf_ema200=101.0)
-        config = {
-            "enabled": True,
-            "rsi_oversold": 30.0,
-            "rsi_overbought": 70.0,
-            "require_cmf": True,
-            "require_htf_trend": True,
-        }
+        config = _mr_bare(
+            rsi_oversold=30.0,
+            rsi_overbought=70.0,
+            require_cmf=True,
+            require_htf_trend=True,
+        )
         result = mr.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers())
         assert result is not None
         assert result.direction == "sell"
@@ -214,7 +266,7 @@ class TestMeanReversionStrategy:
     def test_no_signal_when_rsi_neutral(self) -> None:
         mr = MeanReversionStrategy()
         snapshot = _make_snapshot(rsi=50.0)
-        config = {"enabled": True}
+        config = _mr_bare()
         result = mr.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers())
         assert result is None
 
@@ -238,12 +290,11 @@ class TestMeanReversionStrategy:
         mr = MeanReversionStrategy()
         # RSI oversold, no CMF/HTF requirements → buy
         snapshot = _make_snapshot(rsi=20.0, cmf_value=-0.5, htf_ema50=99.0, htf_ema200=101.0)
-        config = {
-            "enabled": True,
-            "rsi_oversold": 30.0,
-            "require_cmf": False,
-            "require_htf_trend": False,
-        }
+        config = _mr_bare(
+            rsi_oversold=30.0,
+            require_cmf=False,
+            require_htf_trend=False,
+        )
         result = mr.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers())
         assert result is not None
         assert result.direction == "buy"
@@ -272,8 +323,7 @@ class TestMeanReversionStrategy:
             compute_footprint=lambda symbol: {},
         )
         snapshot = _make_snapshot(rsi=20.0, bb_lower=95.0, bb_upper=105.0, bb_middle=100.0)
-        config = {"enabled": True, "require_bb_position": True, "bb_proximity_pct": 1.0,
-                  "require_cmf": False, "require_htf_trend": False}
+        config = _mr_bare(require_bb_position=True, bb_proximity_pct=1.0)
         result = mr.evaluate("BTC-USDT-SWAP", snapshot, config, helpers)
         assert result is not None
         assert result.direction == "buy"
@@ -311,7 +361,7 @@ class TestMeanReversionStrategy:
     def test_no_signal_when_rsi_unavailable(self) -> None:
         mr = MeanReversionStrategy()
         snapshot = _make_snapshot(rsi=None)
-        config = {"enabled": True}
+        config = _mr_bare()
         result = mr.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers())
         assert result is None
 
@@ -319,7 +369,7 @@ class TestMeanReversionStrategy:
         mr = MeanReversionStrategy()
         # RSI oversold, HTF CMF positive → buy
         snapshot = _make_snapshot(rsi=20.0, htf_cmf=0.1)
-        config = {"enabled": True, "require_htf_cmf": True, "require_cmf": False, "require_htf_trend": False}
+        config = _mr_bare(require_htf_cmf=True)
         result = mr.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers())
         assert result is not None
         assert result.direction == "buy"
@@ -328,7 +378,7 @@ class TestMeanReversionStrategy:
         mr = MeanReversionStrategy()
         # RSI oversold, HTF CMF negative → no buy
         snapshot = _make_snapshot(rsi=20.0, htf_cmf=-0.1)
-        config = {"enabled": True, "require_htf_cmf": True, "require_cmf": False, "require_htf_trend": False}
+        config = _mr_bare(require_htf_cmf=True)
         result = mr.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers())
         assert result is None
 
@@ -336,7 +386,7 @@ class TestMeanReversionStrategy:
         mr = MeanReversionStrategy()
         # CMF crossed up: prev=-0.1, current=0.1
         snapshot = _make_snapshot(rsi=20.0, cmf_value=0.1, cmf_series=[-0.3, -0.2, -0.1, -0.1, 0.1])
-        config = {"enabled": True, "require_cmf_cross": True, "require_cmf": False, "require_htf_trend": False}
+        config = _mr_bare(require_cmf_cross=True)
         result = mr.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers())
         assert result is not None
         assert result.direction == "buy"
@@ -345,7 +395,7 @@ class TestMeanReversionStrategy:
         mr = MeanReversionStrategy()
         # CMF stayed positive: prev=0.05, current=0.1 → no cross
         snapshot = _make_snapshot(rsi=20.0, cmf_value=0.1, cmf_series=[0.01, 0.02, 0.03, 0.05, 0.1])
-        config = {"enabled": True, "require_cmf_cross": True, "require_cmf": False, "require_htf_trend": False}
+        config = _mr_bare(require_cmf_cross=True)
         result = mr.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers())
         assert result is None
 
@@ -366,9 +416,9 @@ class TestMeanReversionStrategy:
 
     def test_uses_default_thresholds_when_config_missing(self) -> None:
         mr = MeanReversionStrategy()
-        # RSI=29 → below default oversold of 30 → buy (with no other filters)
-        snapshot = _make_snapshot(rsi=29.0)
-        config = {"enabled": True, "require_cmf": False, "require_htf_trend": False}
+        # RSI=27 → below default oversold of 28 → buy (with other filters bare-off)
+        snapshot = _make_snapshot(rsi=27.0)
+        config = _mr_bare()
         result = mr.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers())
         assert result is not None
         assert result.direction == "buy"
@@ -377,7 +427,7 @@ class TestMeanReversionStrategy:
         mr = MeanReversionStrategy()
         snapshot = _make_snapshot(rsi=20.0)
         snapshot["market_data"]["BTC-USDT-SWAP"]["custom_metrics"]["footprint"] = {"net_delta": 50.0}
-        config = {"enabled": True, "require_footprint_delta": True, "require_cmf": False, "require_htf_trend": False}
+        config = _mr_bare(require_footprint_delta=True)
         result = mr.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers())
         assert result is not None
         assert result.direction == "buy"
@@ -386,7 +436,7 @@ class TestMeanReversionStrategy:
         mr = MeanReversionStrategy()
         snapshot = _make_snapshot(rsi=20.0)
         snapshot["market_data"]["BTC-USDT-SWAP"]["custom_metrics"]["footprint"] = {"net_delta": -50.0}
-        config = {"enabled": True, "require_footprint_delta": True, "require_cmf": False, "require_htf_trend": False}
+        config = _mr_bare(require_footprint_delta=True)
         result = mr.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers())
         assert result is None
 
@@ -400,7 +450,7 @@ class TestMeanReversionStrategy:
             get_last_price=lambda symbol: 100.0,
             compute_footprint=lambda symbol: {"net_delta": 30.0},
         )
-        config = {"enabled": True, "require_footprint_delta": True, "require_cmf": False, "require_htf_trend": False}
+        config = _mr_bare(require_footprint_delta=True)
         result = mr.evaluate("BTC-USDT-SWAP", snapshot, config, helpers)
         assert result is not None
         assert result.direction == "buy"
@@ -435,6 +485,17 @@ class TestMarketServiceStrategyRegistry:
                     "rsi_overbought": 70.0,
                     "require_cmf": False,
                     "require_htf_trend": False,
+                    "require_cmf_cross": False,
+                    "require_bb_position": False,
+                    "require_candle_rejection": False,
+                    "require_vwap_reversion": False,
+                    "require_volume_cooling": False,
+                    "require_regime": False,
+                    "use_atr_sizing": False,
+                    "max_adx": 0.0,
+                    "min_atr_pct": 0.0,
+                    "min_bb_bandwidth": 0.0,
+
                 }
             },
         })
@@ -453,7 +514,18 @@ class TestMarketServiceStrategyRegistry:
             "strategies": {
                 "mean_reversion": {
                     "enabled": True,
-                    "rsi_oversold": 10.0,  # very low, RSI=50 won't trigger
+                    "rsi_oversold": 10.0,  # very low, RSI=50 won't trigger,
+                    "require_cmf_cross": False,
+                    "require_bb_position": False,
+                    "require_candle_rejection": False,
+                    "require_vwap_reversion": False,
+                    "require_volume_cooling": False,
+                    "require_regime": False,
+                    "use_atr_sizing": False,
+                    "max_adx": 0.0,
+                    "min_atr_pct": 0.0,
+                    "min_bb_bandwidth": 0.0,
+
                 }
             },
         })
@@ -468,6 +540,17 @@ class TestMarketServiceStrategyRegistry:
             "mode": "launcher_only",
             "strategies": {
                 "mean_reversion": {"enabled": False},
+                    "require_cmf_cross": False,
+                    "require_bb_position": False,
+                    "require_candle_rejection": False,
+                    "require_vwap_reversion": False,
+                    "require_volume_cooling": False,
+                    "require_regime": False,
+                    "use_atr_sizing": False,
+                    "max_adx": 0.0,
+                    "min_atr_pct": 0.0,
+                    "min_bb_bandwidth": 0.0,
+
             },
         })
         service._last_full_snapshot = _make_snapshot(rsi=5.0)  # extremely oversold
@@ -505,6 +588,17 @@ class TestMarketServiceStrategyRegistry:
                     "rsi_overbought": 70.0,
                     "require_cmf": False,
                     "require_htf_trend": False,
+                    "require_cmf_cross": False,
+                    "require_bb_position": False,
+                    "require_candle_rejection": False,
+                    "require_vwap_reversion": False,
+                    "require_volume_cooling": False,
+                    "require_regime": False,
+                    "use_atr_sizing": False,
+                    "max_adx": 0.0,
+                    "min_atr_pct": 0.0,
+                    "min_bb_bandwidth": 0.0,
+
                 },
             },
         })
@@ -542,6 +636,17 @@ class TestBuildLauncherDecision:
                     "sl_pct": 10.0,
                     "require_cmf": False,
                     "require_htf_trend": False,
+                    "require_cmf_cross": False,
+                    "require_bb_position": False,
+                    "require_candle_rejection": False,
+                    "require_vwap_reversion": False,
+                    "require_volume_cooling": False,
+                    "require_regime": False,
+                    "use_atr_sizing": False,
+                    "max_adx": 0.0,
+                    "min_atr_pct": 0.0,
+                    "min_bb_bandwidth": 0.0,
+
                 }
             },
         })
@@ -571,7 +676,18 @@ class TestBuildLauncherDecision:
                     "rsi_overbought": 70.0,
                     "require_cmf": False,
                     "require_htf_trend": False,
-                    # No tp_pct/sl_pct in strategy config → fallback to launcher level
+                    # No tp_pct/sl_pct in strategy config → fallback to launcher level,
+                    "require_cmf_cross": False,
+                    "require_bb_position": False,
+                    "require_candle_rejection": False,
+                    "require_vwap_reversion": False,
+                    "require_volume_cooling": False,
+                    "require_regime": False,
+                    "use_atr_sizing": False,
+                    "max_adx": 0.0,
+                    "min_atr_pct": 0.0,
+                    "min_bb_bandwidth": 0.0,
+
                 }
             },
         })
@@ -593,6 +709,17 @@ class TestBuildLauncherDecision:
             "notional_usd": 50.0,
             "strategies": {
                 "mean_reversion": {"enabled": False},
+                    "require_cmf_cross": False,
+                    "require_bb_position": False,
+                    "require_candle_rejection": False,
+                    "require_vwap_reversion": False,
+                    "require_volume_cooling": False,
+                    "require_regime": False,
+                    "use_atr_sizing": False,
+                    "max_adx": 0.0,
+                    "min_atr_pct": 0.0,
+                    "min_bb_bandwidth": 0.0,
+
             },
         })
         service._last_full_snapshot = _make_snapshot(rsi=5.0)
@@ -616,6 +743,17 @@ class TestBuildLauncherDecision:
                     "require_htf_trend": False,
                     "dynamic_tp": True,
                     "dynamic_tp_fraction": 0.7,
+                    "require_cmf_cross": False,
+                    "require_bb_position": False,
+                    "require_candle_rejection": False,
+                    "require_vwap_reversion": False,
+                    "require_volume_cooling": False,
+                    "require_regime": False,
+                    "use_atr_sizing": False,
+                    "max_adx": 0.0,
+                    "min_atr_pct": 0.0,
+                    "min_bb_bandwidth": 0.0,
+
                 }
             },
         })
@@ -644,6 +782,17 @@ class TestBuildLauncherDecision:
                     "require_cmf": False,
                     "require_htf_trend": False,
                     "flip_launcher_direction": "both",
+                    "require_cmf_cross": False,
+                    "require_bb_position": False,
+                    "require_candle_rejection": False,
+                    "require_vwap_reversion": False,
+                    "require_volume_cooling": False,
+                    "require_regime": False,
+                    "use_atr_sizing": False,
+                    "max_adx": 0.0,
+                    "min_atr_pct": 0.0,
+                    "min_bb_bandwidth": 0.0,
+
                 }
             },
         })
@@ -667,6 +816,17 @@ class TestBuildLauncherDecision:
                     "rsi_oversold": 30.0,
                     "require_cmf": False,
                     "require_htf_trend": False,
+                    "require_cmf_cross": False,
+                    "require_bb_position": False,
+                    "require_candle_rejection": False,
+                    "require_vwap_reversion": False,
+                    "require_volume_cooling": False,
+                    "require_regime": False,
+                    "use_atr_sizing": False,
+                    "max_adx": 0.0,
+                    "min_atr_pct": 0.0,
+                    "min_bb_bandwidth": 0.0,
+
                 }
             },
         })
@@ -760,24 +920,23 @@ class TestSpikeContinuationStrategy:
             last_price=106.0,
             volume_rsi_series=[70.0, 82.0],
         )
-        config = {
-            "enabled": True,
-            "volume_rsi_min": 75.0,
-            "rsi_min": 55.0,
-            "rsi_max": 75.0,
-            "require_bb_breakout": True,
-            "require_candle_strength": True,
-            "candle_strength_pct": 70.0,
-            "min_bb_bandwidth": 3.0,
-            "max_adx": 40.0,
-            "require_momentum_acceleration": True,
-            "acceleration_lookback": 3,
-            "acceleration_min_ratio": 1.5,
-            "require_rsi_rising": True,
-            "require_volume_rsi_rising": True,
-            "max_spike_extension_pct": 5.0,  # allow up to 5% extension
-            "spike_lookback": 5,
-        }
+        config = _sc_bare(
+            volume_rsi_min=75.0,
+            rsi_min=55.0,
+            rsi_max=75.0,
+            require_bb_breakout=True,
+            require_candle_strength=True,
+            candle_strength_pct=70.0,
+            min_bb_bandwidth=3.0,
+            max_adx=40.0,
+            require_momentum_acceleration=True,
+            acceleration_lookback=3,
+            acceleration_min_ratio=1.5,
+            require_rsi_rising=True,
+            require_volume_rsi_rising=True,
+            max_spike_extension_pct=5.0,  # allow up to 5% extension,
+            spike_lookback=5,
+        )
         signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, helpers)
         assert signal is not None
         assert signal.direction == "buy"
@@ -802,18 +961,17 @@ class TestSpikeContinuationStrategy:
             volume_rsi_series=[80.0, 82.0],
             ohlcv=ohlcv,
         )
-        config = {
-            "enabled": True,
-            "volume_rsi_min": 75.0,
-            "rsi_min": 55.0,
-            "rsi_max": 75.0,
-            "require_momentum_acceleration": True,
-            "acceleration_lookback": 3,
-            "acceleration_min_ratio": 1.5,
-            "require_rsi_rising": True,
-            "require_volume_rsi_rising": True,
-            "max_spike_extension_pct": 0,  # disable for this test
-        }
+        config = _sc_bare(
+            volume_rsi_min=75.0,
+            rsi_min=55.0,
+            rsi_max=75.0,
+            require_momentum_acceleration=True,
+            acceleration_lookback=3,
+            acceleration_min_ratio=1.5,
+            require_rsi_rising=True,
+            require_volume_rsi_rising=True,
+            max_spike_extension_pct=0,  # disable for this test,
+        )
         signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, helpers)
         assert signal is None  # blocked — momentum decelerating
 
@@ -826,14 +984,13 @@ class TestSpikeContinuationStrategy:
             last_price=106.0,
             volume_rsi_series=[88.0, 82.0],  # falling
         )
-        config = {
-            "enabled": True,
-            "volume_rsi_min": 75.0,
-            "rsi_min": 55.0,
-            "rsi_max": 75.0,
-            "require_volume_rsi_rising": True,
-            "max_spike_extension_pct": 0,
-        }
+        config = _sc_bare(
+            volume_rsi_min=75.0,
+            rsi_min=55.0,
+            rsi_max=75.0,
+            require_volume_rsi_rising=True,
+            max_spike_extension_pct=0,
+        )
         signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, helpers)
         assert signal is None
 
@@ -855,14 +1012,13 @@ class TestSpikeContinuationStrategy:
             volume_rsi_series=[80.0, 85.0],
             ohlcv=ohlcv,
         )
-        config = {
-            "enabled": True,
-            "volume_rsi_min": 75.0,
-            "rsi_min": 55.0,
-            "rsi_max": 75.0,
-            "max_spike_extension_pct": 3.0,  # only allow 3% extension
-            "spike_lookback": 5,
-        }
+        config = _sc_bare(
+            volume_rsi_min=75.0,
+            rsi_min=55.0,
+            rsi_max=75.0,
+            max_spike_extension_pct=3.0,  # only allow 3% extension,
+            spike_lookback=5,
+        )
         signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, helpers)
         assert signal is None  # blocked — spike already extended 17.9%
 
@@ -875,13 +1031,12 @@ class TestSpikeContinuationStrategy:
             last_price=106.0,
             volume_rsi_series=[80.0, 85.0],
         )
-        config = {
-            "enabled": True,
-            "volume_rsi_min": 75.0,
-            "rsi_min": 55.0,
-            "rsi_max": 75.0,
-            "max_spike_extension_pct": 0,
-        }
+        config = _sc_bare(
+            volume_rsi_min=75.0,
+            rsi_min=55.0,
+            rsi_max=75.0,
+            max_spike_extension_pct=0,
+        )
         signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, helpers)
         assert signal is None
 
@@ -894,13 +1049,12 @@ class TestSpikeContinuationStrategy:
             last_price=106.0,
             volume_rsi_series=[60.0, 65.0],  # below 75
         )
-        config = {
-            "enabled": True,
-            "volume_rsi_min": 75.0,
-            "rsi_min": 55.0,
-            "rsi_max": 75.0,
-            "max_spike_extension_pct": 0,
-        }
+        config = _sc_bare(
+            volume_rsi_min=75.0,
+            rsi_min=55.0,
+            rsi_max=75.0,
+            max_spike_extension_pct=0,
+        )
         signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, helpers)
         assert signal is None
 
@@ -927,24 +1081,23 @@ class TestSpikeContinuationStrategy:
             volume_rsi_series=[70.0, 82.0],
             ohlcv=ohlcv,
         )
-        config = {
-            "enabled": True,
-            "volume_rsi_min": 75.0,
-            "rsi_min": 55.0,
-            "rsi_max": 75.0,
-            "require_bb_breakout": True,
-            "require_candle_strength": True,
-            "candle_strength_pct": 70.0,
-            "min_bb_bandwidth": 3.0,
-            "max_adx": 40.0,
-            "require_momentum_acceleration": True,
-            "acceleration_lookback": 3,
-            "acceleration_min_ratio": 1.5,
-            "require_rsi_rising": True,
-            "require_volume_rsi_rising": True,
-            "max_spike_extension_pct": 5.0,  # allow up to 5% extension
-            "spike_lookback": 5,
-        }
+        config = _sc_bare(
+            volume_rsi_min=75.0,
+            rsi_min=55.0,
+            rsi_max=75.0,
+            require_bb_breakout=True,
+            require_candle_strength=True,
+            candle_strength_pct=70.0,
+            min_bb_bandwidth=3.0,
+            max_adx=40.0,
+            require_momentum_acceleration=True,
+            acceleration_lookback=3,
+            acceleration_min_ratio=1.5,
+            require_rsi_rising=True,
+            require_volume_rsi_rising=True,
+            max_spike_extension_pct=5.0,  # allow up to 5% extension,
+            spike_lookback=5,
+        )
         signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, helpers)
         assert signal is not None
         assert signal.direction == "sell"
@@ -968,16 +1121,15 @@ class TestSpikeContinuationStrategy:
             volume_rsi_series=[80.0, 82.0],
             ohlcv=ohlcv,
         )
-        config = {
-            "enabled": True,
-            "volume_rsi_min": 75.0,
-            "rsi_min": 55.0,
-            "rsi_max": 75.0,
-            "require_momentum_acceleration": False,  # disabled
-            "require_rsi_rising": True,
-            "require_volume_rsi_rising": True,
-            "max_spike_extension_pct": 0,  # disabled
-        }
+        config = _sc_bare(
+            volume_rsi_min=75.0,
+            rsi_min=55.0,
+            rsi_max=75.0,
+            require_momentum_acceleration=False,  # disabled,
+            require_rsi_rising=True,
+            require_volume_rsi_rising=True,
+            max_spike_extension_pct=0,  # disabled,
+        )
         signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, helpers)
         assert signal is not None
         assert signal.direction == "buy"
@@ -992,15 +1144,14 @@ class TestSpikeContinuationStrategy:
             volume_rsi_series=[70.0, 82.0],
             rsi_series=[70.0, 65.0],  # falling: prev=70, current=65
         )
-        config = {
-            "enabled": True,
-            "volume_rsi_min": 75.0,
-            "rsi_min": 55.0,
-            "rsi_max": 75.0,
-            "require_rsi_rising": True,
-            "require_volume_rsi_rising": True,
-            "max_spike_extension_pct": 0,  # disabled
-        }
+        config = _sc_bare(
+            volume_rsi_min=75.0,
+            rsi_min=55.0,
+            rsi_max=75.0,
+            require_rsi_rising=True,
+            require_volume_rsi_rising=True,
+            max_spike_extension_pct=0,  # disabled,
+        )
         signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, helpers)
         assert signal is None  # blocked — RSI falling via series
 
@@ -1016,15 +1167,14 @@ class TestSpikeContinuationStrategy:
         )
         # Remove rsi_series to simulate unavailable data
         del snapshot["market_data"]["BTC-USDT-SWAP"]["indicators"]["rsi_series"]
-        config = {
-            "enabled": True,
-            "volume_rsi_min": 75.0,
-            "rsi_min": 55.0,
-            "rsi_max": 75.0,
-            "require_rsi_rising": True,
-            "require_volume_rsi_rising": True,
-            "max_spike_extension_pct": 5.0,
-        }
+        config = _sc_bare(
+            volume_rsi_min=75.0,
+            rsi_min=55.0,
+            rsi_max=75.0,
+            require_rsi_rising=True,
+            require_volume_rsi_rising=True,
+            max_spike_extension_pct=5.0,
+        )
         signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, helpers)
         # Current candle is bullish (close > open) → fallback says RSI rising → buy
         assert signal is not None
@@ -1046,11 +1196,10 @@ class TestMeanReversionHtfAbsent:
         indicators = snapshot["market_data"]["BTC-USDT-SWAP"]["indicators"]
         if "htf_indicators" in indicators:
             del indicators["htf_indicators"]
-        config = {
-            "enabled": True,
-            "require_htf_trend": True,  # would normally block without HTF
-            "require_cmf": False,
-        }
+        config = _mr_bare(
+            require_htf_trend=True,  # would normally block without HTF,
+            require_cmf=False,
+        )
         result = mr.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers())
         assert result is not None
         assert result.direction == "buy"
@@ -1063,12 +1212,11 @@ class TestMeanReversionHtfAbsent:
         indicators = snapshot["market_data"]["BTC-USDT-SWAP"]["indicators"]
         if "htf_indicators" in indicators:
             del indicators["htf_indicators"]
-        config = {
-            "enabled": True,
-            "require_htf_cmf": True,  # would normally block without HTF
-            "require_cmf": False,
-            "require_htf_trend": False,
-        }
+        config = _mr_bare(
+            require_htf_cmf=True,  # would normally block without HTF,
+            require_cmf=False,
+            require_htf_trend=False,
+        )
         result = mr.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers())
         assert result is not None
         assert result.direction == "buy"
