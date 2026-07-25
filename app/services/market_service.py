@@ -176,6 +176,19 @@ class MarketService:
     # (symbols × 2 candle endpoints) so the 15s per-call timeout is never
     # spent waiting for a free slot.
     CANDLE_CLIENT_POOL_SIZE = 8
+    # Pool size for the long/short-ratio TradingDataAPI clients. The L/S ratio
+    # endpoint is fetched once per symbol per refresh (concurrently across
+    # symbols), so a smaller pool than candles suffices; 4 keeps latency low
+    # without over-allocating httpx connections.
+    LS_RATIO_CLIENT_POOL_SIZE = 4
+    # httpx.Client default read timeout is 5s, which is too short for some
+    # OKX endpoints (candles for obscure symbols, fills-history, long/short
+    # ratio). Set a generous read timeout on every OKX client so our outer
+    # asyncio.wait_for (15s for candles, 10s for L/S ratio) is the actual
+    # ceiling and slow-but-completing responses aren't killed prematurely.
+    # 20s read / 10s connect covers the slowest observed OKX responses while
+    # still bounding a hung connection.
+    OKX_CLIENT_TIMEOUT = httpx.Timeout(timeout=20.0, connect=10.0)
     # Footprint chart: sliding-window price-level volume profile.
     # Window: how far back (seconds) to include trades in the profile.
     # Bucket ticks: number of instrument tick_size units per price bucket
@@ -217,6 +230,8 @@ class MarketService:
         self._market_api_prod: Any | None = (
             OkxMarket.MarketAPI(flag="0") if OkxMarket and self._okx_flag != "0" else None
         )
+        if self._market_api_prod is not None:
+            self._apply_client_timeout(self._market_api_prod)
         self._public_api = public_api or self._build_public_api()
         self._trading_api = trading_api or self._build_trading_api()
         self._trade_api = trade_api or self._build_trade_api()
@@ -244,6 +259,12 @@ class MarketService:
         # the per-client Semaphore(1) on the shared candle client removed.
         # See CANDLE_CLIENT_POOL_SIZE and _build_candle_pool.
         self._candle_pool: list[tuple[Any, asyncio.Semaphore]] = self._build_candle_pool()
+        # Long/short-ratio fetch pool: same pattern as the candle pool but
+        # for TradingDataAPI clients, so the per-symbol L/S ratio calls
+        # fetched concurrently each refresh don't serialize behind a single
+        # shared _trading_api client and time out at the 10s wait_for.
+        # See LS_RATIO_CLIENT_POOL_SIZE and _build_ls_ratio_pool.
+        self._ls_ratio_pool: list[tuple[Any, asyncio.Semaphore]] = self._build_ls_ratio_pool()
         default_ws_class = SafeWsPublicAsync or WsPublicAsync
         self._websocket_factory = websocket_factory or default_ws_class
         self._enable_websocket = enable_websocket
@@ -5944,24 +5965,51 @@ class MarketService:
         if not base_ccy:
             return cache
         period = "5m"
-        try:
-            response = await asyncio.wait_for(
-                self._guarded_to_thread(
-                    self._trading_api_sem,
-                    self._trading_api.get_long_short_ratio,
-                    base_ccy,
-                    "",
-                    "",
-                    period,
-                ),
-                timeout=10.0,
-            )
-        except asyncio.TimeoutError:
-            logger.debug("Long/short ratio fetch timed out for %s (10s)", symbol)
-            return cache
-        except Exception as exc:  # pragma: no cover - network dependency
-            logger.debug("Long/short ratio fetch failed for %s: %s", symbol, exc)
-            return cache
+        slot = await self._acquire_pool_slot(self._ls_ratio_pool)
+        if slot is not None:
+            ls_api, ls_sem = slot
+            try:
+                response = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        ls_api.get_long_short_ratio,
+                        base_ccy,
+                        "",
+                        "",
+                        period,
+                    ),
+                    timeout=10.0,
+                )
+            except asyncio.TimeoutError:
+                logger.debug("Long/short ratio fetch timed out for %s (10s)", symbol)
+                return cache
+            except Exception as exc:  # pragma: no cover - network dependency
+                logger.debug("Long/short ratio fetch failed for %s: %s", symbol, exc)
+                return cache
+            finally:
+                ls_sem.release()
+        else:
+            # Pool unavailable (python-okx missing) — fall back to the shared
+            # client path, serialized by its per-client semaphore.
+            if not self._trading_api:
+                return cache
+            try:
+                response = await asyncio.wait_for(
+                    self._guarded_to_thread(
+                        self._trading_api_sem,
+                        self._trading_api.get_long_short_ratio,
+                        base_ccy,
+                        "",
+                        "",
+                        period,
+                    ),
+                    timeout=10.0,
+                )
+            except asyncio.TimeoutError:
+                logger.debug("Long/short ratio fetch timed out for %s (10s)", symbol)
+                return cache
+            except Exception as exc:  # pragma: no cover - network dependency
+                logger.debug("Long/short ratio fetch failed for %s: %s", symbol, exc)
+                return cache
         data = self._safe_data(response)
         if not data:
             return cache
@@ -10090,6 +10138,7 @@ class MarketService:
             passphrase=self.settings.okx_passphrase,
             flag=self._okx_flag,
         )
+        self._apply_client_timeout(raw_api)
         return OkxAccountAdapter(raw_api)
 
     def _build_market_api(self) -> Any | None:
@@ -10097,7 +10146,27 @@ class MarketService:
         if OkxMarket is None:
             logger.warning("python-okx not installed; MarketAPI unavailable")
             return None
-        return OkxMarket.MarketAPI(flag=self._okx_flag)
+        client = OkxMarket.MarketAPI(flag=self._okx_flag)
+        self._apply_client_timeout(client)
+        return client
+
+    @classmethod
+    def _apply_client_timeout(cls, client: Any) -> None:
+        """Set a generous read timeout on an OKX ``httpx.Client`` instance.
+
+        ``OkxClient.__init__`` does not accept a ``timeout`` kwarg and does
+        not forward one to ``httpx.Client``, so the default 5s read timeout
+        applies. That is too short for some OKX endpoints (candles for
+        obscure symbols, fills-history, long/short ratio), which then raise
+        ``httpx.ReadTimeout`` ("The read operation timed out") before our
+        outer ``asyncio.wait_for`` ceiling ever fires. Setting the writable
+        ``timeout`` attribute after construction fixes this without patching
+        vendored code. No-op for non-httpx clients (e.g. test stubs).
+        """
+        try:
+            client.timeout = cls.OKX_CLIENT_TIMEOUT
+        except Exception:  # pragma: no cover - test stubs / non-httpx clients
+            pass
 
     def _build_candle_pool(self) -> list[tuple[Any, asyncio.Semaphore]]:
         """Build the pool of independent MarketAPI clients used for candle fetches.
@@ -10117,45 +10186,83 @@ class MarketService:
             return []
         size = max(1, self.CANDLE_CLIENT_POOL_SIZE)
         flag = "0" if self._okx_flag != "0" else self._okx_flag
-        return [(OkxMarket.MarketAPI(flag=flag), asyncio.Semaphore(1)) for _ in range(size)]
+        pool: list[tuple[Any, asyncio.Semaphore]] = []
+        for _ in range(size):
+            client = OkxMarket.MarketAPI(flag=flag)
+            self._apply_client_timeout(client)
+            pool.append((client, asyncio.Semaphore(1)))
+        return pool
 
-    async def _acquire_candle_slot(self) -> tuple[Any, asyncio.Semaphore] | None:
-        """Return a free candle-pool slot, waiting for one if all are busy.
+    def _build_ls_ratio_pool(self) -> list[tuple[Any, asyncio.Semaphore]]:
+        """Build the pool of independent TradingDataAPI clients for L/S ratio fetches.
+
+        Mirrors ``_build_candle_pool``: each member is a fresh
+        ``OkxTrading.TradingDataAPI`` instance (so its ``httpx.Client`` is
+        never shared across threads) paired with its own ``Semaphore(1)``.
+        The long/short-ratio endpoint is fetched concurrently for every
+        symbol each refresh, so without a pool the single shared
+        ``_trading_api`` client (guarded by ``_trading_api_sem``) serializes
+        all those calls and later symbols time out at the 10s ``wait_for``
+        ceiling while queued behind the semaphore.
+        """
+        if OkxTrading is None:
+            return []
+        size = max(1, self.LS_RATIO_CLIENT_POOL_SIZE)
+        pool: list[tuple[Any, asyncio.Semaphore]] = []
+        for _ in range(size):
+            client = OkxTrading.TradingDataAPI(flag=self._okx_flag)
+            self._apply_client_timeout(client)
+            pool.append((client, asyncio.Semaphore(1)))
+        return pool
+
+    async def _acquire_pool_slot(
+        self,
+        pool: list[tuple[Any, asyncio.Semaphore]],
+    ) -> tuple[Any, asyncio.Semaphore] | None:
+        """Return a free slot from ``pool``, waiting for one if all are busy.
 
         Iterates the pool and awaits the first available semaphore. Because
         each semaphore is ``Semaphore(1)``, at most one coroutine holds a
         given slot at a time. Returns ``None`` only when the pool is empty
-        (python-okx not installed); callers fall back to the shared candle
-        client path in that case.
+        (python-okx not installed); callers fall back to the shared-client
+        path in that case.
         """
         # Fast path: grab the first currently-free slot without awaiting.
         # asyncio.Semaphore exposes locked() but no non-blocking acquire, so
         # we use the internal value to detect a free slot and then await
         # acquire() which returns immediately when the slot is free.
-        for client, sem in self._candle_pool:
+        for client, sem in pool:
             if not sem.locked():
                 await sem.acquire()
                 return client, sem
         # All slots busy: await the first slot in order. asyncio.Semaphore is
         # FIFO-fair, so this avoids starvation and bounds total wait time.
-        for client, sem in self._candle_pool:
+        for client, sem in pool:
             await sem.acquire()
             return client, sem
         return None
+
+    async def _acquire_candle_slot(self) -> tuple[Any, asyncio.Semaphore] | None:
+        """Return a free candle-pool slot (thin wrapper over _acquire_pool_slot)."""
+        return await self._acquire_pool_slot(self._candle_pool)
 
     def _build_public_api(self) -> Any | None:
         """Create the PublicAPI client for instruments, funding, and open-interest info."""
         if OkxPublic is None:
             logger.warning("python-okx not installed; PublicAPI unavailable")
             return None
-        return OkxPublic.PublicAPI(flag=self._okx_flag)
+        client = OkxPublic.PublicAPI(flag=self._okx_flag)
+        self._apply_client_timeout(client)
+        return client
 
     def _build_trading_api(self) -> Any | None:
         """Instantiate the TradingDataAPI client for long/short ratios and analytics."""
         if OkxTrading is None:
             logger.warning("python-okx not installed; TradingDataAPI unavailable")
             return None
-        return OkxTrading.TradingDataAPI(flag=self._okx_flag)
+        client = OkxTrading.TradingDataAPI(flag=self._okx_flag)
+        self._apply_client_timeout(client)
+        return client
 
     def _build_trade_api(self) -> Any | None:
         """Build the TradeAPI adapter that routes order placement through okx-sdk."""
@@ -10171,6 +10278,7 @@ class MarketService:
             passphrase=self.settings.okx_passphrase,
             flag=self._okx_flag,
         )
+        self._apply_client_timeout(raw_api)
         return OkxTradeAdapter(raw_api)
 
     def _build_funding_api(self) -> Any | None:
@@ -10181,12 +10289,14 @@ class MarketService:
         if not (self.settings.okx_api_key and self.settings.okx_secret_key and self.settings.okx_passphrase):
             logger.warning("OKX credentials missing; FundingAPI disabled")
             return None
-        return OkxFunding.FundingAPI(
+        client = OkxFunding.FundingAPI(
             api_key=self.settings.okx_api_key,
             api_secret_key=self.settings.okx_secret_key,
             passphrase=self.settings.okx_passphrase,
             flag=self._okx_flag,
         )
+        self._apply_client_timeout(client)
+        return client
 
     def _rebuild_okx_clients(self) -> None:
         """Recreate all OKX REST clients, typically after flipping env flags or credentials."""
@@ -10197,6 +10307,8 @@ class MarketService:
         self._market_api_prod: Any | None = (
             OkxMarket.MarketAPI(flag="0") if OkxMarket and self._okx_flag != "0" else None
         )
+        if self._market_api_prod is not None:
+            self._apply_client_timeout(self._market_api_prod)
         self._public_api = self._build_public_api()
         self._trading_api = self._build_trading_api()
         self._trade_api = self._build_trade_api()
@@ -10214,6 +10326,8 @@ class MarketService:
         # Rebuild the candle client pool so the new flag/credentials take
         # effect and stale pool members aren't driven after a client swap.
         self._candle_pool = self._build_candle_pool()
+        # Rebuild the long/short-ratio pool for the same reason.
+        self._ls_ratio_pool = self._build_ls_ratio_pool()
 
     @staticmethod
     def _format_size(value: float) -> str:
