@@ -3341,33 +3341,37 @@ def register_pages(app: FastAPI) -> None:
                 # Dynamic TP is redundant/harmful when ATR sizing is on.
                 mr_dynamic_tp_switch.value = False
                 mr_dynamic_tp_fraction_input.value = 0.7
-                mr_rsi_oversold_input.value = 28.0
-                mr_rsi_overbought_input.value = 72.0
+                mr_rsi_oversold_input.value = 30.0
+                mr_rsi_overbought_input.value = 70.0
                 mr_min_adx_input.value = 0.0
-                mr_max_adx_input.value = 25.0
+                mr_max_adx_input.value = 28.0
                 mr_require_htf_switch.value = True
                 mr_require_cmf_switch.value = False
                 mr_require_htf_cmf_switch.value = False
-                mr_require_cmf_cross_switch.value = True
+                # CMF cross is rare and cuts frequency ~90%; BB position +
+                # candle rejection already confirm extension+exhaustion.
+                mr_require_cmf_cross_switch.value = False
                 mr_require_cmf_no_div_switch.value = False
                 mr_require_fp_delta_switch.value = False
                 mr_require_bb_switch.value = True
-                mr_bb_proximity_input.value = 0.25
+                mr_bb_proximity_input.value = 0.5
                 mr_min_bb_bw_input.value = 2.0
                 mr_max_bb_bw_input.value = 0.0
                 mr_candle_rejection_switch.value = True
                 mr_candle_rejection_pct_input.value = 30.0
-                mr_vwap_reversion_switch.value = True
+                # VWAP reversion is redundant with BB position + candle rejection.
+                mr_vwap_reversion_switch.value = False
                 mr_vwap_min_dist_input.value = 1.0
-                mr_volume_cooling_switch.value = True
-                mr_volume_rsi_max_input.value = 70.0
+                # Volume cooling is redundant with candle rejection.
+                mr_volume_cooling_switch.value = False
+                mr_volume_rsi_max_input.value = 80.0
                 mr_require_regime_switch.value = True
-                mr_max_bw_pct_input.value = 40.0
+                mr_max_bw_pct_input.value = 55.0
                 mr_regime_lookback_input.value = 50
                 mr_use_atr_sizing_switch.value = True
                 mr_atr_tp_mult_input.value = 1.3
                 mr_atr_sl_mult_input.value = 2.0
-                mr_min_atr_pct_input.value = 1.3
+                mr_min_atr_pct_input.value = 1.0
                 mr_flip_switch.value = False
                 mr_flip_select.value = "both"
                 ui.notify("Mean Reversion fields set to recommended defaults — click Save to persist", color="info")
@@ -3600,29 +3604,29 @@ def register_pages(app: FastAPI) -> None:
                 # Earlier impulse entry, block late tops, give SL room for noise.
                 sc_tp_input.value = 4.0
                 sc_sl_input.value = 3.0
-                sc_volume_rsi_min_input.value = 75.0
-                sc_rsi_min_input.value = 58.0
-                sc_rsi_max_input.value = 70.0
+                sc_volume_rsi_min_input.value = 72.0
+                sc_rsi_min_input.value = 55.0
+                sc_rsi_max_input.value = 72.0
                 sc_bb_breakout_switch.value = True
                 sc_candle_strength_switch.value = True
-                sc_candle_strength_pct_input.value = 75.0
+                sc_candle_strength_pct_input.value = 70.0
                 sc_min_bb_bw_input.value = 3.0
                 sc_max_adx_input.value = 0.0
-                sc_max_adx_entry_input.value = 30.0
+                sc_max_adx_entry_input.value = 32.0
                 sc_momentum_accel_switch.value = True
                 sc_accel_lookback_input.value = 3
-                sc_accel_min_ratio_input.value = 1.5
+                sc_accel_min_ratio_input.value = 1.3
                 sc_rsi_rising_switch.value = True
                 sc_vol_rsi_rising_switch.value = True
-                sc_max_spike_ext_input.value = 2.5
+                sc_max_spike_ext_input.value = 3.5
                 sc_spike_lookback_input.value = 5
                 sc_require_regime_switch.value = True
-                sc_min_bw_pct_input.value = 60.0
+                sc_min_bw_pct_input.value = 55.0
                 sc_regime_lookback_input.value = 50
                 sc_use_atr_sizing_switch.value = True
                 sc_atr_tp_mult_input.value = 2.2
                 sc_atr_sl_mult_input.value = 2.0
-                sc_min_atr_pct_input.value = 1.2
+                sc_min_atr_pct_input.value = 1.0
                 ui.notify("Spike Continuation fields set to recommended defaults — click Save to persist", color="info")
 
             with ui.card().classes("w-full rounded-lg border border-slate-200 mb-1"):

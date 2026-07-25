@@ -74,14 +74,17 @@ class MeanReversionStrategy:
 
         rsi_oversold = helpers.extract_float(config.get("rsi_oversold"))
         if rsi_oversold is None:
-            rsi_oversold = 28.0
+            rsi_oversold = 30.0
         rsi_overbought = helpers.extract_float(config.get("rsi_overbought"))
         if rsi_overbought is None:
-            rsi_overbought = 72.0
+            rsi_overbought = 70.0
         require_htf_trend = bool(config.get("require_htf_trend", True))
         require_cmf = bool(config.get("require_cmf", True))
         require_htf_cmf = bool(config.get("require_htf_cmf", False))
-        require_cmf_cross = bool(config.get("require_cmf_cross", True))
+        # CMF cross is a rare event that cuts frequency ~90%.  BB position +
+        # candle rejection already confirm extension+exhaustion, so the cross
+        # is redundant.  Default off for frequency; enable for ultra-strict.
+        require_cmf_cross = bool(config.get("require_cmf_cross", False))
         require_cmf_no_divergence = bool(config.get("require_cmf_no_divergence", False))
         require_footprint_delta = bool(config.get("require_footprint_delta", False))
         require_bb_position = bool(config.get("require_bb_position", True))
@@ -89,22 +92,27 @@ class MeanReversionStrategy:
         candle_rejection_pct = helpers.extract_float(config.get("candle_rejection_pct"))
         if candle_rejection_pct is None:
             candle_rejection_pct = 30.0
-        require_vwap_reversion = bool(config.get("require_vwap_reversion", True))
+        # VWAP reversion is redundant with BB position + candle rejection
+        # (all three confirm "price extended and snapping back").  Default
+        # off to avoid triple-gating the same signal.
+        require_vwap_reversion = bool(config.get("require_vwap_reversion", False))
         vwap_min_distance_pct = helpers.extract_float(config.get("vwap_min_distance_pct"))
         if vwap_min_distance_pct is None:
             vwap_min_distance_pct = 1.0
-        require_volume_cooling = bool(config.get("require_volume_cooling", True))
+        # Volume cooling is redundant with candle rejection (both confirm
+        # spike is fading).  Default off; enable for ultra-strict.
+        require_volume_cooling = bool(config.get("require_volume_cooling", False))
         volume_rsi_max = helpers.extract_float(config.get("volume_rsi_max"))
         if volume_rsi_max is None:
-            volume_rsi_max = 70.0
+            volume_rsi_max = 80.0
         # ── Regime gate (BB bandwidth percentile) ──────────────────────
         # MR works best in low-volatility chop.  When require_regime is True,
         # the current BB bandwidth must be below max_bb_bandwidth_percentile
-        # relative to the last N candles (e.g. < 40th percentile = chop).
+        # relative to the last N candles (e.g. < 55th percentile = chop).
         require_regime = bool(config.get("require_regime", True))
         max_bb_bandwidth_percentile = helpers.extract_float(config.get("max_bb_bandwidth_percentile"))
         if max_bb_bandwidth_percentile is None:
-            max_bb_bandwidth_percentile = 40.0
+            max_bb_bandwidth_percentile = 55.0
         regime_lookback = helpers.extract_float(config.get("regime_lookback"))
         if regime_lookback is None:
             regime_lookback = 50
@@ -125,10 +133,10 @@ class MeanReversionStrategy:
         # for a meaningful reversion.  0 = disabled.
         min_atr_pct = helpers.extract_float(config.get("min_atr_pct"))
         if min_atr_pct is None:
-            min_atr_pct = 1.3
+            min_atr_pct = 1.0
         bb_proximity_pct = helpers.extract_float(config.get("bb_proximity_pct"))
         if bb_proximity_pct is None:
-            bb_proximity_pct = 0.25
+            bb_proximity_pct = 0.5
         min_bb_bandwidth = helpers.extract_float(config.get("min_bb_bandwidth"))
         if min_bb_bandwidth is None:
             min_bb_bandwidth = 2.0
@@ -140,7 +148,7 @@ class MeanReversionStrategy:
             min_adx = 0.0
         max_adx = helpers.extract_float(config.get("max_adx"))
         if max_adx is None:
-            max_adx = 25.0
+            max_adx = 28.0
 
         market_data: dict[str, Any] = snapshot.get("market_data") or {}
         sym_data = market_data.get(symbol) or {}

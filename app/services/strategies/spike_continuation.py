@@ -82,18 +82,18 @@ class SpikeContinuationStrategy:
 
         volume_rsi_min = helpers.extract_float(config.get("volume_rsi_min"))
         if volume_rsi_min is None:
-            volume_rsi_min = 75.0
+            volume_rsi_min = 72.0
         rsi_min = helpers.extract_float(config.get("rsi_min"))
         if rsi_min is None:
-            rsi_min = 58.0
+            rsi_min = 55.0
         rsi_max = helpers.extract_float(config.get("rsi_max"))
         if rsi_max is None:
-            rsi_max = 70.0
+            rsi_max = 72.0
         require_bb_breakout = bool(config.get("require_bb_breakout", True))
         require_candle_strength = bool(config.get("require_candle_strength", True))
         candle_strength_pct = helpers.extract_float(config.get("candle_strength_pct"))
         if candle_strength_pct is None:
-            candle_strength_pct = 75.0
+            candle_strength_pct = 70.0
         min_bb_bandwidth = helpers.extract_float(config.get("min_bb_bandwidth"))
         if min_bb_bandwidth is None:
             min_bb_bandwidth = 3.0
@@ -103,7 +103,7 @@ class SpikeContinuationStrategy:
         # Late-entry killer: ADX already this high means the move is mature.
         max_adx_for_entry = helpers.extract_float(config.get("max_adx_for_entry"))
         if max_adx_for_entry is None:
-            max_adx_for_entry = 30.0
+            max_adx_for_entry = 32.0
         # ── Regime gate (BB bandwidth percentile) ──────────────────────
         # SC works best in high-volatility expansion.  When require_regime
         # is True, the current BB bandwidth must be above
@@ -112,7 +112,7 @@ class SpikeContinuationStrategy:
         require_regime = bool(config.get("require_regime", True))
         min_bb_bandwidth_percentile = helpers.extract_float(config.get("min_bb_bandwidth_percentile"))
         if min_bb_bandwidth_percentile is None:
-            min_bb_bandwidth_percentile = 60.0
+            min_bb_bandwidth_percentile = 55.0
         regime_lookback = helpers.extract_float(config.get("regime_lookback"))
         if regime_lookback is None:
             regime_lookback = 50
@@ -132,7 +132,7 @@ class SpikeContinuationStrategy:
         # for a real spike.  0 = disabled.
         min_atr_pct = helpers.extract_float(config.get("min_atr_pct"))
         if min_atr_pct is None:
-            min_atr_pct = 1.2
+            min_atr_pct = 1.0
 
         # Momentum acceleration filters
         require_momentum_acceleration = bool(config.get("require_momentum_acceleration", True))
@@ -140,12 +140,12 @@ class SpikeContinuationStrategy:
         acceleration_lookback = int(_acceleration_lookback) if _acceleration_lookback is not None else 3
         acceleration_min_ratio = helpers.extract_float(config.get("acceleration_min_ratio"))
         if acceleration_min_ratio is None:
-            acceleration_min_ratio = 1.5
+            acceleration_min_ratio = 1.3
         require_rsi_rising = bool(config.get("require_rsi_rising", True))
         require_volume_rsi_rising = bool(config.get("require_volume_rsi_rising", True))
         max_spike_extension_pct = helpers.extract_float(config.get("max_spike_extension_pct"))
         if max_spike_extension_pct is None:
-            max_spike_extension_pct = 2.5
+            max_spike_extension_pct = 3.5
         _spike_lookback = helpers.extract_float(config.get("spike_lookback"))
         spike_lookback = int(_spike_lookback) if _spike_lookback is not None else 5
 
