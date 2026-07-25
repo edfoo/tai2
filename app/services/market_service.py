@@ -168,6 +168,14 @@ class MarketService:
     }
     PROTECTION_MIN_OFFSET_RATIO = 0.001  # 0.1% of entry price
     TIER_CACHE_TTL_SECONDS = 600
+    # Number of independent MarketAPI instances used as a pool for candle
+    # fetches. Each httpx.Client is NOT thread-safe, so each pool member is
+    # guarded by its own asyncio.Semaphore(1); up to this many candle calls
+    # run concurrently without any one client being driven from two threads
+    # at once. Sized to comfortably cover the typical snapshot fan-out
+    # (symbols × 2 candle endpoints) so the 15s per-call timeout is never
+    # spent waiting for a free slot.
+    CANDLE_CLIENT_POOL_SIZE = 8
     # Footprint chart: sliding-window price-level volume profile.
     # Window: how far back (seconds) to include trades in the profile.
     # Bucket ticks: number of instrument tick_size units per price bucket
@@ -213,6 +221,29 @@ class MarketService:
         self._trading_api = trading_api or self._build_trading_api()
         self._trade_api = trade_api or self._build_trade_api()
         self._funding_api = funding_api or self._build_funding_api()
+        # Per-client serializing semaphores. python-okx's OkxClient extends
+        # httpx.Client with http2=True, and httpx.Client is NOT thread-safe:
+        # its HTTP/2 connection pool keeps a deque that is iterated on every
+        # request. Driving one client from multiple asyncio.to_thread workers
+        # concurrently raises "deque mutated during iteration" and corrupts
+        # HTTP/2 stream state ("ConnectionTerminated error_code:9"). Each
+        # shared client therefore gets a Semaphore(1) so only one thread
+        # drives it at a time. Cross-client calls (ticker vs candles vs
+        # orderbook) still run in parallel.
+        self._account_api_sem = asyncio.Semaphore(1)
+        self._market_api_sem = asyncio.Semaphore(1)
+        self._market_api_prod_sem = asyncio.Semaphore(1)
+        self._public_api_sem = asyncio.Semaphore(1)
+        self._trading_api_sem = asyncio.Semaphore(1)
+        self._trade_api_sem = asyncio.Semaphore(1)
+        self._funding_api_sem = asyncio.Semaphore(1)
+        # Candle fetch pool: a set of independent MarketAPI instances, each
+        # guarded by its own Semaphore(1). This lets N candle calls run in
+        # parallel (one per pool member) without any single httpx.Client
+        # being driven from two threads at once — restoring the throughput
+        # the per-client Semaphore(1) on the shared candle client removed.
+        # See CANDLE_CLIENT_POOL_SIZE and _build_candle_pool.
+        self._candle_pool: list[tuple[Any, asyncio.Semaphore]] = self._build_candle_pool()
         default_ws_class = SafeWsPublicAsync or WsPublicAsync
         self._websocket_factory = websocket_factory or default_ws_class
         self._enable_websocket = enable_websocket
@@ -4186,7 +4217,7 @@ class MarketService:
         if not self._market_api:
             return []
         try:
-            response = await asyncio.to_thread(self._market_api.get_tickers, "SWAP")
+            response = await self._guarded_to_thread(self._market_api_sem, self._market_api.get_tickers, "SWAP")
             return self._safe_data(response)
         except Exception as exc:
             self._emit_debug(f"Screener ticker fetch failed: {exc}")
@@ -4984,7 +5015,8 @@ class MarketService:
         """Call the public instruments endpoint and hydrate instrument specs cache."""
         if not self._public_api:
             return list(self.symbols)
-        response = await asyncio.to_thread(
+        response = await self._guarded_to_thread(
+            self._public_api_sem,
             self._public_api.get_instruments,
             instType="SWAP",
         )
@@ -5075,7 +5107,8 @@ class MarketService:
             if family:
                 kwargs["instFamily"] = family
         try:
-            response = await asyncio.to_thread(
+            response = await self._guarded_to_thread(
+                self._public_api_sem,
                 self._public_api.get_position_tiers,
                 **kwargs,
             )
@@ -5183,7 +5216,8 @@ class MarketService:
             kwargs["subAcct"] = self._sub_account
         if symbol:
             kwargs["instId"] = symbol
-        response = await asyncio.to_thread(
+        response = await self._guarded_to_thread(
+            self._account_api_sem,
             self._account_api.get_positions,
             **kwargs,
         )
@@ -5239,12 +5273,13 @@ class MarketService:
                 "total_eq_usd": 0.0,
             }
         if self._sub_account and self._sub_account_use_master:
-            response = await asyncio.to_thread(
+            response = await self._guarded_to_thread(
+                self._account_api_sem,
                 self._account_api.get_account_balance,
                 subAcct=self._sub_account,
             )
         else:
-            response = await asyncio.to_thread(self._account_api.get_account_balance)
+            response = await self._guarded_to_thread(self._account_api_sem, self._account_api.get_account_balance)
         if isinstance(response, dict) and response.get("code") not in (None, "0", 0):
             _err_code = response.get("code")
             _err_msg = response.get("msg") or ""
@@ -5271,7 +5306,8 @@ class MarketService:
             return cached
         if not self._market_api:
             return {}
-        response = await asyncio.to_thread(
+        response = await self._guarded_to_thread(
+            self._market_api_sem,
             self._market_api.get_orderbook,
             instId=symbol,
             sz=20,
@@ -5290,7 +5326,7 @@ class MarketService:
             return cached
         if not self._market_api:
             return {}
-        response = await asyncio.to_thread(self._market_api.get_ticker, symbol)
+        response = await self._guarded_to_thread(self._market_api_sem, self._market_api.get_ticker, symbol)
         data = self._safe_data(response)
         if not data:
             return {}
@@ -5304,7 +5340,7 @@ class MarketService:
             return cached
         if not self._public_api:
             return {}
-        response = await asyncio.to_thread(self._public_api.get_funding_rate, symbol)
+        response = await self._guarded_to_thread(self._public_api_sem, self._public_api.get_funding_rate, symbol)
         data = self._safe_data(response)
         if not data:
             return {}
@@ -5318,7 +5354,8 @@ class MarketService:
             return cached
         if not self._public_api:
             return {}
-        response = await asyncio.to_thread(
+        response = await self._guarded_to_thread(
+            self._public_api_sem,
             self._public_api.get_open_interest,
             "SWAP",
             instId=symbol,
@@ -5334,29 +5371,63 @@ class MarketService:
 
         Candle data is public — always uses the production endpoint regardless of
         trading mode so that paper-trading sessions get accurate market history.
+
+        Uses a pool of independent MarketAPI clients (``_candle_pool``) so that
+        many candle calls run concurrently without any single non-thread-safe
+        ``httpx.Client`` being driven from two threads at once. Falls back to the
+        shared ``_market_api_prod`` / ``_market_api`` client (serialized by its
+        own semaphore) when the pool is unavailable.
         """
         cached = self._latest_ohlcv.get(symbol)
-        candle_api = self._market_api_prod or self._market_api
-        if not candle_api:
-            return cached or []
-        try:
-            response = await asyncio.wait_for(
-                asyncio.to_thread(
-                    candle_api.get_candlesticks,
-                    instId=symbol,
-                    bar=self._ohlc_bar,
-                    limit=self._ohlcv_fetch_limit,
-                ),
-                timeout=15.0,
-            )
-        except asyncio.TimeoutError:
-            logger.warning("OHLCV fetch timed out for %s (15s)", symbol)
-            self._emit_debug(f"OHLCV fetch fallback for {symbol}: timeout (15s)")
-            return cached or []
-        except Exception as exc:  # pragma: no cover - network failures
-            logger.warning("OHLCV fetch failed for %s: %s", symbol, exc)
-            self._emit_debug(f"OHLCV fetch fallback for {symbol}: {exc}")
-            return cached or []
+        slot = await self._acquire_candle_slot()
+        if slot is not None:
+            candle_api, candle_sem = slot
+            try:
+                response = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        candle_api.get_candlesticks,
+                        instId=symbol,
+                        bar=self._ohlc_bar,
+                        limit=self._ohlcv_fetch_limit,
+                    ),
+                    timeout=15.0,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("OHLCV fetch timed out for %s (15s)", symbol)
+                self._emit_debug(f"OHLCV fetch fallback for {symbol}: timeout (15s)")
+                return cached or []
+            except Exception as exc:  # pragma: no cover - network failures
+                logger.warning("OHLCV fetch failed for %s: %s", symbol, exc)
+                self._emit_debug(f"OHLCV fetch fallback for {symbol}: {exc}")
+                return cached or []
+            finally:
+                candle_sem.release()
+        else:
+            # Pool unavailable (python-okx missing) — fall back to the shared
+            # client path, serialized by its per-client semaphore.
+            candle_api = self._market_api_prod or self._market_api
+            if not candle_api:
+                return cached or []
+            candle_sem = self._market_api_prod_sem if self._market_api_prod else self._market_api_sem
+            try:
+                response = await asyncio.wait_for(
+                    self._guarded_to_thread(
+                        candle_sem,
+                        candle_api.get_candlesticks,
+                        instId=symbol,
+                        bar=self._ohlc_bar,
+                        limit=self._ohlcv_fetch_limit,
+                    ),
+                    timeout=15.0,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("OHLCV fetch timed out for %s (15s)", symbol)
+                self._emit_debug(f"OHLCV fetch fallback for {symbol}: timeout (15s)")
+                return cached or []
+            except Exception as exc:  # pragma: no cover - network failures
+                logger.warning("OHLCV fetch failed for %s: %s", symbol, exc)
+                self._emit_debug(f"OHLCV fetch fallback for {symbol}: {exc}")
+                return cached or []
         data = self._safe_data(response)
         if data:
             self._latest_ohlcv[symbol] = data
@@ -5366,32 +5437,57 @@ class MarketService:
     async def _fetch_ohlcv_htf(self, symbol: str) -> list[list[Any]]:
         """Fetch OHLCV candles at the next-higher timeframe for the same wall-clock window.
 
-        Always uses the production endpoint — candle data is public.
+        Always uses the production endpoint — candle data is public. Shares the
+        same pool-based concurrency strategy as ``_fetch_ohlcv``.
         """
         htf_bar, _ = self._HTF_MAP.get(self._ohlc_bar, ("", 0))
         if not htf_bar:
             return []
         limit = self._ohlcv_fetch_limit
         cached = self._latest_ohlcv_htf.get(symbol)
-        candle_api = self._market_api_prod or self._market_api
-        if not candle_api:
-            return cached or []
-        try:
-            response = await asyncio.wait_for(
-                asyncio.to_thread(
-                    candle_api.get_candlesticks,
-                    instId=symbol,
-                    bar=htf_bar,
-                    limit=limit,
-                ),
-                timeout=15.0,
-            )
-        except asyncio.TimeoutError:
-            logger.warning("HTF OHLCV fetch timed out for %s (%s) (15s)", symbol, htf_bar)
-            return cached or []
-        except Exception as exc:  # pragma: no cover - network failures
-            logger.warning("HTF OHLCV fetch failed for %s (%s): %s", symbol, htf_bar, exc)
-            return cached or []
+        slot = await self._acquire_candle_slot()
+        if slot is not None:
+            candle_api, candle_sem = slot
+            try:
+                response = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        candle_api.get_candlesticks,
+                        instId=symbol,
+                        bar=htf_bar,
+                        limit=limit,
+                    ),
+                    timeout=15.0,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("HTF OHLCV fetch timed out for %s (%s) (15s)", symbol, htf_bar)
+                return cached or []
+            except Exception as exc:  # pragma: no cover - network failures
+                logger.warning("HTF OHLCV fetch failed for %s (%s): %s", symbol, htf_bar, exc)
+                return cached or []
+            finally:
+                candle_sem.release()
+        else:
+            candle_api = self._market_api_prod or self._market_api
+            if not candle_api:
+                return cached or []
+            candle_sem = self._market_api_prod_sem if self._market_api_prod else self._market_api_sem
+            try:
+                response = await asyncio.wait_for(
+                    self._guarded_to_thread(
+                        candle_sem,
+                        candle_api.get_candlesticks,
+                        instId=symbol,
+                        bar=htf_bar,
+                        limit=limit,
+                    ),
+                    timeout=15.0,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("HTF OHLCV fetch timed out for %s (%s) (15s)", symbol, htf_bar)
+                return cached or []
+            except Exception as exc:  # pragma: no cover - network failures
+                logger.warning("HTF OHLCV fetch failed for %s (%s): %s", symbol, htf_bar, exc)
+                return cached or []
         data = self._safe_data(response)
         if data:
             self._latest_ohlcv_htf[symbol] = data
@@ -5850,7 +5946,8 @@ class MarketService:
         period = "5m"
         try:
             response = await asyncio.wait_for(
-                asyncio.to_thread(
+                self._guarded_to_thread(
+                    self._trading_api_sem,
                     self._trading_api.get_long_short_ratio,
                     base_ccy,
                     "",
@@ -6775,7 +6872,8 @@ class MarketService:
         if not self._funding_api:
             return None
         try:
-            response = await asyncio.to_thread(
+            response = await self._guarded_to_thread(
+                self._funding_api_sem,
                 self._funding_api.get_balances,
                 currency,
             )
@@ -6870,7 +6968,8 @@ class MarketService:
         formatted_amount = self._format_price(required_gap)
         sub_account = self._sub_account if self._sub_account_use_master else None
         try:
-            response = await asyncio.to_thread(
+            response = await self._guarded_to_thread(
+                self._funding_api_sem,
                 self._funding_api.funds_transfer,
                 ccy=currency,
                 amt=formatted_amount,
@@ -7176,7 +7275,8 @@ class MarketService:
 
         async def _call_adjustment() -> Any | None:
             try:
-                return await asyncio.to_thread(
+                return await self._guarded_to_thread(
+                    self._account_api_sem,
                     self._account_api.adjust_isolated_margin,
                     symbol,
                     pos_side_value,
@@ -9934,6 +10034,24 @@ class MarketService:
             return response
         return []
 
+    async def _guarded_to_thread(
+        self,
+        sem: asyncio.Semaphore,
+        fn: Callable[..., Any],
+        /,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        """Run ``fn`` in a worker thread while holding ``sem``.
+
+        Serializes access to a shared, non-thread-safe OKX ``httpx.Client``
+        instance (see the semaphore block in ``__init__``). The semaphore is
+        released even if ``fn`` raises, so a failing call never deadlocks
+        subsequent callers.
+        """
+        async with sem:
+            return await asyncio.to_thread(fn, *args, **kwargs)
+
     @staticmethod
     def _price_from_ticker(ticker: dict[str, Any] | None) -> float | None:
         """Extract a usable price field from heterogeneous OKX ticker payloads."""
@@ -9980,6 +10098,50 @@ class MarketService:
             logger.warning("python-okx not installed; MarketAPI unavailable")
             return None
         return OkxMarket.MarketAPI(flag=self._okx_flag)
+
+    def _build_candle_pool(self) -> list[tuple[Any, asyncio.Semaphore]]:
+        """Build the pool of independent MarketAPI clients used for candle fetches.
+
+        Each pool member is a fresh ``OkxMarket.MarketAPI`` instance (so its
+        underlying ``httpx.Client`` is never shared across threads) paired
+        with its own ``asyncio.Semaphore(1)``. Candle fetches acquire a free
+        slot, drive that one client from a single worker thread, and release
+        the slot on completion — giving up to ``CANDLE_CLIENT_POOL_SIZE``
+        concurrent candle calls without any thread-safety violations.
+
+        Candle data is public, so the pool always uses the production-flag
+        endpoint (``flag="0"``) regardless of trading mode; this matches the
+        pre-existing ``_market_api_prod`` behavior for paper-trading sessions.
+        """
+        if OkxMarket is None:
+            return []
+        size = max(1, self.CANDLE_CLIENT_POOL_SIZE)
+        flag = "0" if self._okx_flag != "0" else self._okx_flag
+        return [(OkxMarket.MarketAPI(flag=flag), asyncio.Semaphore(1)) for _ in range(size)]
+
+    async def _acquire_candle_slot(self) -> tuple[Any, asyncio.Semaphore] | None:
+        """Return a free candle-pool slot, waiting for one if all are busy.
+
+        Iterates the pool and awaits the first available semaphore. Because
+        each semaphore is ``Semaphore(1)``, at most one coroutine holds a
+        given slot at a time. Returns ``None`` only when the pool is empty
+        (python-okx not installed); callers fall back to the shared candle
+        client path in that case.
+        """
+        # Fast path: grab the first currently-free slot without awaiting.
+        # asyncio.Semaphore exposes locked() but no non-blocking acquire, so
+        # we use the internal value to detect a free slot and then await
+        # acquire() which returns immediately when the slot is free.
+        for client, sem in self._candle_pool:
+            if not sem.locked():
+                await sem.acquire()
+                return client, sem
+        # All slots busy: await the first slot in order. asyncio.Semaphore is
+        # FIFO-fair, so this avoids starvation and bounds total wait time.
+        for client, sem in self._candle_pool:
+            await sem.acquire()
+            return client, sem
+        return None
 
     def _build_public_api(self) -> Any | None:
         """Create the PublicAPI client for instruments, funding, and open-interest info."""
@@ -10039,6 +10201,19 @@ class MarketService:
         self._trading_api = self._build_trading_api()
         self._trade_api = self._build_trade_api()
         self._funding_api = self._build_funding_api()
+        # Reset the per-client serializing semaphores so an in-flight task can't
+        # hold a stale semaphore across a client swap (semaphores are cheap to
+        # recreate; the old ones are simply garbage-collected once released).
+        self._account_api_sem = asyncio.Semaphore(1)
+        self._market_api_sem = asyncio.Semaphore(1)
+        self._market_api_prod_sem = asyncio.Semaphore(1)
+        self._public_api_sem = asyncio.Semaphore(1)
+        self._trading_api_sem = asyncio.Semaphore(1)
+        self._trade_api_sem = asyncio.Semaphore(1)
+        self._funding_api_sem = asyncio.Semaphore(1)
+        # Rebuild the candle client pool so the new flag/credentials take
+        # effect and stale pool members aren't driven after a client swap.
+        self._candle_pool = self._build_candle_pool()
 
     @staticmethod
     def _format_size(value: float) -> str:
@@ -10620,7 +10795,7 @@ class MarketService:
             return str(resp.get("code", "1")) == "0"
 
         try:
-            resp = await asyncio.to_thread(setter, **payload)
+            resp = await self._guarded_to_thread(self._trade_api_sem, setter, **payload)
         except Exception as exc:
             self._emit_debug(f"Failed to set leverage for {symbol}: {exc}")
             self._record_execution_feedback(
@@ -10649,7 +10824,7 @@ class MarketService:
                     f"(net was rejected — hedge-mode account)"
                 )
                 try:
-                    retry_resp = await asyncio.to_thread(setter, **retry_payload)
+                    retry_resp = await self._guarded_to_thread(self._trade_api_sem, setter, **retry_payload)
                 except Exception as exc2:
                     self._emit_debug(f"Failed to set leverage for {symbol} ({retry_designator}): {exc2}")
                     self._record_execution_feedback(
@@ -10674,7 +10849,7 @@ class MarketService:
                         opp_payload = dict(retry_payload)
                         opp_payload["posSide"] = opposite
                         try:
-                            opp_resp = await asyncio.to_thread(setter, **opp_payload)
+                            opp_resp = await self._guarded_to_thread(self._trade_api_sem, setter, **opp_payload)
                             if _leverage_ok(opp_resp):
                                 self._isolated_leverage_cache[opp_cache_key] = target_leverage
                                 self._emit_debug(
@@ -10740,7 +10915,7 @@ class MarketService:
             f"Setting cross leverage for {symbol} -> {target_leverage:.2f}x"
         )
         try:
-            resp = await asyncio.to_thread(setter, **payload)
+            resp = await self._guarded_to_thread(self._trade_api_sem, setter, **payload)
         except Exception as exc:
             self._emit_debug(f"Failed to set cross leverage for {symbol}: {exc}")
             return
@@ -10866,7 +11041,7 @@ class MarketService:
                 return self._trade_api.place_order(**payload)
 
             try:
-                response = await asyncio.to_thread(_place)
+                response = await self._guarded_to_thread(self._trade_api_sem, _place)
             except Exception as exc:  # pragma: no cover - network dependency
                 self._emit_debug(f"OKX place_order exception: {exc}")
                 return None, False
@@ -11199,7 +11374,8 @@ class MarketService:
             return
         sub_acct = self._sub_account if self._sub_account_use_master else None
         try:
-            response = await asyncio.to_thread(
+            response = await self._guarded_to_thread(
+                self._trade_api_sem,
                 self._trade_api.get_fills_history,
                 inst_type="SWAP",
                 after="",
@@ -11430,7 +11606,7 @@ class MarketService:
         if self._sub_account and self._sub_account_use_master:
             payload[0]["subAcct"] = self._sub_account
         try:
-            await asyncio.to_thread(self._trade_api.cancel_algo_order, payload)
+            await self._guarded_to_thread(self._trade_api_sem, self._trade_api.cancel_algo_order, payload)
         except Exception as exc:  # pragma: no cover - network dependency
             self._emit_debug(f"Failed to cancel TP/SL algo for {symbol}: {exc}")
 
@@ -11453,7 +11629,7 @@ class MarketService:
         candidates: list[dict[str, Any]] = []
         for state in ("live",):
             try:
-                response = await asyncio.to_thread(_call, state)
+                response = await self._guarded_to_thread(self._trade_api_sem, _call, state)
             except Exception as exc:  # pragma: no cover - network dependency
                 self._emit_debug(f"Failed to query {state} protection for {symbol}: {exc}")
                 continue
@@ -11533,7 +11709,7 @@ class MarketService:
 
         for state in ("live", "history"):
             try:
-                response = await asyncio.to_thread(_call, state)
+                response = await self._guarded_to_thread(self._trade_api_sem, _call, state)
             except Exception as exc:  # pragma: no cover - network dependency
                 self._emit_debug(
                     f"Failed to query {state} TP/SL algos for {symbol}: {exc}"
@@ -11641,7 +11817,7 @@ class MarketService:
             if self._sub_account and self._sub_account_use_master:
                 submission["subAcct"] = self._sub_account
             try:
-                response = await asyncio.to_thread(self._trade_api.place_algo_order, **submission)
+                response = await self._guarded_to_thread(self._trade_api_sem, self._trade_api.place_algo_order, **submission)
             except Exception as exc:  # pragma: no cover - network dependency
                 self._emit_debug(f"Failed to place TP/SL algo for {symbol}: {exc}")
                 return None
