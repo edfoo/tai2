@@ -22,6 +22,7 @@ from app.services.strategies import Strategy, StrategyHelpers, StrategySignal
 from app.services.strategies.mean_reversion import MeanReversionStrategy
 from app.services.strategies.spike_continuation import SpikeContinuationStrategy
 from app.services.strategies.liquidity_sweep import LiquiditySweepStrategy
+from app.services.strategies.vwap_reversion import VWAPReversionStrategy
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -1480,3 +1481,257 @@ class TestLiquiditySweepStrategy:
         signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers())
         assert signal is not None
         assert signal.direction == "buy"
+
+
+# ── VWAPReversionStrategy ────────────────────────────────────────────────────
+
+
+def _make_vr_snapshot(
+    *,
+    vwap: float | None = 100.0,
+    atr_pct: float | None = 2.0,
+    htf_ema50: float | None = 101.0,
+    htf_ema200: float | None = 99.0,
+    bb_lower: float | None = 95.0,
+    bb_upper: float | None = 105.0,
+    bb_middle: float | None = 100.0,
+    ohlcv: list[dict[str, Any]] | None = None,
+    symbol: str = "BTC-USDT-SWAP",
+    last_price: float = 100.0,
+) -> dict[str, Any]:
+    """Build a snapshot for VWAP Reversion tests."""
+    indicators: dict[str, Any] = {
+        "vwap": vwap,
+        "atr_pct": atr_pct,
+        "bollinger_bands": {
+            "lower": bb_lower,
+            "upper": bb_upper,
+            "middle": bb_middle,
+        },
+        "ohlcv": ohlcv or [],
+    }
+    if htf_ema50 is not None or htf_ema200 is not None:
+        indicators["htf_indicators"] = {
+            "moving_averages": {
+                "ema_50": htf_ema50,
+                "ema_200": htf_ema200,
+            }
+        }
+    return {
+        "market_data": {
+            symbol: {
+                "indicators": indicators,
+                "custom_metrics": {},
+            }
+        },
+        "positions": [],
+        "last_price": last_price,
+    }
+
+
+def _vr_bare(**overrides: Any) -> dict[str, Any]:
+    """VWAP Reversion config with default-on filters explicitly disabled for unit tests."""
+    cfg: dict[str, Any] = {
+        "enabled": True,
+        "vwap_min_distance_atr": 2.0,
+        "require_closeback": False,
+        "require_htf_trend": False,
+        "require_regime": False,
+        "max_bb_bandwidth_percentile": 55.0,
+        "use_atr_sizing": False,
+        "atr_tp_multiplier": 1.5,
+        "atr_sl_multiplier": 2.5,
+        "min_atr_pct": 0.0,
+    }
+    cfg.update(overrides)
+    return cfg
+
+
+def _make_trend_ohlcv(n: int = 30, base: float = 100.0) -> list[dict[str, Any]]:
+    """Generate N candles with closes rising slowly (for BB bandwidth percentile)."""
+    candles = []
+    for i in range(n):
+        c = base + i * 0.01
+        candles.append({
+            "open": c - 0.05,
+            "high": c + 0.1,
+            "low": c - 0.1,
+            "close": c,
+            "volume": 100.0,
+        })
+    return candles
+
+
+class TestVWAPReversionStrategy:
+    """Tests for the VWAPReversionStrategy."""
+
+    def test_satisfies_protocol(self) -> None:
+        strategy = VWAPReversionStrategy()
+        assert isinstance(strategy, Strategy)
+
+    def test_returns_none_when_disabled(self) -> None:
+        strategy = VWAPReversionStrategy()
+        snapshot = _make_vr_snapshot(ohlcv=_make_trend_ohlcv(), last_price=94.0)
+        config = {"enabled": False}
+        assert strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers()) is None
+
+    def test_returns_none_when_no_enabled_key(self) -> None:
+        strategy = VWAPReversionStrategy()
+        snapshot = _make_vr_snapshot(ohlcv=_make_trend_ohlcv(), last_price=94.0)
+        result = strategy.evaluate("BTC-USDT-SWAP", snapshot, {}, _make_helpers())
+        assert result is None
+
+    def test_returns_none_when_vwap_unavailable(self) -> None:
+        strategy = VWAPReversionStrategy()
+        snapshot = _make_vr_snapshot(vwap=None, ohlcv=_make_trend_ohlcv(), last_price=94.0)
+        config = _vr_bare()
+        result = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers())
+        assert result is None
+
+    def test_returns_none_when_atr_unavailable(self) -> None:
+        strategy = VWAPReversionStrategy()
+        snapshot = _make_vr_snapshot(atr_pct=None, ohlcv=_make_trend_ohlcv(), last_price=94.0)
+        config = _vr_bare()
+        result = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers())
+        assert result is None
+
+    def test_buy_signal_when_extended_below_vwap(self) -> None:
+        """Price 2.5 ATR below VWAP → buy signal (no closeback required)."""
+        strategy = VWAPReversionStrategy()
+        # VWAP=100, ATR%=2% → ATR_price=2.0. Price=95 → distance=5 → 2.5 ATR.
+        snapshot = _make_vr_snapshot(
+            vwap=100.0, atr_pct=2.0, ohlcv=_make_trend_ohlcv(), last_price=95.0,
+        )
+        config = _vr_bare(vwap_min_distance_atr=2.0, require_closeback=False)
+        signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=95.0))
+        assert signal is not None
+        assert signal.direction == "buy"
+        assert signal.strategy_name == "vwap_reversion"
+
+    def test_sell_signal_when_extended_above_vwap(self) -> None:
+        """Price 2.5 ATR above VWAP → sell signal (no closeback required)."""
+        strategy = VWAPReversionStrategy()
+        # VWAP=100, ATR%=2% → ATR_price=2.0. Price=105 → distance=5 → 2.5 ATR.
+        snapshot = _make_vr_snapshot(
+            vwap=100.0, atr_pct=2.0, ohlcv=_make_trend_ohlcv(), last_price=105.0,
+        )
+        config = _vr_bare(vwap_min_distance_atr=2.0, require_closeback=False)
+        signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=105.0))
+        assert signal is not None
+        assert signal.direction == "sell"
+
+    def test_no_signal_when_not_extended(self) -> None:
+        """Price within min_distance ATR of VWAP → no signal."""
+        strategy = VWAPReversionStrategy()
+        # VWAP=100, ATR%=2% → ATR_price=2.0. Price=99 → distance=1 → 0.5 ATR.
+        snapshot = _make_vr_snapshot(
+            vwap=100.0, atr_pct=2.0, ohlcv=_make_trend_ohlcv(), last_price=99.0,
+        )
+        config = _vr_bare(vwap_min_distance_atr=2.0)
+        result = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=99.0))
+        assert result is None
+
+    def test_closeback_blocks_when_closing_away_from_vwap(self) -> None:
+        """Price below VWAP but closing down (away from VWAP) → no buy."""
+        strategy = VWAPReversionStrategy()
+        ohlcv = _make_trend_ohlcv()
+        # Override last two candles: prev close=95.5, curr close=95.0 (closing down).
+        ohlcv[-2] = {"open": 95.6, "high": 95.8, "low": 95.2, "close": 95.5, "volume": 100.0}
+        ohlcv[-1] = {"open": 95.4, "high": 95.6, "low": 94.8, "close": 95.0, "volume": 100.0}
+        snapshot = _make_vr_snapshot(
+            vwap=100.0, atr_pct=2.0, ohlcv=ohlcv, last_price=95.0,
+        )
+        config = _vr_bare(vwap_min_distance_atr=2.0, require_closeback=True)
+        result = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=95.0))
+        assert result is None
+
+    def test_closeback_allows_when_closing_toward_vwap(self) -> None:
+        """Price below VWAP and closing up (toward VWAP) → buy."""
+        strategy = VWAPReversionStrategy()
+        ohlcv = _make_trend_ohlcv()
+        # prev close=94.5, curr close=95.0 (closing up toward VWAP=100).
+        ohlcv[-2] = {"open": 94.6, "high": 94.8, "low": 94.2, "close": 94.5, "volume": 100.0}
+        ohlcv[-1] = {"open": 94.6, "high": 95.2, "low": 94.4, "close": 95.0, "volume": 100.0}
+        snapshot = _make_vr_snapshot(
+            vwap=100.0, atr_pct=2.0, ohlcv=ohlcv, last_price=95.0,
+        )
+        config = _vr_bare(vwap_min_distance_atr=2.0, require_closeback=True)
+        signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=95.0))
+        assert signal is not None
+        assert signal.direction == "buy"
+
+    def test_htf_trend_blocks_counter_trend_long(self) -> None:
+        """HTF bearish should block a long (counter-trend)."""
+        strategy = VWAPReversionStrategy()
+        snapshot = _make_vr_snapshot(
+            vwap=100.0, atr_pct=2.0, htf_ema50=99.0, htf_ema200=101.0,
+            ohlcv=_make_trend_ohlcv(), last_price=95.0,
+        )
+        config = _vr_bare(require_htf_trend=True)
+        result = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=95.0))
+        assert result is None
+
+    def test_htf_trend_allows_trend_aligned_long(self) -> None:
+        """HTF bullish should allow a long."""
+        strategy = VWAPReversionStrategy()
+        snapshot = _make_vr_snapshot(
+            vwap=100.0, atr_pct=2.0, htf_ema50=101.0, htf_ema200=99.0,
+            ohlcv=_make_trend_ohlcv(), last_price=95.0,
+        )
+        config = _vr_bare(require_htf_trend=True)
+        signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=95.0))
+        assert signal is not None
+        assert signal.direction == "buy"
+
+    def test_htf_absent_auto_disables_htf_trend(self) -> None:
+        """require_htf_trend should auto-disable when no HTF data."""
+        strategy = VWAPReversionStrategy()
+        snapshot = _make_vr_snapshot(
+            vwap=100.0, atr_pct=2.0, htf_ema50=None, htf_ema200=None,
+            ohlcv=_make_trend_ohlcv(), last_price=95.0,
+        )
+        indicators = snapshot["market_data"]["BTC-USDT-SWAP"]["indicators"]
+        if "htf_indicators" in indicators:
+            del indicators["htf_indicators"]
+        config = _vr_bare(require_htf_trend=True)
+        signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=95.0))
+        assert signal is not None
+        assert signal.direction == "buy"
+
+    def test_min_atr_pct_blocks_quiet_coins(self) -> None:
+        """ATR% below min_atr_pct should block entry."""
+        strategy = VWAPReversionStrategy()
+        # VWAP=100, ATR%=0.5% → ATR_price=0.5. Price=95 → distance=5 → 10 ATR (extended).
+        snapshot = _make_vr_snapshot(
+            vwap=100.0, atr_pct=0.5, ohlcv=_make_trend_ohlcv(), last_price=95.0,
+        )
+        config = _vr_bare(min_atr_pct=1.0)
+        result = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=95.0))
+        assert result is None
+
+    def test_atr_sizing_produces_tp_sl(self) -> None:
+        """When use_atr_sizing is on, TP/SL should be ATR-scaled."""
+        strategy = VWAPReversionStrategy()
+        snapshot = _make_vr_snapshot(
+            vwap=100.0, atr_pct=2.0, ohlcv=_make_trend_ohlcv(), last_price=95.0,
+        )
+        config = _vr_bare(use_atr_sizing=True, atr_tp_multiplier=1.5, atr_sl_multiplier=2.5)
+        signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=95.0))
+        assert signal is not None
+        # TP = 1.5 × 2.0% = 3.0%, SL = 2.5 × 2.0% = 5.0%
+        assert signal.tp_pct is not None
+        assert abs(signal.tp_pct - 3.0) < 0.01
+        assert signal.sl_pct is not None
+        assert abs(signal.sl_pct - 5.0) < 0.01
+
+    def test_static_tp_sl_when_atr_sizing_off(self) -> None:
+        """When use_atr_sizing is off, static tp_pct/sl_pct should be used."""
+        strategy = VWAPReversionStrategy()
+        snapshot = _make_vr_snapshot(
+            vwap=100.0, atr_pct=2.0, ohlcv=_make_trend_ohlcv(), last_price=95.0,
+        )
+        config = _vr_bare(use_atr_sizing=False, tp_pct=2.0, sl_pct=3.0)
+        signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=95.0))
+        assert signal is not None
+        assert signal.tp_pct == 2.0
+        assert signal.sl_pct == 3.0

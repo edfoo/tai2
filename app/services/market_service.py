@@ -35,6 +35,7 @@ from app.services.strategies import Strategy, StrategyHelpers, StrategySignal
 from app.services.strategies.liquidity_sweep import LiquiditySweepStrategy
 from app.services.strategies.mean_reversion import MeanReversionStrategy
 from app.services.strategies.spike_continuation import SpikeContinuationStrategy
+from app.services.strategies.vwap_reversion import VWAPReversionStrategy
 
 
 def _ensure_httpx_proxies_compat() -> None:
@@ -413,6 +414,7 @@ class MarketService:
             MeanReversionStrategy(),
             SpikeContinuationStrategy(),
             LiquiditySweepStrategy(),
+            VWAPReversionStrategy(),
         ]
         self._strategy_helpers = StrategyHelpers(
             extract_float=self._extract_float,
@@ -2726,6 +2728,13 @@ class MarketService:
             if not universe:
                 return True
             return symbol_u in {s.upper() for s in universe}
+        # VWAP Reversion shares the MR (chop) universe — VWAP is a magnet in
+        # ranging alts where intraday deviations mean-revert hardest.
+        if name == "vwap_reversion":
+            universe = self._screener_mr_symbols or self._screener_selected_symbols
+            if not universe:
+                return True
+            return symbol_u in {s.upper() for s in universe}
         # Unknown strategies: allow on the combined list / all symbols.
         return True
 
@@ -4228,6 +4237,8 @@ class MarketService:
         if dual and name == "mean_reversion" and self._screener_mr_symbols:
             return list(self._screener_mr_symbols)
         if dual and name == "liquidity_sweep" and self._screener_mr_symbols:
+            return list(self._screener_mr_symbols)
+        if dual and name == "vwap_reversion" and self._screener_mr_symbols:
             return list(self._screener_mr_symbols)
         if self._screener_selected_symbols:
             return list(self._screener_selected_symbols)

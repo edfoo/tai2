@@ -3786,6 +3786,131 @@ def register_pages(app: FastAPI) -> None:
                 ls_min_atr_pct_input.value = 0.8
                 ui.notify("Liquidity Sweep fields set to recommended defaults — click Save to persist", color="info")
 
+            # ── VWAP Reversion ────────────────────────────────────────────────────
+            _vr_cfg = ((config.get("launcher") or {}).get("strategies") or {}).get("vwap_reversion") or {}
+            with ui.card().classes("w-full rounded-lg border border-slate-200 mb-1"):
+                with ui.row().classes("w-full items-center gap-2 flex-nowrap"):
+                    vr_enabled_switch = ui.switch(
+                        value=bool(_vr_cfg.get("enabled", False)),
+                    ).props("dense color=primary")
+                    with ui.expansion("VWAP Reversion").classes("flex-1 text-sm font-medium"):
+                        ui.label(
+                            "VWAP-distance mean reversion: enters when price is extended "
+                            "&gt;N ATR from VWAP and the current candle closes back toward it. "
+                            "VWAP is a magnet on alts; intraday deviations mean-revert hard. "
+                            "Catches setups RSI misses. "
+                            "Shares the MR (chop) universe."
+                        ).classes("text-xs text-slate-500 mb-3")
+                        with ui.row().classes("w-full items-center gap-2 mb-2"):
+                            ui.button(
+                                "Set Recommended Defaults",
+                                icon="tune",
+                                on_click=lambda _: _set_vr_defaults(),
+                            ).props("dense flat color=primary size=sm").tooltip(
+                                "Fill all fields with the recommended VWAP Reversion configuration. "
+                                "You still need to click Save to persist."
+                            )
+                        with ui.row().classes("w-full flex-wrap gap-4 items-start"):
+                            _vr_tp_raw = _vr_cfg.get("tp_pct")
+                            vr_tp_input = ui.number(
+                                label="Take profit (%)",
+                                value=float(_vr_tp_raw) if _vr_tp_raw is not None else 2.0,
+                                min=0.5, step=0.5, precision=1,
+                            ).classes("w-40").props(
+                                "hint='Exit after this % price move (reach VWAP)' persistent-hint clearable"
+                            )
+                            _vr_sl_raw = _vr_cfg.get("sl_pct")
+                            vr_sl_input = ui.number(
+                                label="Stop loss (%)",
+                                value=float(_vr_sl_raw) if _vr_sl_raw is not None else 3.0,
+                                min=0.5, step=0.5, precision=1,
+                            ).classes("w-40").props(
+                                "hint='Exit if extension extends further (beyond entry)' persistent-hint clearable"
+                            )
+                        with ui.row().classes("w-full flex-wrap gap-4 items-start"):
+                            vr_min_dist_atr_input = ui.number(
+                                label="Min VWAP distance (ATR)",
+                                value=float(_vr_cfg.get("vwap_min_distance_atr") or 2.0),
+                                min=0.5, max=10.0, step=0.25, format="%.2f",
+                            ).classes("w-40").props("dense")
+                            ui.label("Minimum distance from VWAP in ATR units to qualify as 'extended'.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            vr_require_closeback_switch = ui.switch(
+                                "Require closeback",
+                                value=bool(_vr_cfg.get("require_closeback", True)),
+                            ).props("dense color=primary")
+                            ui.label("Current candle must close back toward VWAP (reversion started).").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            vr_require_htf_switch = ui.switch(
+                                "Require HTF trend alignment",
+                                value=bool(_vr_cfg.get("require_htf_trend", True)),
+                            ).props("dense color=primary")
+                            ui.label("Only longs in HTF uptrends, shorts in downtrends.").classes("text-xs text-slate-500")
+                        # ── Regime gate ──────────────────────────────────
+                        ui.separator().classes("my-2")
+                        ui.label("Regime Gate (BB Bandwidth Percentile)").classes("text-xs font-semibold text-slate-600")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            vr_require_regime_switch = ui.switch(
+                                "Require regime (chop)",
+                                value=bool(_vr_cfg.get("require_regime", True)),
+                            ).props("dense color=primary")
+                            ui.label("Only enter when BB bandwidth is in the low percentile (chop regime).").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            vr_max_bw_pct_input = ui.number(
+                                label="Max BB bandwidth percentile",
+                                value=float(_vr_cfg.get("max_bb_bandwidth_percentile") or 55.0),
+                                min=5.0, max=95.0, step=5.0, format="%.0f",
+                            ).classes("w-48").props("dense")
+                            vr_regime_lookback_input = ui.number(
+                                label="Regime lookback",
+                                value=float(_vr_cfg.get("regime_lookback") or 50),
+                                min=10, max=200, step=10, format="%.0f",
+                            ).classes("w-40").props("dense")
+                        # ── ATR-scaled TP/SL ────────────────────────────────
+                        ui.separator().classes("my-2")
+                        ui.label("ATR-Scaled TP/SL").classes("text-xs font-semibold text-slate-600")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            vr_use_atr_sizing_switch = ui.switch(
+                                "Use ATR sizing",
+                                value=bool(_vr_cfg.get("use_atr_sizing", True)),
+                            ).props("dense color=primary")
+                            ui.label("Override static TP/SL with ATR-scaled values.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            vr_atr_tp_mult_input = ui.number(
+                                label="ATR TP multiplier",
+                                value=float(_vr_cfg.get("atr_tp_multiplier") or 1.5),
+                                min=0.1, max=10.0, step=0.1, format="%.1f",
+                            ).classes("w-40").props("dense")
+                            vr_atr_sl_mult_input = ui.number(
+                                label="ATR SL multiplier",
+                                value=float(_vr_cfg.get("atr_sl_multiplier") or 2.5),
+                                min=0.1, max=10.0, step=0.1, format="%.1f",
+                            ).classes("w-40").props("dense")
+                            vr_min_atr_pct_input = ui.number(
+                                label="Min ATR%",
+                                value=float(_vr_cfg.get("min_atr_pct") or 1.0),
+                                min=0.0, max=10.0, step=0.1, format="%.1f",
+                            ).classes("w-40").props("dense")
+                    _active_badge_vr = ui.badge("Active", color="positive").bind_visibility_from(
+                        vr_enabled_switch, "value"
+                    )
+
+            def _set_vr_defaults() -> None:
+                """Fill all VWAP Reversion fields with the recommended configuration."""
+                vr_tp_input.value = 2.0
+                vr_sl_input.value = 3.0
+                vr_min_dist_atr_input.value = 2.0
+                vr_require_closeback_switch.value = True
+                vr_require_htf_switch.value = True
+                vr_require_regime_switch.value = True
+                vr_max_bw_pct_input.value = 55.0
+                vr_regime_lookback_input.value = 50
+                vr_use_atr_sizing_switch.value = True
+                vr_atr_tp_mult_input.value = 1.5
+                vr_atr_sl_mult_input.value = 2.5
+                vr_min_atr_pct_input.value = 1.0
+                ui.notify("VWAP Reversion fields set to recommended defaults — click Save to persist", color="info")
+
             with ui.card().classes("w-full rounded-lg border border-slate-200 mb-1"):
                 with ui.row().classes("w-full items-center gap-2 flex-nowrap"):
                     shotgun_switch = ui.switch(
@@ -4746,6 +4871,21 @@ def register_pages(app: FastAPI) -> None:
                 "atr_tp_multiplier": float(ls_atr_tp_mult_input.value or 1.5),
                 "atr_sl_multiplier": float(ls_atr_sl_mult_input.value or 1.2),
                 "min_atr_pct": float(ls_min_atr_pct_input.value or 0.8),
+            }
+            _strategies_cfg["vwap_reversion"] = {
+                "enabled": bool(vr_enabled_switch.value),
+                "tp_pct": float(vr_tp_input.value) if vr_tp_input.value not in (None, "") else None,
+                "sl_pct": float(vr_sl_input.value) if vr_sl_input.value not in (None, "") else None,
+                "vwap_min_distance_atr": float(vr_min_dist_atr_input.value or 2.0),
+                "require_closeback": bool(vr_require_closeback_switch.value),
+                "require_htf_trend": bool(vr_require_htf_switch.value),
+                "require_regime": bool(vr_require_regime_switch.value),
+                "max_bb_bandwidth_percentile": float(vr_max_bw_pct_input.value or 55.0),
+                "regime_lookback": int(vr_regime_lookback_input.value or 50),
+                "use_atr_sizing": bool(vr_use_atr_sizing_switch.value),
+                "atr_tp_multiplier": float(vr_atr_tp_mult_input.value or 1.5),
+                "atr_sl_multiplier": float(vr_atr_sl_mult_input.value or 2.5),
+                "min_atr_pct": float(vr_min_atr_pct_input.value or 1.0),
             }
             _launcher_cfg["strategies"] = _strategies_cfg
             config["launcher"] = _launcher_cfg
