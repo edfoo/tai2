@@ -36,6 +36,7 @@ from app.services.backtest.models import (
 from app.services.backtest.simulator import Simulator
 from app.services.backtest.snapshot_builder import SnapshotBuilder
 from app.services.strategies import Strategy, StrategyHelpers
+from app.services.strategies.liquidity_sweep import LiquiditySweepStrategy
 from app.services.strategies.mean_reversion import MeanReversionStrategy
 from app.services.strategies.spike_continuation import SpikeContinuationStrategy
 
@@ -45,6 +46,7 @@ logger = logging.getLogger(__name__)
 _AVAILABLE_STRATEGIES: dict[str, Strategy] = {
     "mean_reversion": MeanReversionStrategy(),
     "spike_continuation": SpikeContinuationStrategy(),
+    "liquidity_sweep": LiquiditySweepStrategy(),
 }
 
 
