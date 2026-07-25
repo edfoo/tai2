@@ -3629,6 +3629,163 @@ def register_pages(app: FastAPI) -> None:
                 sc_min_atr_pct_input.value = 1.0
                 ui.notify("Spike Continuation fields set to recommended defaults — click Save to persist", color="info")
 
+            # ── Liquidity Sweep ───────────────────────────────────────────────────
+            _ls_cfg = ((config.get("launcher") or {}).get("strategies") or {}).get("liquidity_sweep") or {}
+            with ui.card().classes("w-full rounded-lg border border-slate-200 mb-1"):
+                with ui.row().classes("w-full items-center gap-2 flex-nowrap"):
+                    ls_enabled_switch = ui.switch(
+                        value=bool(_ls_cfg.get("enabled", False)),
+                    ).props("dense color=primary")
+                    with ui.expansion("Liquidity Sweep").classes("flex-1 text-sm font-medium"):
+                        ui.label(
+                            "Stop-hunt reversal: detects when a candle pierces a recent swing "
+                            "low/high (triggering stops) then closes back inside the range. "
+                            "Enters in the opposite direction of the sweep. "
+                            "Shares the MR (chop) universe — sweeps are most common in ranging alts."
+                        ).classes("text-xs text-slate-500 mb-3")
+                        with ui.row().classes("w-full items-center gap-2 mb-2"):
+                            ui.button(
+                                "Set Recommended Defaults",
+                                icon="tune",
+                                on_click=lambda _: _set_ls_defaults(),
+                            ).props("dense flat color=primary size=sm").tooltip(
+                                "Fill all fields with the recommended Liquidity Sweep configuration. "
+                                "You still need to click Save to persist."
+                            )
+                        with ui.row().classes("w-full flex-wrap gap-4 items-start"):
+                            _ls_tp_raw = _ls_cfg.get("tp_pct")
+                            ls_tp_input = ui.number(
+                                label="Take profit (%)",
+                                value=float(_ls_tp_raw) if _ls_tp_raw is not None else 3.0,
+                                min=0.5, step=0.5, precision=1,
+                            ).classes("w-40").props(
+                                "hint='Exit after this % price move' persistent-hint clearable"
+                            )
+                            _ls_sl_raw = _ls_cfg.get("sl_pct")
+                            ls_sl_input = ui.number(
+                                label="Stop loss (%)",
+                                value=float(_ls_sl_raw) if _ls_sl_raw is not None else 2.0,
+                                min=0.5, step=0.5, precision=1,
+                            ).classes("w-40").props(
+                                "hint='Exit if sweep fails (beyond wick)' persistent-hint clearable"
+                            )
+                        with ui.row().classes("w-full flex-wrap gap-4 items-start"):
+                            ls_lookback_input = ui.number(
+                                label="Swing lookback",
+                                value=float(_ls_cfg.get("lookback") or 20),
+                                min=5, max=100, step=1, format="%.0f",
+                            ).classes("w-40").props("dense")
+                            ui.label("Bars to identify the swing high/low that gets swept.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-start"):
+                            ls_sweep_buffer_input = ui.number(
+                                label="Sweep buffer %",
+                                value=float(_ls_cfg.get("sweep_buffer_pct") or 0.1),
+                                min=0.0, max=5.0, step=0.05, format="%.2f",
+                            ).classes("w-40").props("dense")
+                            ui.label("Min % beyond swing level the wick must penetrate (0.1 = 0.1%).").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-start"):
+                            ls_reclaim_ratio_input = ui.number(
+                                label="Reclaim ratio",
+                                value=float(_ls_cfg.get("reclaim_ratio") or 0.5),
+                                min=0.1, max=0.9, step=0.05, format="%.2f",
+                            ).classes("w-40").props("dense")
+                            ui.label("Close must reclaim this fraction of candle range back inside (0.5 = upper 50% for longs).").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            ls_require_htf_switch = ui.switch(
+                                "Require HTF trend alignment",
+                                value=bool(_ls_cfg.get("require_htf_trend", True)),
+                            ).props("dense color=primary")
+                            ui.label("Only longs in HTF uptrends, shorts in downtrends.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            ls_require_vol_switch = ui.switch(
+                                "Require volume spike",
+                                value=bool(_ls_cfg.get("require_volume_spike", True)),
+                            ).props("dense color=primary")
+                            ui.label("Swept candle volume must exceed recent average.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-start"):
+                            ls_vol_ratio_input = ui.number(
+                                label="Volume spike ratio",
+                                value=float(_ls_cfg.get("volume_spike_ratio") or 1.5),
+                                min=1.0, max=5.0, step=0.1, format="%.1f",
+                            ).classes("w-40").props("dense")
+                            ui.label("Current volume / avg recent volume must exceed this.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-start"):
+                            ls_max_adx_input = ui.number(
+                                label="Max ADX",
+                                value=float(_ls_cfg.get("max_adx") or 35.0),
+                                min=0, max=100, step=1, precision=0,
+                            ).classes("w-32").props(
+                                "hint='Skip strong trends (sweep likely real breakout)' persistent-hint"
+                            )
+                        # ── Regime gate ──────────────────────────────────
+                        ui.separator().classes("my-2")
+                        ui.label("Regime Gate (BB Bandwidth Percentile)").classes("text-xs font-semibold text-slate-600")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            ls_require_regime_switch = ui.switch(
+                                "Require regime (chop)",
+                                value=bool(_ls_cfg.get("require_regime", True)),
+                            ).props("dense color=primary")
+                            ui.label("Only enter when BB bandwidth is in the low percentile (chop regime).").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            ls_max_bw_pct_input = ui.number(
+                                label="Max BB bandwidth percentile",
+                                value=float(_ls_cfg.get("max_bb_bandwidth_percentile") or 60.0),
+                                min=5.0, max=95.0, step=5.0, format="%.0f",
+                            ).classes("w-48").props("dense")
+                            ls_regime_lookback_input = ui.number(
+                                label="Regime lookback",
+                                value=float(_ls_cfg.get("regime_lookback") or 50),
+                                min=10, max=200, step=10, format="%.0f",
+                            ).classes("w-40").props("dense")
+                        # ── ATR-scaled TP/SL ────────────────────────────────
+                        ui.separator().classes("my-2")
+                        ui.label("ATR-Scaled TP/SL").classes("text-xs font-semibold text-slate-600")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            ls_use_atr_sizing_switch = ui.switch(
+                                "Use ATR sizing",
+                                value=bool(_ls_cfg.get("use_atr_sizing", True)),
+                            ).props("dense color=primary")
+                            ui.label("Override static TP/SL with ATR-scaled values.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            ls_atr_tp_mult_input = ui.number(
+                                label="ATR TP multiplier",
+                                value=float(_ls_cfg.get("atr_tp_multiplier") or 1.5),
+                                min=0.1, max=10.0, step=0.1, format="%.1f",
+                            ).classes("w-40").props("dense")
+                            ls_atr_sl_mult_input = ui.number(
+                                label="ATR SL multiplier",
+                                value=float(_ls_cfg.get("atr_sl_multiplier") or 1.2),
+                                min=0.1, max=10.0, step=0.1, format="%.1f",
+                            ).classes("w-40").props("dense")
+                            ls_min_atr_pct_input = ui.number(
+                                label="Min ATR%",
+                                value=float(_ls_cfg.get("min_atr_pct") or 0.8),
+                                min=0.0, max=10.0, step=0.1, format="%.1f",
+                            ).classes("w-40").props("dense")
+                    _active_badge_ls = ui.badge("Active", color="positive").bind_visibility_from(
+                        ls_enabled_switch, "value"
+                    )
+
+            def _set_ls_defaults() -> None:
+                """Fill all Liquidity Sweep fields with the recommended configuration."""
+                ls_tp_input.value = 3.0
+                ls_sl_input.value = 2.0
+                ls_lookback_input.value = 20
+                ls_sweep_buffer_input.value = 0.1
+                ls_reclaim_ratio_input.value = 0.5
+                ls_require_htf_switch.value = True
+                ls_require_vol_switch.value = True
+                ls_vol_ratio_input.value = 1.5
+                ls_max_adx_input.value = 35.0
+                ls_require_regime_switch.value = True
+                ls_max_bw_pct_input.value = 60.0
+                ls_regime_lookback_input.value = 50
+                ls_use_atr_sizing_switch.value = True
+                ls_atr_tp_mult_input.value = 1.5
+                ls_atr_sl_mult_input.value = 1.2
+                ls_min_atr_pct_input.value = 0.8
+                ui.notify("Liquidity Sweep fields set to recommended defaults — click Save to persist", color="info")
+
             with ui.card().classes("w-full rounded-lg border border-slate-200 mb-1"):
                 with ui.row().classes("w-full items-center gap-2 flex-nowrap"):
                     shotgun_switch = ui.switch(
@@ -4569,6 +4726,26 @@ def register_pages(app: FastAPI) -> None:
                 "atr_tp_multiplier": float(sc_atr_tp_mult_input.value or 2.5),
                 "atr_sl_multiplier": float(sc_atr_sl_mult_input.value or 1.8),
                 "min_atr_pct": float(sc_min_atr_pct_input.value or 0.0),
+            }
+            _strategies_cfg["liquidity_sweep"] = {
+                "enabled": bool(ls_enabled_switch.value),
+                "tp_pct": float(ls_tp_input.value) if ls_tp_input.value not in (None, "") else None,
+                "sl_pct": float(ls_sl_input.value) if ls_sl_input.value not in (None, "") else None,
+                "lookback": int(ls_lookback_input.value or 20),
+                "sweep_buffer_pct": float(ls_sweep_buffer_input.value or 0.1),
+                "reclaim_ratio": float(ls_reclaim_ratio_input.value or 0.5),
+                "require_htf_trend": bool(ls_require_htf_switch.value),
+                "require_volume_spike": bool(ls_require_vol_switch.value),
+                "volume_spike_ratio": float(ls_vol_ratio_input.value or 1.5),
+                "volume_lookback": 10,
+                "max_adx": float(ls_max_adx_input.value or 35.0),
+                "require_regime": bool(ls_require_regime_switch.value),
+                "max_bb_bandwidth_percentile": float(ls_max_bw_pct_input.value or 60.0),
+                "regime_lookback": int(ls_regime_lookback_input.value or 50),
+                "use_atr_sizing": bool(ls_use_atr_sizing_switch.value),
+                "atr_tp_multiplier": float(ls_atr_tp_mult_input.value or 1.5),
+                "atr_sl_multiplier": float(ls_atr_sl_mult_input.value or 1.2),
+                "min_atr_pct": float(ls_min_atr_pct_input.value or 0.8),
             }
             _launcher_cfg["strategies"] = _strategies_cfg
             config["launcher"] = _launcher_cfg

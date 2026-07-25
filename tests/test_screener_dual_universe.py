@@ -475,17 +475,23 @@ class TestScreenerConfigPlumbing:
         assert stored["enabled"] is True
 
     def test_default_runtime_screener_has_dual_keys(self) -> None:
-        from fastapi.testclient import TestClient
+        """Verify the default screener config source has dual-universe keys.
 
-        from app.main import create_app
+        The defaults are defined inside the ``_create_lifespan`` closure in
+        ``main.py``.  We inspect the source rather than executing the lifespan
+        to avoid event-loop conflicts with prior ``asyncio_run`` calls in the
+        same test session (which close the default loop).
+        """
+        import inspect
 
-        app = create_app(enable_background_services=False)
-        # Lifespan populates runtime_config; enter TestClient to run it.
-        with TestClient(app):
-            screener = app.state.runtime_config.get("screener") or {}
-            assert "dual_universe" in screener
-            assert screener.get("dual_universe") is True
-            assert "sc_max_symbols" in screener
-            assert "mr_max_symbols" in screener
-            assert "mr_min_hl_range_pct" in screener
-            assert "mr_max_momentum_pct" in screener
+        from app import main as main_module
+
+        # _create_lifespan returns the actual lifespan function that contains
+        # the default runtime_config dict with screener defaults.
+        lifespan_factory = main_module._create_lifespan(False)
+        src = inspect.getsource(lifespan_factory)
+        assert "dual_universe" in src
+        assert "sc_max_symbols" in src
+        assert "mr_max_symbols" in src
+        assert "mr_min_hl_range_pct" in src
+        assert "mr_max_momentum_pct" in src

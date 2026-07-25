@@ -32,6 +32,7 @@ from app.models.trade import ExecutedTrade
 from app.services.okx_sdk_adapter import OkxAccountAdapter, OkxTradeAdapter
 from app.services.state_service import StateService
 from app.services.strategies import Strategy, StrategyHelpers, StrategySignal
+from app.services.strategies.liquidity_sweep import LiquiditySweepStrategy
 from app.services.strategies.mean_reversion import MeanReversionStrategy
 from app.services.strategies.spike_continuation import SpikeContinuationStrategy
 
@@ -356,7 +357,11 @@ class MarketService:
         # Each strategy reads from config["strategies"][<strategy_name>].
         # All enabled strategies run concurrently — multiple can fire on the
         # same symbol at the same time, each opening its own position.
-        self._strategies: list[Strategy] = [MeanReversionStrategy(), SpikeContinuationStrategy()]
+        self._strategies: list[Strategy] = [
+            MeanReversionStrategy(),
+            SpikeContinuationStrategy(),
+            LiquiditySweepStrategy(),
+        ]
         self._strategy_helpers = StrategyHelpers(
             extract_float=self._extract_float,
             emit_debug=self._emit_debug,
@@ -2632,6 +2637,13 @@ class MarketService:
             if not universe:
                 return True
             return symbol_u in {s.upper() for s in universe}
+        # Liquidity Sweep shares the MR (chop) universe — sweeps are most
+        # common in ranging alt-coins where stops accumulate at visible levels.
+        if name == "liquidity_sweep":
+            universe = self._screener_mr_symbols or self._screener_selected_symbols
+            if not universe:
+                return True
+            return symbol_u in {s.upper() for s in universe}
         # Unknown strategies: allow on the combined list / all symbols.
         return True
 
@@ -4132,6 +4144,8 @@ class MarketService:
         if dual and name == "spike_continuation" and self._screener_sc_symbols:
             return list(self._screener_sc_symbols)
         if dual and name == "mean_reversion" and self._screener_mr_symbols:
+            return list(self._screener_mr_symbols)
+        if dual and name == "liquidity_sweep" and self._screener_mr_symbols:
             return list(self._screener_mr_symbols)
         if self._screener_selected_symbols:
             return list(self._screener_selected_symbols)

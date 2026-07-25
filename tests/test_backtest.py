@@ -697,8 +697,22 @@ class TestFinerLtfEngineLoop:
                     "rsi_overbought": 70.0,
                     "require_htf_trend": False,  # no HTF in this test
                     "require_cmf": False,  # simplify: only RSI gate
+                    # Disable default-on confirmation filters so the test
+                    # isolates the RSI signal without needing BB/candle data.
+                    "require_bb_position": False,
+                    "require_candle_rejection": False,
+                    "require_vwap_reversion": False,
+                    "require_volume_cooling": False,
+                    "require_regime": False,
+                    "use_atr_sizing": False,
+                    "min_atr_pct": 0.0,
+                    "max_adx": 0.0,
+                    "min_bb_bandwidth": 0.0,
+                    "max_bb_bandwidth": 0.0,
+                    "bb_proximity_pct": 0.0,
                 },
                 "spike_continuation": {"enabled": False},
+                "liquidity_sweep": {"enabled": False},
             },
         }
 

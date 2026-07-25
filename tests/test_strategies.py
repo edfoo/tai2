@@ -21,6 +21,7 @@ from app.services.market_service import MarketService
 from app.services.strategies import Strategy, StrategyHelpers, StrategySignal
 from app.services.strategies.mean_reversion import MeanReversionStrategy
 from app.services.strategies.spike_continuation import SpikeContinuationStrategy
+from app.services.strategies.liquidity_sweep import LiquiditySweepStrategy
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -1220,3 +1221,262 @@ class TestMeanReversionHtfAbsent:
         result = mr.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers())
         assert result is not None
         assert result.direction == "buy"
+
+
+# ── Liquidity Sweep ──────────────────────────────────────────────────────────
+
+
+def _make_ls_snapshot(
+    *,
+    ohlcv: list[dict[str, Any]] | None = None,
+    htf_ema50: float | None = 101.0,
+    htf_ema200: float | None = 99.0,
+    adx_value: float | None = 20.0,
+    bb_lower: float | None = 95.0,
+    bb_upper: float | None = 105.0,
+    bb_middle: float | None = 100.0,
+    atr_pct: float | None = 2.0,
+    symbol: str = "BTC-USDT-SWAP",
+    last_price: float = 100.0,
+) -> dict[str, Any]:
+    """Build a snapshot for Liquidity Sweep tests."""
+    indicators: dict[str, Any] = {
+        "adx": {"value": adx_value},
+        "bollinger_bands": {
+            "lower": bb_lower,
+            "upper": bb_upper,
+            "middle": bb_middle,
+        },
+        "atr_pct": atr_pct,
+        "ohlcv": ohlcv or [],
+    }
+    if htf_ema50 is not None or htf_ema200 is not None:
+        indicators["htf_indicators"] = {
+            "moving_averages": {
+                "ema_50": htf_ema50,
+                "ema_200": htf_ema200,
+            }
+        }
+    return {
+        "market_data": {
+            symbol: {
+                "indicators": indicators,
+                "custom_metrics": {},
+            }
+        },
+        "positions": [],
+        "last_price": last_price,
+    }
+
+
+def _ls_bare(**overrides: Any) -> dict[str, Any]:
+    """LS config with default-on filters explicitly disabled for unit tests."""
+    cfg: dict[str, Any] = {
+        "enabled": True,
+        "lookback": 10,
+        "sweep_buffer_pct": 0.1,
+        "reclaim_ratio": 0.5,
+        "require_htf_trend": False,
+        "require_volume_spike": False,
+        "volume_spike_ratio": 1.5,
+        "max_adx": 0.0,
+        "require_regime": False,
+        "max_bb_bandwidth_percentile": 60.0,
+        "use_atr_sizing": False,
+        "atr_tp_multiplier": 1.5,
+        "atr_sl_multiplier": 1.2,
+        "min_atr_pct": 0.0,
+    }
+    cfg.update(overrides)
+    return cfg
+
+
+def _make_range_ohlcv(
+    n: int = 12,
+    base: float = 100.0,
+    range_pct: float = 2.0,
+    volume: float = 100.0,
+) -> list[dict[str, Any]]:
+    """Generate N candles in a tight range for sweep lookback."""
+    high = base * (1 + range_pct / 200)
+    low = base * (1 - range_pct / 200)
+    candles = []
+    for i in range(n):
+        candles.append({
+            "open": base,
+            "high": high + i * 0.001,
+            "low": low - i * 0.001,
+            "close": base,
+            "volume": volume,
+        })
+    return candles
+
+
+class TestLiquiditySweepStrategy:
+    """Tests for the LiquiditySweepStrategy."""
+
+    def test_satisfies_protocol(self) -> None:
+        strategy = LiquiditySweepStrategy()
+        assert isinstance(strategy, Strategy)
+
+    def test_returns_none_when_disabled(self) -> None:
+        strategy = LiquiditySweepStrategy()
+        snapshot = _make_ls_snapshot(ohlcv=_make_range_ohlcv())
+        config = {"enabled": False}
+        assert strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers()) is None
+
+    def test_returns_none_with_insufficient_candles(self) -> None:
+        strategy = LiquiditySweepStrategy()
+        snapshot = _make_ls_snapshot(ohlcv=_make_range_ohlcv(n=5))
+        config = _ls_bare(lookback=20)
+        result = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers())
+        assert result is None
+
+    def test_buy_signal_on_low_sweep_with_reclaim(self) -> None:
+        """Wick below swing low, close reclaims above → buy signal."""
+        strategy = LiquiditySweepStrategy()
+        prior = _make_range_ohlcv(n=11, base=100.0, range_pct=2.0)
+        # swing_low ≈ 99.0; sweep candle: low=98.5 (below), close=100.5 (reclaim)
+        sweep_candle = {"open": 99.5, "high": 100.8, "low": 98.5, "close": 100.5, "volume": 200.0}
+        ohlcv = prior + [sweep_candle]
+        snapshot = _make_ls_snapshot(ohlcv=ohlcv, last_price=100.5)
+        config = _ls_bare()
+        signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers())
+        assert signal is not None
+        assert signal.direction == "buy"
+        assert signal.strategy_name == "liquidity_sweep"
+
+    def test_sell_signal_on_high_sweep_with_reclaim(self) -> None:
+        """Wick above swing high, close reclaims below → sell signal."""
+        strategy = LiquiditySweepStrategy()
+        prior = _make_range_ohlcv(n=11, base=100.0, range_pct=2.0)
+        # swing_high ≈ 101.0; sweep candle: high=101.8 (above), close=99.5 (reclaim)
+        sweep_candle = {"open": 100.5, "high": 101.8, "low": 99.2, "close": 99.5, "volume": 200.0}
+        ohlcv = prior + [sweep_candle]
+        snapshot = _make_ls_snapshot(ohlcv=ohlcv, last_price=99.5)
+        config = _ls_bare()
+        signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers())
+        assert signal is not None
+        assert signal.direction == "sell"
+
+    def test_no_signal_when_no_sweep(self) -> None:
+        """Candle stays inside range → no signal."""
+        strategy = LiquiditySweepStrategy()
+        prior = _make_range_ohlcv(n=11, base=100.0, range_pct=2.0)
+        normal_candle = {"open": 100.0, "high": 100.5, "low": 99.5, "close": 100.2, "volume": 100.0}
+        ohlcv = prior + [normal_candle]
+        snapshot = _make_ls_snapshot(ohlcv=ohlcv)
+        config = _ls_bare()
+        result = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers())
+        assert result is None
+
+    def test_no_signal_when_sweep_but_no_reclaim(self) -> None:
+        """Wick below swing low but close stays low → no reclaim → no signal."""
+        strategy = LiquiditySweepStrategy()
+        prior = _make_range_ohlcv(n=11, base=100.0, range_pct=2.0)
+        sweep_candle = {"open": 99.5, "high": 99.8, "low": 98.5, "close": 98.8, "volume": 200.0}
+        ohlcv = prior + [sweep_candle]
+        snapshot = _make_ls_snapshot(ohlcv=ohlcv, last_price=98.8)
+        config = _ls_bare(reclaim_ratio=0.5)
+        result = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers())
+        assert result is None
+
+    def test_htf_trend_blocks_counter_trend_sweep(self) -> None:
+        """HTF bearish should block a long sweep (counter-trend)."""
+        strategy = LiquiditySweepStrategy()
+        prior = _make_range_ohlcv(n=11, base=100.0, range_pct=2.0)
+        sweep_candle = {"open": 99.5, "high": 100.8, "low": 98.5, "close": 100.5, "volume": 200.0}
+        ohlcv = prior + [sweep_candle]
+        snapshot = _make_ls_snapshot(ohlcv=ohlcv, htf_ema50=99.0, htf_ema200=101.0, last_price=100.5)
+        config = _ls_bare(require_htf_trend=True)
+        result = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers())
+        assert result is None
+
+    def test_htf_trend_allows_trend_aligned_sweep(self) -> None:
+        """HTF bullish should allow a long sweep."""
+        strategy = LiquiditySweepStrategy()
+        prior = _make_range_ohlcv(n=11, base=100.0, range_pct=2.0)
+        sweep_candle = {"open": 99.5, "high": 100.8, "low": 98.5, "close": 100.5, "volume": 200.0}
+        ohlcv = prior + [sweep_candle]
+        snapshot = _make_ls_snapshot(ohlcv=ohlcv, htf_ema50=101.0, htf_ema200=99.0, last_price=100.5)
+        config = _ls_bare(require_htf_trend=True)
+        signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers())
+        assert signal is not None
+        assert signal.direction == "buy"
+
+    def test_max_adx_blocks_strong_trend(self) -> None:
+        """High ADX (strong trend) should block — sweep likely real breakout."""
+        strategy = LiquiditySweepStrategy()
+        prior = _make_range_ohlcv(n=11, base=100.0, range_pct=2.0)
+        sweep_candle = {"open": 99.5, "high": 100.8, "low": 98.5, "close": 100.5, "volume": 200.0}
+        ohlcv = prior + [sweep_candle]
+        snapshot = _make_ls_snapshot(ohlcv=ohlcv, adx_value=45.0, last_price=100.5)
+        config = _ls_bare(max_adx=35.0)
+        result = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers())
+        assert result is None
+
+    def test_volume_spike_blocks_low_volume_sweep(self) -> None:
+        """Sweep with low volume should be blocked when require_volume_spike is on."""
+        strategy = LiquiditySweepStrategy()
+        prior = _make_range_ohlcv(n=11, base=100.0, range_pct=2.0, volume=200.0)
+        sweep_candle = {"open": 99.5, "high": 100.8, "low": 98.5, "close": 100.5, "volume": 200.0}
+        ohlcv = prior + [sweep_candle]
+        snapshot = _make_ls_snapshot(ohlcv=ohlcv, last_price=100.5)
+        config = _ls_bare(require_volume_spike=True, volume_spike_ratio=1.5)
+        result = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers())
+        assert result is None
+
+    def test_volume_spike_allows_high_volume_sweep(self) -> None:
+        """Sweep with high volume should pass the volume spike filter."""
+        strategy = LiquiditySweepStrategy()
+        prior = _make_range_ohlcv(n=11, base=100.0, range_pct=2.0, volume=100.0)
+        sweep_candle = {"open": 99.5, "high": 100.8, "low": 98.5, "close": 100.5, "volume": 300.0}
+        ohlcv = prior + [sweep_candle]
+        snapshot = _make_ls_snapshot(ohlcv=ohlcv, last_price=100.5)
+        config = _ls_bare(require_volume_spike=True, volume_spike_ratio=1.5)
+        signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers())
+        assert signal is not None
+        assert signal.direction == "buy"
+
+    def test_atr_sizing_produces_tp_sl(self) -> None:
+        """When use_atr_sizing is on, TP/SL should be ATR-scaled."""
+        strategy = LiquiditySweepStrategy()
+        prior = _make_range_ohlcv(n=11, base=100.0, range_pct=2.0)
+        sweep_candle = {"open": 99.5, "high": 100.8, "low": 98.5, "close": 100.5, "volume": 200.0}
+        ohlcv = prior + [sweep_candle]
+        snapshot = _make_ls_snapshot(ohlcv=ohlcv, atr_pct=2.0, last_price=100.5)
+        config = _ls_bare(use_atr_sizing=True, atr_tp_multiplier=1.5, atr_sl_multiplier=1.2)
+        signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers())
+        assert signal is not None
+        # TP = 1.5 × 2.0% = 3.0%, SL = 1.2 × 2.0% = 2.4%
+        assert signal.tp_pct is not None
+        assert abs(signal.tp_pct - 3.0) < 0.01
+        assert signal.sl_pct is not None
+        assert abs(signal.sl_pct - 2.4) < 0.01
+
+    def test_min_atr_pct_blocks_quiet_coins(self) -> None:
+        """ATR% below min_atr_pct should block entry."""
+        strategy = LiquiditySweepStrategy()
+        prior = _make_range_ohlcv(n=11, base=100.0, range_pct=2.0)
+        sweep_candle = {"open": 99.5, "high": 100.8, "low": 98.5, "close": 100.5, "volume": 200.0}
+        ohlcv = prior + [sweep_candle]
+        snapshot = _make_ls_snapshot(ohlcv=ohlcv, atr_pct=0.5, last_price=100.5)
+        config = _ls_bare(min_atr_pct=1.0)
+        result = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers())
+        assert result is None
+
+    def test_htf_absent_auto_disables_htf_trend(self) -> None:
+        """require_htf_trend should auto-disable when no HTF data."""
+        strategy = LiquiditySweepStrategy()
+        prior = _make_range_ohlcv(n=11, base=100.0, range_pct=2.0)
+        sweep_candle = {"open": 99.5, "high": 100.8, "low": 98.5, "close": 100.5, "volume": 200.0}
+        ohlcv = prior + [sweep_candle]
+        snapshot = _make_ls_snapshot(ohlcv=ohlcv, htf_ema50=None, htf_ema200=None, last_price=100.5)
+        # Remove htf_indicators entirely
+        indicators = snapshot["market_data"]["BTC-USDT-SWAP"]["indicators"]
+        if "htf_indicators" in indicators:
+            del indicators["htf_indicators"]
+        config = _ls_bare(require_htf_trend=True)
+        signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers())
+        assert signal is not None
+        assert signal.direction == "buy"
