@@ -3911,6 +3911,147 @@ def register_pages(app: FastAPI) -> None:
                 vr_min_atr_pct_input.value = 1.0
                 ui.notify("VWAP Reversion fields set to recommended defaults — click Save to persist", color="info")
 
+            # ── Trend Pullback ────────────────────────────────────────────────────
+            _tp_cfg = ((config.get("launcher") or {}).get("strategies") or {}).get("trend_pullback") or {}
+            with ui.card().classes("w-full rounded-lg border border-slate-200 mb-1"):
+                with ui.row().classes("w-full items-center gap-2 flex-nowrap"):
+                    tp_enabled_switch = ui.switch(
+                        value=bool(_tp_cfg.get("enabled", False)),
+                    ).props("dense color=primary")
+                    with ui.expansion("Trend Pullback").classes("flex-1 text-sm font-medium"):
+                        ui.label(
+                            "Trend-aligned pullback: enters when price pulls back to EMA21 or VWAP "
+                            "in an established HTF trend, then prints a bullish/bearish candle off "
+                            "the level. Fills the gap between SC breakouts (too late) and MR extremes "
+                            "(wrong in a trend). Shares the SC (trending) universe."
+                        ).classes("text-xs text-slate-500 mb-3")
+                        with ui.row().classes("w-full items-center gap-2 mb-2"):
+                            ui.button(
+                                "Set Recommended Defaults",
+                                icon="tune",
+                                on_click=lambda _: _set_tp_defaults(),
+                            ).props("dense flat color=primary size=sm").tooltip(
+                                "Fill all fields with the recommended Trend Pullback configuration. "
+                                "You still need to click Save to persist."
+                            )
+                        with ui.row().classes("w-full flex-wrap gap-4 items-start"):
+                            _tp_tp_raw = _tp_cfg.get("tp_pct")
+                            tp_tp_input = ui.number(
+                                label="Take profit (%)",
+                                value=float(_tp_tp_raw) if _tp_tp_raw is not None else 4.0,
+                                min=0.5, step=0.5, precision=1,
+                            ).classes("w-40").props(
+                                "hint='Exit after this % price move (2 ATR proxy)' persistent-hint clearable"
+                            )
+                            _tp_sl_raw = _tp_cfg.get("sl_pct")
+                            tp_sl_input = ui.number(
+                                label="Stop loss (%)",
+                                value=float(_tp_sl_raw) if _tp_sl_raw is not None else 3.0,
+                                min=0.5, step=0.5, precision=1,
+                            ).classes("w-40").props(
+                                "hint='Exit below pullback low (1.5 ATR)' persistent-hint clearable"
+                            )
+                        with ui.row().classes("w-full flex-wrap gap-4 items-start"):
+                            tp_pullback_ema_input = ui.number(
+                                label="Pullback EMA length",
+                                value=float(_tp_cfg.get("pullback_ema") or 21),
+                                min=5, max=100, step=1, format="%.0f",
+                            ).classes("w-40").props("dense")
+                            ui.label("LTF EMA used as the pullback level (must be computed in indicators).").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-start"):
+                            tp_proximity_input = ui.number(
+                                label="Pullback proximity %",
+                                value=float(_tp_cfg.get("pullback_proximity_pct") or 0.5),
+                                min=0.05, max=5.0, step=0.05, format="%.2f",
+                            ).classes("w-40").props("dense")
+                            ui.label("How close (in %) price must be to the EMA/VWAP level to qualify as a pullback.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            tp_use_vwap_switch = ui.switch(
+                                "Use VWAP as level",
+                                value=bool(_tp_cfg.get("use_vwap_as_level", True)),
+                            ).props("dense color=primary")
+                            ui.label("Also accept VWAP as a valid pullback level.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            tp_require_htf_switch = ui.switch(
+                                "Require HTF trend",
+                                value=bool(_tp_cfg.get("require_htf_trend", True)),
+                            ).props("dense color=primary")
+                            ui.label("HTF EMA50/EMA200 must confirm the trend direction.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            tp_require_bullish_switch = ui.switch(
+                                "Require bullish/bearish candle",
+                                value=bool(_tp_cfg.get("require_bullish_candle", True)),
+                            ).props("dense color=primary")
+                            ui.label("Trigger candle must close in trend direction with a rejection wick off the level.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-start"):
+                            tp_candle_rejection_pct_input = ui.number(
+                                label="Candle rejection %",
+                                value=float(_tp_cfg.get("candle_rejection_pct") or 25.0),
+                                min=5.0, max=90.0, step=5.0, format="%.0f",
+                            ).classes("w-40").props("dense")
+                            ui.label("Minimum wick size as % of candle range for the rejection confirmation.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-start"):
+                            tp_min_adx_input = ui.number(
+                                label="Min ADX",
+                                value=float(_tp_cfg.get("min_adx") or 18.0),
+                                min=0, max=100, step=1, precision=0,
+                            ).classes("w-32").props(
+                                "hint='Require a real trend (not chop)' persistent-hint"
+                            )
+                            tp_max_adx_entry_input = ui.number(
+                                label="Max ADX for entry",
+                                value=float(_tp_cfg.get("max_adx_for_entry") or 40.0),
+                                min=0, max=100, step=1, precision=0,
+                            ).classes("w-40").props(
+                                "hint='Block when trend already extended (pullback likely reversal)' persistent-hint"
+                            )
+                        # ── ATR-scaled TP/SL ────────────────────────────────
+                        ui.separator().classes("my-2")
+                        ui.label("ATR-Scaled TP/SL").classes("text-xs font-semibold text-slate-600")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            tp_use_atr_sizing_switch = ui.switch(
+                                "Use ATR sizing",
+                                value=bool(_tp_cfg.get("use_atr_sizing", True)),
+                            ).props("dense color=primary")
+                            ui.label("Override static TP/SL with ATR-scaled values.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            tp_atr_tp_mult_input = ui.number(
+                                label="ATR TP multiplier",
+                                value=float(_tp_cfg.get("atr_tp_multiplier") or 2.0),
+                                min=0.1, max=10.0, step=0.1, format="%.1f",
+                            ).classes("w-40").props("dense")
+                            tp_atr_sl_mult_input = ui.number(
+                                label="ATR SL multiplier",
+                                value=float(_tp_cfg.get("atr_sl_multiplier") or 1.5),
+                                min=0.1, max=10.0, step=0.1, format="%.1f",
+                            ).classes("w-40").props("dense")
+                            tp_min_atr_pct_input = ui.number(
+                                label="Min ATR%",
+                                value=float(_tp_cfg.get("min_atr_pct") or 1.0),
+                                min=0.0, max=10.0, step=0.1, format="%.1f",
+                            ).classes("w-40").props("dense")
+                    _active_badge_tp = ui.badge("Active", color="positive").bind_visibility_from(
+                        tp_enabled_switch, "value"
+                    )
+
+            def _set_tp_defaults() -> None:
+                """Fill all Trend Pullback fields with the recommended configuration."""
+                tp_tp_input.value = 4.0
+                tp_sl_input.value = 3.0
+                tp_pullback_ema_input.value = 21
+                tp_proximity_input.value = 0.5
+                tp_use_vwap_switch.value = True
+                tp_require_htf_switch.value = True
+                tp_require_bullish_switch.value = True
+                tp_candle_rejection_pct_input.value = 25.0
+                tp_min_adx_input.value = 18.0
+                tp_max_adx_entry_input.value = 40.0
+                tp_use_atr_sizing_switch.value = True
+                tp_atr_tp_mult_input.value = 2.0
+                tp_atr_sl_mult_input.value = 1.5
+                tp_min_atr_pct_input.value = 1.0
+                ui.notify("Trend Pullback fields set to recommended defaults — click Save to persist", color="info")
+
             with ui.card().classes("w-full rounded-lg border border-slate-200 mb-1"):
                 with ui.row().classes("w-full items-center gap-2 flex-nowrap"):
                     shotgun_switch = ui.switch(
@@ -4886,6 +5027,23 @@ def register_pages(app: FastAPI) -> None:
                 "atr_tp_multiplier": float(vr_atr_tp_mult_input.value or 1.5),
                 "atr_sl_multiplier": float(vr_atr_sl_mult_input.value or 2.5),
                 "min_atr_pct": float(vr_min_atr_pct_input.value or 1.0),
+            }
+            _strategies_cfg["trend_pullback"] = {
+                "enabled": bool(tp_enabled_switch.value),
+                "tp_pct": float(tp_tp_input.value) if tp_tp_input.value not in (None, "") else None,
+                "sl_pct": float(tp_sl_input.value) if tp_sl_input.value not in (None, "") else None,
+                "pullback_ema": int(tp_pullback_ema_input.value or 21),
+                "pullback_proximity_pct": float(tp_proximity_input.value or 0.5),
+                "use_vwap_as_level": bool(tp_use_vwap_switch.value),
+                "require_htf_trend": bool(tp_require_htf_switch.value),
+                "require_bullish_candle": bool(tp_require_bullish_switch.value),
+                "candle_rejection_pct": float(tp_candle_rejection_pct_input.value or 25.0),
+                "min_adx": float(tp_min_adx_input.value or 18.0),
+                "max_adx_for_entry": float(tp_max_adx_entry_input.value or 40.0),
+                "use_atr_sizing": bool(tp_use_atr_sizing_switch.value),
+                "atr_tp_multiplier": float(tp_atr_tp_mult_input.value or 2.0),
+                "atr_sl_multiplier": float(tp_atr_sl_mult_input.value or 1.5),
+                "min_atr_pct": float(tp_min_atr_pct_input.value or 1.0),
             }
             _launcher_cfg["strategies"] = _strategies_cfg
             config["launcher"] = _launcher_cfg

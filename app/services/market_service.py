@@ -35,6 +35,7 @@ from app.services.strategies import Strategy, StrategyHelpers, StrategySignal
 from app.services.strategies.liquidity_sweep import LiquiditySweepStrategy
 from app.services.strategies.mean_reversion import MeanReversionStrategy
 from app.services.strategies.spike_continuation import SpikeContinuationStrategy
+from app.services.strategies.trend_pullback import TrendPullbackStrategy
 from app.services.strategies.vwap_reversion import VWAPReversionStrategy
 
 
@@ -415,6 +416,7 @@ class MarketService:
             SpikeContinuationStrategy(),
             LiquiditySweepStrategy(),
             VWAPReversionStrategy(),
+            TrendPullbackStrategy(),
         ]
         self._strategy_helpers = StrategyHelpers(
             extract_float=self._extract_float,
@@ -2716,6 +2718,13 @@ class MarketService:
             if not universe:
                 return True
             return symbol_u in {s.upper() for s in universe}
+        # Trend Pullback shares the SC (trending) universe — it enters pullbacks
+        # in established trends, the same names SC trades breakouts on.
+        if name == "trend_pullback":
+            universe = self._screener_sc_symbols or self._screener_selected_symbols
+            if not universe:
+                return True
+            return symbol_u in {s.upper() for s in universe}
         if name == "mean_reversion":
             universe = self._screener_mr_symbols or self._screener_selected_symbols
             if not universe:
@@ -4240,6 +4249,8 @@ class MarketService:
             return list(self._screener_mr_symbols)
         if dual and name == "vwap_reversion" and self._screener_mr_symbols:
             return list(self._screener_mr_symbols)
+        if dual and name == "trend_pullback" and self._screener_sc_symbols:
+            return list(self._screener_sc_symbols)
         if self._screener_selected_symbols:
             return list(self._screener_selected_symbols)
         return list(self.symbols)
@@ -5581,6 +5592,7 @@ class MarketService:
         macd_df = ta.macd(df["close"])
         ema_50 = ta.ema(df["close"], length=50)
         ema_200 = ta.ema(df["close"], length=200)
+        ema_21 = ta.ema(df["close"], length=21)
         adx_df = ta.adx(high=df["high"], low=df["low"], close=df["close"], length=14)
         obv_series = ta.obv(close=df["close"], volume=df["volume"])
         cmf_series = ta.cmf(high=df["high"], low=df["low"], close=df["close"], volume=df["volume"], length=20)
@@ -5645,6 +5657,7 @@ class MarketService:
                 "series": MarketService._series_to_list(cmf_14_series),
             },
             "moving_averages": {
+                "ema_21": float(ema_21.iloc[-1]) if ema_21 is not None and not ema_21.empty else None,
                 "ema_50": float(ema_50.iloc[-1]) if ema_50 is not None and not ema_50.empty else None,
                 "ema_200": float(ema_200.iloc[-1]) if ema_200 is not None and not ema_200.empty else None,
             },

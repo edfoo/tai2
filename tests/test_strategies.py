@@ -23,6 +23,7 @@ from app.services.strategies.mean_reversion import MeanReversionStrategy
 from app.services.strategies.spike_continuation import SpikeContinuationStrategy
 from app.services.strategies.liquidity_sweep import LiquiditySweepStrategy
 from app.services.strategies.vwap_reversion import VWAPReversionStrategy
+from app.services.strategies.trend_pullback import TrendPullbackStrategy
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -1734,4 +1735,309 @@ class TestVWAPReversionStrategy:
         signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=95.0))
         assert signal is not None
         assert signal.tp_pct == 2.0
+        assert signal.sl_pct == 3.0
+
+
+# ── TrendPullbackStrategy ────────────────────────────────────────────────────
+
+
+def _make_tp_snapshot(
+    *,
+    ema_21: float | None = 100.0,
+    vwap: float | None = 100.0,
+    atr_pct: float | None = 2.0,
+    adx_value: float | None = 25.0,
+    htf_ema50: float | None = 101.0,
+    htf_ema200: float | None = 99.0,
+    ohlcv: list[dict[str, Any]] | None = None,
+    symbol: str = "BTC-USDT-SWAP",
+    last_price: float = 100.0,
+) -> dict[str, Any]:
+    """Build a snapshot for Trend Pullback tests."""
+    indicators: dict[str, Any] = {
+        "atr_pct": atr_pct,
+        "adx": {"value": adx_value},
+        "vwap": vwap,
+        "moving_averages": {
+            "ema_21": ema_21,
+        },
+        "ohlcv": ohlcv or [],
+    }
+    if htf_ema50 is not None or htf_ema200 is not None:
+        indicators["htf_indicators"] = {
+            "moving_averages": {
+                "ema_50": htf_ema50,
+                "ema_200": htf_ema200,
+            }
+        }
+    return {
+        "market_data": {
+            symbol: {
+                "indicators": indicators,
+                "custom_metrics": {},
+            }
+        },
+        "positions": [],
+        "last_price": last_price,
+    }
+
+
+def _tp_bare(**overrides: Any) -> dict[str, Any]:
+    """Trend Pullback config with default-on filters explicitly disabled for unit tests."""
+    cfg: dict[str, Any] = {
+        "enabled": True,
+        "pullback_ema": 21,
+        "use_vwap_as_level": False,
+        "pullback_proximity_pct": 0.5,
+        "require_htf_trend": False,
+        "require_bullish_candle": False,
+        "candle_rejection_pct": 25.0,
+        "min_adx": 0.0,
+        "max_adx_for_entry": 0.0,
+        "use_atr_sizing": False,
+        "atr_tp_multiplier": 2.0,
+        "atr_sl_multiplier": 1.5,
+        "min_atr_pct": 0.0,
+    }
+    cfg.update(overrides)
+    return cfg
+
+
+def _make_pullback_ohlcv(
+    n: int = 30,
+    base: float = 100.0,
+    last_close: float | None = None,
+    last_open: float | None = None,
+    last_high: float | None = None,
+    last_low: float | None = None,
+    prev_close: float | None = None,
+) -> list[dict[str, Any]]:
+    """Generate N candles; the last two are controllable for candle confirmation."""
+    candles = []
+    for i in range(n - 2):
+        c = base + i * 0.01
+        candles.append({
+            "open": c - 0.05, "high": c + 0.1, "low": c - 0.1,
+            "close": c, "volume": 100.0,
+        })
+    # Second-to-last candle (prev).
+    pc = prev_close if prev_close is not None else base + (n - 2) * 0.01
+    candles.append({
+        "open": pc - 0.05, "high": pc + 0.1, "low": pc - 0.1,
+        "close": pc, "volume": 100.0,
+    })
+    # Last candle (curr) — defaults to a bullish candle off the level.
+    _open = last_open if last_open is not None else 99.7
+    _high = last_high if last_high is not None else 100.2
+    _low = last_low if last_low is not None else 99.6
+    _close = last_close if last_close is not None else 100.0
+    candles.append({
+        "open": _open, "high": _high, "low": _low,
+        "close": _close, "volume": 100.0,
+    })
+    return candles
+
+
+class TestTrendPullbackStrategy:
+    """Tests for the TrendPullbackStrategy."""
+
+    def test_satisfies_protocol(self) -> None:
+        strategy = TrendPullbackStrategy()
+        assert isinstance(strategy, Strategy)
+
+    def test_returns_none_when_disabled(self) -> None:
+        strategy = TrendPullbackStrategy()
+        snapshot = _make_tp_snapshot(ohlcv=_make_pullback_ohlcv(), last_price=100.0)
+        config = {"enabled": False}
+        assert strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=100.0)) is None
+
+    def test_returns_none_when_no_enabled_key(self) -> None:
+        strategy = TrendPullbackStrategy()
+        snapshot = _make_tp_snapshot(ohlcv=_make_pullback_ohlcv(), last_price=100.0)
+        result = strategy.evaluate("BTC-USDT-SWAP", snapshot, {}, _make_helpers(last_price=100.0))
+        assert result is None
+
+    def test_buy_signal_on_pullback_to_ema_in_uptrend(self) -> None:
+        """Price pulls back to EMA21 in HTF uptrend → buy signal."""
+        strategy = TrendPullbackStrategy()
+        # EMA21=100, price=100 (touching), HTF bullish, bullish candle.
+        ohlcv = _make_pullback_ohlcv(prev_close=99.5, last_close=100.0, last_low=99.6)
+        snapshot = _make_tp_snapshot(
+            ema_21=100.0, htf_ema50=101.0, htf_ema200=99.0,
+            ohlcv=ohlcv, last_price=100.0,
+        )
+        config = _tp_bare(require_htf_trend=True, require_bullish_candle=True)
+        signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=100.0))
+        assert signal is not None
+        assert signal.direction == "buy"
+        assert signal.strategy_name == "trend_pullback"
+
+    def test_sell_signal_on_pullback_to_ema_in_downtrend(self) -> None:
+        """Price pulls back to EMA21 in HTF downtrend → sell signal."""
+        strategy = TrendPullbackStrategy()
+        # Bearish candle: close < prev close, upper wick.
+        ohlcv = _make_pullback_ohlcv(
+            prev_close=100.5, last_open=100.3, last_high=100.4,
+            last_low=99.8, last_close=100.0,
+        )
+        snapshot = _make_tp_snapshot(
+            ema_21=100.0, htf_ema50=99.0, htf_ema200=101.0,
+            ohlcv=ohlcv, last_price=100.0,
+        )
+        config = _tp_bare(require_htf_trend=True, require_bullish_candle=True)
+        signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=100.0))
+        assert signal is not None
+        assert signal.direction == "sell"
+
+    def test_no_signal_when_not_at_pullback_level(self) -> None:
+        """Price far from EMA21/VWAP → no pullback → no signal."""
+        strategy = TrendPullbackStrategy()
+        snapshot = _make_tp_snapshot(
+            ema_21=100.0, vwap=100.0, ohlcv=_make_pullback_ohlcv(), last_price=95.0,
+        )
+        config = _tp_bare(pullback_proximity_pct=0.5)
+        result = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=95.0))
+        assert result is None
+
+    def test_vwap_also_qualifies_as_level(self) -> None:
+        """When use_vwap_as_level is True, touching VWAP qualifies."""
+        strategy = TrendPullbackStrategy()
+        # EMA21 far away (105), VWAP=100, price=100 → VWAP touched.
+        ohlcv = _make_pullback_ohlcv(prev_close=99.5, last_close=100.0, last_low=99.6)
+        snapshot = _make_tp_snapshot(
+            ema_21=105.0, vwap=100.0, htf_ema50=101.0, htf_ema200=99.0,
+            ohlcv=ohlcv, last_price=100.0,
+        )
+        config = _tp_bare(use_vwap_as_level=True, require_htf_trend=True, require_bullish_candle=True)
+        signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=100.0))
+        assert signal is not None
+        assert signal.direction == "buy"
+
+    def test_htf_trend_blocks_counter_trend(self) -> None:
+        """HTF bearish should block a long pullback (counter-trend)."""
+        strategy = TrendPullbackStrategy()
+        ohlcv = _make_pullback_ohlcv(prev_close=99.5, last_close=100.0, last_low=99.6)
+        snapshot = _make_tp_snapshot(
+            ema_21=100.0, htf_ema50=99.0, htf_ema200=101.0,
+            ohlcv=ohlcv, last_price=100.0,
+        )
+        config = _tp_bare(require_htf_trend=True, require_bullish_candle=True)
+        result = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=100.0))
+        assert result is None
+
+    def test_htf_flat_blocks_when_required(self) -> None:
+        """HTF EMA50 == EMA200 (flat) should block when require_htf_trend is on."""
+        strategy = TrendPullbackStrategy()
+        ohlcv = _make_pullback_ohlcv(prev_close=99.5, last_close=100.0, last_low=99.6)
+        snapshot = _make_tp_snapshot(
+            ema_21=100.0, htf_ema50=100.0, htf_ema200=100.0,
+            ohlcv=ohlcv, last_price=100.0,
+        )
+        config = _tp_bare(require_htf_trend=True, require_bullish_candle=True)
+        result = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=100.0))
+        assert result is None
+
+    def test_htf_absent_auto_disables_htf_trend(self) -> None:
+        """require_htf_trend should auto-disable when no HTF data."""
+        strategy = TrendPullbackStrategy()
+        ohlcv = _make_pullback_ohlcv(prev_close=99.5, last_close=100.0, last_low=99.6)
+        snapshot = _make_tp_snapshot(
+            ema_21=100.0, htf_ema50=None, htf_ema200=None,
+            ohlcv=ohlcv, last_price=100.0,
+        )
+        indicators = snapshot["market_data"]["BTC-USDT-SWAP"]["indicators"]
+        if "htf_indicators" in indicators:
+            del indicators["htf_indicators"]
+        config = _tp_bare(require_htf_trend=True, require_bullish_candle=True)
+        signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=100.0))
+        assert signal is not None
+        assert signal.direction == "buy"
+
+    def test_bullish_candle_blocks_bearish_close(self) -> None:
+        """A bearish close (close < prev close) should block a long entry."""
+        strategy = TrendPullbackStrategy()
+        # close=99.5 < prev_close=100.0 → bearish, no lower wick confirmation.
+        ohlcv = _make_pullback_ohlcv(
+            prev_close=100.0, last_open=99.8, last_high=100.0,
+            last_low=99.4, last_close=99.5,
+        )
+        snapshot = _make_tp_snapshot(
+            ema_21=100.0, htf_ema50=101.0, htf_ema200=99.0,
+            ohlcv=ohlcv, last_price=99.5,
+        )
+        config = _tp_bare(require_htf_trend=True, require_bullish_candle=True)
+        result = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=99.5))
+        assert result is None
+
+    def test_min_adx_blocks_chop(self) -> None:
+        """ADX below min_adx should block — not a real trend."""
+        strategy = TrendPullbackStrategy()
+        ohlcv = _make_pullback_ohlcv(prev_close=99.5, last_close=100.0, last_low=99.6)
+        snapshot = _make_tp_snapshot(
+            ema_21=100.0, adx_value=10.0, htf_ema50=101.0, htf_ema200=99.0,
+            ohlcv=ohlcv, last_price=100.0,
+        )
+        config = _tp_bare(min_adx=18.0, require_htf_trend=True, require_bullish_candle=True)
+        result = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=100.0))
+        assert result is None
+
+    def test_max_adx_blocks_extended_trend(self) -> None:
+        """ADX above max_adx_for_entry should block — trend extended."""
+        strategy = TrendPullbackStrategy()
+        ohlcv = _make_pullback_ohlcv(prev_close=99.5, last_close=100.0, last_low=99.6)
+        snapshot = _make_tp_snapshot(
+            ema_21=100.0, adx_value=50.0, htf_ema50=101.0, htf_ema200=99.0,
+            ohlcv=ohlcv, last_price=100.0,
+        )
+        config = _tp_bare(max_adx_for_entry=40.0, require_htf_trend=True, require_bullish_candle=True)
+        result = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=100.0))
+        assert result is None
+
+    def test_min_atr_pct_blocks_quiet_coins(self) -> None:
+        """ATR% below min_atr_pct should block entry."""
+        strategy = TrendPullbackStrategy()
+        ohlcv = _make_pullback_ohlcv(prev_close=99.5, last_close=100.0, last_low=99.6)
+        snapshot = _make_tp_snapshot(
+            ema_21=100.0, atr_pct=0.5, htf_ema50=101.0, htf_ema200=99.0,
+            ohlcv=ohlcv, last_price=100.0,
+        )
+        config = _tp_bare(min_atr_pct=1.0, require_htf_trend=True, require_bullish_candle=True)
+        result = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=100.0))
+        assert result is None
+
+    def test_atr_sizing_produces_tp_sl(self) -> None:
+        """When use_atr_sizing is on, TP/SL should be ATR-scaled."""
+        strategy = TrendPullbackStrategy()
+        ohlcv = _make_pullback_ohlcv(prev_close=99.5, last_close=100.0, last_low=99.6)
+        snapshot = _make_tp_snapshot(
+            ema_21=100.0, atr_pct=2.0, htf_ema50=101.0, htf_ema200=99.0,
+            ohlcv=ohlcv, last_price=100.0,
+        )
+        config = _tp_bare(
+            use_atr_sizing=True, atr_tp_multiplier=2.0, atr_sl_multiplier=1.5,
+            require_htf_trend=True, require_bullish_candle=True,
+        )
+        signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=100.0))
+        assert signal is not None
+        # TP = 2.0 × 2.0% = 4.0%, SL = 1.5 × 2.0% = 3.0%
+        assert signal.tp_pct is not None
+        assert abs(signal.tp_pct - 4.0) < 0.01
+        assert signal.sl_pct is not None
+        assert abs(signal.sl_pct - 3.0) < 0.01
+
+    def test_static_tp_sl_when_atr_sizing_off(self) -> None:
+        """When use_atr_sizing is off, static tp_pct/sl_pct should be used."""
+        strategy = TrendPullbackStrategy()
+        ohlcv = _make_pullback_ohlcv(prev_close=99.5, last_close=100.0, last_low=99.6)
+        snapshot = _make_tp_snapshot(
+            ema_21=100.0, htf_ema50=101.0, htf_ema200=99.0,
+            ohlcv=ohlcv, last_price=100.0,
+        )
+        config = _tp_bare(
+            use_atr_sizing=False, tp_pct=4.0, sl_pct=3.0,
+            require_htf_trend=True, require_bullish_candle=True,
+        )
+        signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=100.0))
+        assert signal is not None
+        assert signal.tp_pct == 4.0
         assert signal.sl_pct == 3.0
