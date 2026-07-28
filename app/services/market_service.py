@@ -10032,6 +10032,7 @@ class MarketService:
             rationale=decision.get("rationale"),
             fee=fee_value,
             is_close=reduce_only,
+            strategy_name=decision.get("_strategy_name"),
         )
         return True
 
@@ -11333,6 +11334,7 @@ class MarketService:
         is_close: bool = False,
         pnl_usd: float | None = None,
         pnl_ratio: float | None = None,
+        strategy_name: str | None = None,
     ) -> None:
         """Persist successful fills so downstream analytics and the UI have context."""
         if price is None or amount is None:
@@ -11349,6 +11351,7 @@ class MarketService:
             is_close=is_close,
             pnl_usd=pnl_usd,
             pnl_ratio=pnl_ratio,
+            strategy_name=strategy_name,
         )
         if not self.settings.database_url:
             return
@@ -11421,6 +11424,7 @@ class MarketService:
         is_close: bool,
         pnl_usd: float | None = None,
         pnl_ratio: float | None = None,
+        strategy_name: str | None = None,
     ) -> None:
         """Fire a Telegram alert if the relevant notification toggle is enabled."""
         from app.services.alert_service import send_alert  # local import avoids circular deps
@@ -11475,12 +11479,16 @@ class MarketService:
                 return
             notional = amount * price
             ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+            strategy_line = ""
+            if strategy_name:
+                strategy_line = f"\nStrategy: <code>{strategy_name}</code>"
             text = (
                 f"\U0001f7e2 <b>Trade Opened</b>\n"
                 f"Symbol: <code>{symbol}</code>\n"
                 f"Side: {side.upper()}\n"
                 f"Price: {price:.6g} USDT\n"
-                f"Notional: {notional:.2f} USDT\n"
+                f"Notional: {notional:.2f} USDT"
+                f"{strategy_line}\n"
                 f"Time: {ts}"
             )
         self._emit_debug(f"[alert] sending {'close' if is_close else 'open'} notification for {symbol}")
