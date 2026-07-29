@@ -65,6 +65,11 @@ class SpikeContinuationStrategy:
       - ``atr_tp_multiplier`` (float, default 2.2)
       - ``atr_sl_multiplier`` (float, default 2.0)
       - ``min_atr_pct`` (float, default 1.2)
+      - ``flip_launcher_direction`` (str, default None): invert the
+        Launcher's trade direction before execution. One of "both",
+        "from_long" (only BUY→SELL), "from_short" (only SELL→BUY),
+        or None to disable. TP/SL are mirrored around last_price so
+        they land on the correct side for the flipped direction.
     """
 
     name = "spike_continuation"

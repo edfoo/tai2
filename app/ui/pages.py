@@ -3595,6 +3595,18 @@ def register_pages(app: FastAPI) -> None:
                                 min=0.0, max=10.0, step=0.1, format="%.1f",
                             ).classes("w-40").props("dense")
                             ui.label("Skip entries when ATR% is below this (0 = disabled). Filters out dead coins.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            _sc_flip_enabled = bool(_sc_cfg.get("flip_launcher_direction"))
+                            sc_flip_switch = ui.switch(
+                                "Flip Launcher Decision",
+                                value=_sc_flip_enabled,
+                            ).props("dense color=primary")
+                            sc_flip_select = ui.select(
+                                options={"both": "Both", "from_long": "From LONG only", "from_short": "From SHORT only"},
+                                value=_sc_cfg.get("flip_launcher_direction") or "both",
+                                label="Flip direction",
+                            ).classes("w-40").props("dense")
+                            ui.label("Invert the Launcher's trade direction before execution.").classes("text-xs text-slate-500")
                     _active_badge_sc = ui.badge("Active", color="positive").bind_visibility_from(
                         sc_enabled_switch, "value"
                     )
@@ -3627,6 +3639,8 @@ def register_pages(app: FastAPI) -> None:
                 sc_atr_tp_mult_input.value = 2.2
                 sc_atr_sl_mult_input.value = 2.0
                 sc_min_atr_pct_input.value = 1.0
+                sc_flip_switch.value = False
+                sc_flip_select.value = "both"
                 ui.notify("Spike Continuation fields set to recommended defaults — click Save to persist", color="info")
 
             # ── Liquidity Sweep ───────────────────────────────────────────────────
@@ -5037,6 +5051,7 @@ def register_pages(app: FastAPI) -> None:
                 "atr_tp_multiplier": float(sc_atr_tp_mult_input.value or 2.5),
                 "atr_sl_multiplier": float(sc_atr_sl_mult_input.value or 1.8),
                 "min_atr_pct": float(sc_min_atr_pct_input.value or 0.0),
+                "flip_launcher_direction": str(sc_flip_select.value) if sc_flip_switch.value else None,
             }
             _strategies_cfg["liquidity_sweep"] = {
                 "enabled": bool(ls_enabled_switch.value),

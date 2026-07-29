@@ -1082,6 +1082,108 @@ class TestBuildLauncherDecision:
         assert abs(decision["take_profit"] - 96.0) < 0.01
         assert abs(decision["stop_loss"] - 103.0) < 0.01
 
+    def test_spike_continuation_flip_direction_and_tp_sl_reflection(self) -> None:
+        """Spike Continuation flip mirrors side, TP and SL around last_price."""
+        service = _make_service()
+        self._setup_service_with_price(service, 106.0)
+        service.set_launcher_config({
+            "mode": "launcher_only",
+            "notional_usd": 50.0,
+            "strategies": {
+                "spike_continuation": {
+                    "enabled": True,
+                    "tp_pct": 4.0,
+                    "sl_pct": 3.0,
+                    "volume_rsi_min": 75.0,
+                    "rsi_min": 55.0,
+                    "rsi_max": 75.0,
+                    "require_bb_breakout": True,
+                    "require_candle_strength": True,
+                    "candle_strength_pct": 70.0,
+                    "min_bb_bandwidth": 3.0,
+                    "max_adx": 40.0,
+                    "require_momentum_acceleration": True,
+                    "acceleration_lookback": 3,
+                    "acceleration_min_ratio": 1.5,
+                    "require_rsi_rising": True,
+                    "require_volume_rsi_rising": True,
+                    "max_spike_extension_pct": 5.0,
+                    "spike_lookback": 5,
+                    "require_regime": False,
+                    "use_atr_sizing": False,
+                    "min_atr_pct": 0.0,
+                    "flip_launcher_direction": "both",
+                },
+            },
+        })
+        # Strong accelerating bullish spike → buy signal.
+        service._last_full_snapshot = _make_spike_snapshot(
+            rsi=65.0,
+            last_price=106.0,
+            volume_rsi_series=[70.0, 82.0],
+        )
+
+        decisions = service.build_launcher_decisions("BTC-USDT-SWAP")
+        assert len(decisions) == 1
+        decision = decisions[0]
+        # Spike buy signal, flipped "both" → SELL
+        assert decision["action"] == "SELL"
+        # Original BUY: TP=106*1.04=110.24 (above), SL=106*0.97=102.82 (below).
+        # Flipped to SELL: mirror around last_price=106 →
+        #   TP=2*106-110.24=101.76 (below, correct for short)
+        #   SL=2*106-102.82=109.18 (above, correct for short)
+        assert abs(decision["take_profit"] - 101.76) < 0.01
+        assert abs(decision["stop_loss"] - 109.18) < 0.01
+
+    def test_spike_continuation_flip_from_short_only_keeps_long(self) -> None:
+        """from_short flip should leave a BUY signal unchanged."""
+        service = _make_service()
+        self._setup_service_with_price(service, 106.0)
+        service.set_launcher_config({
+            "mode": "launcher_only",
+            "notional_usd": 50.0,
+            "strategies": {
+                "spike_continuation": {
+                    "enabled": True,
+                    "tp_pct": 4.0,
+                    "sl_pct": 3.0,
+                    "volume_rsi_min": 75.0,
+                    "rsi_min": 55.0,
+                    "rsi_max": 75.0,
+                    "require_bb_breakout": True,
+                    "require_candle_strength": True,
+                    "candle_strength_pct": 70.0,
+                    "min_bb_bandwidth": 3.0,
+                    "max_adx": 40.0,
+                    "require_momentum_acceleration": True,
+                    "acceleration_lookback": 3,
+                    "acceleration_min_ratio": 1.5,
+                    "require_rsi_rising": True,
+                    "require_volume_rsi_rising": True,
+                    "max_spike_extension_pct": 5.0,
+                    "spike_lookback": 5,
+                    "require_regime": False,
+                    "use_atr_sizing": False,
+                    "min_atr_pct": 0.0,
+                    "flip_launcher_direction": "from_short",
+                },
+            },
+        })
+        # Bullish spike → buy signal; from_short should NOT flip it.
+        service._last_full_snapshot = _make_spike_snapshot(
+            rsi=65.0,
+            last_price=106.0,
+            volume_rsi_series=[70.0, 82.0],
+        )
+
+        decisions = service.build_launcher_decisions("BTC-USDT-SWAP")
+        assert len(decisions) == 1
+        decision = decisions[0]
+        assert decision["action"] == "BUY"
+        # Unflipped BUY: TP=106*1.04=110.24, SL=106*0.97=102.82
+        assert abs(decision["take_profit"] - 110.24) < 0.01
+        assert abs(decision["stop_loss"] - 102.82) < 0.01
+
 
 # ── Spike Continuation Strategy ──────────────────────────────────────────────
 
