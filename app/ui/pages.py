@@ -4060,6 +4060,19 @@ def register_pages(app: FastAPI) -> None:
                                 value=float(_tp_cfg.get("min_atr_pct") or 1.0),
                                 min=0.0, max=10.0, step=0.1, format="%.1f",
                             ).classes("w-40").props("dense")
+                            ui.label("Skip entries when ATR% is below this (0 = disabled). Filters out dead coins.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            _tp_flip_enabled = bool(_tp_cfg.get("flip_launcher_direction"))
+                            tp_flip_switch = ui.switch(
+                                "Flip Launcher Decision",
+                                value=_tp_flip_enabled,
+                            ).props("dense color=primary")
+                            tp_flip_select = ui.select(
+                                options={"both": "Both", "from_long": "From LONG only", "from_short": "From SHORT only"},
+                                value=_tp_cfg.get("flip_launcher_direction") or "both",
+                                label="Flip direction",
+                            ).classes("w-40").props("dense")
+                            ui.label("Invert the Launcher's trade direction before execution.").classes("text-xs text-slate-500")
                     _active_badge_tp = ui.badge("Active", color="positive").bind_visibility_from(
                         tp_enabled_switch, "value"
                     )
@@ -4080,6 +4093,8 @@ def register_pages(app: FastAPI) -> None:
                 tp_atr_tp_mult_input.value = 2.0
                 tp_atr_sl_mult_input.value = 1.5
                 tp_min_atr_pct_input.value = 1.0
+                tp_flip_switch.value = False
+                tp_flip_select.value = "both"
                 ui.notify("Trend Pullback fields set to recommended defaults — click Save to persist", color="info")
 
             with ui.card().classes("w-full rounded-lg border border-slate-200 mb-1"):
@@ -5076,6 +5091,7 @@ def register_pages(app: FastAPI) -> None:
                 "atr_tp_multiplier": float(tp_atr_tp_mult_input.value or 2.0),
                 "atr_sl_multiplier": float(tp_atr_sl_mult_input.value or 1.5),
                 "min_atr_pct": float(tp_min_atr_pct_input.value or 1.0),
+                "flip_launcher_direction": str(tp_flip_select.value) if tp_flip_switch.value else None,
             }
             _launcher_cfg["strategies"] = _strategies_cfg
             config["launcher"] = _launcher_cfg

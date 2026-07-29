@@ -996,6 +996,92 @@ class TestBuildLauncherDecision:
         assert abs(decision["take_profit"] - 103.515) < 0.01
         assert abs(decision["stop_loss"] - 95.475) < 0.01
 
+    def test_trend_pullback_flip_direction_and_tp_sl_reflection(self) -> None:
+        """Trend Pullback flip mirrors side, TP and SL around last_price."""
+        service = _make_service()
+        self._setup_service_with_price(service, 100.0)
+        service.set_launcher_config({
+            "mode": "launcher_only",
+            "notional_usd": 50.0,
+            "strategies": {
+                "trend_pullback": {
+                    "enabled": True,
+                    "tp_pct": 4.0,
+                    "sl_pct": 3.0,
+                    "pullback_ema": 21,
+                    "use_vwap_as_level": False,
+                    "pullback_proximity_pct": 0.5,
+                    "require_htf_trend": True,
+                    "require_bullish_candle": True,
+                    "candle_rejection_pct": 25.0,
+                    "min_adx": 0.0,
+                    "max_adx_for_entry": 0.0,
+                    "use_atr_sizing": False,
+                    "min_atr_pct": 0.0,
+                    "flip_launcher_direction": "both",
+                },
+            },
+        })
+        # EMA21=100, price=100 (touching), HTF bullish, bullish candle → buy signal.
+        ohlcv = _make_pullback_ohlcv(prev_close=99.5, last_close=100.0, last_low=99.6)
+        service._last_full_snapshot = _make_tp_snapshot(
+            ema_21=100.0, htf_ema50=101.0, htf_ema200=99.0,
+            ohlcv=ohlcv, last_price=100.0,
+        )
+
+        decisions = service.build_launcher_decisions("BTC-USDT-SWAP")
+        assert len(decisions) == 1
+        decision = decisions[0]
+        # Pullback buy signal, flipped "both" → SELL
+        assert decision["action"] == "SELL"
+        # Original BUY: TP=100*1.04=104 (above), SL=100*0.97=97 (below).
+        # Flipped to SELL: mirror around last_price=100 →
+        #   TP=2*100-104=96 (below, correct for short)
+        #   SL=2*100-97=103 (above, correct for short)
+        assert abs(decision["take_profit"] - 96.0) < 0.01
+        assert abs(decision["stop_loss"] - 103.0) < 0.01
+
+    def test_trend_pullback_flip_from_long_only_keeps_short(self) -> None:
+        """from_long flip should leave a SELL signal unchanged."""
+        service = _make_service()
+        self._setup_service_with_price(service, 100.0)
+        service.set_launcher_config({
+            "mode": "launcher_only",
+            "notional_usd": 50.0,
+            "strategies": {
+                "trend_pullback": {
+                    "enabled": True,
+                    "tp_pct": 4.0,
+                    "sl_pct": 3.0,
+                    "pullback_ema": 21,
+                    "use_vwap_as_level": False,
+                    "pullback_proximity_pct": 0.5,
+                    "require_htf_trend": True,
+                    "require_bullish_candle": True,
+                    "candle_rejection_pct": 25.0,
+                    "min_adx": 0.0,
+                    "max_adx_for_entry": 0.0,
+                    "use_atr_sizing": False,
+                    "min_atr_pct": 0.0,
+                    "flip_launcher_direction": "from_long",
+                },
+            },
+        })
+        # HTF bearish, bearish candle off EMA21 → sell signal; from_long should NOT flip it.
+        ohlcv = _make_pullback_ohlcv(prev_close=100.5, last_close=100.0, last_high=100.4)
+        service._last_full_snapshot = _make_tp_snapshot(
+            ema_21=100.0, htf_ema50=99.0, htf_ema200=101.0,
+            ohlcv=ohlcv, last_price=100.0,
+        )
+
+        decisions = service.build_launcher_decisions("BTC-USDT-SWAP")
+        assert len(decisions) == 1
+        decision = decisions[0]
+        assert decision["action"] == "SELL"
+        # Unflipped SELL: TP=100*0.96=96, SL=100*1.03=103
+        assert abs(decision["take_profit"] - 96.0) < 0.01
+        assert abs(decision["stop_loss"] - 103.0) < 0.01
+
 
 # ── Spike Continuation Strategy ──────────────────────────────────────────────
 

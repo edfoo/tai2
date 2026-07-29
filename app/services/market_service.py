@@ -3005,7 +3005,7 @@ class MarketService:
 
             action = "BUY" if signal.direction == "buy" else "SELL"
 
-            # Flip direction (Mean Reversion / VWAP Reversion / Liquidity Sweep).
+            # Flip direction (Mean Reversion / VWAP Reversion / Liquidity Sweep / Trend Pullback).
             # Mirrors TP/SL around last_price so they land on the correct
             # side of entry for the flipped direction.
             _flip_cfg: dict[str, Any] = {}
@@ -3015,6 +3015,8 @@ class MarketService:
                 _flip_cfg = (gov.get("strategies") or {}).get("vwap_reversion") or {}
             elif signal.strategy_name == "liquidity_sweep":
                 _flip_cfg = (gov.get("strategies") or {}).get("liquidity_sweep") or {}
+            elif signal.strategy_name == "trend_pullback":
+                _flip_cfg = (gov.get("strategies") or {}).get("trend_pullback") or {}
             if _flip_cfg:
                 flip_dir = str(_flip_cfg.get("flip_launcher_direction") or "").strip().lower()
                 if flip_dir in ("both", "from_long", "from_short"):

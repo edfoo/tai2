@@ -51,6 +51,11 @@ class TrendPullbackStrategy:
       - ``min_atr_pct`` (float, default 1.0): skip dead coins.
       - ``tp_pct`` (float, default None): static TP % fallback.
       - ``sl_pct`` (float, default None): static SL % fallback.
+      - ``flip_launcher_direction`` (str, default None): invert the
+        Launcher's trade direction before execution. One of "both",
+        "from_long" (only BUY→SELL), "from_short" (only SELL→BUY),
+        or None to disable. TP/SL are mirrored around last_price so
+        they land on the correct side for the flipped direction.
     """
 
     name = "trend_pullback"
