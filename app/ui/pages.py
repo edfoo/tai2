@@ -3891,6 +3891,19 @@ def register_pages(app: FastAPI) -> None:
                                 value=float(_vr_cfg.get("min_atr_pct") or 1.0),
                                 min=0.0, max=10.0, step=0.1, format="%.1f",
                             ).classes("w-40").props("dense")
+                            ui.label("Skip entries when ATR% is below this (0 = disabled). Filters out dead coins.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            _vr_flip_enabled = bool(_vr_cfg.get("flip_launcher_direction"))
+                            vr_flip_switch = ui.switch(
+                                "Flip Launcher Decision",
+                                value=_vr_flip_enabled,
+                            ).props("dense color=primary")
+                            vr_flip_select = ui.select(
+                                options={"both": "Both", "from_long": "From LONG only", "from_short": "From SHORT only"},
+                                value=_vr_cfg.get("flip_launcher_direction") or "both",
+                                label="Flip direction",
+                            ).classes("w-40").props("dense")
+                            ui.label("Invert the Launcher's trade direction before execution.").classes("text-xs text-slate-500")
                     _active_badge_vr = ui.badge("Active", color="positive").bind_visibility_from(
                         vr_enabled_switch, "value"
                     )
@@ -3909,6 +3922,8 @@ def register_pages(app: FastAPI) -> None:
                 vr_atr_tp_mult_input.value = 1.5
                 vr_atr_sl_mult_input.value = 2.5
                 vr_min_atr_pct_input.value = 1.0
+                vr_flip_switch.value = False
+                vr_flip_select.value = "both"
                 ui.notify("VWAP Reversion fields set to recommended defaults — click Save to persist", color="info")
 
             # ── Trend Pullback ────────────────────────────────────────────────────
@@ -5027,6 +5042,7 @@ def register_pages(app: FastAPI) -> None:
                 "atr_tp_multiplier": float(vr_atr_tp_mult_input.value or 1.5),
                 "atr_sl_multiplier": float(vr_atr_sl_mult_input.value or 2.5),
                 "min_atr_pct": float(vr_min_atr_pct_input.value or 1.0),
+                "flip_launcher_direction": str(vr_flip_select.value) if vr_flip_switch.value else None,
             }
             _strategies_cfg["trend_pullback"] = {
                 "enabled": bool(tp_enabled_switch.value),

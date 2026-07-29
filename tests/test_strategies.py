@@ -840,6 +840,80 @@ class TestBuildLauncherDecision:
         decision = decisions[0]
         assert decision["_decision_origin"] == "launcher"
 
+    def test_vwap_reversion_flip_direction_and_tp_sl_reflection(self) -> None:
+        """VWAP Reversion flip mirrors side, TP and SL around last_price."""
+        service = _make_service()
+        self._setup_service_with_price(service, 95.0)
+        service.set_launcher_config({
+            "mode": "launcher_only",
+            "notional_usd": 50.0,
+            "strategies": {
+                "vwap_reversion": {
+                    "enabled": True,
+                    "tp_pct": 3.0,
+                    "sl_pct": 5.0,
+                    "vwap_min_distance_atr": 2.0,
+                    "require_closeback": False,
+                    "require_htf_trend": False,
+                    "require_regime": False,
+                    "use_atr_sizing": False,
+                    "min_atr_pct": 0.0,
+                    "flip_launcher_direction": "both",
+                },
+            },
+        })
+        # VWAP=100, ATR%=2% → ATR_price=2.0. Price=95 → 2.5 ATR below → buy signal.
+        service._last_full_snapshot = _make_vr_snapshot(
+            vwap=100.0, atr_pct=2.0, ohlcv=_make_trend_ohlcv(), last_price=95.0,
+        )
+
+        decisions = service.build_launcher_decisions("BTC-USDT-SWAP")
+        assert len(decisions) == 1
+        decision = decisions[0]
+        # VWAP reversion buy signal, flipped "both" → SELL
+        assert decision["action"] == "SELL"
+        # Original BUY: TP=95*1.03=97.85 (above), SL=95*0.95=90.25 (below).
+        # Flipped to SELL: mirror around last_price=95 →
+        #   TP=2*95-97.85=92.15 (below, correct for short)
+        #   SL=2*95-90.25=99.75 (above, correct for short)
+        assert abs(decision["take_profit"] - 92.15) < 0.01
+        assert abs(decision["stop_loss"] - 99.75) < 0.01
+
+    def test_vwap_reversion_flip_from_long_only_keeps_short(self) -> None:
+        """from_long flip should leave a SELL signal unchanged."""
+        service = _make_service()
+        self._setup_service_with_price(service, 105.0)
+        service.set_launcher_config({
+            "mode": "launcher_only",
+            "notional_usd": 50.0,
+            "strategies": {
+                "vwap_reversion": {
+                    "enabled": True,
+                    "tp_pct": 3.0,
+                    "sl_pct": 5.0,
+                    "vwap_min_distance_atr": 2.0,
+                    "require_closeback": False,
+                    "require_htf_trend": False,
+                    "require_regime": False,
+                    "use_atr_sizing": False,
+                    "min_atr_pct": 0.0,
+                    "flip_launcher_direction": "from_long",
+                },
+            },
+        })
+        # Price 105 → 2.5 ATR above VWAP → sell signal; from_long should NOT flip it.
+        service._last_full_snapshot = _make_vr_snapshot(
+            vwap=100.0, atr_pct=2.0, ohlcv=_make_trend_ohlcv(), last_price=105.0,
+        )
+
+        decisions = service.build_launcher_decisions("BTC-USDT-SWAP")
+        assert len(decisions) == 1
+        decision = decisions[0]
+        assert decision["action"] == "SELL"
+        # Unflipped SELL: TP=105*0.97=101.85, SL=105*1.05=110.25
+        assert abs(decision["take_profit"] - 101.85) < 0.01
+        assert abs(decision["stop_loss"] - 110.25) < 0.01
+
 
 # ── Spike Continuation Strategy ──────────────────────────────────────────────
 
