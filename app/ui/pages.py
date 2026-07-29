@@ -3299,17 +3299,17 @@ def register_pages(app: FastAPI) -> None:
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             mr_atr_tp_mult_input = ui.number(
                                 label="ATR TP multiplier",
-                                value=float(_mr_cfg.get("atr_tp_multiplier") or 1.3),
+                                value=float(_mr_cfg.get("atr_tp_multiplier") or 2.0),
                                 min=0.1, max=10.0, step=0.1, format="%.1f",
                             ).classes("w-40").props("dense")
-                            ui.label("TP = multiplier × ATR% (e.g. 1.3 = 1.3 ATR, bank reversion sooner).").classes("text-xs text-slate-500")
+                            ui.label("TP = multiplier × ATR% (must be >= SL multiplier for R:R >= 1.0).").classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             mr_atr_sl_mult_input = ui.number(
                                 label="ATR SL multiplier",
-                                value=float(_mr_cfg.get("atr_sl_multiplier") or 2.0),
+                                value=float(_mr_cfg.get("atr_sl_multiplier") or 1.5),
                                 min=0.1, max=10.0, step=0.1, format="%.1f",
                             ).classes("w-40").props("dense")
-                            ui.label("SL = multiplier × ATR% (e.g. 2.0 = 2 ATR, room beyond 15m wick noise).").classes("text-xs text-slate-500")
+                            ui.label("SL = multiplier × ATR% (must be <= TP multiplier for R:R >= 1.0).").classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             mr_min_atr_pct_input = ui.number(
                                 label="Min ATR%",
@@ -3369,11 +3369,16 @@ def register_pages(app: FastAPI) -> None:
                 mr_max_bw_pct_input.value = 55.0
                 mr_regime_lookback_input.value = 50
                 mr_use_atr_sizing_switch.value = True
-                mr_atr_tp_mult_input.value = 1.3
-                mr_atr_sl_mult_input.value = 2.0
+                # R:R must be >= 1.0: TP multiplier >= SL multiplier.
+                # Inverted R:R (TP<SL) guarantees a losing bias because MR
+                # win rates are naturally < 50%.
+                mr_atr_tp_mult_input.value = 2.0
+                mr_atr_sl_mult_input.value = 1.5
                 mr_min_atr_pct_input.value = 1.0
+                # Do not flip the strategy's chosen direction — flipping
+                # destroys the directional edge the strategy is built around.
                 mr_flip_switch.value = False
-                mr_flip_select.value = "both"
+                mr_flip_select.value = None
                 ui.notify("Mean Reversion fields set to recommended defaults — click Save to persist", color="info")
 
             # ── Spike Continuation ───────────────────────────────────────────────────
@@ -3907,12 +3912,12 @@ def register_pages(app: FastAPI) -> None:
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             vr_atr_tp_mult_input = ui.number(
                                 label="ATR TP multiplier",
-                                value=float(_vr_cfg.get("atr_tp_multiplier") or 1.5),
+                                value=float(_vr_cfg.get("atr_tp_multiplier") or 1.8),
                                 min=0.1, max=10.0, step=0.1, format="%.1f",
                             ).classes("w-40").props("dense")
                             vr_atr_sl_mult_input = ui.number(
                                 label="ATR SL multiplier",
-                                value=float(_vr_cfg.get("atr_sl_multiplier") or 2.5),
+                                value=float(_vr_cfg.get("atr_sl_multiplier") or 1.0),
                                 min=0.1, max=10.0, step=0.1, format="%.1f",
                             ).classes("w-40").props("dense")
                             vr_min_atr_pct_input = ui.number(
@@ -3948,11 +3953,13 @@ def register_pages(app: FastAPI) -> None:
                 vr_max_bw_pct_input.value = 55.0
                 vr_regime_lookback_input.value = 50
                 vr_use_atr_sizing_switch.value = True
-                vr_atr_tp_mult_input.value = 1.5
-                vr_atr_sl_mult_input.value = 2.5
+                vr_atr_tp_mult_input.value = 1.8
+                vr_atr_sl_mult_input.value = 1.0
                 vr_min_atr_pct_input.value = 1.0
+                # Do not flip the strategy's chosen direction — flipping
+                # destroys the directional edge the strategy is built around.
                 vr_flip_switch.value = False
-                vr_flip_select.value = "both"
+                vr_flip_select.value = None
                 ui.notify("VWAP Reversion fields set to recommended defaults — click Save to persist", color="info")
 
             # ── Trend Pullback ────────────────────────────────────────────────────
@@ -5020,9 +5027,9 @@ def register_pages(app: FastAPI) -> None:
                 "max_bb_bandwidth_percentile": float(mr_max_bw_pct_input.value or 45.0),
                 "regime_lookback": int(mr_regime_lookback_input.value or 50),
                 "use_atr_sizing": bool(mr_use_atr_sizing_switch.value),
-                "atr_tp_multiplier": float(mr_atr_tp_mult_input.value or 1.5),
-                "atr_sl_multiplier": float(mr_atr_sl_mult_input.value or 1.0),
-                "min_atr_pct": float(mr_min_atr_pct_input.value or 0.0),
+                "atr_tp_multiplier": float(mr_atr_tp_mult_input.value or 2.0),
+                "atr_sl_multiplier": float(mr_atr_sl_mult_input.value or 1.5),
+                "min_atr_pct": float(mr_min_atr_pct_input.value or 1.0),
             }
             _strategies_cfg["spike_continuation"] = {
                 "enabled": bool(sc_enabled_switch.value),
@@ -5085,7 +5092,8 @@ def register_pages(app: FastAPI) -> None:
                 "max_bb_bandwidth_percentile": float(vr_max_bw_pct_input.value or 55.0),
                 "regime_lookback": int(vr_regime_lookback_input.value or 50),
                 "use_atr_sizing": bool(vr_use_atr_sizing_switch.value),
-                "atr_tp_multiplier": float(vr_atr_tp_mult_input.value or 1.5),
+                "atr_tp_multiplier": float(vr_atr_tp_mult_input.value or 1.8),
+                "atr_sl_multiplier": float(vr_atr_sl_mult_input.value or 1.0),
                 "atr_sl_multiplier": float(vr_atr_sl_mult_input.value or 2.5),
                 "min_atr_pct": float(vr_min_atr_pct_input.value or 1.0),
                 "flip_launcher_direction": str(vr_flip_select.value) if vr_flip_switch.value else None,

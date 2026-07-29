@@ -2757,10 +2757,20 @@ class MarketService:
         Dual-universe routing: when the screener is enabled with dual lists,
         Spike Continuation only evaluates SC-universe symbols and Mean
         Reversion only evaluates MR-universe symbols.
+
+        Strategies are evaluated on the **previous closed candle**, not the
+        incomplete forming candle.  This aligns live evaluation with the
+        backtest engine and eliminates the intra-candle indicator bias where
+        RSI/ADX hit transient extremes mid-candle that revert by candle close
+        (see /memories/repo/backtest_live_divergence.md).  The real-time
+        ``last_price`` from the ticker is still used for TP/SL placement.
         """
         snapshot = self._last_full_snapshot
         if not snapshot:
             return []
+        # Build a snapshot trimmed to closed candles so strategies see the
+        # same indicator values the backtest would compute.
+        snapshot = self._build_closed_candle_snapshot(snapshot, symbol)
         strategies_cfg = self._launcher_config.get("strategies") or {}
         signals: list[StrategySignal] = []
         for strategy in self._strategies:
@@ -2772,6 +2782,86 @@ class MarketService:
                 signal.strategy_name = strategy.name
                 signals.append(signal)
         return signals
+
+    def _build_closed_candle_snapshot(
+        self, snapshot: dict[str, Any], symbol: str
+    ) -> dict[str, Any]:
+        """Return a shallow-copied snapshot with indicators recomputed on closed candles.
+
+        Drops the last (incomplete/forming) candle from the symbol's OHLCV and
+        recomputes indicators on the remaining closed candles.  If the last
+        candle is already closed (or there are too few candles to trim), the
+        original snapshot is returned unchanged.
+
+        Only the target symbol's ``market_data`` entry is modified; all other
+        symbols and top-level snapshot keys (positions, account, etc.) are
+        preserved.  The real-time ticker / last_price are NOT changed — they
+        are used downstream for TP/SL placement and order sizing.
+        """
+        market_data: dict[str, Any] = snapshot.get("market_data") or {}
+        sym_data = market_data.get(symbol) or {}
+        indicators = sym_data.get("indicators") or {}
+        ohlcv_compact = indicators.get("ohlcv") or []
+        if len(ohlcv_compact) < 3:
+            # Not enough candles to trim safely.
+            return snapshot
+
+        # Detect the forming candle by comparing the last candle's start
+        # timestamp to the current time.  OKX returns candle-start timestamps
+        # in milliseconds.  The bar duration is inferred from the gap between
+        # the last two candle timestamps (robust across all timeframes).
+        now_ms = time.time() * 1000.0
+        last_ts = ohlcv_compact[-1].get("ts") if isinstance(ohlcv_compact[-1], dict) else None
+        prev_ts = ohlcv_compact[-2].get("ts") if isinstance(ohlcv_compact[-2], dict) else None
+        if last_ts is None or prev_ts is None:
+            return snapshot
+        try:
+            last_ts = float(last_ts)
+            prev_ts = float(prev_ts)
+        except (TypeError, ValueError):
+            return snapshot
+        bar_ms = last_ts - prev_ts
+        if bar_ms <= 0:
+            return snapshot
+        # The last candle is "forming" if the current time is before the
+        # candle's expected close (start + bar duration).  Add a small margin
+        # (10% of bar) so a candle that closed seconds ago is treated as closed.
+        candle_close_ts = last_ts + bar_ms
+        is_forming = now_ms < candle_close_ts - (bar_ms * 0.1)
+        if not is_forming:
+            # Last candle already closed — no trimming needed.
+            return snapshot
+
+        # Trim the forming candle and recompute indicators on closed candles.
+        closed_compact = ohlcv_compact[:-1]
+        # Convert compact dicts back to the row-list format _compute_indicators expects.
+        closed_rows = [
+            [c.get("ts"), c.get("open"), c.get("high"), c.get("low"), c.get("close"), c.get("volume")]
+            for c in closed_compact
+            if isinstance(c, dict)
+        ]
+        if len(closed_rows) < 3:
+            return snapshot
+        try:
+            new_indicators = self._compute_indicators(closed_rows)
+        except Exception as exc:  # pragma: no cover - defensive
+            self._emit_debug(f"Closed-candle recompute failed for {symbol}: {exc}")
+            return snapshot
+        # Preserve HTF indicators and structure from the original snapshot —
+        # HTF candles are already aligned to their own closed bars in _build_snapshot.
+        new_indicators["htf_indicators"] = indicators.get("htf_indicators")
+        new_indicators["ohlcv_htf"] = indicators.get("ohlcv_htf")
+        new_indicators["ohlcv_htf_bar"] = indicators.get("ohlcv_htf_bar")
+        new_indicators["structure"] = indicators.get("structure")
+
+        # Shallow-copy the snapshot and patch only the target symbol's indicators.
+        trimmed = dict(snapshot)
+        trimmed_market = dict(market_data)
+        trimmed_sym = dict(sym_data)
+        trimmed_sym["indicators"] = new_indicators
+        trimmed_market[symbol] = trimmed_sym
+        trimmed["market_data"] = trimmed_market
+        return trimmed
 
     async def _check_launcher(self) -> None:
         """Update Launcher position-tracking state for the scheduler's on_close trigger.

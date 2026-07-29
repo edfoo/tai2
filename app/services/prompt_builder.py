@@ -2634,8 +2634,8 @@ class PromptBuilder:
             "isolated_margin_symbol_seeds_usd": {},
             "isolated_margin_max_transfer_usd": None,
             "isolated_wallet_bootstrap_pct": None,
-            "min_reward_risk_ratio": None,
-            "require_reward_risk_ratio": False,
+            "min_reward_risk_ratio": 1.3,
+            "require_reward_risk_ratio": True,
             "adjust_invalid_tp": False,
             "adjust_invalid_tp_pct": 0.10,
             "footprint": {

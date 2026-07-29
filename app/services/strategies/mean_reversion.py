@@ -54,8 +54,12 @@ class MeanReversionStrategy:
       - ``require_regime`` (bool, default True)
       - ``max_bb_bandwidth_percentile`` (float, default 40)
       - ``use_atr_sizing`` (bool, default True)
-      - ``atr_tp_multiplier`` (float, default 1.3)
-      - ``atr_sl_multiplier`` (float, default 2.0)
+      - ``atr_tp_multiplier`` (float, default 2.0): TP = multiplier × ATR%.
+        Must be >= atr_sl_multiplier so the reward-to-risk ratio is >= 1.0;
+        an inverted R:R (TP < SL) mathematically guarantees a losing bias
+        because MR win rates are naturally < 50%.
+      - ``atr_sl_multiplier`` (float, default 1.5): SL = multiplier × ATR%.
+        Must be <= atr_tp_multiplier (see above).
       - ``min_atr_pct`` (float, default 1.3)
     """
 
@@ -124,10 +128,10 @@ class MeanReversionStrategy:
         use_atr_sizing = bool(config.get("use_atr_sizing", True))
         atr_tp_multiplier = helpers.extract_float(config.get("atr_tp_multiplier"))
         if atr_tp_multiplier is None:
-            atr_tp_multiplier = 1.3
+            atr_tp_multiplier = 2.0
         atr_sl_multiplier = helpers.extract_float(config.get("atr_sl_multiplier"))
         if atr_sl_multiplier is None:
-            atr_sl_multiplier = 2.0
+            atr_sl_multiplier = 1.5
         # ── Minimum ATR% filter ───────────────────────────────────────
         # Skip entries on coins with ATR% below this threshold — too quiet
         # for a meaningful reversion.  0 = disabled.
