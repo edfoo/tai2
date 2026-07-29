@@ -914,6 +914,88 @@ class TestBuildLauncherDecision:
         assert abs(decision["take_profit"] - 101.85) < 0.01
         assert abs(decision["stop_loss"] - 110.25) < 0.01
 
+    def test_liquidity_sweep_flip_direction_and_tp_sl_reflection(self) -> None:
+        """Liquidity Sweep flip mirrors side, TP and SL around last_price."""
+        service = _make_service()
+        self._setup_service_with_price(service, 100.5)
+        service.set_launcher_config({
+            "mode": "launcher_only",
+            "notional_usd": 50.0,
+            "strategies": {
+                "liquidity_sweep": {
+                    "enabled": True,
+                    "tp_pct": 3.0,
+                    "sl_pct": 5.0,
+                    "lookback": 10,
+                    "sweep_buffer_pct": 0.1,
+                    "reclaim_ratio": 0.5,
+                    "require_htf_trend": False,
+                    "require_volume_spike": False,
+                    "max_adx": 0.0,
+                    "require_regime": False,
+                    "use_atr_sizing": False,
+                    "min_atr_pct": 0.0,
+                    "flip_launcher_direction": "both",
+                },
+            },
+        })
+        # Low sweep: wick below swing low, close reclaims above → buy signal.
+        prior = _make_range_ohlcv(n=11, base=100.0, range_pct=2.0)
+        sweep_candle = {"open": 99.5, "high": 100.8, "low": 98.5, "close": 100.5, "volume": 200.0}
+        ohlcv = prior + [sweep_candle]
+        service._last_full_snapshot = _make_ls_snapshot(ohlcv=ohlcv, last_price=100.5)
+
+        decisions = service.build_launcher_decisions("BTC-USDT-SWAP")
+        assert len(decisions) == 1
+        decision = decisions[0]
+        # Sweep buy signal, flipped "both" → SELL
+        assert decision["action"] == "SELL"
+        # Original BUY: TP=100.5*1.03=103.515 (above), SL=100.5*0.95=95.475 (below).
+        # Flipped to SELL: mirror around last_price=100.5 →
+        #   TP=2*100.5-103.515=97.485 (below, correct for short)
+        #   SL=2*100.5-95.475=105.525 (above, correct for short)
+        assert abs(decision["take_profit"] - 97.485) < 0.01
+        assert abs(decision["stop_loss"] - 105.525) < 0.01
+
+    def test_liquidity_sweep_flip_from_short_only_keeps_long(self) -> None:
+        """from_short flip should leave a BUY signal unchanged."""
+        service = _make_service()
+        self._setup_service_with_price(service, 100.5)
+        service.set_launcher_config({
+            "mode": "launcher_only",
+            "notional_usd": 50.0,
+            "strategies": {
+                "liquidity_sweep": {
+                    "enabled": True,
+                    "tp_pct": 3.0,
+                    "sl_pct": 5.0,
+                    "lookback": 10,
+                    "sweep_buffer_pct": 0.1,
+                    "reclaim_ratio": 0.5,
+                    "require_htf_trend": False,
+                    "require_volume_spike": False,
+                    "max_adx": 0.0,
+                    "require_regime": False,
+                    "use_atr_sizing": False,
+                    "min_atr_pct": 0.0,
+                    "flip_launcher_direction": "from_short",
+                },
+            },
+        })
+        # Low sweep → buy signal; from_short should NOT flip it.
+        prior = _make_range_ohlcv(n=11, base=100.0, range_pct=2.0)
+        sweep_candle = {"open": 99.5, "high": 100.8, "low": 98.5, "close": 100.5, "volume": 200.0}
+        ohlcv = prior + [sweep_candle]
+        service._last_full_snapshot = _make_ls_snapshot(ohlcv=ohlcv, last_price=100.5)
+
+        decisions = service.build_launcher_decisions("BTC-USDT-SWAP")
+        assert len(decisions) == 1
+        decision = decisions[0]
+        assert decision["action"] == "BUY"
+        # Unflipped BUY: TP=100.5*1.03=103.515, SL=100.5*0.95=95.475
+        assert abs(decision["take_profit"] - 103.515) < 0.01
+        assert abs(decision["stop_loss"] - 95.475) < 0.01
+
 
 # ── Spike Continuation Strategy ──────────────────────────────────────────────
 
