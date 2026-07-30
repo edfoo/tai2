@@ -3871,14 +3871,14 @@ def register_pages(app: FastAPI) -> None:
                             ).classes("w-40").props("dense")
                             vr_max_dist_atr_input = ui.number(
                                 label="Max VWAP distance (ATR)",
-                                value=float(_vr_cfg.get("vwap_max_distance_atr") or 4.0),
+                                value=float(_vr_cfg.get("vwap_max_distance_atr") or 3.0),
                                 min=0.0, max=20.0, step=0.25, format="%.2f",
                             ).classes("w-40").props("dense")
                             ui.label("Min/max distance from VWAP in ATR units. Max prevents catching falling knives in breakouts (0=disabled).").classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-start"):
                             vr_max_adx_input = ui.number(
                                 label="Max ADX",
-                                value=float(_vr_cfg.get("max_adx") or 30.0),
+                                value=float(_vr_cfg.get("max_adx") or 25.0),
                                 min=0.0, max=80.0, step=1.0, format="%.0f",
                             ).classes("w-40").props("dense")
                             ui.label("Block entry when ADX is above this (strong trend = reversion unlikely). 0 = disabled.").classes("text-xs text-slate-500")
@@ -3961,8 +3961,8 @@ def register_pages(app: FastAPI) -> None:
                 vr_tp_input.value = 2.0
                 vr_sl_input.value = 3.0
                 vr_min_dist_atr_input.value = 2.0
-                vr_max_dist_atr_input.value = 4.0
-                vr_max_adx_input.value = 30.0
+                vr_max_dist_atr_input.value = 3.0
+                vr_max_adx_input.value = 25.0
                 vr_require_closeback_switch.value = True
                 vr_require_htf_switch.value = True
                 vr_require_regime_switch.value = True
@@ -4028,7 +4028,7 @@ def register_pages(app: FastAPI) -> None:
                         with ui.row().classes("w-full flex-wrap gap-4 items-start"):
                             tp_proximity_input = ui.number(
                                 label="Pullback proximity %",
-                                value=float(_tp_cfg.get("pullback_proximity_pct") or 0.5),
+                                value=float(_tp_cfg.get("pullback_proximity_pct") or 0.4),
                                 min=0.05, max=5.0, step=0.05, format="%.2f",
                             ).classes("w-40").props("dense")
                             ui.label("How close (in %) price must be to the EMA/VWAP level to qualify as a pullback.").classes("text-xs text-slate-500")
@@ -4060,14 +4060,14 @@ def register_pages(app: FastAPI) -> None:
                         with ui.row().classes("w-full flex-wrap gap-4 items-start"):
                             tp_min_adx_input = ui.number(
                                 label="Min ADX",
-                                value=float(_tp_cfg.get("min_adx") or 18.0),
+                                value=float(_tp_cfg.get("min_adx") or 20.0),
                                 min=0, max=100, step=1, precision=0,
                             ).classes("w-32").props(
                                 "hint='Require a real trend (not chop)' persistent-hint"
                             )
                             tp_max_adx_entry_input = ui.number(
                                 label="Max ADX for entry",
-                                value=float(_tp_cfg.get("max_adx_for_entry") or 40.0),
+                                value=float(_tp_cfg.get("max_adx_for_entry") or 35.0),
                                 min=0, max=100, step=1, precision=0,
                             ).classes("w-40").props(
                                 "hint='Block when trend already extended (pullback likely reversal)' persistent-hint"
@@ -4119,13 +4119,13 @@ def register_pages(app: FastAPI) -> None:
                 tp_tp_input.value = 4.0
                 tp_sl_input.value = 3.0
                 tp_pullback_ema_input.value = 21
-                tp_proximity_input.value = 0.5
+                tp_proximity_input.value = 0.4
                 tp_use_vwap_switch.value = True
                 tp_require_htf_switch.value = True
                 tp_require_bullish_switch.value = True
                 tp_candle_rejection_pct_input.value = 25.0
-                tp_min_adx_input.value = 18.0
-                tp_max_adx_entry_input.value = 40.0
+                tp_min_adx_input.value = 20.0
+                tp_max_adx_entry_input.value = 35.0
                 tp_use_atr_sizing_switch.value = True
                 tp_atr_tp_mult_input.value = 2.0
                 tp_atr_sl_mult_input.value = 1.5
@@ -5102,8 +5102,8 @@ def register_pages(app: FastAPI) -> None:
                 "tp_pct": float(vr_tp_input.value) if vr_tp_input.value not in (None, "") else None,
                 "sl_pct": float(vr_sl_input.value) if vr_sl_input.value not in (None, "") else None,
                 "vwap_min_distance_atr": float(vr_min_dist_atr_input.value or 2.0),
-                "vwap_max_distance_atr": float(vr_max_dist_atr_input.value or 4.0),
-                "max_adx": float(vr_max_adx_input.value or 30.0),
+                "vwap_max_distance_atr": float(vr_max_dist_atr_input.value or 3.0),
+                "max_adx": float(vr_max_adx_input.value or 25.0),
                 "require_closeback": bool(vr_require_closeback_switch.value),
                 "require_htf_trend": bool(vr_require_htf_switch.value),
                 "require_regime": bool(vr_require_regime_switch.value),
@@ -5120,13 +5120,13 @@ def register_pages(app: FastAPI) -> None:
                 "tp_pct": float(tp_tp_input.value) if tp_tp_input.value not in (None, "") else None,
                 "sl_pct": float(tp_sl_input.value) if tp_sl_input.value not in (None, "") else None,
                 "pullback_ema": int(tp_pullback_ema_input.value or 21),
-                "pullback_proximity_pct": float(tp_proximity_input.value or 0.5),
+                "pullback_proximity_pct": float(tp_proximity_input.value or 0.4),
                 "use_vwap_as_level": bool(tp_use_vwap_switch.value),
                 "require_htf_trend": bool(tp_require_htf_switch.value),
                 "require_bullish_candle": bool(tp_require_bullish_switch.value),
                 "candle_rejection_pct": float(tp_candle_rejection_pct_input.value or 25.0),
-                "min_adx": float(tp_min_adx_input.value or 18.0),
-                "max_adx_for_entry": float(tp_max_adx_entry_input.value or 40.0),
+                "min_adx": float(tp_min_adx_input.value or 20.0),
+                "max_adx_for_entry": float(tp_max_adx_entry_input.value or 35.0),
                 "use_atr_sizing": bool(tp_use_atr_sizing_switch.value),
                 "atr_tp_multiplier": float(tp_atr_tp_mult_input.value or 2.0),
                 "atr_sl_multiplier": float(tp_atr_sl_mult_input.value or 1.5),

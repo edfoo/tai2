@@ -29,11 +29,11 @@ class VWAPReversionStrategy:
       - ``enabled`` (bool): master switch
       - ``vwap_min_distance_atr`` (float, default 2.0): minimum distance from
         VWAP in ATR units to qualify as "extended".
-      - ``vwap_max_distance_atr`` (float, default 4.0): maximum distance from
+            - ``vwap_max_distance_atr`` (float, default 3.0): maximum distance from
         VWAP in ATR units.  Beyond this, the extension is likely a genuine
         trend/breakout, not a reversion setup — entering is catching a
         falling knife.  0 = disabled.
-      - ``max_adx`` (float, default 30.0): block entry when ADX is above this
+            - ``max_adx`` (float, default 25.0): block entry when ADX is above this
         — a strong trend means the VWAP deviation is a real move, not noise
         that will revert.  0 = disabled.
       - ``require_closeback`` (bool, default True): current candle must close
@@ -82,10 +82,10 @@ class VWAPReversionStrategy:
             vwap_min_distance_atr = 2.0
         vwap_max_distance_atr = helpers.extract_float(config.get("vwap_max_distance_atr"))
         if vwap_max_distance_atr is None:
-            vwap_max_distance_atr = 4.0
+            vwap_max_distance_atr = 3.0
         max_adx = helpers.extract_float(config.get("max_adx"))
         if max_adx is None:
-            max_adx = 30.0
+            max_adx = 25.0
         require_closeback = bool(config.get("require_closeback", True))
         require_htf_trend = bool(config.get("require_htf_trend", True))
         require_regime = bool(config.get("require_regime", True))
