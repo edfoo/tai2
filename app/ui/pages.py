@@ -3869,7 +3869,19 @@ def register_pages(app: FastAPI) -> None:
                                 value=float(_vr_cfg.get("vwap_min_distance_atr") or 2.0),
                                 min=0.5, max=10.0, step=0.25, format="%.2f",
                             ).classes("w-40").props("dense")
-                            ui.label("Minimum distance from VWAP in ATR units to qualify as 'extended'.").classes("text-xs text-slate-500")
+                            vr_max_dist_atr_input = ui.number(
+                                label="Max VWAP distance (ATR)",
+                                value=float(_vr_cfg.get("vwap_max_distance_atr") or 4.0),
+                                min=0.0, max=20.0, step=0.25, format="%.2f",
+                            ).classes("w-40").props("dense")
+                            ui.label("Min/max distance from VWAP in ATR units. Max prevents catching falling knives in breakouts (0=disabled).").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-start"):
+                            vr_max_adx_input = ui.number(
+                                label="Max ADX",
+                                value=float(_vr_cfg.get("max_adx") or 30.0),
+                                min=0.0, max=80.0, step=1.0, format="%.0f",
+                            ).classes("w-40").props("dense")
+                            ui.label("Block entry when ADX is above this (strong trend = reversion unlikely). 0 = disabled.").classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             vr_require_closeback_switch = ui.switch(
                                 "Require closeback",
@@ -3949,6 +3961,8 @@ def register_pages(app: FastAPI) -> None:
                 vr_tp_input.value = 2.0
                 vr_sl_input.value = 3.0
                 vr_min_dist_atr_input.value = 2.0
+                vr_max_dist_atr_input.value = 4.0
+                vr_max_adx_input.value = 30.0
                 vr_require_closeback_switch.value = True
                 vr_require_htf_switch.value = True
                 vr_require_regime_switch.value = True
@@ -5088,6 +5102,8 @@ def register_pages(app: FastAPI) -> None:
                 "tp_pct": float(vr_tp_input.value) if vr_tp_input.value not in (None, "") else None,
                 "sl_pct": float(vr_sl_input.value) if vr_sl_input.value not in (None, "") else None,
                 "vwap_min_distance_atr": float(vr_min_dist_atr_input.value or 2.0),
+                "vwap_max_distance_atr": float(vr_max_dist_atr_input.value or 4.0),
+                "max_adx": float(vr_max_adx_input.value or 30.0),
                 "require_closeback": bool(vr_require_closeback_switch.value),
                 "require_htf_trend": bool(vr_require_htf_switch.value),
                 "require_regime": bool(vr_require_regime_switch.value),

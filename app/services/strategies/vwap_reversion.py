@@ -29,6 +29,13 @@ class VWAPReversionStrategy:
       - ``enabled`` (bool): master switch
       - ``vwap_min_distance_atr`` (float, default 2.0): minimum distance from
         VWAP in ATR units to qualify as "extended".
+      - ``vwap_max_distance_atr`` (float, default 4.0): maximum distance from
+        VWAP in ATR units.  Beyond this, the extension is likely a genuine
+        trend/breakout, not a reversion setup — entering is catching a
+        falling knife.  0 = disabled.
+      - ``max_adx`` (float, default 30.0): block entry when ADX is above this
+        — a strong trend means the VWAP deviation is a real move, not noise
+        that will revert.  0 = disabled.
       - ``require_closeback`` (bool, default True): current candle must close
         back toward VWAP (close > prev close for longs, close < prev close
         for shorts) — confirms the reversion has started.
@@ -73,6 +80,12 @@ class VWAPReversionStrategy:
         vwap_min_distance_atr = helpers.extract_float(config.get("vwap_min_distance_atr"))
         if vwap_min_distance_atr is None:
             vwap_min_distance_atr = 2.0
+        vwap_max_distance_atr = helpers.extract_float(config.get("vwap_max_distance_atr"))
+        if vwap_max_distance_atr is None:
+            vwap_max_distance_atr = 4.0
+        max_adx = helpers.extract_float(config.get("max_adx"))
+        if max_adx is None:
+            max_adx = 30.0
         require_closeback = bool(config.get("require_closeback", True))
         require_htf_trend = bool(config.get("require_htf_trend", True))
         require_regime = bool(config.get("require_regime", True))
@@ -131,6 +144,17 @@ class VWAPReversionStrategy:
             )
             return None
 
+        # ── ADX gate: block in strong trends ───────────────────────────
+        # A high ADX means the VWAP deviation is a real directional move,
+        # not noise that will revert.  Entering is catching a falling knife.
+        adx = helpers.extract_float((indicators.get("adx") or {}).get("value"))
+        if max_adx > 0 and adx is not None and adx > max_adx:
+            helpers.emit_debug(
+                f"VWAPReversion: {symbol} — no signal "
+                f"(ADX={adx:.1f} > max={max_adx:.1f} — strong trend, reversion unlikely)"
+            )
+            return None
+
         # ── Distance from VWAP in ATR units ───────────────────────────
         distance = last_price - vwap_value  # positive = above VWAP
         distance_atr = abs(distance) / atr_price
@@ -139,6 +163,13 @@ class VWAPReversionStrategy:
                 f"VWAPReversion: {symbol} — no signal "
                 f"(distance={distance_atr:.2f} ATR < min={vwap_min_distance_atr:.2f} ATR, "
                 f"VWAP={vwap_value:.6g}, price={last_price:.6g})"
+            )
+            return None
+        if vwap_max_distance_atr > 0 and distance_atr > vwap_max_distance_atr:
+            helpers.emit_debug(
+                f"VWAPReversion: {symbol} — no signal "
+                f"(distance={distance_atr:.2f} ATR > max={vwap_max_distance_atr:.2f} ATR "
+                f"— extension too far, likely a real breakout not a reversion)"
             )
             return None
 
