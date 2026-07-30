@@ -41,9 +41,11 @@ class VWAPReversionStrategy:
         percentile for the regime gate.
       - ``regime_lookback`` (int, default 50): bars for the percentile.
       - ``use_atr_sizing`` (bool, default True): use ATR-scaled TP/SL.
-      - ``atr_tp_multiplier`` (float, default 1.5): TP = multiplier × ATR%.
-      - ``atr_sl_multiplier`` (float, default 2.5): SL = multiplier × ATR%.
-        Wider than TP — let the extension exhaust before reverting.
+      - ``atr_tp_multiplier`` (float, default 1.8): TP = multiplier × ATR%.
+        Must be >= atr_sl_multiplier so R:R >= 1.0.
+      - ``atr_sl_multiplier`` (float, default 1.0): SL = multiplier × ATR%.
+        Tighter than TP — the extension is the invalidation; if it continues
+        further, the reversion thesis is wrong.
       - ``min_atr_pct`` (float, default 1.0): skip dead coins.
       - ``tp_pct`` (float, default None): static TP % fallback.
       - ``sl_pct`` (float, default None): static SL % fallback.
@@ -84,10 +86,10 @@ class VWAPReversionStrategy:
         use_atr_sizing = bool(config.get("use_atr_sizing", True))
         atr_tp_multiplier = helpers.extract_float(config.get("atr_tp_multiplier"))
         if atr_tp_multiplier is None:
-            atr_tp_multiplier = 1.5
+            atr_tp_multiplier = 1.8
         atr_sl_multiplier = helpers.extract_float(config.get("atr_sl_multiplier"))
         if atr_sl_multiplier is None:
-            atr_sl_multiplier = 2.5
+            atr_sl_multiplier = 1.0
         min_atr_pct = helpers.extract_float(config.get("min_atr_pct"))
         if min_atr_pct is None:
             min_atr_pct = 1.0

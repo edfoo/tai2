@@ -3644,8 +3644,10 @@ def register_pages(app: FastAPI) -> None:
                 sc_atr_tp_mult_input.value = 2.2
                 sc_atr_sl_mult_input.value = 2.0
                 sc_min_atr_pct_input.value = 1.0
+                # Do not flip the strategy's chosen direction — flipping
+                # destroys the directional edge the strategy is built around.
                 sc_flip_switch.value = False
-                sc_flip_select.value = "both"
+                sc_flip_select.value = None
                 ui.notify("Spike Continuation fields set to recommended defaults — click Save to persist", color="info")
 
             # ── Liquidity Sweep ───────────────────────────────────────────────────
@@ -5055,9 +5057,9 @@ def register_pages(app: FastAPI) -> None:
                 "min_bb_bandwidth_percentile": float(sc_min_bw_pct_input.value or 55.0),
                 "regime_lookback": int(sc_regime_lookback_input.value or 50),
                 "use_atr_sizing": bool(sc_use_atr_sizing_switch.value),
-                "atr_tp_multiplier": float(sc_atr_tp_mult_input.value or 2.5),
-                "atr_sl_multiplier": float(sc_atr_sl_mult_input.value or 1.8),
-                "min_atr_pct": float(sc_min_atr_pct_input.value or 0.0),
+                "atr_tp_multiplier": float(sc_atr_tp_mult_input.value or 2.2),
+                "atr_sl_multiplier": float(sc_atr_sl_mult_input.value or 2.0),
+                "min_atr_pct": float(sc_min_atr_pct_input.value or 1.0),
                 "flip_launcher_direction": str(sc_flip_select.value) if sc_flip_switch.value else None,
             }
             _strategies_cfg["liquidity_sweep"] = {
@@ -5094,7 +5096,6 @@ def register_pages(app: FastAPI) -> None:
                 "use_atr_sizing": bool(vr_use_atr_sizing_switch.value),
                 "atr_tp_multiplier": float(vr_atr_tp_mult_input.value or 1.8),
                 "atr_sl_multiplier": float(vr_atr_sl_mult_input.value or 1.0),
-                "atr_sl_multiplier": float(vr_atr_sl_mult_input.value or 2.5),
                 "min_atr_pct": float(vr_min_atr_pct_input.value or 1.0),
                 "flip_launcher_direction": str(vr_flip_select.value) if vr_flip_switch.value else None,
             }
