@@ -2577,6 +2577,7 @@ class MarketService:
                     attach = self._build_attach_algo_orders(
                         take_profit_price=tp_price,
                         stop_loss_price=None,
+                        symbol=symbol,
                     )
                     self._emit_debug(
                         f"Commutator: {symbol_key} post-reversal TP at {tp_price:.6f} "
@@ -9855,6 +9856,7 @@ class MarketService:
                         attach_algo_orders = self._build_attach_algo_orders(
                             take_profit_price=attachments_take_profit,
                             stop_loss_price=attachments_stop_loss,
+                            symbol=symbol,
                         )
                 else:
                     if require_protection:
@@ -10462,10 +10464,31 @@ class MarketService:
         """Format contract sizes with trimmed trailing zeros for OKX payloads."""
         return (f"{value:.6f}".rstrip("0").rstrip(".") or "0") if value is not None else "0"
 
-    @staticmethod
-    def _format_price(value: float) -> str:
-        """Format prices to 8 decimals, removing redundant zeros."""
-        return (f"{value:.8f}".rstrip("0").rstrip(".") or "0") if value is not None else "0"
+    def _format_price(self, value: float, symbol: str | None = None) -> str:
+        """Format a price for OKX payloads, rounded to the instrument's tick size.
+
+        For most instruments the legacy 8-decimal format is sufficient, but for
+        micro-priced tokens (e.g. SATS-USDT-SWAP at ~1e-8) 8 decimals truncates
+        the TP/SL to the same value as the entry price, which OKX rejects with
+        ``51050`` ("TP price should be higher than the primary order price").
+        Rounding to the instrument's ``tickSz`` and then formatting with enough
+        significant digits preserves the real price level for those instruments.
+        """
+        if value is None:
+            return "0"
+        tick_size = 0.0
+        if symbol:
+            spec = self._instrument_specs.get((symbol or "").upper())
+            if spec:
+                tick_size = self._extract_float(spec.get("tick_size")) or 0.0
+        if tick_size and tick_size > 0:
+            rounded = round(value / tick_size) * tick_size
+            # Choose a decimal count that comfortably represents the tick size
+            # (e.g. tick 1e-10 needs ~10 decimals).  Cap at 18 to avoid float noise.
+            decimals = max(8, int(math.ceil(-math.log10(tick_size))))
+            decimals = min(decimals, 18)
+            return (f"{rounded:.{decimals}f}".rstrip("0").rstrip(".") or "0")
+        return (f"{value:.8f}".rstrip("0").rstrip(".") or "0")
 
     @staticmethod
     def _format_leverage(value: float) -> str:
@@ -11975,6 +11998,7 @@ class MarketService:
         *,
         take_profit_price: float | None,
         stop_loss_price: float | None,
+        symbol: str | None = None,
     ) -> list[dict[str, Any]] | None:
         """Construct the attach list for `place_order` when TP and/or SL prices exist."""
         if not (take_profit_price or stop_loss_price):
@@ -11983,7 +12007,7 @@ class MarketService:
         if take_profit_price:
             attach_payload.update(
                 {
-                    "tpTriggerPx": self._format_price(take_profit_price),
+                    "tpTriggerPx": self._format_price(take_profit_price, symbol),
                     "tpOrdPx": "-1",
                     "tpTriggerPxType": "last",
                 }
@@ -11991,7 +12015,7 @@ class MarketService:
         if stop_loss_price:
             attach_payload.update(
                 {
-                    "slTriggerPx": self._format_price(stop_loss_price),
+                    "slTriggerPx": self._format_price(stop_loss_price, symbol),
                     "slOrdPx": "-1",
                     "slTriggerPxType": "last",
                 }
@@ -12043,11 +12067,11 @@ class MarketService:
         if quantized_close_size > 0:
             payload["sz"] = self._format_size(quantized_close_size)
         if take_profit_price:
-            payload["tpTriggerPx"] = self._format_price(take_profit_price)
+            payload["tpTriggerPx"] = self._format_price(take_profit_price, symbol)
             payload["tpOrdPx"] = "-1"
             payload["tpTriggerPxType"] = "last"
         if stop_loss_price:
-            payload["slTriggerPx"] = self._format_price(stop_loss_price)
+            payload["slTriggerPx"] = self._format_price(stop_loss_price, symbol)
             payload["slOrdPx"] = "-1"
             payload["slTriggerPxType"] = "last"
         self._emit_debug(
