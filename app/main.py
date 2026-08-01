@@ -578,6 +578,51 @@ def create_app(enable_background_services: bool | None = None) -> FastAPI:
         tail = all_lines[-lines:]
         return JSONResponse({"lines": tail, "total": len(all_lines)})
 
+    @app.get("/api/performance/summary")
+    async def performance_summary() -> JSONResponse:
+        """Return a JSON performance summary parsed from the rotating logs.
+
+        Agent-friendly endpoint that runs the same analysis as the
+        ``scripts/performance_summary.py`` script and returns structured JSON:
+        aggregate stats, per-strategy attribution, per-symbol PnL,
+        trade-management events, guardrail blocks, and SL slippage detection.
+
+        No DB / Redis / exchange calls — reads log files only.
+        """
+        import sys
+
+        from scripts.performance_summary import (
+            build_summary,
+            parse_logs,
+            summary_to_dict,
+        )
+
+        log_dir = Path("logs")
+        if not log_dir.exists():
+            return JSONResponse(
+                {"detail": "logs directory not found"}, status_code=503
+            )
+        files = sorted(log_dir.glob("app.log*"), key=lambda p: p.name)
+
+        def _sort_key(p: Path) -> tuple[int, str]:
+            name = p.name
+            if name == "app.log":
+                return (99, name)
+            try:
+                idx = int(name.rsplit(".", 1)[1])
+            except (ValueError, IndexError):
+                idx = 0
+            return (idx, name)
+
+        files = sorted(files, key=_sort_key)
+        if not files:
+            return JSONResponse(
+                {"detail": "no log files found"}, status_code=503
+            )
+        pnl_trades, signals, seeded, cleared, summary = parse_logs(files)
+        summary = build_summary(pnl_trades, signals, seeded, cleared, summary)
+        return JSONResponse(summary_to_dict(summary), status_code=200)
+
     @app.get("/llm/prompt")
     async def llm_prompt(
         symbol: str | None = None,

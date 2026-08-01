@@ -63,6 +63,7 @@ NAV_LINKS = [
     ("HISTORY", "/history"),
     ("DEBUG", "/debug"),
     ("PROMPT", "/prompt"),
+    ("PERFORMANCE", "/performance"),
     ("CFG", "/cfg"),
 ]
 
@@ -5986,6 +5987,106 @@ def register_pages(app: FastAPI) -> None:
         save_button.on("click", save_prompt_settings)
         asyncio.create_task(load_prompt_versions_list())
 
+    def render_performance_page() -> None:
+        """PERFORMANCE page — run analysis scripts and display output.
+
+        Hosts a registry of analysis scripts (starting with the performance
+        summary).  Each script has a button; clicking it runs the script and
+        renders the output in a scrollable log panel.  Designed so additional
+        scripts can be added to ``_PERFORMANCE_SCRIPTS`` with minimal code.
+        """
+        navigation("PERFORMANCE")
+        wrapper = page_container()
+        wrapper.style("max-width: 100%; width: 100%; margin-left: 0; margin-right: 0;")
+
+        # Script registry: key → {label, description, runner}.
+        # Each runner is a callable() -> str that returns text output.
+        # Additional scripts can be appended here.
+        def _run_performance_summary() -> str:
+            """Run the log-based performance summary and return text output."""
+            import io
+            import contextlib
+            from pathlib import Path
+            from scripts.performance_summary import main as _summary_main
+
+            # Capture stdout from the script.
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                try:
+                    _summary_main([])
+                except SystemExit:
+                    pass
+            return buf.getvalue() or "(no output)"
+
+        _PERFORMANCE_SCRIPTS: list[dict[str, Any]] = [
+            {
+                "key": "performance_summary",
+                "label": "Performance Summary",
+                "description": (
+                    "Parse all rotated log files and report aggregate PnL, "
+                    "per-strategy win rates, per-symbol breakdown, trade-management "
+                    "events, guardrail blocks, and SL slippage detection."
+                ),
+                "runner": _run_performance_summary,
+            },
+        ]
+
+        with wrapper:
+            ui.label("Performance Analysis").classes("text-2xl font-bold")
+            ui.label(
+                "Run analysis scripts against the bot's logs and runtime state. "
+                "Each script produces a text report below.  Scripts are read-only "
+                "and safe to run anytime."
+            ).classes("text-sm text-slate-500 mb-2")
+            ui.separator().classes("w-full my-2")
+
+            # ── Script buttons ────────────────────────────────────────────
+            with ui.card().classes(
+                "w-full p-4 gap-2 bg-slate-50 border border-slate-200 shadow-sm"
+            ):
+                ui.label("Available scripts").classes("text-lg font-semibold")
+                for script in _PERFORMANCE_SCRIPTS:
+                    with ui.row().classes("w-full items-center justify-between flex-wrap gap-2"):
+                        with ui.column().classes("gap-0"):
+                            ui.label(script["label"]).classes("font-semibold text-sm")
+                            ui.label(script["description"]).classes("text-xs text-slate-500")
+                        # Placeholder output panel — created per script below.
+                    # Output panel for this script.
+                    script["output"] = (
+                        ui.log(max_lines=5000)
+                        .classes("w-full font-mono text-xs bg-slate-900/90 text-white rounded-xl")
+                        .style("min-height: 24rem; max-height: 36rem; overflow-y: auto;")
+                    )
+                    script["output"].set_visibility(False)
+
+                    def _make_run_handler(s: dict[str, Any]) -> Any:
+                        def _run() -> None:
+                            s["output"].clear()
+                            s["output"].push("Running…")
+                            s["output"].set_visibility(True)
+                            try:
+                                text = s["runner"]()
+                                s["output"].clear()
+                                for line in text.splitlines():
+                                    s["output"].push(line)
+                            except Exception as exc:  # pragma: no cover - UI guard
+                                s["output"].clear()
+                                s["output"].push(f"Error: {exc}")
+                            s["output"].set_visibility(True)
+
+                        return _run
+
+                    ui.button(
+                        script["label"],
+                        on_click=_make_run_handler(script),
+                    ).props("color=primary dense").classes("text-sm")
+
+            ui.separator().classes("w-full my-4")
+            ui.label(
+                "Tip: use the REST endpoint GET /api/performance/summary for "
+                "machine-readable JSON (agent-friendly)."
+            ).classes("text-xs text-slate-500")
+
     def render_cfg_page() -> None:
         navigation("CFG")
         wrapper = page_container()
@@ -8023,6 +8124,10 @@ def register_pages(app: FastAPI) -> None:
     @ui.page("/cfg")
     def cfg() -> None:
         render_cfg_page()
+
+    @ui.page("/performance")
+    def performance() -> None:
+        render_performance_page()
 
     @ui.page("/backtest")
     def backtest() -> None:
