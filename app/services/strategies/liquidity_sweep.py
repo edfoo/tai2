@@ -54,7 +54,26 @@ class LiquiditySweepStrategy:
       - ``max_bb_bandwidth_percentile`` (float, default 60): upper bandwidth
         percentile for regime gate.
       - ``regime_lookback`` (int, default 50): bars for percentile.
+      - ``use_structural_sizing`` (bool, default True): use structural TP/SL
+        based on the swept swing levels instead of (or clamped by) ATR.
+        TP targets the opposite swing extreme (swing_high for longs,
+        swing_low for shorts).  SL sits just beyond the sweep wick.
+        ATR clamps both to a sane range (see below).  When structural
+        levels are unavailable, falls back to ATR sizing.
+      - ``structural_sl_buffer_atr`` (float, default 0.15): SL is placed
+        this many ATR units *beyond* the sweep wick low/high so it's not
+        sitting exactly at the wick (which would get wicked out easily).
+      - ``atr_min_tp_mult`` (float, default 0.5): structural TP distance
+        must be at least this × ATR% from entry (prevents tiny TPs).
+      - ``atr_max_tp_mult`` (float, default 4.0): structural TP distance
+        is capped at this × ATR% from entry (prevents unreachable TPs).
+      - ``atr_min_sl_mult`` (float, default 0.3): structural SL distance
+        must be at least this × ATR% from entry (prevents instant stops).
+      - ``atr_max_sl_mult`` (float, default 3.0): structural SL distance
+        is capped at this × ATR% from entry (prevents huge risk).
       - ``use_atr_sizing`` (bool, default True): use ATR-scaled TP/SL.
+        Used as fallback when structural levels are unavailable or when
+        ``use_structural_sizing`` is False.
       - ``atr_tp_multiplier`` (float, default 1.5): TP = multiplier × ATR%.
       - ``atr_sl_multiplier`` (float, default 1.2): SL = multiplier × ATR%.
         Tighter than MR/SC because the sweep wick is the invalidation.
@@ -108,6 +127,22 @@ class LiquiditySweepStrategy:
             max_bb_bandwidth_percentile = 60.0
         _regime_lookback = helpers.extract_float(config.get("regime_lookback"))
         regime_lookback = int(_regime_lookback) if _regime_lookback is not None else 50
+        use_structural_sizing = bool(config.get("use_structural_sizing", True))
+        structural_sl_buffer_atr = helpers.extract_float(config.get("structural_sl_buffer_atr"))
+        if structural_sl_buffer_atr is None:
+            structural_sl_buffer_atr = 0.15
+        atr_min_tp_mult = helpers.extract_float(config.get("atr_min_tp_mult"))
+        if atr_min_tp_mult is None:
+            atr_min_tp_mult = 0.5
+        atr_max_tp_mult = helpers.extract_float(config.get("atr_max_tp_mult"))
+        if atr_max_tp_mult is None:
+            atr_max_tp_mult = 4.0
+        atr_min_sl_mult = helpers.extract_float(config.get("atr_min_sl_mult"))
+        if atr_min_sl_mult is None:
+            atr_min_sl_mult = 0.3
+        atr_max_sl_mult = helpers.extract_float(config.get("atr_max_sl_mult"))
+        if atr_max_sl_mult is None:
+            atr_max_sl_mult = 3.0
         use_atr_sizing = bool(config.get("use_atr_sizing", True))
         atr_tp_multiplier = helpers.extract_float(config.get("atr_tp_multiplier"))
         if atr_tp_multiplier is None:
@@ -327,15 +362,70 @@ class LiquiditySweepStrategy:
             return None
 
         # ── Compute effective TP/SL ───────────────────────────────────
+        # Structural mode: TP at opposite swing extreme, SL beyond sweep wick.
+        # ATR mode (fallback): TP/SL = multiplier × ATR%.
+        # In both modes, ATR clamps the structural distances to a sane range.
         _static_tp = helpers.extract_float(config.get("tp_pct"))
         _static_sl = helpers.extract_float(config.get("sl_pct"))
         _effective_tp = _static_tp
         _effective_sl = _static_sl
-        if use_atr_sizing:
-            atr_pct = helpers.extract_float(indicators.get("atr_pct"))
-            if atr_pct is not None and atr_pct > 0:
-                _effective_tp = atr_tp_multiplier * atr_pct
-                _effective_sl = atr_sl_multiplier * atr_pct
+        _sizing_source = "static"
+
+        atr_pct = helpers.extract_float(indicators.get("atr_pct"))
+        last_price = helpers.get_last_price(symbol)
+
+        # ATR fallback / clamp values.
+        if use_atr_sizing and atr_pct is not None and atr_pct > 0:
+            _effective_tp = atr_tp_multiplier * atr_pct
+            _effective_sl = atr_sl_multiplier * atr_pct
+            _sizing_source = "atr"
+
+        # Structural sizing: use the swing levels we already computed.
+        if use_structural_sizing and last_price and last_price > 0 and atr_pct is not None and atr_pct > 0:
+            atr_price = (atr_pct / 100.0) * last_price
+            if atr_price > 0:
+                if buy_signal:
+                    # Long: TP at swing_high (opposite extreme), SL beyond sweep wick low.
+                    raw_tp_dist = swing_high - last_price if swing_high > last_price else None
+                    # SL: sweep wick low minus a small ATR buffer beyond it.
+                    raw_sl_dist = last_price - (curr_low - structural_sl_buffer_atr * atr_price)
+                else:
+                    # Short: TP at swing_low (opposite extreme), SL beyond sweep wick high.
+                    raw_tp_dist = last_price - swing_low if swing_low < last_price else None
+                    raw_sl_dist = (curr_high + structural_sl_buffer_atr * atr_price) - last_price
+
+                # Convert distances to % of price for clamping.
+                tp_pct_raw = (raw_tp_dist / last_price * 100.0) if raw_tp_dist is not None and raw_tp_dist > 0 else None
+                sl_pct_raw = (raw_sl_dist / last_price * 100.0) if raw_sl_dist is not None and raw_sl_dist > 0 else None
+
+                # Clamp TP to [atr_min_tp_mult × ATR%, atr_max_tp_mult × ATR%].
+                tp_clamped = None
+                if tp_pct_raw is not None:
+                    tp_min = atr_min_tp_mult * atr_pct
+                    tp_max = atr_max_tp_mult * atr_pct
+                    tp_clamped = max(tp_min, min(tp_max, tp_pct_raw))
+
+                # Clamp SL to [atr_min_sl_mult × ATR%, atr_max_sl_mult × ATR%].
+                sl_clamped = None
+                if sl_pct_raw is not None:
+                    sl_min = atr_min_sl_mult * atr_pct
+                    sl_max = atr_max_sl_mult * atr_pct
+                    sl_clamped = max(sl_min, min(sl_max, sl_pct_raw))
+
+                if tp_clamped is not None and sl_clamped is not None:
+                    _effective_tp = tp_clamped
+                    _effective_sl = sl_clamped
+                    _sizing_source = (
+                        f"structural(tp={'%.2f' % tp_pct_raw}→{'%.2f' % tp_clamped}%, "
+                        f"sl={'%.2f' % sl_pct_raw}→{'%.2f' % sl_clamped}%)"
+                    )
+                elif tp_clamped is not None:
+                    _effective_tp = tp_clamped
+                    _sizing_source = f"structural(tp={'%.2f' % tp_clamped}%, sl=atr)"
+                elif sl_clamped is not None:
+                    _effective_sl = sl_clamped
+                    _sizing_source = f"structural(sl={'%.2f' % sl_clamped}%, tp=atr)"
+                # If neither clamped value is available, keep ATR/static fallback.
 
         sweep_type = "low" if buy_signal else "high"
         direction = "buy" if buy_signal else "sell"
@@ -348,6 +438,6 @@ class LiquiditySweepStrategy:
             rationale=(
                 f"LiquiditySweep {direction.upper()}: swept {sweep_type} "
                 f"(swing={'%.6g' % (swing_low if buy_signal else swing_high)}, "
-                f"close_pos={close_pos:.2f}{vol_str})"
+                f"close_pos={close_pos:.2f}{vol_str}) [{_sizing_source}]"
             ),
         )

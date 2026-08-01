@@ -934,6 +934,7 @@ class TestBuildLauncherDecision:
                     "max_adx": 0.0,
                     "require_regime": False,
                     "use_atr_sizing": False,
+                    "use_structural_sizing": False,
                     "min_atr_pct": 0.0,
                     "flip_launcher_direction": "both",
                 },
@@ -977,6 +978,7 @@ class TestBuildLauncherDecision:
                     "max_adx": 0.0,
                     "require_regime": False,
                     "use_atr_sizing": False,
+                    "use_structural_sizing": False,
                     "min_atr_pct": 0.0,
                     "flip_launcher_direction": "from_short",
                 },
@@ -1791,7 +1793,7 @@ class TestLiquiditySweepStrategy:
         sweep_candle = {"open": 99.5, "high": 100.8, "low": 98.5, "close": 100.5, "volume": 200.0}
         ohlcv = prior + [sweep_candle]
         snapshot = _make_ls_snapshot(ohlcv=ohlcv, atr_pct=2.0, last_price=100.5)
-        config = _ls_bare(use_atr_sizing=True, atr_tp_multiplier=1.5, atr_sl_multiplier=1.2)
+        config = _ls_bare(use_atr_sizing=True, use_structural_sizing=False, atr_tp_multiplier=1.5, atr_sl_multiplier=1.2)
         signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers())
         assert signal is not None
         # TP = 1.5 × 2.0% = 3.0%, SL = 1.2 × 2.0% = 2.4%

@@ -3760,13 +3760,49 @@ def register_pages(app: FastAPI) -> None:
                             ).classes("w-40").props("dense")
                         # ── ATR-scaled TP/SL ────────────────────────────────
                         ui.separator().classes("my-2")
-                        ui.label("ATR-Scaled TP/SL").classes("text-xs font-semibold text-slate-600")
+                        ui.label("TP/SL Sizing").classes("text-xs font-semibold text-slate-600")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            ls_use_structural_switch = ui.switch(
+                                "Use structural sizing",
+                                value=bool(_ls_cfg.get("use_structural_sizing", True)),
+                            ).props("dense color=primary")
+                            ui.label("TP at opposite swing extreme, SL beyond sweep wick. ATR clamps both to a sane range. Falls back to ATR when unavailable.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            ls_structural_sl_buffer_input = ui.number(
+                                label="SL buffer (ATR)",
+                                value=float(_ls_cfg.get("structural_sl_buffer_atr") or 0.15),
+                                min=0.0, max=2.0, step=0.05, format="%.2f",
+                            ).classes("w-32").props("dense")
+                            ui.label("SL placed this many ATR units beyond the sweep wick.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            ls_atr_min_tp_input = ui.number(
+                                label="Min TP (×ATR)",
+                                value=float(_ls_cfg.get("atr_min_tp_mult") or 0.5),
+                                min=0.1, max=10.0, step=0.1, format="%.1f",
+                            ).classes("w-32").props("dense")
+                            ls_atr_max_tp_input = ui.number(
+                                label="Max TP (×ATR)",
+                                value=float(_ls_cfg.get("atr_max_tp_mult") or 4.0),
+                                min=0.5, max=20.0, step=0.5, format="%.1f",
+                            ).classes("w-32").props("dense")
+                            ls_atr_min_sl_input = ui.number(
+                                label="Min SL (×ATR)",
+                                value=float(_ls_cfg.get("atr_min_sl_mult") or 0.3),
+                                min=0.1, max=10.0, step=0.1, format="%.1f",
+                            ).classes("w-32").props("dense")
+                            ls_atr_max_sl_input = ui.number(
+                                label="Max SL (×ATR)",
+                                value=float(_ls_cfg.get("atr_max_sl_mult") or 3.0),
+                                min=0.5, max=20.0, step=0.5, format="%.1f",
+                            ).classes("w-32").props("dense")
+                        ui.separator().classes("my-2")
+                        ui.label("ATR Fallback TP/SL").classes("text-xs font-semibold text-slate-600")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             ls_use_atr_sizing_switch = ui.switch(
-                                "Use ATR sizing",
+                                "Use ATR sizing (fallback)",
                                 value=bool(_ls_cfg.get("use_atr_sizing", True)),
                             ).props("dense color=primary")
-                            ui.label("Override static TP/SL with ATR-scaled values.").classes("text-xs text-slate-500")
+                            ui.label("Used when structural levels are unavailable or structural sizing is off.").classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             ls_atr_tp_mult_input = ui.number(
                                 label="ATR TP multiplier",
@@ -3815,11 +3851,17 @@ def register_pages(app: FastAPI) -> None:
                 ls_max_bw_pct_input.value = 60.0
                 ls_regime_lookback_input.value = 50
                 ls_use_atr_sizing_switch.value = True
+                ls_use_structural_switch.value = True
+                ls_structural_sl_buffer_input.value = 0.15
+                ls_atr_min_tp_input.value = 0.5
+                ls_atr_max_tp_input.value = 4.0
+                ls_atr_min_sl_input.value = 0.3
+                ls_atr_max_sl_input.value = 3.0
                 ls_atr_tp_mult_input.value = 1.5
                 ls_atr_sl_mult_input.value = 1.2
                 ls_min_atr_pct_input.value = 0.8
                 ls_flip_switch.value = False
-                ls_flip_select.value = "both"
+                ls_flip_select.value = None
                 ui.notify("Liquidity Sweep fields set to recommended defaults — click Save to persist", color="info")
 
             # ── VWAP Reversion ────────────────────────────────────────────────────
@@ -5091,6 +5133,12 @@ def register_pages(app: FastAPI) -> None:
                 "require_regime": bool(ls_require_regime_switch.value),
                 "max_bb_bandwidth_percentile": float(ls_max_bw_pct_input.value or 60.0),
                 "regime_lookback": int(ls_regime_lookback_input.value or 50),
+                "use_structural_sizing": bool(ls_use_structural_switch.value),
+                "structural_sl_buffer_atr": float(ls_structural_sl_buffer_input.value or 0.15),
+                "atr_min_tp_mult": float(ls_atr_min_tp_input.value or 0.5),
+                "atr_max_tp_mult": float(ls_atr_max_tp_input.value or 4.0),
+                "atr_min_sl_mult": float(ls_atr_min_sl_input.value or 0.3),
+                "atr_max_sl_mult": float(ls_atr_max_sl_input.value or 3.0),
                 "use_atr_sizing": bool(ls_use_atr_sizing_switch.value),
                 "atr_tp_multiplier": float(ls_atr_tp_mult_input.value or 1.5),
                 "atr_sl_multiplier": float(ls_atr_sl_mult_input.value or 1.2),
