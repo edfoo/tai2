@@ -335,6 +335,30 @@ When structural levels are unavailable, the strategy falls back to ATR sizing (`
 
 The debug log shows `[structural(tp=1.01→1.01%, sl=1.80→1.80%)]` in the signal rationale when structural sizing is active, so you can verify it's working.
 
+### Trend Pullback
+
+The Trend Pullback strategy enters on pullbacks to value (EMA21 or VWAP) in an established HTF trend, then prints a bullish/bearish candle off the level. It fills the gap between Spike Continuation (breakouts, too late) and Mean Reversion (extremes, wrong in a trend).
+
+**Entry conditions** (all must agree):
+
+| Indicator | Buy | Sell | Configurable |
+|---|---|---|---|
+| HTF trend (required) | EMA50 > EMA200 | EMA50 < EMA200 | Toggle `require_htf_trend` |
+| Pullback level (required) | Price near EMA21 or VWAP | Price near EMA21 or VWAP | `pullback_proximity_pct`, `use_vwap_as_level` |
+| Candle confirmation (optional) | Close > prev close + lower wick ≥ `candle_rejection_pct` | Close < prev close + upper wick ≥ `candle_rejection_pct` | Toggle `require_bullish_candle` |
+| ADX min (optional) | ADX ≥ `min_adx` | ADX ≥ `min_adx` | `min_adx` (0 = disabled) |
+| ADX max (optional) | ADX ≤ `max_adx_for_entry` | ADX ≤ `max_adx_for_entry` | `max_adx_for_entry` (0 = disabled) |
+
+**Structural TP/SL sizing** (default on):
+
+The strategy uses **structural levels** for TP/SL instead of pure ATR distances:
+
+- **TP** targets the **nearest swing high** (for longs) or **swing low** (for shorts) from `indicators["structure"]["swing_highs"]` / `["swing_lows"]`. These are levels where price reversed before, so they're natural targets.
+- **SL** sits just **beyond the pullback candle's low** (for longs) or **high** (for shorts) plus a small ATR buffer (`structural_sl_buffer_atr`, default 0.15 ATR). This is the structural invalidation: if price goes below the pullback candle, the pullback failed.
+- **ATR clamps both** to a sane range (same config keys and defaults as Liquidity Sweep).
+
+When structural levels are unavailable, the strategy falls back to ATR sizing.
+
 ## Future Strategies
 
 Here are some strategies that could be implemented using existing indicators, ranked by implementation effort:

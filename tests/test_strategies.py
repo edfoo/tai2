@@ -1019,6 +1019,7 @@ class TestBuildLauncherDecision:
                     "min_adx": 0.0,
                     "max_adx_for_entry": 0.0,
                     "use_atr_sizing": False,
+                    "use_structural_sizing": False,
                     "min_atr_pct": 0.0,
                     "flip_launcher_direction": "both",
                 },
@@ -1064,6 +1065,7 @@ class TestBuildLauncherDecision:
                     "min_adx": 0.0,
                     "max_adx_for_entry": 0.0,
                     "use_atr_sizing": False,
+                    "use_structural_sizing": False,
                     "min_atr_pct": 0.0,
                     "flip_launcher_direction": "from_long",
                 },
@@ -2360,7 +2362,8 @@ class TestTrendPullbackStrategy:
             ohlcv=ohlcv, last_price=100.0,
         )
         config = _tp_bare(
-            use_atr_sizing=True, atr_tp_multiplier=2.0, atr_sl_multiplier=1.5,
+            use_atr_sizing=True, use_structural_sizing=False,
+            atr_tp_multiplier=2.0, atr_sl_multiplier=1.5,
             require_htf_trend=True, require_bullish_candle=True,
         )
         signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=100.0))
@@ -2380,7 +2383,8 @@ class TestTrendPullbackStrategy:
             ohlcv=ohlcv, last_price=100.0,
         )
         config = _tp_bare(
-            use_atr_sizing=False, tp_pct=4.0, sl_pct=3.0,
+            use_atr_sizing=False, use_structural_sizing=False,
+            tp_pct=4.0, sl_pct=3.0,
             require_htf_trend=True, require_bullish_candle=True,
         )
         signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=100.0))

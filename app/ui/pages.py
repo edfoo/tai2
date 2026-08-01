@@ -4114,15 +4114,51 @@ def register_pages(app: FastAPI) -> None:
                             ).classes("w-40").props(
                                 "hint='Block when trend already extended (pullback likely reversal)' persistent-hint"
                             )
-                        # ── ATR-scaled TP/SL ────────────────────────────────
+                        # ── TP/SL Sizing ────────────────────────────────
                         ui.separator().classes("my-2")
-                        ui.label("ATR-Scaled TP/SL").classes("text-xs font-semibold text-slate-600")
+                        ui.label("TP/SL Sizing").classes("text-xs font-semibold text-slate-600")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            tp_use_structural_switch = ui.switch(
+                                "Use structural sizing",
+                                value=bool(_tp_cfg.get("use_structural_sizing", True)),
+                            ).props("dense color=primary")
+                            ui.label("TP at nearest swing high/low, SL beyond pullback candle. ATR clamps both. Falls back to ATR when unavailable.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            tp_structural_sl_buffer_input = ui.number(
+                                label="SL buffer (ATR)",
+                                value=float(_tp_cfg.get("structural_sl_buffer_atr") or 0.15),
+                                min=0.0, max=2.0, step=0.05, format="%.2f",
+                            ).classes("w-32").props("dense")
+                            ui.label("SL placed this many ATR units beyond the pullback candle low/high.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            tp_atr_min_tp_input = ui.number(
+                                label="Min TP (×ATR)",
+                                value=float(_tp_cfg.get("atr_min_tp_mult") or 0.5),
+                                min=0.1, max=10.0, step=0.1, format="%.1f",
+                            ).classes("w-32").props("dense")
+                            tp_atr_max_tp_input = ui.number(
+                                label="Max TP (×ATR)",
+                                value=float(_tp_cfg.get("atr_max_tp_mult") or 4.0),
+                                min=0.5, max=20.0, step=0.5, format="%.1f",
+                            ).classes("w-32").props("dense")
+                            tp_atr_min_sl_input = ui.number(
+                                label="Min SL (×ATR)",
+                                value=float(_tp_cfg.get("atr_min_sl_mult") or 0.3),
+                                min=0.1, max=10.0, step=0.1, format="%.1f",
+                            ).classes("w-32").props("dense")
+                            tp_atr_max_sl_input = ui.number(
+                                label="Max SL (×ATR)",
+                                value=float(_tp_cfg.get("atr_max_sl_mult") or 3.0),
+                                min=0.5, max=20.0, step=0.5, format="%.1f",
+                            ).classes("w-32").props("dense")
+                        ui.separator().classes("my-2")
+                        ui.label("ATR Fallback TP/SL").classes("text-xs font-semibold text-slate-600")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             tp_use_atr_sizing_switch = ui.switch(
-                                "Use ATR sizing",
+                                "Use ATR sizing (fallback)",
                                 value=bool(_tp_cfg.get("use_atr_sizing", True)),
                             ).props("dense color=primary")
-                            ui.label("Override static TP/SL with ATR-scaled values.").classes("text-xs text-slate-500")
+                            ui.label("Used when structural levels are unavailable or structural sizing is off.").classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             tp_atr_tp_mult_input = ui.number(
                                 label="ATR TP multiplier",
@@ -4169,11 +4205,17 @@ def register_pages(app: FastAPI) -> None:
                 tp_min_adx_input.value = 20.0
                 tp_max_adx_entry_input.value = 35.0
                 tp_use_atr_sizing_switch.value = True
+                tp_use_structural_switch.value = True
+                tp_structural_sl_buffer_input.value = 0.15
+                tp_atr_min_tp_input.value = 0.5
+                tp_atr_max_tp_input.value = 4.0
+                tp_atr_min_sl_input.value = 0.3
+                tp_atr_max_sl_input.value = 3.0
                 tp_atr_tp_mult_input.value = 2.0
                 tp_atr_sl_mult_input.value = 1.5
                 tp_min_atr_pct_input.value = 1.0
                 tp_flip_switch.value = False
-                tp_flip_select.value = "both"
+                tp_flip_select.value = None
                 ui.notify("Trend Pullback fields set to recommended defaults — click Save to persist", color="info")
 
             with ui.card().classes("w-full rounded-lg border border-slate-200 mb-1"):
@@ -5175,6 +5217,12 @@ def register_pages(app: FastAPI) -> None:
                 "candle_rejection_pct": float(tp_candle_rejection_pct_input.value or 25.0),
                 "min_adx": float(tp_min_adx_input.value or 20.0),
                 "max_adx_for_entry": float(tp_max_adx_entry_input.value or 35.0),
+                "use_structural_sizing": bool(tp_use_structural_switch.value),
+                "structural_sl_buffer_atr": float(tp_structural_sl_buffer_input.value or 0.15),
+                "atr_min_tp_mult": float(tp_atr_min_tp_input.value or 0.5),
+                "atr_max_tp_mult": float(tp_atr_max_tp_input.value or 4.0),
+                "atr_min_sl_mult": float(tp_atr_min_sl_input.value or 0.3),
+                "atr_max_sl_mult": float(tp_atr_max_sl_input.value or 3.0),
                 "use_atr_sizing": bool(tp_use_atr_sizing_switch.value),
                 "atr_tp_multiplier": float(tp_atr_tp_mult_input.value or 2.0),
                 "atr_sl_multiplier": float(tp_atr_sl_mult_input.value or 1.5),
