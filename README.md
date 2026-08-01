@@ -294,6 +294,47 @@ These filters together prevent the pattern where the strategy enters a long at t
 - Use **Mean Reversion** when you see price at BB extremes with RSI oversold/overbought and want to fade the move
 - Both can run concurrently — they target different market conditions
 
+### Liquidity Sweep (Stop-Hunt Reversal)
+
+The Liquidity Sweep strategy detects stop-hunt wicks: price pierces a recent swing low/high (triggering stops) then closes back inside the range. It enters in the opposite direction of the sweep, expecting a rapid reversal as the stop-run exhausts.
+
+**Entry conditions** (all must agree):
+
+| Indicator | Buy (long sweep) | Sell (short sweep) | Configurable |
+|---|---|---|---|
+| Sweep (required) | Wick below swing low × (1 − buffer%) | Wick above swing high × (1 + buffer%) | `sweep_buffer_pct` |
+| Reclaim (required) | Close in upper `reclaim_ratio` of candle range | Close in lower `reclaim_ratio` of candle range | `reclaim_ratio` |
+| HTF trend (optional) | EMA50 > EMA200 | EMA50 < EMA200 | Toggle `require_htf_trend` |
+| Volume spike (optional) | Volume ≥ avg × `volume_spike_ratio` | Volume ≥ avg × `volume_spike_ratio` | Toggle `require_volume_spike` |
+| ADX max (optional) | ADX ≤ `max_adx` | ADX ≤ `max_adx` | `max_adx` (0 = disabled) |
+| Regime (optional) | BB bandwidth percentile ≤ `max_bb_bandwidth_percentile` | same | Toggle `require_regime` |
+
+**Structural TP/SL sizing** (default on):
+
+The strategy uses **structural levels** for TP/SL instead of pure ATR distances:
+
+- **TP** targets the **opposite swing extreme** — for a long sweep (wick below swing low), TP is at the swing high; for a short sweep, TP is at the swing low. This is where price reversed from before, so it's a natural target.
+- **SL** sits just **beyond the sweep wick** — for a long, SL is below the sweep candle's low plus a small ATR buffer (`structural_sl_buffer_atr`, default 0.15 ATR). This is the structural invalidation: if price goes below the sweep wick, the sweep failed.
+- **ATR clamps both** to a sane range so you don't get absurdly tight or wide levels:
+  - TP clamped to `[atr_min_tp_mult × ATR, atr_max_tp_mult × ATR]` from entry (default `[0.5, 4.0]`)
+  - SL clamped to `[atr_min_sl_mult × ATR, atr_max_sl_mult × ATR]` from entry (default `[0.3, 3.0]`)
+
+When structural levels are unavailable, the strategy falls back to ATR sizing (`atr_tp_multiplier × atr_pct` / `atr_sl_multiplier × atr_pct`).
+
+| Setting | Default | Purpose |
+|---|---|---|
+| `use_structural_sizing` | `True` | Master switch for structural TP/SL |
+| `structural_sl_buffer_atr` | `0.15` | SL placed this many ATR beyond the sweep wick |
+| `atr_min_tp_mult` | `0.5` | Min TP distance in ATR units (clamp) |
+| `atr_max_tp_mult` | `4.0` | Max TP distance in ATR units (clamp) |
+| `atr_min_sl_mult` | `0.3` | Min SL distance in ATR units (clamp) |
+| `atr_max_sl_mult` | `3.0` | Max SL distance in ATR units (clamp) |
+| `use_atr_sizing` | `True` | ATR fallback when structural levels unavailable |
+| `atr_tp_multiplier` | `1.5` | ATR fallback TP multiplier |
+| `atr_sl_multiplier` | `1.2` | ATR fallback SL multiplier |
+
+The debug log shows `[structural(tp=1.01→1.01%, sl=1.80→1.80%)]` in the signal rationale when structural sizing is active, so you can verify it's working.
+
 ## Future Strategies
 
 Here are some strategies that could be implemented using existing indicators, ranked by implementation effort:
