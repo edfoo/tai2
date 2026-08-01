@@ -32,8 +32,9 @@ class TrendPullbackStrategy:
         ``indicators["moving_averages"]["ema_<n>"]``.
       - ``use_vwap_as_level`` (bool, default True): also accept VWAP as a
         valid pullback level (price near VWAP qualifies).
-            - ``pullback_proximity_pct`` (float, default 0.4): how close (in %)
+            - ``pullback_proximity_pct`` (float, default 0.3): how close (in %)
         price must be to the EMA/VWAP level to qualify as a pullback.
+        Tightened from 0.4 to reduce weak pullback entries.
       - ``require_htf_trend`` (bool, default True): HTF EMA50/EMA200 must
         confirm the trend direction.  Auto-disabled when no HTF data.
       - ``require_bullish_candle`` (bool, default True): the trigger candle
@@ -41,8 +42,9 @@ class TrendPullbackStrategy:
         rejection wick off the level.
       - ``candle_rejection_pct`` (float, default 25): minimum wick size as %
         of candle range for the rejection confirmation.
-            - ``max_adx_for_entry`` (float, default 35): block when ADX is too high
+            - ``max_adx_for_entry`` (float, default 28): block when ADX is too high
         (trend already extended — pullback likely a reversal).  0 = disabled.
+        Tightened from 35 to avoid late entries in mature trends.
             - ``min_adx`` (float, default 20): require a minimum trend strength so
         we only enter in real trends, not chop.  0 = disabled.
       - ``use_structural_sizing`` (bool, default True): use structural TP/SL
@@ -95,7 +97,7 @@ class TrendPullbackStrategy:
         use_vwap_as_level = bool(config.get("use_vwap_as_level", True))
         pullback_proximity_pct = helpers.extract_float(config.get("pullback_proximity_pct"))
         if pullback_proximity_pct is None:
-            pullback_proximity_pct = 0.4
+            pullback_proximity_pct = 0.3
         require_htf_trend = bool(config.get("require_htf_trend", True))
         require_bullish_candle = bool(config.get("require_bullish_candle", True))
         candle_rejection_pct = helpers.extract_float(config.get("candle_rejection_pct"))
@@ -103,7 +105,7 @@ class TrendPullbackStrategy:
             candle_rejection_pct = 25.0
         max_adx_for_entry = helpers.extract_float(config.get("max_adx_for_entry"))
         if max_adx_for_entry is None:
-            max_adx_for_entry = 35.0
+            max_adx_for_entry = 28.0
         min_adx = helpers.extract_float(config.get("min_adx"))
         if min_adx is None:
             min_adx = 20.0

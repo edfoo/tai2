@@ -46,8 +46,9 @@ class LiquiditySweepStrategy:
       - ``volume_spike_ratio`` (float, default 1.5): current volume / avg
         recent volume must exceed this.
       - ``volume_lookback`` (int, default 10): bars for average volume.
-      - ``max_adx`` (float, default 35): skip when ADX is very high (strong
+      - ``max_adx`` (float, default 28): skip when ADX is very high (strong
         trend — sweep is more likely a real breakout, not a stop hunt).
+        Tightened from 35 to reduce strong-trend losses.
       - ``require_regime`` (bool, default True): only enter when BB bandwidth
         percentile is below ``max_bb_bandwidth_percentile`` (chop/range
         regime where sweeps are most reliable).
@@ -118,7 +119,7 @@ class LiquiditySweepStrategy:
         volume_lookback = int(_vol_lookback) if _vol_lookback is not None else 10
         max_adx = helpers.extract_float(config.get("max_adx"))
         if max_adx is None:
-            max_adx = 35.0
+            max_adx = 28.0
         require_regime = bool(config.get("require_regime", True))
         max_bb_bandwidth_percentile = helpers.extract_float(
             config.get("max_bb_bandwidth_percentile")

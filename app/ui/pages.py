@@ -3776,7 +3776,7 @@ def register_pages(app: FastAPI) -> None:
                         with ui.row().classes("w-full flex-wrap gap-4 items-start"):
                             ls_max_adx_input = ui.number(
                                 label="Max ADX",
-                                value=float(_ls_cfg.get("max_adx") or 35.0),
+                                value=float(_ls_cfg.get("max_adx") or 28.0),
                                 min=0, max=100, step=1, precision=0,
                             ).classes("w-32").props(
                                 "hint='Skip strong trends (sweep likely real breakout)' persistent-hint"
@@ -3889,7 +3889,7 @@ def register_pages(app: FastAPI) -> None:
                 ls_require_htf_switch.value = True
                 ls_require_vol_switch.value = True
                 ls_vol_ratio_input.value = 1.5
-                ls_max_adx_input.value = 35.0
+                ls_max_adx_input.value = 28.0
                 ls_require_regime_switch.value = True
                 ls_max_bw_pct_input.value = 60.0
                 ls_regime_lookback_input.value = 50
@@ -4155,7 +4155,7 @@ def register_pages(app: FastAPI) -> None:
                         with ui.row().classes("w-full flex-wrap gap-4 items-start"):
                             tp_proximity_input = ui.number(
                                 label="Pullback proximity %",
-                                value=float(_tp_cfg.get("pullback_proximity_pct") or 0.4),
+                                value=float(_tp_cfg.get("pullback_proximity_pct") or 0.3),
                                 min=0.05, max=5.0, step=0.05, format="%.2f",
                             ).classes("w-40").props("dense")
                             ui.label("How close (in %) price must be to the EMA/VWAP level to qualify as a pullback.").classes("text-xs text-slate-500")
@@ -4194,7 +4194,7 @@ def register_pages(app: FastAPI) -> None:
                             )
                             tp_max_adx_entry_input = ui.number(
                                 label="Max ADX for entry",
-                                value=float(_tp_cfg.get("max_adx_for_entry") or 35.0),
+                                value=float(_tp_cfg.get("max_adx_for_entry") or 28.0),
                                 min=0, max=100, step=1, precision=0,
                             ).classes("w-40").props(
                                 "hint='Block when trend already extended (pullback likely reversal)' persistent-hint"
@@ -4282,13 +4282,13 @@ def register_pages(app: FastAPI) -> None:
                 tp_tp_input.value = 4.0
                 tp_sl_input.value = 3.0
                 tp_pullback_ema_input.value = 21
-                tp_proximity_input.value = 0.4
+                tp_proximity_input.value = 0.3
                 tp_use_vwap_switch.value = True
                 tp_require_htf_switch.value = True
                 tp_require_bullish_switch.value = True
                 tp_candle_rejection_pct_input.value = 25.0
                 tp_min_adx_input.value = 20.0
-                tp_max_adx_entry_input.value = 35.0
+                tp_max_adx_entry_input.value = 28.0
                 tp_use_atr_sizing_switch.value = True
                 tp_use_structural_switch.value = True
                 tp_structural_sl_buffer_input.value = 0.15
