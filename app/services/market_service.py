@@ -4423,6 +4423,12 @@ class MarketService:
         sc_max = max(1, int(cfg.get("sc_max_symbols") or max(3, max_symbols // 2)))
         mr_max = max(1, int(cfg.get("mr_max_symbols") or max(3, max_symbols // 2)))
         min_volume_usd = float(cfg.get("min_volume_usd") or 0.0)
+        # Liquidity guard: reject symbols whose bid/ask spread is too wide.
+        # Wide spreads signal thin order books where market-order SL closes
+        # slip badly (the dominant loss mechanism on low-liquidity alts).
+        # 0.0 = disabled.  Default 0.5% filters out names like SATS/MMT where
+        # a 10-USDT market close slipped 2-5x beyond the SL trigger.
+        max_spread_pct = float(cfg.get("max_spread_pct") or 0.0)
         # SC filters: want movement.
         sc_min_momentum_pct = float(
             cfg.get("sc_min_momentum_pct", cfg.get("min_momentum_pct") or 1.5)
@@ -4456,6 +4462,20 @@ class MarketService:
                 continue
             if vol_ccy_24h is None or vol_ccy_24h < min_volume_usd:
                 continue
+            # Liquidity guard: reject wide-spread (thin book) symbols.
+            # OKX tickers expose bidPx/askPx; spread = (ask-bid)/mid × 100.
+            # A wide spread means market-order closes (SL triggers) will slip.
+            spread_pct: float | None = None
+            if max_spread_pct > 0:
+                bid_px = self._extract_float(ticker.get("bidPx"))
+                ask_px = self._extract_float(ticker.get("askPx"))
+                if bid_px is not None and ask_px is not None and bid_px > 0 and ask_px > 0:
+                    mid = (bid_px + ask_px) / 2.0
+                    if mid > 0:
+                        spread_pct = (ask_px - bid_px) / mid * 100.0
+                        if spread_pct > max_spread_pct:
+                            continue
+                # If bid/ask missing, do not reject — let volume filter decide.
             momentum_pct = (
                 abs((last - open24h) / open24h * 100)
                 if open24h and open24h > 0
@@ -4485,12 +4505,14 @@ class MarketService:
                     "vol_spike_ratio": vol_spike_ratio,
                     "hl_range_pct": hl_range_pct,
                     "momentum_pct": momentum_pct,
+                    "spread_pct": spread_pct,
                 }
             )
 
+        spread_str = f", spread<={max_spread_pct:.2f}%" if max_spread_pct > 0 else ""
         self._emit_debug(
             f"Screener: {len(candidates)} base candidates from {len(tickers)} tickers "
-            f"(vol>={min_volume_usd:.0f} USD, dual={dual_universe})"
+            f"(vol>={min_volume_usd:.0f} USD{spread_str}, dual={dual_universe})"
         )
         if not candidates:
             self._screener_last_run = now

@@ -50,6 +50,7 @@ def _dual_cfg(**overrides: Any) -> dict[str, Any]:
         "sc_max_symbols": 3,
         "mr_max_symbols": 3,
         "min_volume_usd": 0,
+        "max_spread_pct": 0.0,
         "sc_min_momentum_pct": 0.5,
         "sc_min_hl_range_pct": 0.0,
         "mr_min_hl_range_pct": 1.0,
@@ -219,6 +220,104 @@ class TestDualUniverseScoring:
             await _run_screener(service, cfg=_dual_cfg(min_volume_usd=100_000))
             union = set(service._screener_selected_symbols)
             assert "DEAD-USDT-SWAP" not in union
+
+        asyncio.run(scenario())
+
+    def test_max_spread_filter_rejects_wide_spread(self) -> None:
+        """Wide-spread (thin-book) symbols must be rejected by max_spread_pct."""
+        service = _make_service()
+        tickers = _sample_tickers()
+        # WIDE has a 2% bid/ask spread — should be rejected at max_spread_pct=0.5.
+        tickers.append(
+            {
+                "instId": "WIDE-USDT-SWAP",
+                "last": 100,
+                "open24h": 100,
+                "high24h": 106,
+                "low24h": 94,
+                "volCcy24h": 5_000_000,
+                "bidPx": 99.0,
+                "askPx": 101.0,
+            }
+        )
+        # TIGHT has a 0.1% spread — should pass at max_spread_pct=0.5.
+        tickers.append(
+            {
+                "instId": "TIGHT-USDT-SWAP",
+                "last": 100,
+                "open24h": 100,
+                "high24h": 106,
+                "low24h": 94,
+                "volCcy24h": 5_000_000,
+                "bidPx": 99.95,
+                "askPx": 100.05,
+            }
+        )
+
+        async def scenario() -> None:
+            await _run_screener(
+                service,
+                tickers=tickers,
+                cfg=_dual_cfg(max_spread_pct=0.5),
+            )
+            union = set(service._screener_selected_symbols)
+            assert "WIDE-USDT-SWAP" not in union
+            assert "TIGHT-USDT-SWAP" in union
+
+        asyncio.run(scenario())
+
+    def test_max_spread_disabled_when_zero(self) -> None:
+        """max_spread_pct=0 must not reject any symbol regardless of spread."""
+        service = _make_service()
+        tickers = _sample_tickers()
+        tickers.append(
+            {
+                "instId": "WIDE-USDT-SWAP",
+                "last": 100,
+                "open24h": 100,
+                "high24h": 106,
+                "low24h": 94,
+                "volCcy24h": 5_000_000,
+                "bidPx": 99.0,
+                "askPx": 101.0,
+            }
+        )
+
+        async def scenario() -> None:
+            await _run_screener(
+                service,
+                tickers=tickers,
+                cfg=_dual_cfg(max_spread_pct=0.0),
+            )
+            union = set(service._screener_selected_symbols)
+            assert "WIDE-USDT-SWAP" in union
+
+        asyncio.run(scenario())
+
+    def test_max_spread_missing_bid_ask_not_rejected(self) -> None:
+        """Symbols missing bidPx/askPx must not be rejected by the spread filter."""
+        service = _make_service()
+        tickers = _sample_tickers()
+        # NOSPREAD has no bid/ask fields — should pass (volume filter decides).
+        tickers.append(
+            {
+                "instId": "NOSPREAD-USDT-SWAP",
+                "last": 100,
+                "open24h": 100,
+                "high24h": 106,
+                "low24h": 94,
+                "volCcy24h": 5_000_000,
+            }
+        )
+
+        async def scenario() -> None:
+            await _run_screener(
+                service,
+                tickers=tickers,
+                cfg=_dual_cfg(max_spread_pct=0.5),
+            )
+            union = set(service._screener_selected_symbols)
+            assert "NOSPREAD-USDT-SWAP" in union
 
         asyncio.run(scenario())
 
@@ -495,3 +594,18 @@ class TestScreenerConfigPlumbing:
         assert "mr_max_symbols" in src
         assert "mr_min_hl_range_pct" in src
         assert "mr_max_momentum_pct" in src
+
+    def test_default_runtime_screener_has_liquidity_filters(self) -> None:
+        """Verify the default screener config has the liquidity guardrails.
+
+        min_volume_usd default was raised to 10M and max_spread_pct (0.5%)
+        was added to filter out thin-book alts where SL market closes slip.
+        """
+        import inspect
+
+        from app import main as main_module
+
+        lifespan_factory = main_module._create_lifespan(False)
+        src = inspect.getsource(lifespan_factory)
+        assert "max_spread_pct" in src
+        assert "10_000_000" in src or "10000000" in src

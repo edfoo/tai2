@@ -6594,12 +6594,21 @@ def register_pages(app: FastAPI) -> None:
                 )
                 screener_min_volume_input = ui.number(
                     label="Min 24h volume (M USDT)",
-                    value=float((screener_cfg.get("min_volume_usd") or 500_000) / 1_000_000),
+                    value=float((screener_cfg.get("min_volume_usd") or 10_000_000) / 1_000_000),
                     min=0,
                     step=0.1,
                     format="%.2f",
                 ).classes("w-full md:w-56").props(
-                    "hint='Exclude symbols below this 24h quote-volume — enter in millions, e.g. 0.5 = 500,000 USDT (0 = no filter)' persistent-hint"
+                    "hint='Exclude symbols below this 24h quote-volume — enter in millions, e.g. 10 = 10,000,000 USDT (0 = no filter). Default 10M filters out thin-book alts where SL market closes slip badly.' persistent-hint"
+                )
+                screener_max_spread_input = ui.number(
+                    label="Max bid/ask spread (%)",
+                    value=float(screener_cfg.get("max_spread_pct") or 0.5),
+                    min=0,
+                    step=0.05,
+                    format="%.2f",
+                ).classes("w-full md:w-56").props(
+                    "hint='Reject symbols whose bid/ask spread exceeds this % of mid. Wide spreads signal thin order books where SL market-order closes slip 2-5x. 0 = disabled. Default 0.5%.' persistent-hint"
                 )
             ui.label("SC universe filters (expansion)").classes("text-xs font-semibold text-slate-600 mt-2")
             with ui.row().classes("w-full flex-wrap gap-4"):
@@ -7913,6 +7922,7 @@ def register_pages(app: FastAPI) -> None:
                 "mr_max_symbols": max(1, _coerce(screener_mr_max_input.value, 8, int)),
                 "interval_minutes": max(5, _coerce(screener_interval_input.value, 60, int)),
                 "min_volume_usd": max(0.0, _coerce(screener_min_volume_input.value, 0.0, float) * 1_000_000),
+                "max_spread_pct": max(0.0, _coerce(screener_max_spread_input.value, 0.0, float)),
                 # SC filters (also stored as legacy min_* for backward compatibility)
                 "sc_min_momentum_pct": max(0.0, _coerce(screener_min_momentum_input.value, 0.0, float)),
                 "sc_min_hl_range_pct": max(0.0, _coerce(screener_min_hl_range_input.value, 0.0, float)),
