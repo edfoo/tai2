@@ -10129,6 +10129,29 @@ class MarketService:
                         },
                     )
 
+        _is_launcher_decision = str(decision.get("_decision_origin") or "").lower() == "launcher"
+        if not reduce_only and _is_launcher_decision:
+            entry_side = "long" if side == "buy" else "short"
+            strat_key = (
+                f"{decision.get('_strategy_name')}:{symbol.upper()}"
+                if decision.get("_strategy_name")
+                else symbol.upper()
+            )
+            self._launcher_in_position[strat_key] = {
+                "side": entry_side,
+                "pos_side": pos_side,
+                "strategy": decision.get("_strategy_name"),
+            }
+            self._seed_trade_mgmt_state(
+                symbol=symbol,
+                side=entry_side,
+                strategy_name=decision.get("_strategy_name"),
+                attach_algo_orders=attach_algo_orders,
+                entry_price=executed_price or last_price,
+                tp_price=take_profit_price,
+                sl_price=stop_loss_price,
+            )
+
         await self._record_trade_execution(
             symbol=symbol,
             side=side,

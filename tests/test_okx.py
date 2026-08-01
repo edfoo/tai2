@@ -176,6 +176,74 @@ def test_handle_llm_decision_blocks_without_positions(monkeypatch: pytest.Monkey
     assert any("Execution disabled" in message for message in messages)
 
 
+def test_launcher_decision_seeds_trade_mgmt_state_on_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def scenario() -> tuple[bool, str, dict[str, Any], dict[str, Any]]:
+        state = DummySnapshotStore()
+        service = MarketService(
+            state_service=state,
+            enable_websocket=False,
+            account_api=None,
+            market_api=None,
+            public_api=None,
+            trade_api=object(),
+        )
+        service._instrument_specs[service.symbol] = {
+            "lot_size": 0.1,
+            "min_size": 0.1,
+            "tick_size": 0.0001,
+        }
+        service._latest_ticker[service.symbol] = {"last": 100.0}
+        service._strategy_config = {
+            "trade_management": {
+                "enabled": True,
+            }
+        }
+
+        async def fake_submit_order(*args: Any, **kwargs: Any) -> tuple[dict[str, Any], bool]:
+            return {"ordId": "order-1"}, True
+
+        async def fake_record_trade_execution(*args: Any, **kwargs: Any) -> None:
+            return None
+
+        async def fake_fetch_positions() -> list[dict[str, Any]]:
+            return []
+
+        monkeypatch.setattr(service, "_submit_order", fake_submit_order)
+        monkeypatch.setattr(service, "_record_trade_execution", fake_record_trade_execution)
+        monkeypatch.setattr(service, "_fetch_positions", fake_fetch_positions)
+
+        decision = {
+            "action": "BUY",
+            "confidence": 0.95,
+            "notional_usd": 100.0,
+            "rationale": "launcher",
+            "_decision_origin": "launcher",
+            "_strategy_name": "vwap_reversion",
+        }
+        context = {
+            "symbol": service.symbol,
+            "execution": {
+                "enabled": True,
+                "trade_mode": "isolated",
+                "order_type": "market",
+                "min_size": 0.1,
+            },
+            "guardrails": {},
+            "account": {"account_equity": 1000.0},
+            "market": {"last_price": 100.0},
+        }
+
+        executed = await service.handle_llm_decision(decision, context)
+        return executed, service.symbol, service._launcher_in_position, service._trade_mgmt_state
+
+    executed, symbol, launcher_positions, trade_mgmt_state = asyncio.run(scenario())
+    assert executed is True
+    assert launcher_positions
+    assert trade_mgmt_state
+    assert launcher_positions[f"vwap_reversion:{symbol.upper()}"]["strategy"] == "vwap_reversion"
+    assert trade_mgmt_state[symbol.upper()]["strategy"] == "vwap_reversion"
+
+
 def test_handle_llm_seeds_isolated_margin_when_tier_requires_more_margin(monkeypatch: pytest.MonkeyPatch) -> None:
     class RecordingAccountApi:
         def __init__(self) -> None:
