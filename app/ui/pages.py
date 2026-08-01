@@ -3292,10 +3292,47 @@ def register_pages(app: FastAPI) -> None:
                         ).classes("text-xs text-slate-500 mb-2")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             mr_use_atr_sizing_switch = ui.switch(
-                                "Use ATR sizing",
+                                "Use ATR sizing (fallback)",
                                 value=bool(_mr_cfg.get("use_atr_sizing", True)),
                             ).props("dense color=primary")
-                            ui.label("Override static TP/SL with ATR-scaled values.").classes("text-xs text-slate-500")
+                            ui.label("Used when structural levels are unavailable or structural sizing is off.").classes("text-xs text-slate-500")
+                        # ── Structural TP/SL ──────────────────────────────
+                        ui.separator().classes("my-2")
+                        ui.label("Structural TP/SL").classes("text-xs font-semibold text-slate-600")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            mr_use_structural_switch = ui.switch(
+                                "Use structural sizing",
+                                value=bool(_mr_cfg.get("use_structural_sizing", True)),
+                            ).props("dense color=primary")
+                            ui.label("TP at BB middle band (the mean), SL beyond entry candle wick. ATR clamps both. Falls back to ATR when unavailable.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            mr_structural_sl_buffer_input = ui.number(
+                                label="SL buffer (ATR)",
+                                value=float(_mr_cfg.get("structural_sl_buffer_atr") or 0.15),
+                                min=0.0, max=2.0, step=0.05, format="%.2f",
+                            ).classes("w-32").props("dense")
+                            ui.label("SL placed this many ATR units beyond the entry candle low/high.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            mr_atr_min_tp_input = ui.number(
+                                label="Min TP (×ATR)",
+                                value=float(_mr_cfg.get("atr_min_tp_mult") or 0.5),
+                                min=0.1, max=10.0, step=0.1, format="%.1f",
+                            ).classes("w-32").props("dense")
+                            mr_atr_max_tp_input = ui.number(
+                                label="Max TP (×ATR)",
+                                value=float(_mr_cfg.get("atr_max_tp_mult") or 4.0),
+                                min=0.5, max=20.0, step=0.5, format="%.1f",
+                            ).classes("w-32").props("dense")
+                            mr_atr_min_sl_input = ui.number(
+                                label="Min SL (×ATR)",
+                                value=float(_mr_cfg.get("atr_min_sl_mult") or 0.3),
+                                min=0.1, max=10.0, step=0.1, format="%.1f",
+                            ).classes("w-32").props("dense")
+                            mr_atr_max_sl_input = ui.number(
+                                label="Max SL (×ATR)",
+                                value=float(_mr_cfg.get("atr_max_sl_mult") or 3.0),
+                                min=0.5, max=20.0, step=0.5, format="%.1f",
+                            ).classes("w-32").props("dense")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             mr_atr_tp_mult_input = ui.number(
                                 label="ATR TP multiplier",
@@ -3369,6 +3406,12 @@ def register_pages(app: FastAPI) -> None:
                 mr_max_bw_pct_input.value = 55.0
                 mr_regime_lookback_input.value = 50
                 mr_use_atr_sizing_switch.value = True
+                mr_use_structural_switch.value = True
+                mr_structural_sl_buffer_input.value = 0.15
+                mr_atr_min_tp_input.value = 0.5
+                mr_atr_max_tp_input.value = 4.0
+                mr_atr_min_sl_input.value = 0.3
+                mr_atr_max_sl_input.value = 3.0
                 # R:R must be >= 1.0: TP multiplier >= SL multiplier.
                 # Inverted R:R (TP<SL) guarantees a losing bias because MR
                 # win rates are naturally < 50%.
@@ -5168,6 +5211,12 @@ def register_pages(app: FastAPI) -> None:
                 "require_regime": bool(mr_require_regime_switch.value),
                 "max_bb_bandwidth_percentile": float(mr_max_bw_pct_input.value or 45.0),
                 "regime_lookback": int(mr_regime_lookback_input.value or 50),
+                "use_structural_sizing": bool(mr_use_structural_switch.value),
+                "structural_sl_buffer_atr": float(mr_structural_sl_buffer_input.value or 0.15),
+                "atr_min_tp_mult": float(mr_atr_min_tp_input.value or 0.5),
+                "atr_max_tp_mult": float(mr_atr_max_tp_input.value or 4.0),
+                "atr_min_sl_mult": float(mr_atr_min_sl_input.value or 0.3),
+                "atr_max_sl_mult": float(mr_atr_max_sl_input.value or 3.0),
                 "use_atr_sizing": bool(mr_use_atr_sizing_switch.value),
                 "atr_tp_multiplier": float(mr_atr_tp_mult_input.value or 2.0),
                 "atr_sl_multiplier": float(mr_atr_sl_mult_input.value or 1.5),

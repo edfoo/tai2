@@ -381,6 +381,16 @@ The VWAP Reversion strategy enters when price is extended >N ATR from VWAP and t
 
 When VWAP or candle data is unavailable, the strategy falls back to ATR sizing.
 
+### Mean Reversion Structural TP/SL
+
+Mean Reversion also supports structural TP/SL sizing (default on):
+
+- **TP** targets the **BB middle band** (the 20-period SMA mean) — the natural reversion target for a mean-reversion trade.
+- **SL** sits just **beyond the entry candle's wick** (low for longs, high for shorts) plus a small ATR buffer. If price extends beyond the exhaustion candle, the reversion thesis is wrong.
+- **ATR clamps both** to a sane range (same config keys and defaults as the other strategies).
+
+When BB or candle data is unavailable, the strategy falls back to ATR sizing. The `dynamic_tp` feature (BB bandwidth-scaled TP) is automatically disabled when `use_atr_sizing` is on, and structural sizing takes priority over both.
+
 ## Future Strategies
 
 Here are some strategies that could be implemented using existing indicators, ranked by implementation effort:

@@ -53,6 +53,22 @@ class MeanReversionStrategy:
       - ``volume_rsi_max`` (float, default 70.0): maximum volume RSI to allow entry
       - ``require_regime`` (bool, default True)
       - ``max_bb_bandwidth_percentile`` (float, default 40)
+      - ``use_structural_sizing`` (bool, default True): use structural TP/SL
+        based on Bollinger Bands and the entry candle instead of (or
+        clamped by) ATR.  TP targets the BB middle band (the mean price
+        reverts to).  SL sits just beyond the entry candle's wick (the
+        exhaustion extreme).  ATR clamps both to a sane range.  Falls back
+        to ATR sizing when BB or candle data is unavailable.
+      - ``structural_sl_buffer_atr`` (float, default 0.15): SL is placed
+        this many ATR units *beyond* the entry candle's low/high.
+      - ``atr_min_tp_mult`` (float, default 0.5): structural TP distance
+        must be at least this × ATR% from entry.
+      - ``atr_max_tp_mult`` (float, default 4.0): structural TP distance
+        capped at this × ATR% from entry.
+      - ``atr_min_sl_mult`` (float, default 0.3): structural SL distance
+        must be at least this × ATR% from entry.
+      - ``atr_max_sl_mult`` (float, default 3.0): structural SL distance
+        capped at this × ATR% from entry.
       - ``use_atr_sizing`` (bool, default True)
       - ``atr_tp_multiplier`` (float, default 2.0): TP = multiplier × ATR%.
         Must be >= atr_sl_multiplier so the reward-to-risk ratio is >= 1.0;
@@ -125,6 +141,22 @@ class MeanReversionStrategy:
         # multiplier × ATR% instead of fixed percentages.  This adapts to
         # the volatility regime.  Recommended: wider SL (survive noise)
         # and modest TP (bank the snapback).
+        use_structural_sizing = bool(config.get("use_structural_sizing", True))
+        structural_sl_buffer_atr = helpers.extract_float(config.get("structural_sl_buffer_atr"))
+        if structural_sl_buffer_atr is None:
+            structural_sl_buffer_atr = 0.15
+        atr_min_tp_mult = helpers.extract_float(config.get("atr_min_tp_mult"))
+        if atr_min_tp_mult is None:
+            atr_min_tp_mult = 0.5
+        atr_max_tp_mult = helpers.extract_float(config.get("atr_max_tp_mult"))
+        if atr_max_tp_mult is None:
+            atr_max_tp_mult = 4.0
+        atr_min_sl_mult = helpers.extract_float(config.get("atr_min_sl_mult"))
+        if atr_min_sl_mult is None:
+            atr_min_sl_mult = 0.3
+        atr_max_sl_mult = helpers.extract_float(config.get("atr_max_sl_mult"))
+        if atr_max_sl_mult is None:
+            atr_max_sl_mult = 3.0
         use_atr_sizing = bool(config.get("use_atr_sizing", True))
         atr_tp_multiplier = helpers.extract_float(config.get("atr_tp_multiplier"))
         if atr_tp_multiplier is None:
@@ -395,16 +427,69 @@ class MeanReversionStrategy:
             and atr_ok
         )
         # ── Compute effective TP/SL ────────────────────────────────────
-        # ATR-scaled TP/SL overrides the static config values when enabled.
+        # Structural mode: TP at BB middle band (the mean), SL beyond entry candle wick.
+        # ATR mode (fallback): TP/SL = multiplier × ATR%.
         _static_tp = helpers.extract_float(config.get("tp_pct"))
         _static_sl = helpers.extract_float(config.get("sl_pct"))
         _effective_tp = _static_tp
         _effective_sl = _static_sl
-        if use_atr_sizing:
-            atr_pct = helpers.extract_float(indicators.get("atr_pct"))
-            if atr_pct is not None and atr_pct > 0:
-                _effective_tp = atr_tp_multiplier * atr_pct
-                _effective_sl = atr_sl_multiplier * atr_pct
+        _sizing_source = "static"
+        atr_pct = helpers.extract_float(indicators.get("atr_pct"))
+        if use_atr_sizing and atr_pct is not None and atr_pct > 0:
+            _effective_tp = atr_tp_multiplier * atr_pct
+            _effective_sl = atr_sl_multiplier * atr_pct
+            _sizing_source = "atr"
+
+        # Structural sizing: TP at BB middle, SL beyond entry candle wick.
+        if use_structural_sizing and bb_last_price and bb_last_price > 0 and atr_pct is not None and atr_pct > 0:
+            atr_price = (atr_pct / 100.0) * bb_last_price
+            if atr_price > 0 and bb_middle and bb_middle > 0:
+                ohlcv_compact = indicators.get("ohlcv") or []
+                _curr = ohlcv_compact[-1] if ohlcv_compact and isinstance(ohlcv_compact[-1], dict) else {}
+                curr_low = helpers.extract_float(_curr.get("low"))
+                curr_high = helpers.extract_float(_curr.get("high"))
+
+                if buy_signal:
+                    # Long: TP at BB middle (reversion to mean), SL beyond entry candle low.
+                    raw_tp_dist = bb_middle - bb_last_price
+                    raw_sl_dist = (bb_last_price - (curr_low - structural_sl_buffer_atr * atr_price)) if curr_low is not None else None
+                else:
+                    # Short: TP at BB middle (reversion to mean), SL beyond entry candle high.
+                    raw_tp_dist = bb_last_price - bb_middle
+                    raw_sl_dist = ((curr_high + structural_sl_buffer_atr * atr_price) - bb_last_price) if curr_high is not None else None
+
+                # Convert distances to % of price for clamping.
+                tp_pct_raw = (raw_tp_dist / bb_last_price * 100.0) if raw_tp_dist is not None and raw_tp_dist > 0 else None
+                sl_pct_raw = (raw_sl_dist / bb_last_price * 100.0) if raw_sl_dist is not None and raw_sl_dist > 0 else None
+
+                # Clamp TP to [atr_min_tp_mult × ATR%, atr_max_tp_mult × ATR%].
+                tp_clamped = None
+                if tp_pct_raw is not None:
+                    tp_min = atr_min_tp_mult * atr_pct
+                    tp_max = atr_max_tp_mult * atr_pct
+                    tp_clamped = max(tp_min, min(tp_max, tp_pct_raw))
+
+                # Clamp SL to [atr_min_sl_mult × ATR%, atr_max_sl_mult × ATR%].
+                sl_clamped = None
+                if sl_pct_raw is not None:
+                    sl_min = atr_min_sl_mult * atr_pct
+                    sl_max = atr_max_sl_mult * atr_pct
+                    sl_clamped = max(sl_min, min(sl_max, sl_pct_raw))
+
+                if tp_clamped is not None and sl_clamped is not None:
+                    _effective_tp = tp_clamped
+                    _effective_sl = sl_clamped
+                    _sizing_source = (
+                        f"structural(tp={'%.2f' % tp_pct_raw}→{'%.2f' % tp_clamped}%, "
+                        f"sl={'%.2f' % sl_pct_raw}→{'%.2f' % sl_clamped}%)"
+                    )
+                elif tp_clamped is not None:
+                    _effective_tp = tp_clamped
+                    _sizing_source = f"structural(tp={'%.2f' % tp_clamped}%, sl=atr)"
+                elif sl_clamped is not None:
+                    _effective_sl = sl_clamped
+                    _sizing_source = f"structural(sl={'%.2f' % sl_clamped}%, tp=atr)"
+                # If neither clamped value is available, keep ATR/static fallback.
 
         if buy_signal:
             return StrategySignal(
@@ -412,7 +497,7 @@ class MeanReversionStrategy:
                 strategy_name=self.name,
                 tp_pct=_effective_tp,
                 sl_pct=_effective_sl,
-                rationale=f"MeanReversion BUY: RSI={rsi:.1f}<{rsi_oversold}",
+                rationale=f"MeanReversion BUY: RSI={rsi:.1f}<{rsi_oversold} [{_sizing_source}]",
             )
         if sell_signal:
             return StrategySignal(
@@ -420,7 +505,7 @@ class MeanReversionStrategy:
                 strategy_name=self.name,
                 tp_pct=_effective_tp,
                 sl_pct=_effective_sl,
-                rationale=f"MeanReversion SELL: RSI={rsi:.1f}>{rsi_overbought}",
+                rationale=f"MeanReversion SELL: RSI={rsi:.1f}>{rsi_overbought} [{_sizing_source}]",
             )
 
         # Build a human-readable breakdown of which filters blocked the signal.
