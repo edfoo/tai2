@@ -359,6 +359,28 @@ The strategy uses **structural levels** for TP/SL instead of pure ATR distances:
 
 When structural levels are unavailable, the strategy falls back to ATR sizing.
 
+### VWAP Reversion
+
+The VWAP Reversion strategy enters when price is extended >N ATR from VWAP and the current candle closes back toward VWAP. VWAP is a strong magnet on alt-coins; intraday deviations mean-revert hard.
+
+**Entry conditions** (all must agree):
+
+| Indicator | Buy | Sell | Configurable |
+|---|---|---|---|
+| VWAP distance (required) | Price > `vwap_min_distance_atr` ATR below VWAP | Price > `vwap_min_distance_atr` ATR above VWAP | `vwap_min_distance_atr`, `vwap_max_distance_atr` |
+| Closeback (optional) | Current candle closes up (toward VWAP) | Current candle closes down (toward VWAP) | Toggle `require_closeback` |
+| ADX max (optional) | ADX ≤ `max_adx` | ADX ≤ `max_adx` | `max_adx` (0 = disabled) |
+| HTF trend (optional) | EMA50 > EMA200 | EMA50 < EMA200 | Toggle `require_htf_trend` |
+| Regime (optional) | BB bandwidth percentile ≤ `max_bb_bandwidth_percentile` | same | Toggle `require_regime` |
+
+**Structural TP/SL sizing** (default on):
+
+- **TP** targets **VWAP** — the magnet price is expected to revert to. This is the natural target for a reversion trade.
+- **SL** sits just **beyond the extension candle's extreme** (low for longs, high for shorts) plus a small ATR buffer (`structural_sl_buffer_atr`, default 0.15 ATR). If price extends further, the reversion thesis is wrong.
+- **ATR clamps both** to a sane range (same config keys and defaults as Liquidity Sweep / Trend Pullback).
+
+When VWAP or candle data is unavailable, the strategy falls back to ATR sizing.
+
 ## Future Strategies
 
 Here are some strategies that could be implemented using existing indicators, ranked by implementation effort:

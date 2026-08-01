@@ -857,6 +857,7 @@ class TestBuildLauncherDecision:
                     "require_htf_trend": False,
                     "require_regime": False,
                     "use_atr_sizing": False,
+                    "use_structural_sizing": False,
                     "min_atr_pct": 0.0,
                     "flip_launcher_direction": "both",
                 },
@@ -896,6 +897,7 @@ class TestBuildLauncherDecision:
                     "require_htf_trend": False,
                     "require_regime": False,
                     "use_atr_sizing": False,
+                    "use_structural_sizing": False,
                     "min_atr_pct": 0.0,
                     "flip_launcher_direction": "from_long",
                 },
@@ -2064,7 +2066,7 @@ class TestVWAPReversionStrategy:
         snapshot = _make_vr_snapshot(
             vwap=100.0, atr_pct=2.0, ohlcv=_make_trend_ohlcv(), last_price=95.0,
         )
-        config = _vr_bare(use_atr_sizing=True, atr_tp_multiplier=1.5, atr_sl_multiplier=2.5)
+        config = _vr_bare(use_atr_sizing=True, use_structural_sizing=False, atr_tp_multiplier=1.5, atr_sl_multiplier=2.5)
         signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=95.0))
         assert signal is not None
         # TP = 1.5 × 2.0% = 3.0%, SL = 2.5 × 2.0% = 5.0%
@@ -2079,7 +2081,7 @@ class TestVWAPReversionStrategy:
         snapshot = _make_vr_snapshot(
             vwap=100.0, atr_pct=2.0, ohlcv=_make_trend_ohlcv(), last_price=95.0,
         )
-        config = _vr_bare(use_atr_sizing=False, tp_pct=2.0, sl_pct=3.0)
+        config = _vr_bare(use_atr_sizing=False, use_structural_sizing=False, tp_pct=2.0, sl_pct=3.0)
         signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=95.0))
         assert signal is not None
         assert signal.tp_pct == 2.0
