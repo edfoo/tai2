@@ -13,6 +13,8 @@ report covering:
   - Guardrail blocks (R:R blocks, position-alignment blocks)
   - SL slippage detection: flags trades where the realised loss exceeds
     the SL distance by >1.5x (market-order slippage on thin books)
+    - Stop-outs with peak favorable excursion when the logs emit peak/current
+        unrealized-PnL tracking lines
 
 Usage::
 
@@ -53,6 +55,13 @@ _SIGNAL_RE = re.compile(
     r"([A-Z0-9-]+-USDT-SWAP) (BUY|SELL) \[(\w+)\] "
     r"last=([0-9.eE+-]+) notional=([0-9.]+) "
     r"tp=([0-9.eE+-]+) sl=([0-9.eE+-]+)"
+)
+
+# Peak-favorable-excursion line from profit-trailing supervision.
+_PEAK_EXCURSION_RE = re.compile(
+    r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}).*Alternator: "
+    r"([A-Z0-9-]+-USDT-SWAP).*peak_pct=([0-9.eE+-]+|None) current_pct=([0-9.eE+-]+|None) "
+    r"peak_usd=([0-9.eE+-]+|None) current_usd=([0-9.eE+-]+|None)"
 )
 
 # TradeMgmt cleared line:
@@ -108,6 +117,8 @@ class PnLTrade:
     ts: str
     symbol: str
     pnl: float
+    mfe_peak_pct: Optional[float] = None
+    mfe_peak_usd: Optional[float] = None
 
 
 @dataclass
@@ -172,6 +183,8 @@ class Summary:
     align_blocks: int = 0
     # SL slippage
     slippage_trades: list[dict] = field(default_factory=list)
+    # Losing trades with observed peak favorable excursion
+    stopout_peak_trades: list[dict] = field(default_factory=list)
     # Screener
     screener_runs: int = 0
     screener_last_candidates: int = 0
@@ -215,6 +228,16 @@ def parse_logs(files: list[Path]) -> tuple[list[PnLTrade], list[Signal], list[Se
     seeded: list[SeededEntry] = []
     cleared: list[ClearedEntry] = []
     summary = Summary()
+    active_peak_pct_by_symbol: dict[str, float] = {}
+    active_peak_usd_by_symbol: dict[str, float] = {}
+
+    def _parse_optional_float(raw: str) -> Optional[float]:
+        if raw == "None":
+            return None
+        try:
+            return float(raw)
+        except ValueError:
+            return None
 
     for fpath in files:
         summary.files_parsed.append(fpath.name)
@@ -226,8 +249,15 @@ def parse_logs(files: list[Path]) -> tuple[list[PnLTrade], list[Signal], list[Se
             # PnL
             m = _PNL_RE.search(line)
             if m:
+                symbol = m.group(2)
                 pnl_trades.append(
-                    PnLTrade(ts=m.group(1), symbol=m.group(2), pnl=float(m.group(3)))
+                    PnLTrade(
+                        ts=m.group(1),
+                        symbol=symbol,
+                        pnl=float(m.group(3)),
+                        mfe_peak_pct=active_peak_pct_by_symbol.pop(symbol, None),
+                        mfe_peak_usd=active_peak_usd_by_symbol.pop(symbol, None),
+                    )
                 )
                 continue
             # Signal
@@ -245,6 +275,23 @@ def parse_logs(files: list[Path]) -> tuple[list[PnLTrade], list[Signal], list[Se
                 )
                 signals.append(sig)
                 summary.strat_signals[sig.strategy] += 1
+                active_peak_pct_by_symbol.pop(sig.symbol, None)
+                active_peak_usd_by_symbol.pop(sig.symbol, None)
+                continue
+            # Peak favorable excursion
+            m = _PEAK_EXCURSION_RE.search(line)
+            if m:
+                symbol = m.group(2)
+                peak_pct = _parse_optional_float(m.group(3))
+                peak_usd = _parse_optional_float(m.group(5))
+                if peak_pct is not None:
+                    active_peak_pct_by_symbol[symbol] = max(
+                        active_peak_pct_by_symbol.get(symbol, peak_pct), peak_pct
+                    )
+                if peak_usd is not None:
+                    active_peak_usd_by_symbol[symbol] = max(
+                        active_peak_usd_by_symbol.get(symbol, peak_usd), peak_usd
+                    )
                 continue
             # Seeded
             m = _SEEDED_RE.search(line)
@@ -302,12 +349,18 @@ def parse_logs(files: list[Path]) -> tuple[list[PnLTrade], list[Signal], list[Se
 # ── Attribution & analysis ────────────────────────────────────────────────────
 def _attribute_strategy(pnl: PnLTrade, signals: list[Signal]) -> str:
     """Heuristic: most recent prior signal for the same symbol."""
+    best = _most_recent_signal(pnl.symbol, pnl.ts, signals)
+    return best.strategy if best else "unknown"
+
+
+def _most_recent_signal(symbol: str, ts: str, signals: list[Signal]) -> Optional[Signal]:
+    """Return the most recent prior signal for a symbol."""
     best: Optional[Signal] = None
     for sig in signals:
-        if sig.symbol == pnl.symbol and sig.ts <= pnl.ts:
+        if sig.symbol == symbol and sig.ts <= ts:
             if best is None or sig.ts > best.ts:
                 best = sig
-    return best.strategy if best else "unknown"
+    return best
 
 
 def _compute_slippage(
@@ -419,6 +472,24 @@ def build_summary(
             summary.strat_wins[strat] += 1
         else:
             summary.strat_losses[strat] += 1
+            best_sig = _most_recent_signal(trade.symbol, trade.ts, signals)
+            mfe_pct = trade.mfe_peak_pct
+            if mfe_pct is None and trade.mfe_peak_usd is not None and best_sig is not None:
+                if best_sig.notional > 0:
+                    mfe_pct = trade.mfe_peak_usd / best_sig.notional * 100.0
+            if mfe_pct is not None and mfe_pct > 0:
+                summary.stopout_peak_trades.append(
+                    {
+                        "ts": trade.ts,
+                        "symbol": trade.symbol,
+                        "strategy": strat,
+                        "pnl_usdt": round(trade.pnl, 4),
+                        "mfe_pct": round(mfe_pct, 2),
+                        "mfe_usd": round(trade.mfe_peak_usd, 4)
+                        if trade.mfe_peak_usd is not None
+                        else None,
+                    }
+                )
 
     summary.avg_win = sum(win_pnls) / len(win_pnls) if win_pnls else 0.0
     summary.avg_loss = sum(loss_pnls) / len(loss_pnls) if loss_pnls else 0.0
@@ -539,6 +610,26 @@ def print_report(summary: Summary) -> None:
         print("  None detected.")
     print()
 
+    # ── Stop-outs with peak excursion ──
+    print("── Stop-outs with peak favorable excursion ─────────────────────")
+    if summary.stopout_peak_trades:
+        print(
+            f"  {'ts':<22}{'symbol':<18}{'strategy':<16}{'loss USDT':>11}{'peak%':>8}"
+        )
+        print(f"  {'-' * 22}{'-' * 18}{'-' * 16}{'-' * 11}{'-' * 8}")
+        for trade in sorted(
+            summary.stopout_peak_trades,
+            key=lambda item: (item["mfe_pct"], item["pnl_usdt"]),
+            reverse=True,
+        ):
+            print(
+                f"  {trade['ts']:<22}{trade['symbol']:<18}{trade['strategy']:<16}"
+                f"{trade['pnl_usdt']:>+11.4f}{trade['mfe_pct']:>7.2f}%"
+            )
+    else:
+        print("  None detected in the parsed logs.")
+    print()
+
     # ── Screener ──
     if summary.screener_runs:
         print("── Screener (last run) ──────────────────────────────────────────")
@@ -607,6 +698,7 @@ def summary_to_dict(summary: Summary) -> dict:
             "align_blocks": summary.align_blocks,
         },
         "sl_slippage": summary.slippage_trades,
+        "stopout_peak_trades": summary.stopout_peak_trades,
         "screener": {
             "runs": summary.screener_runs,
             "last_candidates": summary.screener_last_candidates,
