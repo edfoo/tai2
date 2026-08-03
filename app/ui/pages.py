@@ -3417,22 +3417,20 @@ def register_pages(app: FastAPI) -> None:
                 mr_max_bw_pct_input.value = 55.0
                 mr_regime_lookback_input.value = 50
                 mr_use_atr_sizing_switch.value = True
-                mr_use_structural_switch.value = True
+                mr_use_structural_switch.value = False
                 mr_structural_sl_buffer_input.value = 0.15
                 mr_atr_min_tp_input.value = 0.5
                 mr_atr_max_tp_input.value = 4.0
                 mr_atr_min_sl_input.value = 0.3
                 mr_atr_max_sl_input.value = 3.0
-                # R:R must be >= 1.0: TP multiplier >= SL multiplier.
-                # Inverted R:R (TP<SL) guarantees a losing bias because MR
-                # win rates are naturally < 50%.
-                mr_atr_tp_mult_input.value = 2.0
-                mr_atr_sl_mult_input.value = 1.5
+                # Noise-capture scalping: TP ~= SL (R:R ~1.0) to bank small wins
+                # often in a noisy market. Structural sizing is disabled because
+                # it placed wide 3-4x TPs that rarely hit before the SL.
+                mr_atr_tp_mult_input.value = 1.0
+                mr_atr_sl_mult_input.value = 1.0
                 mr_min_atr_pct_input.value = 1.0
-                # R:R guardrail: TP multiplier >= SL multiplier keeps R:R >= 1.0.
-                # Leave the per-strategy override blank so it inherits the global
-                # min_reward_risk_ratio guardrail.
-                mr_min_rr_input.value = None
+                # R:R guardrail: enforce >= 1.0 for this strategy.
+                mr_min_rr_input.value = 1.0
                 # Do not flip the strategy's chosen direction — flipping
                 # destroys the directional edge the strategy is built around.
                 mr_flip_switch.value = False
@@ -3709,12 +3707,11 @@ def register_pages(app: FastAPI) -> None:
                 sc_min_bw_pct_input.value = 55.0
                 sc_regime_lookback_input.value = 50
                 sc_use_atr_sizing_switch.value = True
-                sc_atr_tp_mult_input.value = 2.2
-                sc_atr_sl_mult_input.value = 2.0
+                sc_atr_tp_mult_input.value = 1.2
+                sc_atr_sl_mult_input.value = 1.0
                 sc_min_atr_pct_input.value = 1.0
-                # R:R guardrail: leave the per-strategy override blank so it
-                # inherits the global min_reward_risk_ratio guardrail.
-                sc_min_rr_input.value = None
+                # R:R guardrail: enforce >= 1.0 for this strategy.
+                sc_min_rr_input.value = 1.0
                 # Do not flip the strategy's chosen direction — flipping
                 # destroys the directional edge the strategy is built around.
                 sc_flip_switch.value = False
@@ -3938,12 +3935,11 @@ def register_pages(app: FastAPI) -> None:
                 ls_atr_max_tp_input.value = 4.0
                 ls_atr_min_sl_input.value = 0.3
                 ls_atr_max_sl_input.value = 3.0
-                ls_atr_tp_mult_input.value = 1.5
-                ls_atr_sl_mult_input.value = 1.2
+                ls_atr_tp_mult_input.value = 1.2
+                ls_atr_sl_mult_input.value = 1.0
                 ls_min_atr_pct_input.value = 0.8
-                # R:R guardrail: leave the per-strategy override blank so it
-                # inherits the global min_reward_risk_ratio guardrail.
-                ls_min_rr_input.value = None
+                # R:R guardrail: enforce >= 1.0 for this strategy.
+                ls_min_rr_input.value = 1.0
                 ls_flip_switch.value = False
                 ls_flip_select.value = None
                 ui.notify("Liquidity Sweep fields set to recommended defaults — click Save to persist", color="info")
@@ -4141,18 +4137,17 @@ def register_pages(app: FastAPI) -> None:
                 vr_max_bw_pct_input.value = 55.0
                 vr_regime_lookback_input.value = 50
                 vr_use_atr_sizing_switch.value = True
-                vr_use_structural_switch.value = True
+                vr_use_structural_switch.value = False
                 vr_structural_sl_buffer_input.value = 0.15
                 vr_atr_min_tp_input.value = 0.5
                 vr_atr_max_tp_input.value = 4.0
                 vr_atr_min_sl_input.value = 0.3
                 vr_atr_max_sl_input.value = 3.0
-                vr_atr_tp_mult_input.value = 1.8
+                vr_atr_tp_mult_input.value = 1.0
                 vr_atr_sl_mult_input.value = 1.0
                 vr_min_atr_pct_input.value = 1.0
-                # R:R guardrail: leave the per-strategy override blank so it
-                # inherits the global min_reward_risk_ratio guardrail.
-                vr_min_rr_input.value = None
+                # R:R guardrail: enforce >= 1.0 for this strategy.
+                vr_min_rr_input.value = 1.0
                 # Do not flip the strategy's chosen direction — flipping
                 # destroys the directional edge the strategy is built around.
                 vr_flip_switch.value = False
@@ -4360,12 +4355,11 @@ def register_pages(app: FastAPI) -> None:
                 tp_atr_max_tp_input.value = 4.0
                 tp_atr_min_sl_input.value = 0.3
                 tp_atr_max_sl_input.value = 3.0
-                tp_atr_tp_mult_input.value = 2.0
-                tp_atr_sl_mult_input.value = 1.5
+                tp_atr_tp_mult_input.value = 1.2
+                tp_atr_sl_mult_input.value = 1.0
                 tp_min_atr_pct_input.value = 1.0
-                # R:R guardrail: leave the per-strategy override blank so it
-                # inherits the global min_reward_risk_ratio guardrail.
-                tp_min_rr_input.value = None
+                # R:R guardrail: enforce >= 1.0 for this strategy.
+                tp_min_rr_input.value = 1.0
                 tp_flip_switch.value = False
                 tp_flip_select.value = None
                 ui.notify("Trend Pullback fields set to recommended defaults — click Save to persist", color="info")
