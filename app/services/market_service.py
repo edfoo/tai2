@@ -9292,7 +9292,19 @@ class MarketService:
             and isinstance(stop_loss_price, (int, float))
             and stop_loss_price > 0
         ):
+            # Per-strategy override: launcher strategies may set their own
+            # min_reward_risk_ratio (e.g. config["launcher"]["strategies"]
+            # ["mean_reversion"]["min_reward_risk_ratio"]). Blank/None inherits
+            # the global guardrail value.
             min_rr = self._extract_float(guardrails.get("min_reward_risk_ratio")) or 1.0
+            _strat_name = str(decision.get("_strategy_name") or "").strip().lower()
+            if _strat_name:
+                _strat_cfg = (
+                    (self._launcher_config.get("strategies") or {}).get(_strat_name) or {}
+                )
+                _strat_rr = self._extract_float(_strat_cfg.get("min_reward_risk_ratio"))
+                if _strat_rr is not None:
+                    min_rr = _strat_rr
             if action == "BUY":
                 tp_dist = take_profit_price - last_price
                 sl_dist = last_price - stop_loss_price

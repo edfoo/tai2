@@ -3356,6 +3356,16 @@ def register_pages(app: FastAPI) -> None:
                             ).classes("w-40").props("dense")
                             ui.label("Skip entries when ATR% is below this (0 = disabled). Filters out dead coins.").classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            _mr_rr_raw = _mr_cfg.get("min_reward_risk_ratio")
+                            mr_min_rr_input = ui.number(
+                                label="Min Reward-to-Risk Ratio",
+                                value=float(_mr_rr_raw) if _mr_rr_raw is not None else None,
+                                min=0.1, max=10.0, step=0.1, format="%.1f",
+                            ).classes("w-40").props(
+                                "hint='Minimum TP:SL distance ratio for this strategy (blank = use global guardrail)' persistent-hint clearable"
+                            )
+                            ui.label("Overrides the global R:R guardrail for Mean Reversion entries. Blank inherits the global min_reward_risk_ratio.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             _mr_flip_enabled = bool(_mr_cfg.get("flip_launcher_direction"))
                             mr_flip_switch = ui.switch(
                                 "Flip Launcher Decision",
@@ -3419,6 +3429,10 @@ def register_pages(app: FastAPI) -> None:
                 mr_atr_tp_mult_input.value = 2.0
                 mr_atr_sl_mult_input.value = 1.5
                 mr_min_atr_pct_input.value = 1.0
+                # R:R guardrail: TP multiplier >= SL multiplier keeps R:R >= 1.0.
+                # Leave the per-strategy override blank so it inherits the global
+                # min_reward_risk_ratio guardrail.
+                mr_min_rr_input.value = None
                 # Do not flip the strategy's chosen direction — flipping
                 # destroys the directional edge the strategy is built around.
                 mr_flip_switch.value = False
@@ -5222,6 +5236,9 @@ def register_pages(app: FastAPI) -> None:
                 "atr_tp_multiplier": float(mr_atr_tp_mult_input.value or 2.0),
                 "atr_sl_multiplier": float(mr_atr_sl_mult_input.value or 1.5),
                 "min_atr_pct": float(mr_min_atr_pct_input.value or 1.0),
+                "min_reward_risk_ratio": (
+                    float(mr_min_rr_input.value) if mr_min_rr_input.value not in (None, "") else None
+                ),
             }
             _strategies_cfg["spike_continuation"] = {
                 "enabled": bool(sc_enabled_switch.value),
