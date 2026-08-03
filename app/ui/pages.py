@@ -4077,6 +4077,16 @@ def register_pages(app: FastAPI) -> None:
                             ).classes("w-40").props("dense")
                             ui.label("Skip entries when ATR% is below this (0 = disabled). Filters out dead coins.").classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            _vr_rr_raw = _vr_cfg.get("min_reward_risk_ratio")
+                            vr_min_rr_input = ui.number(
+                                label="Min Reward-to-Risk Ratio",
+                                value=float(_vr_rr_raw) if _vr_rr_raw is not None else None,
+                                min=0.1, max=10.0, step=0.1, format="%.1f",
+                            ).classes("w-40").props(
+                                "hint='Minimum TP:SL distance ratio for this strategy (blank = use global guardrail)' persistent-hint clearable"
+                            )
+                            ui.label("Overrides the global R:R guardrail for VWAP Reversion entries. Blank inherits the global min_reward_risk_ratio.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             _vr_flip_enabled = bool(_vr_cfg.get("flip_launcher_direction"))
                             vr_flip_switch = ui.switch(
                                 "Flip Launcher Decision",
@@ -4114,6 +4124,9 @@ def register_pages(app: FastAPI) -> None:
                 vr_atr_tp_mult_input.value = 1.8
                 vr_atr_sl_mult_input.value = 1.0
                 vr_min_atr_pct_input.value = 1.0
+                # R:R guardrail: leave the per-strategy override blank so it
+                # inherits the global min_reward_risk_ratio guardrail.
+                vr_min_rr_input.value = None
                 # Do not flip the strategy's chosen direction — flipping
                 # destroys the directional edge the strategy is built around.
                 vr_flip_switch.value = False
@@ -5318,6 +5331,9 @@ def register_pages(app: FastAPI) -> None:
                 "atr_tp_multiplier": float(vr_atr_tp_mult_input.value or 1.8),
                 "atr_sl_multiplier": float(vr_atr_sl_mult_input.value or 1.0),
                 "min_atr_pct": float(vr_min_atr_pct_input.value or 1.0),
+                "min_reward_risk_ratio": (
+                    float(vr_min_rr_input.value) if vr_min_rr_input.value not in (None, "") else None
+                ),
                 "flip_launcher_direction": str(vr_flip_select.value) if vr_flip_switch.value else None,
             }
             _strategies_cfg["trend_pullback"] = {
