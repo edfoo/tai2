@@ -3297,6 +3297,27 @@ def register_pages(app: FastAPI) -> None:
                                 value=bool(_mr_cfg.get("use_atr_sizing", True)),
                             ).props("dense color=primary")
                             ui.label("Used when structural levels are unavailable or structural sizing is off.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            mr_atr_tp_mult_input = ui.number(
+                                label="ATR TP multiplier",
+                                value=float(_mr_cfg.get("atr_tp_multiplier") or 2.0),
+                                min=0.1, max=10.0, step=0.1, format="%.1f",
+                            ).classes("w-40").props("dense")
+                            ui.label("TP = multiplier × ATR% (must be >= SL multiplier for R:R >= 1.0).").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            mr_atr_sl_mult_input = ui.number(
+                                label="ATR SL multiplier",
+                                value=float(_mr_cfg.get("atr_sl_multiplier") or 1.5),
+                                min=0.1, max=10.0, step=0.1, format="%.1f",
+                            ).classes("w-40").props("dense")
+                            ui.label("SL = multiplier × ATR% (must be <= TP multiplier for R:R >= 1.0).").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            mr_min_atr_pct_input = ui.number(
+                                label="Min ATR%",
+                                value=float(_mr_cfg.get("min_atr_pct") or 1.3),
+                                min=0.0, max=10.0, step=0.1, format="%.1f",
+                            ).classes("w-40").props("dense")
+                            ui.label("Skip entries when ATR% is below this (0 = disabled). Filters out dead coins.").classes("text-xs text-slate-500")
                         # ── Structural TP/SL ──────────────────────────────
                         ui.separator().classes("my-2")
                         ui.label("Structural TP/SL").classes("text-xs font-semibold text-slate-600")
@@ -3334,27 +3355,7 @@ def register_pages(app: FastAPI) -> None:
                                 value=float(_mr_cfg.get("atr_max_sl_mult") or 3.0),
                                 min=0.5, max=20.0, step=0.5, format="%.1f",
                             ).classes("w-32").props("dense")
-                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
-                            mr_atr_tp_mult_input = ui.number(
-                                label="ATR TP multiplier",
-                                value=float(_mr_cfg.get("atr_tp_multiplier") or 2.0),
-                                min=0.1, max=10.0, step=0.1, format="%.1f",
-                            ).classes("w-40").props("dense")
-                            ui.label("TP = multiplier × ATR% (must be >= SL multiplier for R:R >= 1.0).").classes("text-xs text-slate-500")
-                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
-                            mr_atr_sl_mult_input = ui.number(
-                                label="ATR SL multiplier",
-                                value=float(_mr_cfg.get("atr_sl_multiplier") or 1.5),
-                                min=0.1, max=10.0, step=0.1, format="%.1f",
-                            ).classes("w-40").props("dense")
-                            ui.label("SL = multiplier × ATR% (must be <= TP multiplier for R:R >= 1.0).").classes("text-xs text-slate-500")
-                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
-                            mr_min_atr_pct_input = ui.number(
-                                label="Min ATR%",
-                                value=float(_mr_cfg.get("min_atr_pct") or 1.3),
-                                min=0.0, max=10.0, step=0.1, format="%.1f",
-                            ).classes("w-40").props("dense")
-                            ui.label("Skip entries when ATR% is below this (0 = disabled). Filters out dead coins.").classes("text-xs text-slate-500")
+                            ui.label("ATR clamps applied to structural TP/SL distances.").classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             _mr_rr_raw = _mr_cfg.get("min_reward_risk_ratio")
                             mr_min_rr_input = ui.number(
