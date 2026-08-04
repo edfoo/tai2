@@ -492,6 +492,9 @@ def _create_lifespan(enable_background_services: bool):
                 stored_launcher_cfg = app.state.runtime_config.get("launcher") or {}
                 if stored_launcher_cfg:
                     market_service.set_launcher_config(stored_launcher_cfg)
+                market_service.set_guardrails(
+                    app.state.runtime_config.get("guardrails") or {}
+                )
                 stored_notifications_cfg = app.state.runtime_config.get("notifications") or {}
                 if stored_notifications_cfg:
                     market_service.set_notifications_config(stored_notifications_cfg)

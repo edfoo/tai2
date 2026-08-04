@@ -6918,6 +6918,9 @@ def register_pages(app: FastAPI) -> None:
             ui.separator().classes("w-full my-4")
             ui.label("Launcher").classes("text-sm text-slate-500")
             _gov_cfg = (config.get("launcher") or {})
+
+            # ── Launcher: mode & schedule ────────────────────────────────
+            ui.label("Mode & Schedule").classes("text-xs font-semibold text-slate-600 mt-1")
             with ui.row().classes("w-full flex-wrap gap-4 items-start"):
                 gov_mode_select = ui.select(
                     options={
@@ -6950,6 +6953,10 @@ def register_pages(app: FastAPI) -> None:
                 ).classes("w-full md:w-48").props(
                     "hint='launcher_only + timer mode: seconds between entry evaluations' persistent-hint suffix='s'"
                 )
+
+            # ── Launcher: position sizing ────────────────────────────────
+            ui.label("Position Sizing").classes("text-xs font-semibold text-slate-600 mt-3")
+            with ui.row().classes("w-full flex-wrap gap-4 items-start"):
                 _gov_notional_raw = _gov_cfg.get("notional_usd")
                 gov_notional_input = ui.number(
                     label="Notional per trade (USDT)",
@@ -6978,6 +6985,20 @@ def register_pages(app: FastAPI) -> None:
                 ).classes("w-full md:w-40").props(
                     "hint='Force-close positions after this many candles (0 = disabled). Used by backtest and live trade management time-stop alignment.' persistent-hint"
                 )
+
+            # ── Launcher: TP/SL interpretation ───────────────────────────
+            ui.label("TP/SL Interpretation").classes("text-xs font-semibold text-slate-600 mt-3")
+            with ui.row().classes("w-full flex-wrap gap-4 items-center"):
+                gov_pnl_pct_switch = ui.switch(
+                    "TP/SL in PnL %",
+                    value=bool(_gov_cfg.get("tp_sl_in_pnl_pct", False)),
+                ).props(
+                    "hint='When enabled, strategy TP/SL fields are interpreted as Floating PnL % on margin (after leverage). Disabled = price %.' persistent-hint"
+                )
+                ui.label(
+                    "When enabled, strategy TP/SL fields are Floating PnL % on margin (after leverage); "
+                    "otherwise they are price %. Uses the Max Leverage guardrail above for the conversion."
+                ).classes("text-xs text-slate-500")
             ui.label("Signal filters and TP/SL are configured on the STRATEGY page → Mean Reversion Scalping section.").classes("text-xs text-slate-400 mt-1")
             ui.separator().classes("w-full my-4")
             ui.label("Candle settings").classes("text-sm text-slate-500")
@@ -8118,6 +8139,7 @@ def register_pages(app: FastAPI) -> None:
                 "entry_interval_seconds": max(30.0, _coerce(gov_interval_input.value, 300, float)),
                 "trade_mode": str(gov_trade_mode_select.value or "isolated"),
                 "notional_usd": float(gov_notional_input.value) if gov_notional_input.value not in (None, "") else None,
+                "tp_sl_in_pnl_pct": bool(gov_pnl_pct_switch.value),
                 "max_hold_candles": int(gov_max_hold_input.value or 0),
             }
             try:
@@ -8142,6 +8164,7 @@ def register_pages(app: FastAPI) -> None:
                 market_service.set_footprint_config(config["guardrails"].get("footprint") or {})
                 market_service.set_screener_config(config["screener"])
                 market_service.set_launcher_config(config["launcher"])
+                market_service.set_guardrails(config["guardrails"])
                 await market_service.set_okx_flag(config.get("okx_api_flag"))
                 await market_service.set_sub_account(
                     config.get("okx_sub_account"),

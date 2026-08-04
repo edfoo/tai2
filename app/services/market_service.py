@@ -390,6 +390,7 @@ class MarketService:
         # Launcher: rule-based entry/exit + optional LLM trade filter.
         # Stored separately from _strategy_config (lives in runtime_config["launcher"]).
         self._launcher_config: dict[str, Any] = {}
+        self._guardrails_config: dict[str, Any] = {}
         self._notifications_config: dict[str, Any] = {}
         # Tracks when the bot itself recorded a close (is_close=True) so the WS
         # pos=0 handler can skip a duplicate notification for the same symbol.
@@ -1355,6 +1356,10 @@ class MarketService:
         """Update the Launcher configuration at runtime (called from CFG save)."""
         self._launcher_config = config or {}
         self._emit_debug(f"Launcher config updated: {self._launcher_config}")
+
+    def set_guardrails(self, config: dict[str, Any]) -> None:
+        """Update the guardrails configuration at runtime (called from CFG save)."""
+        self._guardrails_config = config or {}
 
     def set_notifications_config(self, config: dict[str, Any]) -> None:
         """Update the notifications configuration at runtime (called from CFG save)."""
@@ -3045,6 +3050,38 @@ class MarketService:
             # TP/SL from the strategy signal, falling back to launcher-level.
             tp_pct = signal.tp_pct if signal.tp_pct is not None else self._extract_float(gov.get("tp_pct"))
             sl_pct = signal.sl_pct if signal.sl_pct is not None else self._extract_float(gov.get("sl_pct"))
+
+            # PnL% mode: when enabled, the strategy TP/SL fields are interpreted
+            # as Floating PnL % on margin (after leverage). Convert them to price
+            # distances using the guardrail leverage: price% = PnL% / leverage.
+            # This ONLY applies to static percentage targets. ATR and structural
+            # sizing compute price-based levels directly (already in price %),
+            # so they must NOT be divided by leverage.
+            _pnl_pct_mode = bool(gov.get("tp_sl_in_pnl_pct", False))
+            # Reuse the execution guardrails' leverage bounds for the conversion.
+            # Prefer max_leverage (the hard cap) as the effective leverage; fall
+            # back to min_leverage if max is unset.
+            _guard_leverage = self._extract_float(self._guardrails_config.get("max_leverage"))
+            if not _guard_leverage or _guard_leverage <= 0:
+                _guard_leverage = self._extract_float(self._guardrails_config.get("min_leverage"))
+            _strat_cfg_for_sizing = (gov.get("strategies") or {}).get(signal.strategy_name) or {}
+            _uses_atr = bool(_strat_cfg_for_sizing.get("use_atr_sizing", False))
+            _uses_struct = bool(_strat_cfg_for_sizing.get("use_structural_sizing", False))
+            if (
+                _pnl_pct_mode
+                and _guard_leverage
+                and _guard_leverage > 0
+                and not _uses_atr
+                and not _uses_struct
+            ):
+                if tp_pct is not None:
+                    tp_pct = tp_pct / _guard_leverage
+                if sl_pct is not None:
+                    sl_pct = sl_pct / _guard_leverage
+                self._emit_debug(
+                    f"Launcher PnL%→price: {symbol} [{signal.strategy_name}] "
+                    f"leverage={_guard_leverage:.1f}x → tp_pct={tp_pct:.3f}% sl_pct={sl_pct:.3f}%"
+                )
 
             # Dynamic TP (Mean Reversion only): tighten TP using BB bandwidth.
             # Disabled when use_atr_sizing is True — ATR sizing already adapts
