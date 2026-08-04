@@ -153,6 +153,9 @@ class ClearedEntry:
 
 @dataclass
 class Summary:
+    # Time period covered by the parsed logs
+    start_ts: Optional[str] = None
+    end_ts: Optional[str] = None
     # Aggregate
     total_trades: int = 0
     wins: int = 0
@@ -239,6 +242,13 @@ def parse_logs(files: list[Path]) -> tuple[list[PnLTrade], list[Signal], list[Se
         except ValueError:
             return None
 
+    def _track_period(ts: str) -> None:
+        """Expand the covered time window to include ``ts``."""
+        if summary.start_ts is None or ts < summary.start_ts:
+            summary.start_ts = ts
+        if summary.end_ts is None or ts > summary.end_ts:
+            summary.end_ts = ts
+
     for fpath in files:
         summary.files_parsed.append(fpath.name)
         try:
@@ -250,6 +260,7 @@ def parse_logs(files: list[Path]) -> tuple[list[PnLTrade], list[Signal], list[Se
             m = _PNL_RE.search(line)
             if m:
                 symbol = m.group(2)
+                _track_period(m.group(1))
                 pnl_trades.append(
                     PnLTrade(
                         ts=m.group(1),
@@ -508,6 +519,8 @@ def print_report(summary: Summary) -> None:
     print(" tai2 Performance Summary")
     print("=" * 78)
     print(f" Log files parsed: {', '.join(summary.files_parsed)}")
+    if summary.start_ts and summary.end_ts:
+        print(f" Period covered:  {summary.start_ts}  →  {summary.end_ts}")
     print()
 
     # ── Aggregate ──
@@ -649,6 +662,10 @@ def summary_to_dict(summary: Summary) -> dict:
     """Convert summary to a JSON-serialisable dict."""
     return {
         "files_parsed": summary.files_parsed,
+        "period": {
+            "start": summary.start_ts,
+            "end": summary.end_ts,
+        },
         "aggregate": {
             "total_trades": summary.total_trades,
             "wins": summary.wins,
