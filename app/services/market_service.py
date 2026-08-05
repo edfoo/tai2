@@ -431,6 +431,7 @@ class MarketService:
         if self._poller_task:
             return
         await self._hydrate_cached_annotations()
+        await self._rehydrate_open_positions()
         if self._enable_websocket:
             self._ws_task = asyncio.create_task(self._run_public_ws(), name="okx-ws")
             self._ws_private_task = asyncio.create_task(self._run_private_ws(), name="okx-ws-private")
@@ -1342,6 +1343,89 @@ class MarketService:
             self._emit_debug(
                 f"Hydrated {restored_protection} TP/SL entries and {restored_activity} last-trade marks from cached snapshot"
             )
+
+    async def _rehydrate_open_positions(self) -> None:
+        """Re-seed launcher/trade-management tracking for open positions after a restart.
+
+        On a warm restart the in-memory ``_launcher_in_position`` and
+        ``_trade_mgmt_state`` dicts are wiped, so a position the bot opened just
+        before the restart would otherwise be treated as an untracked/manual
+        position: its close (SL/TP) would never be detected, reconciled, or
+        logged.  This method rebuilds that tracking for any currently-open
+        position that has a matching unreconciled entry in the DB (i.e. a
+        position the bot itself opened).
+
+        Manual positions opened directly on OKX are intentionally left alone —
+        they have no DB entry, so they are not re-seeded.
+        """
+        if not self.settings.database_url:
+            return
+        try:
+            positions = await self._fetch_positions()
+        except Exception as exc:  # pragma: no cover - network safety
+            self._emit_debug(f"Position re-hydration skipped (fetch failed): {exc}")
+            return
+        if not positions:
+            return
+
+        rehydrated = 0
+        for pos in positions:
+            if not isinstance(pos, dict):
+                continue
+            symbol = str(pos.get("instId", "")).upper()
+            pos_val = self._extract_float(pos.get("pos"))
+            if not symbol or not pos_val or pos_val == 0:
+                continue
+            if symbol in self._trade_mgmt_state:
+                continue
+
+            # Determine the open direction from the position.
+            pos_side = str(pos.get("posSide", "")).lower()
+            if pos_side == "long" or (not pos_side and pos_val > 0):
+                side = "long"
+                entry_side = "buy"
+            elif pos_side == "short" or (not pos_side and pos_val < 0):
+                side = "short"
+                entry_side = "sell"
+            else:
+                continue
+
+            # Only re-seed positions the bot opened: there must be an
+            # unreconciled entry in the DB for this symbol in the open direction.
+            try:
+                candidates = await fetch_unreconciled_trades(
+                    symbol=symbol,
+                    side=entry_side,
+                    lookback_hours=48.0,
+                    same_side=True,
+                )
+            except Exception as exc:  # pragma: no cover - best-effort
+                self._emit_debug(f"Re-hydration lookup failed for {symbol}: {exc}")
+                continue
+            if not candidates:
+                # No DB entry → manual position (or already reconciled) → skip.
+                continue
+
+            avg_px = self._extract_float(pos.get("avgPx"))
+            strat_key = f"{symbol}"
+            self._launcher_in_position[strat_key] = {
+                "side": side,
+                "pos_side": pos_side or None,
+                "strategy": "",
+            }
+            self._seed_trade_mgmt_state(
+                symbol=symbol,
+                side=side,
+                entry_price=avg_px,
+            )
+            rehydrated += 1
+            self._emit_debug(
+                f"Re-hydrated launcher tracking for open position {symbol} "
+                f"({side}, entry={avg_px})"
+            )
+
+        if rehydrated:
+            logger.info("Position re-hydration: re-seeded %d open position(s)", rehydrated)
 
     def set_strategy_config(self, config: dict[str, Any]) -> None:
         """Apply an updated strategy configuration (e.g. skimming settings)."""
