@@ -285,6 +285,7 @@ def parse_logs(files: list[Path]) -> tuple[list[PnLTrade], list[Signal], list[Se
                     sl=float(m.group(8)),
                 )
                 signals.append(sig)
+                _track_period(sig.ts)
                 summary.strat_signals[sig.strategy] += 1
                 active_peak_pct_by_symbol.pop(sig.symbol, None)
                 active_peak_usd_by_symbol.pop(sig.symbol, None)
@@ -293,6 +294,7 @@ def parse_logs(files: list[Path]) -> tuple[list[PnLTrade], list[Signal], list[Se
             m = _PEAK_EXCURSION_RE.search(line)
             if m:
                 symbol = m.group(2)
+                _track_period(m.group(1))
                 peak_pct = _parse_optional_float(m.group(3))
                 peak_usd = _parse_optional_float(m.group(5))
                 if peak_pct is not None:
@@ -318,6 +320,7 @@ def parse_logs(files: list[Path]) -> tuple[list[PnLTrade], list[Signal], list[Se
                         risk_pct=float(m.group(7)),
                     )
                 )
+                _track_period(m.group(1))
                 summary.seeded_count += 1
                 continue
             # Cleared
@@ -325,6 +328,7 @@ def parse_logs(files: list[Path]) -> tuple[list[PnLTrade], list[Signal], list[Se
             if m:
                 reason = m.group(3)
                 cleared.append(ClearedEntry(ts=m.group(1), symbol=m.group(2), reason=reason))
+                _track_period(m.group(1))
                 summary.cleared_reasons[reason] += 1
                 continue
             # R:R block
