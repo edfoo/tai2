@@ -75,11 +75,15 @@ UPDATE_TRADE_PNL_SQL = (
 )
 
 # Back-fill entry-leg fee only (pnl stays NULL until the position closes).
+# NOTE: we deliberately do NOT set okx_fill_id here. okx_fill_id is used by the
+# PnL reconciler as the "already reconciled with a closing fill" marker
+# (FETCH_UNRECONCILED_SQL filters on okx_fill_id IS NULL). Stamping it during the
+# entry-fee pass would permanently hide the entry row from PnL reconciliation.
 UPDATE_ENTRY_FEE_SQL = (
     "UPDATE executed_trades "
-    "SET fee = COALESCE($1, fee), okx_fill_id = COALESCE(okx_fill_id, $2), "
+    "SET fee = COALESCE($1, fee), "
     "fee_paid_at = COALESCE(fee_paid_at, NOW()) "
-    "WHERE id = $3"
+    "WHERE id = $2"
 )
 
 FETCH_UNRECONCILED_SQL = """
@@ -290,14 +294,17 @@ async def update_trade_pnl(
 async def update_entry_fee(
     trade_id: Any,
     fee: float | None,
-    okx_fill_id: str | None,
 ) -> None:
-    """Back-fill the entry-leg fee before the position closes (pnl remains NULL)."""
+    """Back-fill the entry-leg fee before the position closes (pnl remains NULL).
+
+    Does NOT set okx_fill_id — that column is reserved as the PnL reconciler's
+    "already reconciled" marker, so the entry row stays eligible for PnL
+    back-fill once the position closes.
+    """
     pool = await get_postgres_pool()
     await pool.execute(
         UPDATE_ENTRY_FEE_SQL,
         fee,
-        okx_fill_id,
         trade_id,
     )
 

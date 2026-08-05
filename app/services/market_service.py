@@ -11949,10 +11949,13 @@ class MarketService:
 
             target = candidates[0]
             try:
+                # Do NOT pass okx_fill_id here: it is reserved as the PnL
+                # reconciler's "already reconciled" marker. Stamping it during
+                # the entry-fee pass would hide the entry row from PnL
+                # reconciliation once the position closes.
                 await update_entry_fee(
                     trade_id=target["id"],
                     fee=fee_value,
-                    okx_fill_id=fill_id or None,
                 )
                 entry_fees_stored += 1
                 self._emit_debug(
