@@ -3314,12 +3314,6 @@ def register_pages(app: FastAPI) -> None:
                             ).props("dense color=primary")
                             ui.label("Used when structural levels are unavailable or structural sizing is off.").classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
-                            sc_use_adaptive_atr_switch = ui.switch(
-                                "Adaptive ATR regime",
-                                value=bool(_sc_cfg.get("use_adaptive_atr", False)),
-                            ).props("dense color=amber")
-                            ui.label("Scales ATR distances by volatility regime.").classes("text-xs text-slate-500")
-                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             mr_atr_tp_mult_input = ui.number(
                                 label="ATR TP multiplier",
                                 value=float(_mr_cfg.get("atr_tp_multiplier") or 2.0),
