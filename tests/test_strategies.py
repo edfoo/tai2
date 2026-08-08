@@ -704,6 +704,46 @@ class TestBuildLauncherDecision:
         # SL should be 15% below (launcher-level fallback)
         assert abs(decision["stop_loss"] - 85.0) < 0.01
 
+    def test_mean_reversion_disables_protection_when_all_tp_sl_sources_off(self) -> None:
+        service = _make_service()
+        self._setup_service_with_price(service, 100.0)
+        service.set_launcher_config({
+            "mode": "launcher_only",
+            "notional_usd": 50.0,
+            "tp_pct": 2.0,
+            "sl_pct": 3.0,
+            "strategies": {
+                "mean_reversion": {
+                    "enabled": True,
+                    "rsi_oversold": 30.0,
+                    "rsi_overbought": 70.0,
+                    "tp_pct": None,
+                    "sl_pct": None,
+                    "require_cmf": False,
+                    "require_htf_trend": False,
+                    "require_cmf_cross": False,
+                    "require_bb_position": False,
+                    "require_candle_rejection": False,
+                    "require_vwap_reversion": False,
+                    "require_volume_cooling": False,
+                    "require_regime": False,
+                    "use_atr_sizing": False,
+                    "use_structural_sizing": False,
+                    "max_adx": 0.0,
+                    "min_atr_pct": 0.0,
+                    "min_bb_bandwidth": 0.0,
+                }
+            },
+        })
+        service._last_full_snapshot = _make_snapshot(rsi=20.0)
+
+        decisions = service.build_launcher_decisions("BTC-USDT-SWAP")
+        assert len(decisions) == 1
+        decision = decisions[0]
+        assert decision["take_profit"] is None
+        assert decision["stop_loss"] is None
+        assert decision["_disable_protection"] is True
+
     def test_returns_empty_when_strategy_disabled(self) -> None:
         service = _make_service()
         self._setup_service_with_price(service, 100.0)

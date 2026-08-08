@@ -567,12 +567,22 @@ class BacktestEngine:
         This previously only existed in the live path, causing backtests to
         diverge from live trade behaviour.
         """
+        _disable_protection = False
+        if signal.strategy_name == "mean_reversion" and strat_cfg is not None:
+            _mr_use_atr = bool(strat_cfg.get("use_atr_sizing", True))
+            _mr_use_struct = bool(strat_cfg.get("use_structural_sizing", True))
+            _mr_static_tp = _extract_float(strat_cfg.get("tp_pct"))
+            _mr_static_sl = _extract_float(strat_cfg.get("sl_pct"))
+            if not _mr_use_atr and not _mr_use_struct and _mr_static_tp is None and _mr_static_sl is None:
+                _disable_protection = True
+
         tp_pct = signal.tp_pct
-        if tp_pct is None:
-            tp_pct = _extract_float(launcher_config.get("tp_pct"))
         sl_pct = signal.sl_pct
-        if sl_pct is None:
-            sl_pct = _extract_float(launcher_config.get("sl_pct"))
+        if not _disable_protection:
+            if tp_pct is None:
+                tp_pct = _extract_float(launcher_config.get("tp_pct"))
+            if sl_pct is None:
+                sl_pct = _extract_float(launcher_config.get("sl_pct"))
 
         # ── Dynamic TP (Mean Reversion only) ──────────────────────────
         # Tighten TP using BB bandwidth at entry.  Mirrors the live logic in

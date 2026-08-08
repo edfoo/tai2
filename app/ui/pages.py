@@ -2936,11 +2936,17 @@ def register_pages(app: FastAPI) -> None:
                 with ui.row().classes("w-full items-center gap-2 bg-amber-50 border border-amber-300 rounded-lg px-4 py-2 mb-2"):
                     ui.icon("auto_graph", color="amber").classes("text-lg")
                     frac = _mr_cfg_notice.get("dynamic_tp_fraction", 0.7)
-                    tp_floor = _mr_cfg_notice.get("tp_pct", 2.0)
-                    ui.label(
-                        f"Dynamic TP is active for Mean Reversion — effective TP = min({tp_floor}%, bandwidth÷2 × {frac}). "
-                        f"Static {tp_floor}% acts as a ceiling; dynamic only tightens the target in low-bandwidth conditions."
-                    ).classes("text-xs text-amber-800")
+                    _tp_floor_raw = _mr_cfg_notice.get("tp_pct")
+                    tp_floor = float(_tp_floor_raw) if _tp_floor_raw not in (None, "") else None
+                    if tp_floor is not None and tp_floor > 0:
+                        ui.label(
+                            f"Dynamic TP is active for Mean Reversion — effective TP = min({tp_floor}%, bandwidth÷2 × {frac}). "
+                            f"Static {tp_floor}% acts as a ceiling; dynamic only tightens the target in low-bandwidth conditions."
+                        ).classes("text-xs text-amber-800")
+                    else:
+                        ui.label(
+                            "Dynamic TP is enabled for Mean Reversion, but static TP is blank, so no TP protection will be attached."
+                        ).classes("text-xs text-amber-800")
         shotgun = strategy.setdefault("shotgun", {
             "enabled": False,
             "tp_pct": None,
@@ -5443,6 +5449,7 @@ def register_pages(app: FastAPI) -> None:
                             {"name": "timestamp", "label": "Timestamp", "field": "timestamp"},
                             {"name": "symbol", "label": "Symbol", "field": "symbol"},
                             {"name": "side", "label": "Side", "field": "side"},
+                            {"name": "strategy", "label": "Strategy", "field": "strategy"},
                             {"name": "price", "label": "Price", "field": "price"},
                             {"name": "amount", "label": "Amount", "field": "amount"},
                             {"name": "fee", "label": "Fee", "field": "fee"},
@@ -5519,6 +5526,9 @@ def register_pages(app: FastAPI) -> None:
                         record["fee"] = f"{float(raw_fee):.4f} USDT"
                     except (TypeError, ValueError):
                         record["fee"] = "—"
+                raw_strategy = record.get("strategy")
+                if not raw_strategy:
+                    record["strategy"] = "—"
                 formatted_rows.append(record)
             trades_table.rows = formatted_rows
             trades_table.update()

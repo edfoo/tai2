@@ -28,7 +28,8 @@ CREATE TABLE IF NOT EXISTS executed_trades (
     llm_reasoning TEXT,
     pnl NUMERIC,
     fee NUMERIC,
-    fee_paid_at TIMESTAMPTZ
+    fee_paid_at TIMESTAMPTZ,
+    strategy TEXT
 );
 
 CREATE TABLE IF NOT EXISTS prompt_runs (
@@ -64,8 +65,8 @@ CREATE TABLE IF NOT EXISTS prompt_versions (
 """
 
 INSERT_SQL = (
-    "INSERT INTO executed_trades (id, timestamp, symbol, instrument, side, size, price, amount, llm_reasoning, pnl, fee, fee_paid_at) "
-    "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)"
+    "INSERT INTO executed_trades (id, timestamp, symbol, instrument, side, size, price, amount, llm_reasoning, pnl, fee, fee_paid_at, strategy) "
+    "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)"
 )
 
 UPDATE_TRADE_PNL_SQL = (
@@ -99,7 +100,7 @@ FETCH_UNRECONCILED_SQL = """
 """
 
 FETCH_RECENT_SQL = (
-    "SELECT id, timestamp, symbol, instrument, side, size, price, amount, llm_reasoning, pnl, fee "
+    "SELECT id, timestamp, symbol, instrument, side, size, price, amount, llm_reasoning, pnl, fee, strategy "
     "FROM executed_trades ORDER BY timestamp DESC LIMIT $1"
 )
 
@@ -233,6 +234,12 @@ async def init_postgres_pool(*, min_size: int = 1, max_size: int = 10) -> asyncp
         ADD COLUMN IF NOT EXISTS fee_paid_at TIMESTAMPTZ;
         """
     )
+    await _POOL.execute(
+        """
+        ALTER TABLE executed_trades
+        ADD COLUMN IF NOT EXISTS strategy TEXT;
+        """
+    )
     logger.info("PostgreSQL pool initialized")
     return _POOL
 
@@ -271,6 +278,7 @@ async def insert_executed_trade(trade: ExecutedTrade) -> None:
         # recorded immediately after fill); NULL for LLM entry orders whose fee is
         # back-filled later by the reconciler via UPDATE_TRADE_PNL_SQL.
         datetime.now(timezone.utc) if trade.fee is not None else None,
+        trade.strategy,
     )
 
 
@@ -354,6 +362,7 @@ async def fetch_recent_trades(limit: int = 200) -> list[dict[str, Any]]:
                 "pnl": float(record.get("pnl")) if record.get("pnl") is not None else None,
                 "llm_reasoning": record.get("llm_reasoning"),
                 "fee": float(record.get("fee")) if record.get("fee") is not None else None,
+                "strategy": record.get("strategy"),
             }
         )
     return results

@@ -3112,6 +3112,7 @@ class MarketService:
         decisions: list[dict[str, Any]] = []
         for signal in signals:
             strat_key = f"{signal.strategy_name}:{symbol_upper}"
+            _strat_cfg_for_sizing = (gov.get("strategies") or {}).get(signal.strategy_name) or {}
 
             # Per-strategy position guard: skip if this strategy already has
             # an open or in-flight position on this symbol.
@@ -3135,6 +3136,21 @@ class MarketService:
             tp_pct = signal.tp_pct if signal.tp_pct is not None else self._extract_float(gov.get("tp_pct"))
             sl_pct = signal.sl_pct if signal.sl_pct is not None else self._extract_float(gov.get("sl_pct"))
 
+            # Mean Reversion opt-out: if both adaptive sizing modes are explicitly
+            # disabled and static TP/SL are both blank, do not attach protection.
+            # This enables external trade management (e.g., Skimming-like logic)
+            # without placing TP/SL algos on the order book.
+            _disable_protection = False
+            if signal.strategy_name == "mean_reversion":
+                _mr_use_atr = bool(_strat_cfg_for_sizing.get("use_atr_sizing", True))
+                _mr_use_struct = bool(_strat_cfg_for_sizing.get("use_structural_sizing", True))
+                _mr_static_tp = self._extract_float(_strat_cfg_for_sizing.get("tp_pct"))
+                _mr_static_sl = self._extract_float(_strat_cfg_for_sizing.get("sl_pct"))
+                if not _mr_use_atr and not _mr_use_struct and _mr_static_tp is None and _mr_static_sl is None:
+                    _disable_protection = True
+                    tp_pct = None
+                    sl_pct = None
+
             # PnL% mode: when enabled, the strategy TP/SL fields are interpreted
             # as Floating PnL % on margin (after leverage). Convert them to price
             # distances using the guardrail leverage: price% = PnL% / leverage.
@@ -3148,7 +3164,6 @@ class MarketService:
             _guard_leverage = self._extract_float(self._guardrails_config.get("max_leverage"))
             if not _guard_leverage or _guard_leverage <= 0:
                 _guard_leverage = self._extract_float(self._guardrails_config.get("min_leverage"))
-            _strat_cfg_for_sizing = (gov.get("strategies") or {}).get(signal.strategy_name) or {}
             _uses_atr = bool(_strat_cfg_for_sizing.get("use_atr_sizing", False))
             _uses_struct = bool(_strat_cfg_for_sizing.get("use_structural_sizing", False))
             if (
@@ -3266,6 +3281,7 @@ class MarketService:
                 "rationale": signal.rationale or f"Launcher signal: {action}",
                 "_decision_origin": "launcher",
                 "_strategy_name": signal.strategy_name,
+                "_disable_protection": _disable_protection,
             })
 
         return decisions
@@ -4195,6 +4211,7 @@ class MarketService:
                 rationale=f"Alternator close (trigger={trigger})",
                 fee=_close_fee,
                 is_close=True,
+                strategy_name="alternator",
             )
             self._emit_debug(
                 f"Alternator: {symbol_key} close order submitted "
@@ -4249,6 +4266,7 @@ class MarketService:
                     rationale=f"Alternator entry (trigger={trigger}, flip=#{new_flip_count})",
                     fee=None,
                     is_close=False,
+                    strategy_name="alternator",
                 )
             else:
                 self._emit_debug(
@@ -9354,6 +9372,11 @@ class MarketService:
         _alternator_entry = not reduce_only and bool(
             (self._strategy_config.get("alternator") or {}).get("enabled")
         )
+        _launcher_no_protection_entry = (
+            not reduce_only
+            and str(decision.get("_decision_origin") or "").lower() == "launcher"
+            and bool(decision.get("_disable_protection"))
+        )
         if _alternator_entry:
             if take_profit_price or stop_loss_price:
                 self._emit_debug(
@@ -9367,7 +9390,21 @@ class MarketService:
             take_profit_ratio = None
             stop_loss_ratio = None
 
-        if require_protection and not reduce_only and not _alternator_entry and (stop_loss_price is None or not isinstance(stop_loss_price, (int, float)) or stop_loss_price <= 0):
+        if _launcher_no_protection_entry:
+            if take_profit_price is not None or stop_loss_price is not None:
+                self._emit_debug(
+                    f"{symbol} launcher no-protection entry: stripping TP ({take_profit_price}) "
+                    f"and SL ({stop_loss_price}) from entry order"
+                )
+            take_profit_price = None
+            stop_loss_price = None
+            requested_take_profit = None
+            requested_stop_loss = None
+            take_profit_ratio = None
+            stop_loss_ratio = None
+            require_protection = False
+
+        if require_protection and not reduce_only and not _alternator_entry and not _launcher_no_protection_entry and (stop_loss_price is None or not isinstance(stop_loss_price, (int, float)) or stop_loss_price <= 0):
             self._record_execution_feedback(
                 symbol,
                 "Blocked: stop-loss required",
@@ -9381,7 +9418,7 @@ class MarketService:
             self._emit_debug(f"Execution skipped for {symbol}: stop-loss required for entries")
             return False
 
-        if require_protection and not reduce_only and not _alternator_entry and (
+        if require_protection and not reduce_only and not _alternator_entry and not _launcher_no_protection_entry and (
             take_profit_price is None
             or not isinstance(take_profit_price, (int, float))
             or take_profit_price <= 0
@@ -11669,6 +11706,7 @@ class MarketService:
                 amount=Decimal(str(amount)),
                 llm_reasoning=rationale,
                 fee=Decimal(str(fee)) if fee is not None else None,
+                strategy=strategy_name,
             )
             await insert_executed_trade(trade)
         except Exception as exc:  # pragma: no cover - persistence best-effort
