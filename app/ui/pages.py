@@ -5307,6 +5307,7 @@ def register_pages(app: FastAPI) -> None:
                 "require_regime": bool(mr_require_regime_switch.value),
                 "max_bb_bandwidth_percentile": float(mr_max_bw_pct_input.value or 45.0),
                 "regime_lookback": int(mr_regime_lookback_input.value or 50),
+                "use_adaptive_atr": bool(mr_use_adaptive_atr_switch.value),
                 "use_structural_sizing": bool(mr_use_structural_switch.value),
                 "structural_sl_buffer_atr": float(mr_structural_sl_buffer_input.value or 0.15),
                 "atr_min_tp_mult": float(mr_atr_min_tp_input.value or 0.5),
