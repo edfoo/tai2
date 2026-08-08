@@ -435,6 +435,14 @@ class MeanReversionStrategy:
         _effective_sl = _static_sl
         _sizing_source = "static"
         atr_pct = helpers.extract_float(indicators.get("atr_pct"))
+        # Optional adaptive ATR regime – wider stops/targets in volatile regimes.
+        if atr_pct is not None and config.get("use_adaptive_atr", False):
+            if atr_pct < 1.5:
+                atr_pct *= 1.20
+            elif atr_pct < 3.0:
+                atr_pct *= 1.80
+            else:
+                atr_pct *= 2.50
         if use_atr_sizing and atr_pct is not None and atr_pct > 0:
             _effective_tp = atr_tp_multiplier * atr_pct
             _effective_sl = atr_sl_multiplier * atr_pct

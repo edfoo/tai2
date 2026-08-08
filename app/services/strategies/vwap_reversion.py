@@ -149,6 +149,13 @@ class VWAPReversionStrategy:
         vwap_value = helpers.extract_float(indicators.get("vwap"))
         last_price = helpers.get_last_price(symbol)
         atr_pct = helpers.extract_float(indicators.get("atr_pct"))
+        if atr_pct is not None and config.get("use_adaptive_atr", False):
+            if atr_pct < 1.5:
+                atr_pct *= 1.20
+            elif atr_pct < 3.0:
+                atr_pct *= 1.80
+            else:
+                atr_pct *= 2.50
 
         if vwap_value is None or vwap_value <= 0 or last_price is None:
             helpers.emit_debug(

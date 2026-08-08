@@ -3298,11 +3298,25 @@ def register_pages(app: FastAPI) -> None:
                             "Adapts to volatility regime (tighter in low-vol, wider in high-vol)."
                         ).classes("text-xs text-slate-500 mb-2")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            mr_use_adaptive_atr_switch = ui.switch(
+                                "Adaptive ATR regime",
+                                value=bool(_mr_cfg.get("use_adaptive_atr", False)),
+                            ).props("dense color=amber")
+                            ui.label(
+                                "Scales ATR distance by volatility regime (quiet/normal/volatile)."
+                            ).classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             mr_use_atr_sizing_switch = ui.switch(
                                 "Use ATR sizing (fallback)",
                                 value=bool(_mr_cfg.get("use_atr_sizing", True)),
                             ).props("dense color=primary")
                             ui.label("Used when structural levels are unavailable or structural sizing is off.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            sc_use_adaptive_atr_switch = ui.switch(
+                                "Adaptive ATR regime",
+                                value=bool(_sc_cfg.get("use_adaptive_atr", False)),
+                            ).props("dense color=amber")
+                            ui.label("Scales ATR distances by volatility regime.").classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             mr_atr_tp_mult_input = ui.number(
                                 label="ATR TP multiplier",
@@ -3879,6 +3893,12 @@ def register_pages(app: FastAPI) -> None:
                             ).props("dense color=primary")
                             ui.label("Used when structural levels are unavailable or structural sizing is off.").classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            ls_use_adaptive_atr_switch = ui.switch(
+                                "Adaptive ATR regime",
+                                value=bool(_ls_cfg.get("use_adaptive_atr", False)),
+                            ).props("dense color=amber")
+                            ui.label("Scales ATR distances by volatility regime.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             ls_atr_tp_mult_input = ui.number(
                                 label="ATR TP multiplier",
                                 value=float(_ls_cfg.get("atr_tp_multiplier") or 1.5),
@@ -4088,6 +4108,12 @@ def register_pages(app: FastAPI) -> None:
                                 value=bool(_vr_cfg.get("use_atr_sizing", True)),
                             ).props("dense color=primary")
                             ui.label("Used when structural levels are unavailable or structural sizing is off.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            vr_use_adaptive_atr_switch = ui.switch(
+                                "Adaptive ATR regime",
+                                value=bool(_vr_cfg.get("use_adaptive_atr", False)),
+                            ).props("dense color=amber")
+                            ui.label("Scales ATR distances by volatility regime.").classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             vr_atr_tp_mult_input = ui.number(
                                 label="ATR TP multiplier",
@@ -4300,6 +4326,12 @@ def register_pages(app: FastAPI) -> None:
                                 value=bool(_tp_cfg.get("use_atr_sizing", True)),
                             ).props("dense color=primary")
                             ui.label("Used when structural levels are unavailable or structural sizing is off.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            tp_use_adaptive_atr_switch = ui.switch(
+                                "Adaptive ATR regime",
+                                value=bool(_tp_cfg.get("use_adaptive_atr", False)),
+                            ).props("dense color=amber")
+                            ui.label("Scales ATR distances by volatility regime.").classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             tp_atr_tp_mult_input = ui.number(
                                 label="ATR TP multiplier",
@@ -4730,6 +4762,12 @@ def register_pages(app: FastAPI) -> None:
                                 value=bool(alternator.get("dynamic_threshold", False)),
                             ).props(
                                 "hint='Compute reversal threshold from average HTF candle amplitude: (H−L)/mid × 100' persistent-hint dense color=primary"
+                        with ui.row().classes("gap-4 items-center mt-1"):
+                            sc_use_adapt_atr_switch = ui.switch(
+                                "Adaptive ATR regime",
+                                value=bool(_sc_cfg.get("use_adaptive_atr", False)),
+                            ).props("dense color=amber")
+                            ui.label("Scales ATR distance by volatility regime.").classes("text-xs text-slate-500")
                             )
                             _altr_df_raw = alternator.get("dynamic_threshold_factor", 1.0)
                             altr_dynamic_factor = ui.number(
@@ -5313,6 +5351,7 @@ def register_pages(app: FastAPI) -> None:
                 "require_volume_rsi_rising": bool(sc_vol_rsi_rising_switch.value),
                 "max_spike_extension_pct": float(sc_max_spike_ext_input.value or 4.0),
                 "spike_lookback": int(sc_spike_lookback_input.value or 5),
+                    "use_adaptive_atr": bool(sc_use_adaptive_atr_switch.value),
                 "require_regime": bool(sc_require_regime_switch.value),
                 "min_bb_bandwidth_percentile": float(sc_min_bw_pct_input.value or 55.0),
                 "regime_lookback": int(sc_regime_lookback_input.value or 50),
@@ -5340,6 +5379,7 @@ def register_pages(app: FastAPI) -> None:
                 "require_regime": bool(ls_require_regime_switch.value),
                 "max_bb_bandwidth_percentile": float(ls_max_bw_pct_input.value or 60.0),
                 "regime_lookback": int(ls_regime_lookback_input.value or 50),
+                    "use_adaptive_atr": bool(ls_use_adaptive_atr_switch.value),
                 "use_structural_sizing": bool(ls_use_structural_switch.value),
                 "structural_sl_buffer_atr": float(ls_structural_sl_buffer_input.value or 0.15),
                 "atr_min_tp_mult": float(ls_atr_min_tp_input.value or 0.5),
@@ -5364,6 +5404,7 @@ def register_pages(app: FastAPI) -> None:
                 "max_adx": float(vr_max_adx_input.value or 25.0),
                 "require_closeback": bool(vr_require_closeback_switch.value),
                 "require_htf_trend": bool(vr_require_htf_switch.value),
+                    "use_adaptive_atr": bool(vr_use_adaptive_atr_switch.value),
                 "require_regime": bool(vr_require_regime_switch.value),
                 "max_bb_bandwidth_percentile": float(vr_max_bw_pct_input.value or 55.0),
                 "regime_lookback": int(vr_regime_lookback_input.value or 50),
@@ -5390,6 +5431,7 @@ def register_pages(app: FastAPI) -> None:
                 "pullback_proximity_pct": float(tp_proximity_input.value or 0.4),
                 "use_vwap_as_level": bool(tp_use_vwap_switch.value),
                 "require_htf_trend": bool(tp_require_htf_switch.value),
+                    "use_adaptive_atr": bool(tp_use_adaptive_atr_switch.value),
                 "require_bullish_candle": bool(tp_require_bullish_switch.value),
                 "candle_rejection_pct": float(tp_candle_rejection_pct_input.value or 25.0),
                 "min_adx": float(tp_min_adx_input.value or 20.0),
