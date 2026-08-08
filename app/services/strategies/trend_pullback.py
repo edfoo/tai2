@@ -106,8 +106,9 @@ class TrendPullbackStrategy:
         adx_htf = helpers.extract_float(indicators.get("adx_htf"))
         chop_htf = helpers.extract_float(indicators.get("choppiness_htf"))
 
-        # Trend pullback only makes sense if the HTF is in a trend
-        if not is_trending(adx_htf, chop_htf):
+        # Trend pullback only makes sense if the HTF is in a trend. Only block
+        # on a definitive non-trending signal; neutral (no HTF data) passes.
+        if is_trending(adx_htf, chop_htf) is False:
             return None
 
         # ── Config ────────────────────────────────────────────────────
@@ -342,90 +343,101 @@ class TrendPullbackStrategy:
         _effective_sl = _static_sl
         _sizing_source = "static"
 
-        if use_atr_sizing and atr_pct is not None and atr_pct > 0:
-            _effective_tp = atr_tp_multiplier * atr_pct
-            _effective_sl = atr_sl_multiplier * atr_pct
-            _sizing_source = "atr"
+        # ------------------------------------------------------------------
+        # Unified TP/SL via trade_management
+        # ------------------------------------------------------------------
 
-        # Structural sizing: use swing highs/lows from indicators["structure"].
-        if use_structural_sizing and last_price and last_price > 0 and atr_pct is not None and atr_pct > 0:
-            atr_price = (atr_pct / 100.0) * last_price
-            if atr_price > 0:
-                structure = indicators.get("structure") or {}
-                swing_highs = structure.get("swing_highs") or []
-                swing_lows = structure.get("swing_lows") or []
+        from app.services.trade_management import OrderContext, compute_tp_sl_pct
 
-                # Pullback candle OHLC (already extracted above for confirmation).
-                _curr = (ohlcv_compact[-1] if ohlcv_compact and isinstance(ohlcv_compact[-1], dict) else {})
-                curr_low = helpers.extract_float(_curr.get("low"))
-                curr_high = helpers.extract_float(_curr.get("high"))
+        entry_price = helpers.get_last_price(symbol)
+        if entry_price is None:
+            return None
 
-                if buy_signal:
-                    # Long: TP at nearest swing high above price, SL beyond pullback candle low.
-                    tp_target = None
-                    for sh in swing_highs:
-                        sh_price = helpers.extract_float(sh.get("price")) if isinstance(sh, dict) else None
-                        if sh_price is not None and sh_price > last_price:
-                            tp_target = sh_price
-                            break
-                    raw_tp_dist = (tp_target - last_price) if tp_target is not None else None
-                    raw_sl_dist = (last_price - (curr_low - structural_sl_buffer_atr * atr_price)) if curr_low is not None else None
-                else:
-                    # Short: TP at nearest swing low below price, SL beyond pullback candle high.
-                    tp_target = None
-                    for sl in swing_lows:
-                        sl_price = helpers.extract_float(sl.get("price")) if isinstance(sl, dict) else None
-                        if sl_price is not None and sl_price < last_price:
-                            tp_target = sl_price
-                            break
-                    raw_tp_dist = (last_price - tp_target) if tp_target is not None else None
-                    raw_sl_dist = ((curr_high + structural_sl_buffer_atr * atr_price) - last_price) if curr_high is not None else None
+        side = "long" if buy_signal else "short" if sell_signal else None
+        if side is None:
+            return None
 
-                # Convert distances to % of price for clamping.
-                tp_pct_raw = (raw_tp_dist / last_price * 100.0) if raw_tp_dist is not None and raw_tp_dist > 0 else None
-                sl_pct_raw = (raw_sl_dist / last_price * 100.0) if raw_sl_dist is not None and raw_sl_dist > 0 else None
+        market_data: dict[str, Any] = snapshot.get("market_data") or {}
+        sym_data = market_data.get(symbol) or {}
+        indicators_full = sym_data.get("indicators") or {}
 
-                # Clamp TP to [atr_min_tp_mult × ATR%, atr_max_tp_mult × ATR%].
-                tp_clamped = None
-                if tp_pct_raw is not None:
-                    tp_min = atr_min_tp_mult * atr_pct
-                    tp_max = atr_max_tp_mult * atr_pct
-                    tp_clamped = max(tp_min, min(tp_max, tp_pct_raw))
+        atr_tf_pct = helpers.extract_float(indicators_full.get("atr_pct")) or 1.0
+        atr_htf_pct = helpers.extract_float(indicators_full.get("atr_pct_htf")) or atr_tf_pct
+        vpoc = helpers.extract_float(indicators_full.get("vpoc"))
+        va_width = helpers.extract_float(indicators_full.get("value_area_width"))
+        swing_high_val = helpers.extract_float(indicators_full.get("swing_high"))
+        swing_low_val = helpers.extract_float(indicators_full.get("swing_low"))
 
-                # Clamp SL to [atr_min_sl_mult × ATR%, atr_max_sl_mult × ATR%].
-                sl_clamped = None
-                if sl_pct_raw is not None:
-                    sl_min = atr_min_sl_mult * atr_pct
-                    sl_max = atr_max_sl_mult * atr_pct
-                    sl_clamped = max(sl_min, min(sl_max, sl_pct_raw))
+        static_tp = helpers.extract_float(config.get("tp_pct"))
+        static_sl = helpers.extract_float(config.get("sl_pct"))
 
-                if tp_clamped is not None and sl_clamped is not None:
-                    _effective_tp = tp_clamped
-                    _effective_sl = sl_clamped
-                    _sizing_source = (
-                        f"structural(tp={'%.2f' % tp_pct_raw}→{'%.2f' % tp_clamped}%, "
-                        f"sl={'%.2f' % sl_pct_raw}→{'%.2f' % sl_clamped}%)"
-                    )
-                elif tp_clamped is not None:
-                    _effective_tp = tp_clamped
-                    _sizing_source = f"structural(tp={'%.2f' % tp_clamped}%, sl=atr)"
-                elif sl_clamped is not None:
-                    _effective_sl = sl_clamped
-                    _sizing_source = f"structural(sl={'%.2f' % sl_clamped}%, tp=atr)"
-                # If neither clamped value is available, keep ATR/static fallback.
+        # Thesis-specific structural levels: TP at the nearest swing high/low
+        # beyond price, SL beyond the pullback candle's extreme.
+        tp_target: float | None = None
+        sl_level: float | None = None
+        if use_structural_sizing and entry_price and entry_price > 0:
+            atr_price = (atr_tf_pct / 100.0) * entry_price
+            structure = indicators_full.get("structure") or {}
+            swing_highs = structure.get("swing_highs") or []
+            swing_lows = structure.get("swing_lows") or []
+            ohlcv_compact = indicators_full.get("ohlcv") or []
+            _curr = ohlcv_compact[-1] if ohlcv_compact and isinstance(ohlcv_compact[-1], dict) else {}
+            curr_low = helpers.extract_float(_curr.get("low"))
+            curr_high = helpers.extract_float(_curr.get("high"))
 
-        direction = "buy" if buy_signal else "sell"
+            if side == "long":
+                for sh in swing_highs:
+                    sh_price = helpers.extract_float(sh.get("price")) if isinstance(sh, dict) else None
+                    if sh_price is not None and sh_price > entry_price:
+                        tp_target = sh_price
+                        break
+                if curr_low is not None:
+                    sl_level = curr_low - structural_sl_buffer_atr * atr_price
+            else:
+                for sl in swing_lows:
+                    sl_price = helpers.extract_float(sl.get("price")) if isinstance(sl, dict) else None
+                    if sl_price is not None and sl_price < entry_price:
+                        tp_target = sl_price
+                        break
+                if curr_high is not None:
+                    sl_level = curr_high + structural_sl_buffer_atr * atr_price
+
+        tp_pct_final, sl_pct_final = compute_tp_sl_pct(
+            entry=entry_price,
+            side=side,
+            ctx=OrderContext(
+                atr_tf_pct=atr_tf_pct,
+                atr_htf_pct=atr_htf_pct,
+                vpoc=vpoc,
+                value_area_width=va_width,
+                swing_high=swing_high_val,
+                swing_low=swing_low_val,
+                last_price=entry_price,
+                tp_target=tp_target,
+                sl_level=sl_level,
+                structural_sl_buffer_atr=structural_sl_buffer_atr,
+                atr_min_tp_mult=atr_min_tp_mult,
+                atr_max_tp_mult=atr_max_tp_mult,
+                atr_min_sl_mult=atr_min_sl_mult,
+                atr_max_sl_mult=atr_max_sl_mult,
+            ),
+            static_tp_pct=static_tp,
+            static_sl_pct=static_sl,
+            atr_tp_multiplier=atr_tp_multiplier if use_atr_sizing else None,
+            atr_sl_multiplier=atr_sl_multiplier if use_atr_sizing else None,
+        )
+
         level_str = '+'.join(touched_levels)
         trend_word = "bullish" if buy_signal else "bearish"
         adx_str = f"{adx:.1f}" if adx is not None else "n/a"
+
         return StrategySignal(
-            direction=direction,
+            direction="buy" if side == "long" else "sell",
             strategy_name=self.name,
-            tp_pct=_effective_tp,
-            sl_pct=_effective_sl,
+            tp_pct=tp_pct_final,
+            sl_pct=sl_pct_final,
             rationale=(
-                f"TrendPullback {direction.upper()}: pullback to {level_str} "
-                f"in {trend_word} HTF trend "
-                f"(price={last_price:.6g}, ADX={adx_str}) [{_sizing_source}]"
+                f"TrendPullback {'BUY' if side=='long' else 'SELL'}: pullback to {level_str} "
+                f"in {trend_word} HTF trend (ADX={adx_str}) [trade_mgmt]"
             ),
         )

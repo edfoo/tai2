@@ -116,7 +116,7 @@ class LiquiditySweepStrategy:
         adx_htf = helpers.extract_float(indicators.get("adx_htf"))
         chop_htf = helpers.extract_float(indicators.get("choppiness_htf"))
 
-        if is_trending(adx_htf, chop_htf):
+        if is_trending(adx_htf, chop_htf) is True:
             # In a trending environment sweeps often become breakouts.
             return None
 
@@ -456,15 +456,81 @@ class LiquiditySweepStrategy:
 
         sweep_type = "low" if buy_signal else "high"
         direction = "buy" if buy_signal else "sell"
+        # ------------------------------------------------------------------
+        # Unified TP/SL via trade_management
+        # ------------------------------------------------------------------
+
+        from app.services.trade_management import OrderContext, compute_tp_sl_pct
+
+        entry_price = helpers.get_last_price(symbol)
+        if entry_price is None:
+            return None
+
+        market_data: dict[str, Any] = snapshot.get("market_data") or {}
+        sym_data = market_data.get(symbol) or {}
+        indicators = sym_data.get("indicators") or {}
+
+        atr_tf_pct = helpers.extract_float(indicators.get("atr_pct")) or 1.0
+        atr_htf_pct = helpers.extract_float(indicators.get("atr_pct_htf")) or atr_tf_pct
+        vpoc = helpers.extract_float(indicators.get("vpoc"))
+        va_width = helpers.extract_float(indicators.get("value_area_width"))
+        swing_high_val = helpers.extract_float(indicators.get("swing_high"))
+        swing_low_val = helpers.extract_float(indicators.get("swing_low"))
+
+        static_tp = helpers.extract_float(config.get("tp_pct"))
+        static_sl = helpers.extract_float(config.get("sl_pct"))
+
+        # Thesis-specific structural levels: TP at the opposite swing extreme,
+        # SL beyond the sweep wick (with an ATR buffer so it's not sitting
+        # exactly at the wick).
+        tp_target: float | None = None
+        sl_level: float | None = None
+        if use_structural_sizing and entry_price and entry_price > 0:
+            atr_price = (atr_tf_pct / 100.0) * entry_price
+            if buy_signal:
+                if swing_high is not None and swing_high > entry_price:
+                    tp_target = swing_high
+                if curr_low is not None:
+                    sl_level = curr_low - structural_sl_buffer_atr * atr_price
+            else:
+                if swing_low is not None and swing_low < entry_price:
+                    tp_target = swing_low
+                if curr_high is not None:
+                    sl_level = curr_high + structural_sl_buffer_atr * atr_price
+
+        tp_pct_final, sl_pct_final = compute_tp_sl_pct(
+            entry=entry_price,
+            side="long" if buy_signal else "short",
+            ctx=OrderContext(
+                atr_tf_pct=atr_tf_pct,
+                atr_htf_pct=atr_htf_pct,
+                vpoc=vpoc,
+                value_area_width=va_width,
+                swing_high=swing_high_val,
+                swing_low=swing_low_val,
+                last_price=entry_price,
+                tp_target=tp_target,
+                sl_level=sl_level,
+                structural_sl_buffer_atr=structural_sl_buffer_atr,
+                atr_min_tp_mult=atr_min_tp_mult,
+                atr_max_tp_mult=atr_max_tp_mult,
+                atr_min_sl_mult=atr_min_sl_mult,
+                atr_max_sl_mult=atr_max_sl_mult,
+            ),
+            static_tp_pct=static_tp,
+            static_sl_pct=static_sl,
+            atr_tp_multiplier=atr_tp_multiplier if use_atr_sizing else None,
+            atr_sl_multiplier=atr_sl_multiplier if use_atr_sizing else None,
+        )
+
         vol_str = f" vol_ratio={vol_ratio:.2f}" if vol_ratio is not None else ""
+
         return StrategySignal(
             direction=direction,
             strategy_name=self.name,
-            tp_pct=_effective_tp,
-            sl_pct=_effective_sl,
+            tp_pct=tp_pct_final,
+            sl_pct=sl_pct_final,
             rationale=(
-                f"LiquiditySweep {direction.upper()}: swept {sweep_type} "
-                f"(swing={'%.6g' % (swing_low if buy_signal else swing_high)}, "
-                f"close_pos={close_pos:.2f}{vol_str}) [{_sizing_source}]"
+                f"LiquiditySweep {direction.upper()}: swept {sweep_type}{vol_str} [trade_mgmt]"
             ),
         )

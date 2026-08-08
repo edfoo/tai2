@@ -201,7 +201,8 @@ class MeanReversionStrategy:
         adx_htf = helpers.extract_float(indicators.get("adx_htf"))
         chop_htf = helpers.extract_float(indicators.get("choppiness_htf"))
 
-        if is_trending(adx_htf, chop_htf):
+        # Neutral (None) when no HTF regime data → don't block.
+        if is_trending(adx_htf, chop_htf) is True:
             # Market is trending → disable mean-reversion entry prematurely.
             return None
 
@@ -514,22 +515,86 @@ class MeanReversionStrategy:
                     _sizing_source = f"structural(sl={'%.2f' % sl_clamped}%, tp=atr)"
                 # If neither clamped value is available, keep ATR/static fallback.
 
-        if buy_signal:
+        # ------------------------------------------------------------------
+        # Unified TP/SL sizing via trade_management
+        # ------------------------------------------------------------------
+
+        from app.services.trade_management import OrderContext, compute_tp_sl_pct
+
+        entry_price = bb_last_price or helpers.get_last_price(symbol)
+
+        atr_tf_pct = helpers.extract_float(indicators.get("atr_pct")) or 1.0  # fallback to small >0
+        atr_htf_pct = helpers.extract_float(indicators.get("atr_pct_htf")) or atr_tf_pct
+
+        vpoc = helpers.extract_float(indicators.get("vpoc"))
+        va_width = helpers.extract_float(indicators.get("value_area_width"))
+        swing_high = helpers.extract_float(indicators.get("swing_high"))
+        swing_low = helpers.extract_float(indicators.get("swing_low"))
+
+        side = "long" if buy_signal else "short" if sell_signal else None
+
+        if side is not None:
+            static_tp = helpers.extract_float(config.get("tp_pct"))
+            static_sl = helpers.extract_float(config.get("sl_pct"))
+
+            # Thesis-specific structural levels: TP at BB middle (the mean
+            # price reverts to), SL beyond the entry candle's wick (the
+            # exhaustion extreme).
+            tp_target: float | None = None
+            sl_level: float | None = None
+            if use_structural_sizing and entry_price and bb_middle and bb_middle > 0:
+                atr_price = (atr_tf_pct / 100.0) * entry_price
+                ohlcv_compact = indicators.get("ohlcv") or []
+                _curr = ohlcv_compact[-1] if ohlcv_compact and isinstance(ohlcv_compact[-1], dict) else {}
+                curr_low = helpers.extract_float(_curr.get("low"))
+                curr_high = helpers.extract_float(_curr.get("high"))
+                if side == "long":
+                    tp_target = bb_middle
+                    if curr_low is not None:
+                        sl_level = curr_low - structural_sl_buffer_atr * atr_price
+                else:
+                    tp_target = bb_middle
+                    if curr_high is not None:
+                        sl_level = curr_high + structural_sl_buffer_atr * atr_price
+
+            tp_pct_final: float | None = None
+            sl_pct_final: float | None = None
+            if entry_price is not None:
+                tp_pct_final, sl_pct_final = compute_tp_sl_pct(
+                    entry=entry_price,
+                    side=side,
+                    ctx=OrderContext(
+                        atr_tf_pct=atr_tf_pct,
+                        atr_htf_pct=atr_htf_pct,
+                        vpoc=vpoc,
+                        value_area_width=va_width,
+                        swing_high=swing_high,
+                        swing_low=swing_low,
+                        last_price=entry_price,
+                        tp_target=tp_target,
+                        sl_level=sl_level,
+                        structural_sl_buffer_atr=structural_sl_buffer_atr,
+                        atr_min_tp_mult=atr_min_tp_mult,
+                        atr_max_tp_mult=atr_max_tp_mult,
+                        atr_min_sl_mult=atr_min_sl_mult,
+                        atr_max_sl_mult=atr_max_sl_mult,
+                    ),
+                    static_tp_pct=static_tp,
+                    static_sl_pct=static_sl,
+                    atr_tp_multiplier=atr_tp_multiplier if use_atr_sizing else None,
+                    atr_sl_multiplier=atr_sl_multiplier if use_atr_sizing else None,
+                )
+
             return StrategySignal(
-                direction="buy",
+                direction="buy" if side == "long" else "sell",
                 strategy_name=self.name,
-                tp_pct=_effective_tp,
-                sl_pct=_effective_sl,
-                rationale=f"MeanReversion BUY: RSI={rsi:.1f}<{rsi_oversold} [{_sizing_source}]",
-            )
-        if sell_signal:
-            return StrategySignal(
-                direction="sell",
-                strategy_name=self.name,
-                tp_pct=_effective_tp,
-                sl_pct=_effective_sl,
-                rationale=f"MeanReversion SELL: RSI={rsi:.1f}>{rsi_overbought} [{_sizing_source}]",
-            )
+                    tp_pct=tp_pct_final,
+                    sl_pct=sl_pct_final,
+                    rationale=(
+                        f"MeanReversion {'BUY' if side=='long' else 'SELL'}: RSI={rsi:.1f}"
+                        f" {'<' if side=='long' else '>'}{rsi_oversold if side=='long' else rsi_overbought} [trade_mgmt]"
+                    ),
+                )
 
         # Build a human-readable breakdown of which filters blocked the signal.
         rsi_str = f"RSI={rsi:.1f} (need <{rsi_oversold} or >{rsi_overbought})"

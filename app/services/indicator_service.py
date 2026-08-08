@@ -26,8 +26,13 @@ def is_trending(
     *,
     adx_threshold: float = 25.0,
     choppiness_threshold: float = 40.0,
-) -> bool:
-    """Return ``True`` when the higher-timeframe regime is trending.
+) -> bool | None:
+    """Return ``True``/``False`` when the higher-timeframe regime is trending.
+
+    Returns ``None`` when *no* higher-timeframe regime data is available, so
+    callers can treat the gate as neutral (do not block) rather than assuming
+    a trend or a range.  This mirrors the existing ``require_htf_trend``
+    auto-disable behaviour when HTF indicators are absent.
 
     Parameters
     ----------
@@ -42,6 +47,9 @@ def is_trending(
         Choppiness value below which the market is deemed directional
         (scale 0–100).  A threshold of 40 roughly matches ADX 25.
     """
+
+    if adx_htf is None and chop_htf is None:
+        return None  # no HTF regime data → neutral
 
     trending = False
 

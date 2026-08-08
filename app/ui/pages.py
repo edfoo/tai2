@@ -4576,9 +4576,9 @@ def register_pages(app: FastAPI) -> None:
                         protector_switch, "value"
                     )
 
-            # ── Trade Management (breakeven / partial / time-stop) ───────────
-            with ui.card().classes("w-full rounded-lg border border-slate-200 mb-1"):
-                with ui.row().classes("w-full items-center gap-2 flex-nowrap"):
+            # ── Launcher-level Risk Settings (breakeven / partial / time-stop) ──
+            with ui.card().classes("w-full rounded-lg border border-slate-200 mb-2"):
+                with ui.expansion("Launcher-level Risk Settings").classes("flex-1 text-sm font-medium"):
                     tm_enabled_switch = ui.switch(
                         value=bool(trade_management.get("enabled", True)),
                     ).props("dense color=primary")
@@ -8414,8 +8414,9 @@ def register_pages(app: FastAPI) -> None:
                     _SWEEP_PRESETS = {
                         "MR RSI oversold": ("strategies.mean_reversion.rsi_oversold", "25, 30, 35, 40"),
                         "MR max ADX": ("strategies.mean_reversion.max_adx", "20, 25, 30, 0"),
-                        "MR TP %": ("strategies.mean_reversion.tp_pct", "1.5, 2.0, 3.0, 4.0"),
-                        "MR SL %": ("strategies.mean_reversion.sl_pct", "2.0, 3.0, 4.0, 5.0"),
+                        # TP/SL are now optional – leave blank for dynamic sizing.
+                        "MR TP % (optional)": ("strategies.mean_reversion.tp_pct", ""),
+                        "MR SL % (optional)": ("strategies.mean_reversion.sl_pct", ""),
                         "SC volume RSI min": ("strategies.spike_continuation.volume_rsi_min", "70, 75, 80, 85"),
                         "SC max spike ext %": ("strategies.spike_continuation.max_spike_extension_pct", "3.0, 5.0, 7.0, 10.0"),
                         "SC accel min ratio": ("strategies.spike_continuation.acceleration_min_ratio", "1.0, 1.2, 1.5, 2.0"),

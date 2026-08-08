@@ -100,8 +100,9 @@ class SpikeContinuationStrategy:
         adx_htf = helpers.extract_float(indicators.get("adx_htf"))
         chop_htf = helpers.extract_float(indicators.get("choppiness_htf"))
 
-        # Spike continuation wants *trending* conditions; block if not trending
-        if not is_trending(adx_htf, chop_htf):
+        # Spike continuation wants *trending* conditions. Only block on a
+        # definitive non-trending signal; neutral (no HTF data) passes.
+        if is_trending(adx_htf, chop_htf) is False:
             return None
 
         volume_rsi_min = helpers.extract_float(cfg.get("volume_rsi_min"))
@@ -431,43 +432,46 @@ class SpikeContinuationStrategy:
             and atr_ok
         )
 
-        # ── Compute effective TP/SL ────────────────────────────────────
-        # ATR-scaled TP/SL overrides the static config values when enabled.
-        _static_tp = helpers.extract_float(config.get("tp_pct"))
-        _static_sl = helpers.extract_float(config.get("sl_pct"))
-        _effective_tp = _static_tp
-        _effective_sl = _static_sl
-        if use_atr_sizing:
-            atr_pct = helpers.extract_float(indicators.get("atr_pct"))
-            if atr_pct is not None and config.get("use_adaptive_atr", False):
-                if atr_pct < 1.5:
-                    atr_pct *= 1.20
-                elif atr_pct < 3.0:
-                    atr_pct *= 1.80
-                else:
-                    atr_pct *= 2.50
-            if atr_pct is not None and atr_pct > 0:
-                _effective_tp = atr_tp_multiplier * atr_pct
-                _effective_sl = atr_sl_multiplier * atr_pct
+        # ── Unified TP/SL via trade_management ─────────────────────────
 
-        if buy_signal:
-            return StrategySignal(
-                direction="buy",
-                strategy_name=self.name,
-                tp_pct=_effective_tp,
-                sl_pct=_effective_sl,
-                rationale=f"SpikeContinuation BUY: RSI={rsi:.1f} vol_rsi={volume_rsi_value:.1f} "
-                          f"(accelerating, not peaking)",
-            )
-        if sell_signal:
-            return StrategySignal(
-                direction="sell",
-                strategy_name=self.name,
-                tp_pct=_effective_tp,
-                sl_pct=_effective_sl,
-                rationale=f"SpikeContinuation SELL: RSI={rsi:.1f} vol_rsi={volume_rsi_value:.1f} "
-                          f"(accelerating, not peaking)",
-            )
+        from app.services.trade_management import OrderContext, compute_tp_sl_pct
+
+        side: str | None = "long" if buy_signal else "short" if sell_signal else None
+        if side is not None:
+            entry_price = helpers.get_last_price(symbol)
+            if entry_price is not None:
+                market_data: dict[str, Any] = snapshot.get("market_data") or {}
+                sym_data = market_data.get(symbol) or {}
+                inds = sym_data.get("indicators") or {}
+
+                static_tp = helpers.extract_float(config.get("tp_pct"))
+                static_sl = helpers.extract_float(config.get("sl_pct"))
+
+                tp_pct_val, sl_pct_val = compute_tp_sl_pct(
+                    entry=entry_price,
+                    side=side,
+                    ctx=OrderContext(
+                        atr_tf_pct=helpers.extract_float(inds.get("atr_pct")) or 1.0,
+                        atr_htf_pct=helpers.extract_float(inds.get("atr_pct_htf")) or 1.0,
+                        vpoc=helpers.extract_float(inds.get("vpoc")),
+                        value_area_width=helpers.extract_float(inds.get("value_area_width")),
+                        swing_high=helpers.extract_float(inds.get("swing_high")),
+                        swing_low=helpers.extract_float(inds.get("swing_low")),
+                        last_price=entry_price,
+                    ),
+                    static_tp_pct=static_tp,
+                    static_sl_pct=static_sl,
+                    atr_tp_multiplier=atr_tp_multiplier if use_atr_sizing else None,
+                    atr_sl_multiplier=atr_sl_multiplier if use_atr_sizing else None,
+                )
+
+                return StrategySignal(
+                    direction="buy" if side == "long" else "sell",
+                    strategy_name=self.name,
+                    tp_pct=tp_pct_val,
+                    sl_pct=sl_pct_val,
+                    rationale="SpikeContinuation: volume/momentum spike [trade_mgmt]",
+                )
 
         # Debug breakdown
         parts = [f"RSI={rsi:.1f} (need {rsi_min}-{rsi_max} or {100-rsi_max}-{100-rsi_min})"]
