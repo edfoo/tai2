@@ -3646,6 +3646,14 @@ def register_pages(app: FastAPI) -> None:
                             "Adapts to volatility regime."
                         ).classes("text-xs text-slate-500 mb-2")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            sc_use_adaptive_atr_switch = ui.switch(
+                                "Adaptive ATR regime",
+                                value=bool(_sc_cfg.get("use_adaptive_atr", False)),
+                            ).props("dense color=amber")
+                            ui.label(
+                                "Scales ATR distance by volatility regime (quiet/normal/volatile)."
+                            ).classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             sc_use_atr_sizing_switch = ui.switch(
                                 "Use ATR sizing",
                                 value=bool(_sc_cfg.get("use_atr_sizing", False)),
