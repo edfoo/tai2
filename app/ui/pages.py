@@ -4764,12 +4764,6 @@ def register_pages(app: FastAPI) -> None:
                                 value=bool(alternator.get("dynamic_threshold", False)),
                             ).props(
                                 "hint='Compute reversal threshold from average HTF candle amplitude: (H−L)/mid × 100' persistent-hint dense color=primary"
-                        with ui.row().classes("gap-4 items-center mt-1"):
-                            sc_use_adapt_atr_switch = ui.switch(
-                                "Adaptive ATR regime",
-                                value=bool(_sc_cfg.get("use_adaptive_atr", False)),
-                            ).props("dense color=amber")
-                            ui.label("Scales ATR distance by volatility regime.").classes("text-xs text-slate-500")
                             )
                             _altr_df_raw = alternator.get("dynamic_threshold_factor", 1.0)
                             altr_dynamic_factor = ui.number(
