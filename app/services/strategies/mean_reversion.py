@@ -195,6 +195,16 @@ class MeanReversionStrategy:
         sym_data = market_data.get(symbol) or {}
         indicators = sym_data.get("indicators") or {}
 
+        # ---- Higher-timeframe trend filter ----------------------------------
+        from app.services.indicator_service import is_trending  # local import to avoid circulars
+
+        adx_htf = helpers.extract_float(indicators.get("adx_htf"))
+        chop_htf = helpers.extract_float(indicators.get("choppiness_htf"))
+
+        if is_trending(adx_htf, chop_htf):
+            # Market is trending → disable mean-reversion entry prematurely.
+            return None
+
         rsi = helpers.extract_float(indicators.get("rsi"))
         # Use 14-period CMF for LTF entries (gap 2); fall back to 20-period if unavailable.
         _cmf_14_block = indicators.get("cmf_14") or indicators.get("cmf") or {}

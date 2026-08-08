@@ -96,6 +96,20 @@ class TrendPullbackStrategy:
         # falls back to an acceptable, validated value.
         cfg = merged_config(config, self.name)
 
+        # ---- HTF regime gate (must BE trending) ----------------------------
+        from app.services.indicator_service import is_trending
+
+        market_data: dict[str, Any] = snapshot.get("market_data") or {}
+        sym_data = market_data.get(symbol) or {}
+        indicators = sym_data.get("indicators") or {}
+
+        adx_htf = helpers.extract_float(indicators.get("adx_htf"))
+        chop_htf = helpers.extract_float(indicators.get("choppiness_htf"))
+
+        # Trend pullback only makes sense if the HTF is in a trend
+        if not is_trending(adx_htf, chop_htf):
+            return None
+
         # ── Config ────────────────────────────────────────────────────
         _pullback_ema = helpers.extract_float(cfg.get("pullback_ema"))
         pullback_ema_len = int(_pullback_ema) if _pullback_ema is not None else 21

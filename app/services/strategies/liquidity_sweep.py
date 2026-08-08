@@ -106,6 +106,20 @@ class LiquiditySweepStrategy:
         # falls back to an acceptable, validated value.
         cfg = merged_config(config, self.name)
 
+        # ---- HTF regime gate (chop preferred) ------------------------------
+        from app.services.indicator_service import is_trending
+
+        market_data: dict[str, Any] = snapshot.get("market_data") or {}
+        sym_data = market_data.get(symbol) or {}
+        indicators = sym_data.get("indicators") or {}
+
+        adx_htf = helpers.extract_float(indicators.get("adx_htf"))
+        chop_htf = helpers.extract_float(indicators.get("choppiness_htf"))
+
+        if is_trending(adx_htf, chop_htf):
+            # In a trending environment sweeps often become breakouts.
+            return None
+
         # ── Config ────────────────────────────────────────────────────
         _lookback = helpers.extract_float(cfg.get("lookback"))
         lookback = int(_lookback) if _lookback is not None else 20

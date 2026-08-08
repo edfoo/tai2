@@ -90,6 +90,20 @@ class SpikeContinuationStrategy:
         # falls back to an acceptable, validated value.
         cfg = merged_config(config, self.name)
 
+        # ---- HTF regime gate (requires trending) ---------------------------
+        from app.services.indicator_service import is_trending
+
+        market_data: dict[str, Any] = snapshot.get("market_data") or {}
+        sym_data = market_data.get(symbol) or {}
+        indicators = sym_data.get("indicators") or {}
+
+        adx_htf = helpers.extract_float(indicators.get("adx_htf"))
+        chop_htf = helpers.extract_float(indicators.get("choppiness_htf"))
+
+        # Spike continuation wants *trending* conditions; block if not trending
+        if not is_trending(adx_htf, chop_htf):
+            return None
+
         volume_rsi_min = helpers.extract_float(cfg.get("volume_rsi_min"))
         if volume_rsi_min is None:
             volume_rsi_min = 72.0
