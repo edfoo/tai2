@@ -3090,6 +3090,8 @@ def register_pages(app: FastAPI) -> None:
                                 "Fill all fields with the recommended Mean Reversion configuration. "
                                 "You still need to click Save to persist."
                             )
+                        ui.label("Static TP / SL (% price)").classes("text-xs font-semibold text-slate-600 mt-1")
+                        ui.label("Static TP / SL (% price)").classes("text-xs font-semibold text-slate-600 mt-1")
                         with ui.row().classes("w-full flex-wrap gap-4 items-start"):
                             _mr_tp_raw = _mr_cfg.get("tp_pct")
                             mr_tp_input = ui.number(
