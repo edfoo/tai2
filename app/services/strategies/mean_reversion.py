@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 from . import StrategyHelpers, StrategySignal, compute_bb_bandwidth_percentile
+from .defaults import merged_config
 
 
 class MeanReversionStrategy:
@@ -92,48 +93,52 @@ class MeanReversionStrategy:
         if not bool(config.get("enabled", False)):
             return None
 
-        rsi_oversold = helpers.extract_float(config.get("rsi_oversold"))
+        # Merge caller config over the canonical defaults so any missing key
+        # falls back to an acceptable, validated value.
+        cfg = merged_config(config, self.name)
+
+        rsi_oversold = helpers.extract_float(cfg.get("rsi_oversold"))
         if rsi_oversold is None:
             rsi_oversold = 30.0
-        rsi_overbought = helpers.extract_float(config.get("rsi_overbought"))
+        rsi_overbought = helpers.extract_float(cfg.get("rsi_overbought"))
         if rsi_overbought is None:
             rsi_overbought = 70.0
-        require_htf_trend = bool(config.get("require_htf_trend", True))
-        require_cmf = bool(config.get("require_cmf", True))
-        require_htf_cmf = bool(config.get("require_htf_cmf", False))
+        require_htf_trend = bool(cfg.get("require_htf_trend", True))
+        require_cmf = bool(cfg.get("require_cmf", True))
+        require_htf_cmf = bool(cfg.get("require_htf_cmf", False))
         # CMF cross is a rare event that cuts frequency ~90%.  BB position +
         # candle rejection already confirm extension+exhaustion, so the cross
         # is redundant.  Default off for frequency; enable for ultra-strict.
-        require_cmf_cross = bool(config.get("require_cmf_cross", False))
-        require_cmf_no_divergence = bool(config.get("require_cmf_no_divergence", False))
-        require_footprint_delta = bool(config.get("require_footprint_delta", False))
-        require_bb_position = bool(config.get("require_bb_position", True))
-        require_candle_rejection = bool(config.get("require_candle_rejection", True))
-        candle_rejection_pct = helpers.extract_float(config.get("candle_rejection_pct"))
+        require_cmf_cross = bool(cfg.get("require_cmf_cross", False))
+        require_cmf_no_divergence = bool(cfg.get("require_cmf_no_divergence", False))
+        require_footprint_delta = bool(cfg.get("require_footprint_delta", False))
+        require_bb_position = bool(cfg.get("require_bb_position", True))
+        require_candle_rejection = bool(cfg.get("require_candle_rejection", True))
+        candle_rejection_pct = helpers.extract_float(cfg.get("candle_rejection_pct"))
         if candle_rejection_pct is None:
             candle_rejection_pct = 30.0
         # VWAP reversion is redundant with BB position + candle rejection
         # (all three confirm "price extended and snapping back").  Default
         # off to avoid triple-gating the same signal.
-        require_vwap_reversion = bool(config.get("require_vwap_reversion", False))
-        vwap_min_distance_pct = helpers.extract_float(config.get("vwap_min_distance_pct"))
+        require_vwap_reversion = bool(cfg.get("require_vwap_reversion", False))
+        vwap_min_distance_pct = helpers.extract_float(cfg.get("vwap_min_distance_pct"))
         if vwap_min_distance_pct is None:
             vwap_min_distance_pct = 1.0
         # Volume cooling is redundant with candle rejection (both confirm
         # spike is fading).  Default off; enable for ultra-strict.
-        require_volume_cooling = bool(config.get("require_volume_cooling", False))
-        volume_rsi_max = helpers.extract_float(config.get("volume_rsi_max"))
+        require_volume_cooling = bool(cfg.get("require_volume_cooling", False))
+        volume_rsi_max = helpers.extract_float(cfg.get("volume_rsi_max"))
         if volume_rsi_max is None:
             volume_rsi_max = 80.0
         # ── Regime gate (BB bandwidth percentile) ──────────────────────
         # MR works best in low-volatility chop.  When require_regime is True,
         # the current BB bandwidth must be below max_bb_bandwidth_percentile
         # relative to the last N candles (e.g. < 55th percentile = chop).
-        require_regime = bool(config.get("require_regime", True))
-        max_bb_bandwidth_percentile = helpers.extract_float(config.get("max_bb_bandwidth_percentile"))
+        require_regime = bool(cfg.get("require_regime", True))
+        max_bb_bandwidth_percentile = helpers.extract_float(cfg.get("max_bb_bandwidth_percentile"))
         if max_bb_bandwidth_percentile is None:
             max_bb_bandwidth_percentile = 55.0
-        regime_lookback = helpers.extract_float(config.get("regime_lookback"))
+        regime_lookback = helpers.extract_float(cfg.get("regime_lookback"))
         if regime_lookback is None:
             regime_lookback = 50
         # ── ATR-scaled TP/SL ────────────────────────────────────────────
@@ -141,48 +146,48 @@ class MeanReversionStrategy:
         # multiplier × ATR% instead of fixed percentages.  This adapts to
         # the volatility regime.  Recommended: wider SL (survive noise)
         # and modest TP (bank the snapback).
-        use_structural_sizing = bool(config.get("use_structural_sizing", True))
-        structural_sl_buffer_atr = helpers.extract_float(config.get("structural_sl_buffer_atr"))
+        use_structural_sizing = bool(cfg.get("use_structural_sizing", True))
+        structural_sl_buffer_atr = helpers.extract_float(cfg.get("structural_sl_buffer_atr"))
         if structural_sl_buffer_atr is None:
             structural_sl_buffer_atr = 0.15
-        atr_min_tp_mult = helpers.extract_float(config.get("atr_min_tp_mult"))
+        atr_min_tp_mult = helpers.extract_float(cfg.get("atr_min_tp_mult"))
         if atr_min_tp_mult is None:
             atr_min_tp_mult = 0.5
-        atr_max_tp_mult = helpers.extract_float(config.get("atr_max_tp_mult"))
+        atr_max_tp_mult = helpers.extract_float(cfg.get("atr_max_tp_mult"))
         if atr_max_tp_mult is None:
             atr_max_tp_mult = 4.0
-        atr_min_sl_mult = helpers.extract_float(config.get("atr_min_sl_mult"))
+        atr_min_sl_mult = helpers.extract_float(cfg.get("atr_min_sl_mult"))
         if atr_min_sl_mult is None:
             atr_min_sl_mult = 0.3
-        atr_max_sl_mult = helpers.extract_float(config.get("atr_max_sl_mult"))
+        atr_max_sl_mult = helpers.extract_float(cfg.get("atr_max_sl_mult"))
         if atr_max_sl_mult is None:
             atr_max_sl_mult = 3.0
-        use_atr_sizing = bool(config.get("use_atr_sizing", True))
-        atr_tp_multiplier = helpers.extract_float(config.get("atr_tp_multiplier"))
+        use_atr_sizing = bool(cfg.get("use_atr_sizing", True))
+        atr_tp_multiplier = helpers.extract_float(cfg.get("atr_tp_multiplier"))
         if atr_tp_multiplier is None:
             atr_tp_multiplier = 2.0
-        atr_sl_multiplier = helpers.extract_float(config.get("atr_sl_multiplier"))
+        atr_sl_multiplier = helpers.extract_float(cfg.get("atr_sl_multiplier"))
         if atr_sl_multiplier is None:
             atr_sl_multiplier = 1.5
         # ── Minimum ATR% filter ───────────────────────────────────────
         # Skip entries on coins with ATR% below this threshold — too quiet
         # for a meaningful reversion.  0 = disabled.
-        min_atr_pct = helpers.extract_float(config.get("min_atr_pct"))
+        min_atr_pct = helpers.extract_float(cfg.get("min_atr_pct"))
         if min_atr_pct is None:
             min_atr_pct = 1.0
-        bb_proximity_pct = helpers.extract_float(config.get("bb_proximity_pct"))
+        bb_proximity_pct = helpers.extract_float(cfg.get("bb_proximity_pct"))
         if bb_proximity_pct is None:
             bb_proximity_pct = 0.5
-        min_bb_bandwidth = helpers.extract_float(config.get("min_bb_bandwidth"))
+        min_bb_bandwidth = helpers.extract_float(cfg.get("min_bb_bandwidth"))
         if min_bb_bandwidth is None:
             min_bb_bandwidth = 2.0
-        max_bb_bandwidth = helpers.extract_float(config.get("max_bb_bandwidth"))
+        max_bb_bandwidth = helpers.extract_float(cfg.get("max_bb_bandwidth"))
         if max_bb_bandwidth is None:
             max_bb_bandwidth = 0.0
-        min_adx = helpers.extract_float(config.get("min_adx"))
+        min_adx = helpers.extract_float(cfg.get("min_adx"))
         if min_adx is None:
             min_adx = 0.0
-        max_adx = helpers.extract_float(config.get("max_adx"))
+        max_adx = helpers.extract_float(cfg.get("max_adx"))
         if max_adx is None:
             max_adx = 28.0
 

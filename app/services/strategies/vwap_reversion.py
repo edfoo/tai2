@@ -20,6 +20,7 @@ from __future__ import annotations
 from typing import Any
 
 from . import StrategyHelpers, StrategySignal, compute_bb_bandwidth_percentile
+from .defaults import merged_config
 
 
 class VWAPReversionStrategy:
@@ -94,50 +95,54 @@ class VWAPReversionStrategy:
         if not bool(config.get("enabled", False)):
             return None
 
+        # Merge caller config over the canonical defaults so any missing key
+        # falls back to an acceptable, validated value.
+        cfg = merged_config(config, self.name)
+
         # ── Config ────────────────────────────────────────────────────
-        vwap_min_distance_atr = helpers.extract_float(config.get("vwap_min_distance_atr"))
+        vwap_min_distance_atr = helpers.extract_float(cfg.get("vwap_min_distance_atr"))
         if vwap_min_distance_atr is None:
             vwap_min_distance_atr = 2.0
-        vwap_max_distance_atr = helpers.extract_float(config.get("vwap_max_distance_atr"))
+        vwap_max_distance_atr = helpers.extract_float(cfg.get("vwap_max_distance_atr"))
         if vwap_max_distance_atr is None:
             vwap_max_distance_atr = 3.0
-        max_adx = helpers.extract_float(config.get("max_adx"))
+        max_adx = helpers.extract_float(cfg.get("max_adx"))
         if max_adx is None:
             max_adx = 25.0
-        require_closeback = bool(config.get("require_closeback", True))
-        require_htf_trend = bool(config.get("require_htf_trend", True))
-        require_regime = bool(config.get("require_regime", True))
+        require_closeback = bool(cfg.get("require_closeback", True))
+        require_htf_trend = bool(cfg.get("require_htf_trend", True))
+        require_regime = bool(cfg.get("require_regime", True))
         max_bb_bandwidth_percentile = helpers.extract_float(
-            config.get("max_bb_bandwidth_percentile")
+            cfg.get("max_bb_bandwidth_percentile")
         )
         if max_bb_bandwidth_percentile is None:
             max_bb_bandwidth_percentile = 55.0
-        _regime_lookback = helpers.extract_float(config.get("regime_lookback"))
+        _regime_lookback = helpers.extract_float(cfg.get("regime_lookback"))
         regime_lookback = int(_regime_lookback) if _regime_lookback is not None else 50
-        use_structural_sizing = bool(config.get("use_structural_sizing", True))
-        structural_sl_buffer_atr = helpers.extract_float(config.get("structural_sl_buffer_atr"))
+        use_structural_sizing = bool(cfg.get("use_structural_sizing", True))
+        structural_sl_buffer_atr = helpers.extract_float(cfg.get("structural_sl_buffer_atr"))
         if structural_sl_buffer_atr is None:
             structural_sl_buffer_atr = 0.15
-        atr_min_tp_mult = helpers.extract_float(config.get("atr_min_tp_mult"))
+        atr_min_tp_mult = helpers.extract_float(cfg.get("atr_min_tp_mult"))
         if atr_min_tp_mult is None:
             atr_min_tp_mult = 0.5
-        atr_max_tp_mult = helpers.extract_float(config.get("atr_max_tp_mult"))
+        atr_max_tp_mult = helpers.extract_float(cfg.get("atr_max_tp_mult"))
         if atr_max_tp_mult is None:
             atr_max_tp_mult = 4.0
-        atr_min_sl_mult = helpers.extract_float(config.get("atr_min_sl_mult"))
+        atr_min_sl_mult = helpers.extract_float(cfg.get("atr_min_sl_mult"))
         if atr_min_sl_mult is None:
             atr_min_sl_mult = 0.3
-        atr_max_sl_mult = helpers.extract_float(config.get("atr_max_sl_mult"))
+        atr_max_sl_mult = helpers.extract_float(cfg.get("atr_max_sl_mult"))
         if atr_max_sl_mult is None:
             atr_max_sl_mult = 3.0
-        use_atr_sizing = bool(config.get("use_atr_sizing", True))
-        atr_tp_multiplier = helpers.extract_float(config.get("atr_tp_multiplier"))
+        use_atr_sizing = bool(cfg.get("use_atr_sizing", True))
+        atr_tp_multiplier = helpers.extract_float(cfg.get("atr_tp_multiplier"))
         if atr_tp_multiplier is None:
             atr_tp_multiplier = 1.8
-        atr_sl_multiplier = helpers.extract_float(config.get("atr_sl_multiplier"))
+        atr_sl_multiplier = helpers.extract_float(cfg.get("atr_sl_multiplier"))
         if atr_sl_multiplier is None:
             atr_sl_multiplier = 1.0
-        min_atr_pct = helpers.extract_float(config.get("min_atr_pct"))
+        min_atr_pct = helpers.extract_float(cfg.get("min_atr_pct"))
         if min_atr_pct is None:
             min_atr_pct = 1.0
 
@@ -149,7 +154,7 @@ class VWAPReversionStrategy:
         vwap_value = helpers.extract_float(indicators.get("vwap"))
         last_price = helpers.get_last_price(symbol)
         atr_pct = helpers.extract_float(indicators.get("atr_pct"))
-        if atr_pct is not None and config.get("use_adaptive_atr", False):
+        if atr_pct is not None and cfg.get("use_adaptive_atr", False):
             if atr_pct < 1.5:
                 atr_pct *= 1.20
             elif atr_pct < 3.0:

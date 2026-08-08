@@ -24,6 +24,7 @@ from __future__ import annotations
 from typing import Any
 
 from . import StrategyHelpers, StrategySignal, compute_bb_bandwidth_percentile
+from .defaults import merged_config
 
 
 class LiquiditySweepStrategy:
@@ -101,57 +102,61 @@ class LiquiditySweepStrategy:
         if not bool(config.get("enabled", False)):
             return None
 
+        # Merge caller config over the canonical defaults so any missing key
+        # falls back to an acceptable, validated value.
+        cfg = merged_config(config, self.name)
+
         # ── Config ────────────────────────────────────────────────────
-        _lookback = helpers.extract_float(config.get("lookback"))
+        _lookback = helpers.extract_float(cfg.get("lookback"))
         lookback = int(_lookback) if _lookback is not None else 20
-        sweep_buffer_pct = helpers.extract_float(config.get("sweep_buffer_pct"))
+        sweep_buffer_pct = helpers.extract_float(cfg.get("sweep_buffer_pct"))
         if sweep_buffer_pct is None:
             sweep_buffer_pct = 0.1
-        reclaim_ratio = helpers.extract_float(config.get("reclaim_ratio"))
+        reclaim_ratio = helpers.extract_float(cfg.get("reclaim_ratio"))
         if reclaim_ratio is None:
             reclaim_ratio = 0.5
-        require_htf_trend = bool(config.get("require_htf_trend", True))
-        require_volume_spike = bool(config.get("require_volume_spike", True))
-        volume_spike_ratio = helpers.extract_float(config.get("volume_spike_ratio"))
+        require_htf_trend = bool(cfg.get("require_htf_trend", True))
+        require_volume_spike = bool(cfg.get("require_volume_spike", True))
+        volume_spike_ratio = helpers.extract_float(cfg.get("volume_spike_ratio"))
         if volume_spike_ratio is None:
             volume_spike_ratio = 1.5
-        _vol_lookback = helpers.extract_float(config.get("volume_lookback"))
+        _vol_lookback = helpers.extract_float(cfg.get("volume_lookback"))
         volume_lookback = int(_vol_lookback) if _vol_lookback is not None else 10
-        max_adx = helpers.extract_float(config.get("max_adx"))
+        max_adx = helpers.extract_float(cfg.get("max_adx"))
         if max_adx is None:
             max_adx = 28.0
-        require_regime = bool(config.get("require_regime", True))
+        require_regime = bool(cfg.get("require_regime", True))
         max_bb_bandwidth_percentile = helpers.extract_float(
-            config.get("max_bb_bandwidth_percentile")
+            cfg.get("max_bb_bandwidth_percentile")
         )
         if max_bb_bandwidth_percentile is None:
             max_bb_bandwidth_percentile = 60.0
-        _regime_lookback = helpers.extract_float(config.get("regime_lookback"))
+        _regime_lookback = helpers.extract_float(cfg.get("regime_lookback"))
         regime_lookback = int(_regime_lookback) if _regime_lookback is not None else 50
-        use_structural_sizing = bool(config.get("use_structural_sizing", True))
-        structural_sl_buffer_atr = helpers.extract_float(config.get("structural_sl_buffer_atr"))
+        use_structural_sizing = bool(cfg.get("use_structural_sizing", True))
+        structural_sl_buffer_atr = helpers.extract_float(cfg.get("structural_sl_buffer_atr"))
         if structural_sl_buffer_atr is None:
             structural_sl_buffer_atr = 0.15
-        atr_min_tp_mult = helpers.extract_float(config.get("atr_min_tp_mult"))
+        atr_min_tp_mult = helpers.extract_float(cfg.get("atr_min_tp_mult"))
         if atr_min_tp_mult is None:
             atr_min_tp_mult = 0.5
-        atr_max_tp_mult = helpers.extract_float(config.get("atr_max_tp_mult"))
+        atr_max_tp_mult = helpers.extract_float(cfg.get("atr_max_tp_mult"))
         if atr_max_tp_mult is None:
             atr_max_tp_mult = 4.0
-        atr_min_sl_mult = helpers.extract_float(config.get("atr_min_sl_mult"))
+        atr_min_sl_mult = helpers.extract_float(cfg.get("atr_min_sl_mult"))
         if atr_min_sl_mult is None:
             atr_min_sl_mult = 0.3
-        atr_max_sl_mult = helpers.extract_float(config.get("atr_max_sl_mult"))
+        atr_max_sl_mult = helpers.extract_float(cfg.get("atr_max_sl_mult"))
         if atr_max_sl_mult is None:
             atr_max_sl_mult = 3.0
-        use_atr_sizing = bool(config.get("use_atr_sizing", True))
-        atr_tp_multiplier = helpers.extract_float(config.get("atr_tp_multiplier"))
+        use_atr_sizing = bool(cfg.get("use_atr_sizing", True))
+        atr_tp_multiplier = helpers.extract_float(cfg.get("atr_tp_multiplier"))
         if atr_tp_multiplier is None:
             atr_tp_multiplier = 1.5
-        atr_sl_multiplier = helpers.extract_float(config.get("atr_sl_multiplier"))
+        atr_sl_multiplier = helpers.extract_float(cfg.get("atr_sl_multiplier"))
         if atr_sl_multiplier is None:
             atr_sl_multiplier = 1.2
-        min_atr_pct = helpers.extract_float(config.get("min_atr_pct"))
+        min_atr_pct = helpers.extract_float(cfg.get("min_atr_pct"))
         if min_atr_pct is None:
             min_atr_pct = 0.8
 

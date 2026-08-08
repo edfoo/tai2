@@ -16,6 +16,7 @@ from __future__ import annotations
 from typing import Any
 
 from . import StrategyHelpers, StrategySignal, compute_bb_bandwidth_percentile
+from .defaults import merged_config
 
 
 class SpikeContinuationStrategy:
@@ -85,28 +86,32 @@ class SpikeContinuationStrategy:
         if not bool(config.get("enabled", False)):
             return None
 
-        volume_rsi_min = helpers.extract_float(config.get("volume_rsi_min"))
+        # Merge caller config over the canonical defaults so any missing key
+        # falls back to an acceptable, validated value.
+        cfg = merged_config(config, self.name)
+
+        volume_rsi_min = helpers.extract_float(cfg.get("volume_rsi_min"))
         if volume_rsi_min is None:
             volume_rsi_min = 72.0
-        rsi_min = helpers.extract_float(config.get("rsi_min"))
+        rsi_min = helpers.extract_float(cfg.get("rsi_min"))
         if rsi_min is None:
             rsi_min = 55.0
-        rsi_max = helpers.extract_float(config.get("rsi_max"))
+        rsi_max = helpers.extract_float(cfg.get("rsi_max"))
         if rsi_max is None:
             rsi_max = 72.0
-        require_bb_breakout = bool(config.get("require_bb_breakout", True))
-        require_candle_strength = bool(config.get("require_candle_strength", True))
-        candle_strength_pct = helpers.extract_float(config.get("candle_strength_pct"))
+        require_bb_breakout = bool(cfg.get("require_bb_breakout", True))
+        require_candle_strength = bool(cfg.get("require_candle_strength", True))
+        candle_strength_pct = helpers.extract_float(cfg.get("candle_strength_pct"))
         if candle_strength_pct is None:
             candle_strength_pct = 70.0
-        min_bb_bandwidth = helpers.extract_float(config.get("min_bb_bandwidth"))
+        min_bb_bandwidth = helpers.extract_float(cfg.get("min_bb_bandwidth"))
         if min_bb_bandwidth is None:
             min_bb_bandwidth = 3.0
-        max_adx = helpers.extract_float(config.get("max_adx"))
+        max_adx = helpers.extract_float(cfg.get("max_adx"))
         if max_adx is None:
             max_adx = 0.0
         # Late-entry killer: ADX already this high means the move is mature.
-        max_adx_for_entry = helpers.extract_float(config.get("max_adx_for_entry"))
+        max_adx_for_entry = helpers.extract_float(cfg.get("max_adx_for_entry"))
         if max_adx_for_entry is None:
             max_adx_for_entry = 32.0
         # ── Regime gate (BB bandwidth percentile) ──────────────────────
@@ -114,44 +119,44 @@ class SpikeContinuationStrategy:
         # is True, the current BB bandwidth must be above
         # min_bb_bandwidth_percentile relative to the last N candles
         # (e.g. > 60th percentile = volatility expansion).
-        require_regime = bool(config.get("require_regime", True))
-        min_bb_bandwidth_percentile = helpers.extract_float(config.get("min_bb_bandwidth_percentile"))
+        require_regime = bool(cfg.get("require_regime", True))
+        min_bb_bandwidth_percentile = helpers.extract_float(cfg.get("min_bb_bandwidth_percentile"))
         if min_bb_bandwidth_percentile is None:
             min_bb_bandwidth_percentile = 55.0
-        regime_lookback = helpers.extract_float(config.get("regime_lookback"))
+        regime_lookback = helpers.extract_float(cfg.get("regime_lookback"))
         if regime_lookback is None:
             regime_lookback = 50
         # ── ATR-scaled TP/SL ────────────────────────────────────────────
         # When use_atr_sizing is True, TP/SL are computed as
         # multiplier × ATR% instead of fixed percentages.
         # SC uses wider SL (~2.0 ATR) to avoid being stopped by noise.
-        use_atr_sizing = bool(config.get("use_atr_sizing", True))
-        atr_tp_multiplier = helpers.extract_float(config.get("atr_tp_multiplier"))
+        use_atr_sizing = bool(cfg.get("use_atr_sizing", True))
+        atr_tp_multiplier = helpers.extract_float(cfg.get("atr_tp_multiplier"))
         if atr_tp_multiplier is None:
             atr_tp_multiplier = 2.2
-        atr_sl_multiplier = helpers.extract_float(config.get("atr_sl_multiplier"))
+        atr_sl_multiplier = helpers.extract_float(cfg.get("atr_sl_multiplier"))
         if atr_sl_multiplier is None:
             atr_sl_multiplier = 2.0
         # ── Minimum ATR% filter ───────────────────────────────────────
         # Skip entries on coins with ATR% below this threshold — too quiet
         # for a real spike.  0 = disabled.
-        min_atr_pct = helpers.extract_float(config.get("min_atr_pct"))
+        min_atr_pct = helpers.extract_float(cfg.get("min_atr_pct"))
         if min_atr_pct is None:
             min_atr_pct = 1.0
 
         # Momentum acceleration filters
-        require_momentum_acceleration = bool(config.get("require_momentum_acceleration", True))
-        _acceleration_lookback = helpers.extract_float(config.get("acceleration_lookback"))
+        require_momentum_acceleration = bool(cfg.get("require_momentum_acceleration", True))
+        _acceleration_lookback = helpers.extract_float(cfg.get("acceleration_lookback"))
         acceleration_lookback = int(_acceleration_lookback) if _acceleration_lookback is not None else 3
-        acceleration_min_ratio = helpers.extract_float(config.get("acceleration_min_ratio"))
+        acceleration_min_ratio = helpers.extract_float(cfg.get("acceleration_min_ratio"))
         if acceleration_min_ratio is None:
             acceleration_min_ratio = 1.3
-        require_rsi_rising = bool(config.get("require_rsi_rising", True))
-        require_volume_rsi_rising = bool(config.get("require_volume_rsi_rising", True))
-        max_spike_extension_pct = helpers.extract_float(config.get("max_spike_extension_pct"))
+        require_rsi_rising = bool(cfg.get("require_rsi_rising", True))
+        require_volume_rsi_rising = bool(cfg.get("require_volume_rsi_rising", True))
+        max_spike_extension_pct = helpers.extract_float(cfg.get("max_spike_extension_pct"))
         if max_spike_extension_pct is None:
             max_spike_extension_pct = 3.5
-        _spike_lookback = helpers.extract_float(config.get("spike_lookback"))
+        _spike_lookback = helpers.extract_float(cfg.get("spike_lookback"))
         spike_lookback = int(_spike_lookback) if _spike_lookback is not None else 5
 
         market_data: dict[str, Any] = snapshot.get("market_data") or {}

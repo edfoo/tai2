@@ -20,6 +20,7 @@ from __future__ import annotations
 from typing import Any
 
 from . import StrategyHelpers, StrategySignal
+from .defaults import merged_config
 
 
 class TrendPullbackStrategy:
@@ -91,48 +92,52 @@ class TrendPullbackStrategy:
         if not bool(config.get("enabled", False)):
             return None
 
+        # Merge caller config over the canonical defaults so any missing key
+        # falls back to an acceptable, validated value.
+        cfg = merged_config(config, self.name)
+
         # ── Config ────────────────────────────────────────────────────
-        _pullback_ema = helpers.extract_float(config.get("pullback_ema"))
+        _pullback_ema = helpers.extract_float(cfg.get("pullback_ema"))
         pullback_ema_len = int(_pullback_ema) if _pullback_ema is not None else 21
-        use_vwap_as_level = bool(config.get("use_vwap_as_level", True))
-        pullback_proximity_pct = helpers.extract_float(config.get("pullback_proximity_pct"))
+        use_vwap_as_level = bool(cfg.get("use_vwap_as_level", True))
+        pullback_proximity_pct = helpers.extract_float(cfg.get("pullback_proximity_pct"))
         if pullback_proximity_pct is None:
             pullback_proximity_pct = 0.3
-        require_htf_trend = bool(config.get("require_htf_trend", True))
-        require_bullish_candle = bool(config.get("require_bullish_candle", True))
-        candle_rejection_pct = helpers.extract_float(config.get("candle_rejection_pct"))
+        require_htf_trend = bool(cfg.get("require_htf_trend", True))
+        require_bullish_candle = bool(cfg.get("require_bullish_candle", True))
+        candle_rejection_pct = helpers.extract_float(cfg.get("candle_rejection_pct"))
         if candle_rejection_pct is None:
             candle_rejection_pct = 25.0
-        max_adx_for_entry = helpers.extract_float(config.get("max_adx_for_entry"))
+        max_adx_for_entry = helpers.extract_float(cfg.get("max_adx_for_entry"))
         if max_adx_for_entry is None:
             max_adx_for_entry = 28.0
-        min_adx = helpers.extract_float(config.get("min_adx"))
+        min_adx = helpers.extract_float(cfg.get("min_adx"))
         if min_adx is None:
             min_adx = 20.0
-        use_structural_sizing = bool(config.get("use_structural_sizing", True))
-        structural_sl_buffer_atr = helpers.extract_float(config.get("structural_sl_buffer_atr"))
+        use_structural_sizing = bool(cfg.get("use_structural_sizing", True))
+        structural_sl_buffer_atr = helpers.extract_float(cfg.get("structural_sl_buffer_atr"))
         if structural_sl_buffer_atr is None:
             structural_sl_buffer_atr = 0.15
-        atr_min_tp_mult = helpers.extract_float(config.get("atr_min_tp_mult"))
+        atr_min_tp_mult = helpers.extract_float(cfg.get("atr_min_tp_mult"))
         if atr_min_tp_mult is None:
             atr_min_tp_mult = 0.5
-        atr_max_tp_mult = helpers.extract_float(config.get("atr_max_tp_mult"))
+        atr_max_tp_mult = helpers.extract_float(cfg.get("atr_max_tp_mult"))
         if atr_max_tp_mult is None:
             atr_max_tp_mult = 4.0
-        atr_min_sl_mult = helpers.extract_float(config.get("atr_min_sl_mult"))
+        atr_min_sl_mult = helpers.extract_float(cfg.get("atr_min_sl_mult"))
         if atr_min_sl_mult is None:
             atr_min_sl_mult = 0.3
-        atr_max_sl_mult = helpers.extract_float(config.get("atr_max_sl_mult"))
+        atr_max_sl_mult = helpers.extract_float(cfg.get("atr_max_sl_mult"))
         if atr_max_sl_mult is None:
             atr_max_sl_mult = 3.0
-        use_atr_sizing = bool(config.get("use_atr_sizing", True))
-        atr_tp_multiplier = helpers.extract_float(config.get("atr_tp_multiplier"))
+        use_atr_sizing = bool(cfg.get("use_atr_sizing", True))
+        atr_tp_multiplier = helpers.extract_float(cfg.get("atr_tp_multiplier"))
         if atr_tp_multiplier is None:
             atr_tp_multiplier = 2.0
-        atr_sl_multiplier = helpers.extract_float(config.get("atr_sl_multiplier"))
+        atr_sl_multiplier = helpers.extract_float(cfg.get("atr_sl_multiplier"))
         if atr_sl_multiplier is None:
             atr_sl_multiplier = 1.5
-        min_atr_pct = helpers.extract_float(config.get("min_atr_pct"))
+        min_atr_pct = helpers.extract_float(cfg.get("min_atr_pct"))
         if min_atr_pct is None:
             min_atr_pct = 1.0
 
@@ -143,7 +148,7 @@ class TrendPullbackStrategy:
 
         last_price = helpers.get_last_price(symbol)
         atr_pct = helpers.extract_float(indicators.get("atr_pct"))
-        if atr_pct is not None and config.get("use_adaptive_atr", False):
+        if atr_pct is not None and cfg.get("use_adaptive_atr", False):
             if atr_pct < 1.5:
                 atr_pct *= 1.20
             elif atr_pct < 3.0:
