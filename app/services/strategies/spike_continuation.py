@@ -17,6 +17,7 @@ from typing import Any
 
 from . import StrategyHelpers, StrategySignal, compute_bb_bandwidth_percentile
 from .defaults import merged_config
+from .liquidity_helpers import oi_confirms_momentum
 
 
 class SpikeContinuationStrategy:
@@ -173,6 +174,14 @@ class SpikeContinuationStrategy:
             max_spike_extension_pct = 3.5
         _spike_lookback = helpers.extract_float(cfg.get("spike_lookback"))
         spike_lookback = int(_spike_lookback) if _spike_lookback is not None else 5
+        # ── Liquidity-aware gates (§3) ────────────────────────────────
+        # ``require_oi_confirmation`` (default off): momentum entries need
+        # fresh leverage — rising open interest (oi_zscore > 1 in direction).
+        # Degrades to pass when OI data is unavailable.
+        require_oi_confirmation = bool(cfg.get("require_oi_confirmation", False))
+        oi_min_zscore = helpers.extract_float(cfg.get("oi_min_zscore"))
+        if oi_min_zscore is None:
+            oi_min_zscore = 1.0
 
         market_data: dict[str, Any] = snapshot.get("market_data") or {}
         sym_data = market_data.get(symbol) or {}
@@ -310,6 +319,20 @@ class SpikeContinuationStrategy:
             or (bb_last_price is not None and bb_lower is not None and bb_last_price <= bb_lower)
         )
 
+        # ── Open-interest momentum confirmation (§3) ──────────────────
+        # Momentum entries need fresh leverage: OI should be rising (buy) or
+        # falling (short) beyond the z-score threshold.  Granting when data is
+        # absent (oi_ok True) keeps the gate from blocking on no-OI symbols.
+        oi_ok = True
+        oi_info: dict = {}
+        if require_oi_confirmation:
+            open_interest = sym_data.get("open_interest") or {}
+            oi_ok, oi_info = oi_confirms_momentum(
+                open_interest,
+                direction="long",
+                min_zscore=oi_min_zscore,
+            )
+
         # Early exits with debug
         if rsi is None:
             helpers.emit_debug(f"SpikeContinuation: {symbol} — no signal (RSI unavailable)")
@@ -418,6 +441,7 @@ class SpikeContinuationStrategy:
             and spike_extension_ok_buy
             and regime_ok
             and atr_ok
+            and (not require_oi_confirmation or oi_ok)
         )
         # Sell signal: mirror
         sell_signal = (
@@ -430,6 +454,7 @@ class SpikeContinuationStrategy:
             and spike_extension_ok_sell
             and regime_ok
             and atr_ok
+            and (not require_oi_confirmation or oi_ok)
         )
 
         # ── Unified TP/SL via trade_management ─────────────────────────
@@ -495,5 +520,15 @@ class SpikeContinuationStrategy:
             parts.append(f"ADX={adx:.1f}" if adx is not None else "ADX=n/a")
             if max_adx_for_entry > 0:
                 parts.append(f"max_adx_entry={max_adx_for_entry:.0f}")
+        if require_oi_confirmation:
+            if oi_info.get("available"):
+                _oi = oi_info.get("zscore")
+                parts.append(
+                    f"oi_z={_oi:.2f} (ok={'true' if oi_ok else 'blocked'})"
+                    if _oi is not None
+                    else f"oi_delta_ok={'true' if oi_ok else 'blocked'}"
+                )
+            else:
+                parts.append("oi=skipped(no data)")
         helpers.emit_debug(f"SpikeContinuation: {symbol} — no signal ({', '.join(parts)})")
         return None

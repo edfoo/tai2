@@ -10,6 +10,7 @@ from typing import Any
 
 from . import StrategyHelpers, StrategySignal, compute_bb_bandwidth_percentile
 from .defaults import merged_config
+from .liquidity_helpers import funding_is_blocked, order_book_imbalance
 
 
 class MeanReversionStrategy:
@@ -190,10 +191,60 @@ class MeanReversionStrategy:
         max_adx = helpers.extract_float(cfg.get("max_adx"))
         if max_adx is None:
             max_adx = 28.0
+        # ── Liquidity-aware gates (§3) ────────────────────────────────
+        # All disabled by default so existing live behaviour is unchanged until
+        # individually tuned.  ``require_price_in_va``: only enter when price is
+        # inside the 70 % value area (mean reversion wants price fading toward
+        # the mean, not trending out of value).  ``require_no_extreme_funding``:
+        # block extreme crowdfunding in the trade direction.  ``require_balanced_book``:
+        # block when order-book imbalance is extreme (no liquidity to fade into).
+        require_price_in_va = bool(cfg.get("require_price_in_va", False))
+        require_no_extreme_funding = bool(cfg.get("require_no_extreme_funding", False))
+        funding_max_abs_rate = helpers.extract_float(cfg.get("funding_max_abs_rate"))
+        if funding_max_abs_rate is None:
+            funding_max_abs_rate = 0.001
+        require_balanced_book = bool(cfg.get("require_balanced_book", False))
+        imbalance_min = helpers.extract_float(cfg.get("imbalance_min"))
+        imbalance_max = helpers.extract_float(cfg.get("imbalance_max"))
+        if imbalance_min is None:
+            imbalance_min = 0.6
+        if imbalance_max is None:
+            imbalance_max = 1.4
 
         market_data: dict[str, Any] = snapshot.get("market_data") or {}
         sym_data = market_data.get(symbol) or {}
         indicators = sym_data.get("indicators") or {}
+
+        # ── Liquidity-aware data extraction (§3) ──────────────────────
+        # Read the same per-symbol fields the broader launcher uses so the
+        # gates work in both live and backtest snapshots.  All gates are
+        # opt-in (default off) and degrade to "pass" when data is absent.
+        last_price = helpers.get_last_price(symbol)
+
+        def _in_value_area() -> bool:
+            va_high = helpers.extract_float(indicators.get("value_area_high"))
+            va_low = helpers.extract_float(indicators.get("value_area_low"))
+            if va_high is None or va_low is None or last_price is None:
+                return True  # no VA data → neutral (don't block)
+            return va_low <= last_price <= va_high
+
+        va_ok = _in_value_area()
+
+        funding = sym_data.get("funding_rate") or {}
+        funding_blocked_long, _f_info = funding_is_blocked(
+            funding, direction="long", max_abs_rate=funding_max_abs_rate
+        )
+        funding_blocked_short, _ = funding_is_blocked(
+            funding, direction="short", max_abs_rate=funding_max_abs_rate
+        )
+
+        order_book = sym_data.get("order_book") or {}
+        imbalance = order_book_imbalance(order_book)
+        imbalance_ok = (
+            not require_balanced_book
+            or imbalance is None
+            or (imbalance_min <= imbalance <= imbalance_max)
+        )
 
         # ---- Higher-timeframe trend filter ----------------------------------
         from app.services.indicator_service import is_trending  # local import to avoid circulars
@@ -426,6 +477,9 @@ class MeanReversionStrategy:
             and volume_cooling_ok
             and regime_ok
             and atr_ok
+            and (not require_price_in_va or va_ok)
+            and (not require_no_extreme_funding or not funding_blocked_long)
+            and imbalance_ok
         )
         sell_signal = (
             rsi > rsi_overbought
@@ -441,6 +495,9 @@ class MeanReversionStrategy:
             and volume_cooling_ok
             and regime_ok
             and atr_ok
+            and (not require_price_in_va or va_ok)
+            and (not require_no_extreme_funding or not funding_blocked_short)
+            and imbalance_ok
         )
         # ── Compute effective TP/SL ────────────────────────────────────
         # Structural mode: TP at BB middle band (the mean), SL beyond entry candle wick.
@@ -653,5 +710,21 @@ class MeanReversionStrategy:
                 parts.append("VWAP=n/a")
         if require_volume_cooling:
             parts.append(f"vol_rsi={volume_rsi_value:.1f}" if volume_rsi_value is not None else "vol_rsi=n/a")
+        if require_price_in_va:
+            if helpers.extract_float(indicators.get("value_area_high")) is not None:
+                parts.append(
+                    f"in_va={'ok' if va_ok else 'blocked'}"
+                    f"(va_low={helpers.extract_float(indicators.get('value_area_low'))}, "
+                    f"va_high={helpers.extract_float(indicators.get('value_area_high'))})"
+                )
+            else:
+                parts.append("in_va=n/a")
+        if require_no_extreme_funding:
+            if _f_info.get("available"):
+                parts.append(f"funding={_f_info['rate']:.5g} (blocked={'yes' if (funding_blocked_long or funding_blocked_short) else 'no'})")
+            else:
+                parts.append("funding=n/a")
+        if require_balanced_book:
+            parts.append(f"imbalance={imbalance:.3f}" if imbalance is not None else "imbalance=n/a")
         helpers.emit_debug(f"MeanReversion: {symbol} — no entry signal ({', '.join(parts)})")
         return None

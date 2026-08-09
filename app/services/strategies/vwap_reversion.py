@@ -21,6 +21,7 @@ from typing import Any
 
 from . import StrategyHelpers, StrategySignal, compute_bb_bandwidth_percentile
 from .defaults import merged_config
+from .liquidity_helpers import funding_is_blocked
 
 
 class VWAPReversionStrategy:
@@ -158,6 +159,15 @@ class VWAPReversionStrategy:
         min_atr_pct = helpers.extract_float(cfg.get("min_atr_pct"))
         if min_atr_pct is None:
             min_atr_pct = 1.0
+        # ── Liquidity-aware gates (§3) ────────────────────────────────
+        # ``require_no_funding_bias`` (default off): block reversion against a
+        # strong funding-rate crowding in the trade direction.  Mirrors the
+        # guide's |funding_z| < 0.7 bias filter using an absolute rate so it
+        # works from a single snapshot (no 30-day history required).
+        require_no_funding_bias = bool(cfg.get("require_no_funding_bias", False))
+        funding_max_abs_rate = helpers.extract_float(cfg.get("funding_max_abs_rate"))
+        if funding_max_abs_rate is None:
+            funding_max_abs_rate = 0.0007  # ≈ 0.07 % — mirrors |funding_z| < 0.7
 
         # ── Snapshot data ─────────────────────────────────────────────
         market_data: dict[str, Any] = snapshot.get("market_data") or {}
@@ -297,6 +307,18 @@ class VWAPReversionStrategy:
             )
             return None
 
+        # ── Funding bias gate (§3) ────────────────────────────────────
+        # Block reversion against heavy funding crowding in the trade
+        # direction (e.g. don't buy the dip when longs are already extremely
+        # crowded).  Neutral (no funding data) passes.
+        funding = sym_data.get("funding_rate") or {}
+        funding_blocked_long, f_info = funding_is_blocked(
+            funding, direction="long", max_abs_rate=funding_max_abs_rate
+        )
+        funding_blocked_short, _ = funding_is_blocked(
+            funding, direction="short", max_abs_rate=funding_max_abs_rate
+        )
+
         # ── Direction decision ────────────────────────────────────────
         # Long: price extended below VWAP, closing back up.
         # Short: price extended above VWAP, closing back down.
@@ -304,11 +326,13 @@ class VWAPReversionStrategy:
             distance < 0
             and closeback_long_ok
             and (not require_htf_trend or not htf_available or htf_bullish)
+            and (not require_no_funding_bias or not funding_blocked_long)
         )
         sell_signal = (
             distance > 0
             and closeback_short_ok
             and (not require_htf_trend or not htf_available or htf_bearish)
+            and (not require_no_funding_bias or not funding_blocked_short)
         )
 
         if not buy_signal and not sell_signal:
@@ -334,6 +358,11 @@ class VWAPReversionStrategy:
                 parts.append(
                     f"BW_pct={bw_percentile:.0f}" if bw_percentile is not None else "BW_pct=n/a"
                 )
+            if require_no_funding_bias:
+                if f_info.get("available"):
+                    parts.append(f"funding={f_info['rate']:.5g}")
+                else:
+                    parts.append("funding=n/a")
             helpers.emit_debug(
                 f"VWAPReversion: {symbol} — no signal ({', '.join(parts)})"
             )

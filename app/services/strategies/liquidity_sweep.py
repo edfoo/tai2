@@ -25,6 +25,7 @@ from typing import Any
 
 from . import StrategyHelpers, StrategySignal, compute_bb_bandwidth_percentile
 from .defaults import merged_config
+from .liquidity_helpers import order_book_imbalance
 
 
 class LiquiditySweepStrategy:
@@ -173,6 +174,17 @@ class LiquiditySweepStrategy:
         min_atr_pct = helpers.extract_float(cfg.get("min_atr_pct"))
         if min_atr_pct is None:
             min_atr_pct = 0.8
+        # ── Liquidity-aware gates (§3) ────────────────────────────────
+        # ``require_close_in_va`` (default off): the sweep candle must close
+        # *back inside* the value area after its wick, confirming the stop-run
+        # was absorbed within value rather than a true break of value.
+        # ``require_macro_sl`` (default off): place SL at the macro swing
+        # (look-back ``macro_sl_lookback`` candles) instead of the immediate
+        # wick, giving the reversal room to breathe.
+        require_close_in_va = bool(cfg.get("require_close_in_va", False))
+        require_macro_sl = bool(cfg.get("require_macro_sl", False))
+        _macro_lookback = helpers.extract_float(cfg.get("macro_sl_lookback"))
+        macro_sl_lookback = int(_macro_lookback) if _macro_lookback is not None else 50
 
         # ── Snapshot data ─────────────────────────────────────────────
         market_data: dict[str, Any] = snapshot.get("market_data") or {}
@@ -261,6 +273,25 @@ class LiquiditySweepStrategy:
                 f"LiquiditySweep: {symbol} — no signal "
                 f"(sweep pierced but no reclaim: close_pos={close_pos:.2f}, "
                 f"need >={reclaim_ratio} for long or <={1.0 - reclaim_ratio:.2f} for short)"
+            )
+            return None
+
+        # ── Close-back-inside-VA gate (§3) ────────────────────────────
+        # The stop-run is only "absorbed within value" when the candle closes
+        # back inside the value area.  A close below/above value means the sweep
+        # broke through — treat as a true breakout, not a reversal.
+        va_high = helpers.extract_float(indicators.get("value_area_high"))
+        va_low = helpers.extract_float(indicators.get("value_area_low"))
+        close_in_va = (
+            va_high is None
+            or va_low is None
+            or (va_low <= curr_close <= va_high)
+        )
+        if require_close_in_va and not close_in_va:
+            helpers.emit_debug(
+                f"LiquiditySweep: {symbol} — no signal "
+                f"(close={curr_close:.6g} outside VA [{va_low:.6g}, {va_high:.6g}] — "
+                f"probably a real break, not a stop-run)"
             )
             return None
 
@@ -482,7 +513,9 @@ class LiquiditySweepStrategy:
 
         # Thesis-specific structural levels: TP at the opposite swing extreme,
         # SL beyond the sweep wick (with an ATR buffer so it's not sitting
-        # exactly at the wick).
+        # exactly at the wick).  When ``require_macro_sl``, the SL uses the
+        # macro swing (look-back ``macro_sl_lookback`` candles) instead of the
+        # immediate wick, giving the reversal room to breathe (§3).
         tp_target: float | None = None
         sl_level: float | None = None
         if use_structural_sizing and entry_price and entry_price > 0:
@@ -497,6 +530,30 @@ class LiquiditySweepStrategy:
                     tp_target = swing_low
                 if curr_high is not None:
                     sl_level = curr_high + structural_sl_buffer_atr * atr_price
+
+            # Macro-SL override: SL at the macro swing extreme, not the wick.
+            if require_macro_sl:
+                macro_sweep_low = None
+                macro_sweep_high = None
+                _macro_candles = ohlcv_compact[-macro_sl_lookback:] if macro_sl_lookback > 0 else []
+                _macro_lows = [
+                    helpers.extract_float(c.get("low"))
+                    for c in _macro_candles
+                    if isinstance(c, dict) and helpers.extract_float(c.get("low")) is not None
+                ]
+                _macro_highs = [
+                    helpers.extract_float(c.get("high"))
+                    for c in _macro_candles
+                    if isinstance(c, dict) and helpers.extract_float(c.get("high")) is not None
+                ]
+                if _macro_lows:
+                    macro_sweep_low = min(_macro_lows)
+                if _macro_highs:
+                    macro_sweep_high = max(_macro_highs)
+                if buy_signal and macro_sweep_low is not None:
+                    sl_level = macro_sweep_low - structural_sl_buffer_atr * atr_price
+                elif not buy_signal and macro_sweep_high is not None:
+                    sl_level = macro_sweep_high + structural_sl_buffer_atr * atr_price
 
         tp_pct_final, sl_pct_final = compute_tp_sl_pct(
             entry=entry_price,

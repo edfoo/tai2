@@ -155,6 +155,15 @@ class TrendPullbackStrategy:
         min_atr_pct = helpers.extract_float(cfg.get("min_atr_pct"))
         if min_atr_pct is None:
             min_atr_pct = 1.0
+        # ── Liquidity-aware gate (§3) ────────────────────────────────
+        # ``require_poc_proximity`` (default off): the pullback must occur at a
+        # POC / value-area node — price within ``poc_proximity_va_width`` × the
+        # value-area width of POC / VA-high / VA-low.  Adds a liquidity
+        # confluence confirmation on top of the 21-EMA touch.
+        require_poc_proximity = bool(cfg.get("require_poc_proximity", False))
+        poc_proximity_va_width = helpers.extract_float(cfg.get("poc_proximity_va_width"))
+        if poc_proximity_va_width is None:
+            poc_proximity_va_width = 0.2
 
         # ── Snapshot data ─────────────────────────────────────────────
         market_data: dict[str, Any] = snapshot.get("market_data") or {}
@@ -308,15 +317,46 @@ class TrendPullbackStrategy:
             candle_long_ok = curr_close > prev_close and lower_wick_pct >= candle_rejection_pct
             candle_short_ok = curr_close < prev_close and upper_wick_pct >= candle_rejection_pct
 
+        # ── POC / value-area proximity gate (§3) ─────────────────────
+        # Confirm the pullback sits at a liquidity node — within
+        # ``poc_proximity_va_width`` × VA-width of POC / VA-high / VA-low.
+        # Neutral (no VA data) passes.
+        poc_proximity_ok = True
+        if require_poc_proximity:
+            vpoc = helpers.extract_float(indicators.get("vpoc"))
+            va_high = helpers.extract_float(indicators.get("value_area_high"))
+            va_low = helpers.extract_float(indicators.get("value_area_low"))
+            va_width = helpers.extract_float(indicators.get("value_area_width"))
+            if va_width is not None and va_width > 0:
+                threshold = poc_proximity_va_width * va_width
+                nodes = [n for n in (vpoc, va_high, va_low) if n is not None]
+                if nodes:
+                    poc_proximity_ok = any(
+                        abs(last_price - n) <= threshold for n in nodes
+                    )
+            # No usable VA → leave True (neutral).
+
         # ── Direction decision ────────────────────────────────────────
-        buy_signal = want_long and long_level_touched and candle_long_ok
-        sell_signal = want_short and short_level_touched and candle_short_ok
+        buy_signal = (
+            want_long
+            and long_level_touched
+            and candle_long_ok
+            and poc_proximity_ok
+        )
+        sell_signal = (
+            want_short
+            and short_level_touched
+            and candle_short_ok
+            and poc_proximity_ok
+        )
 
         if not buy_signal and not sell_signal:
             parts = [
                 f"levels={'+'.join(touched_levels)}",
                 f"price={last_price:.6g}",
             ]
+            if require_poc_proximity:
+                parts.append(f"poc_prox={'ok' if poc_proximity_ok else 'blocked'}")
             if require_htf_trend:
                 if not htf_available:
                     parts.append("HTF=skipped(no data)")
