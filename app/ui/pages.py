@@ -3393,6 +3393,42 @@ def register_pages(app: FastAPI) -> None:
                                 label="Flip direction",
                             ).classes("w-40").props("dense")
                             ui.label("Invert the Launcher's trade direction before execution.").classes("text-xs text-slate-500")
+                        # ── Liquidity-aware gates (§3) ───────────────────
+                        ui.separator().classes("my-2")
+                        ui.label("Liquidity-Aware Gates").classes("text-xs font-semibold text-slate-600")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            mr_require_in_va_switch = ui.switch(
+                                "Require price inside value area",
+                                value=bool(_mr_cfg.get("require_price_in_va", False)),
+                            ).props("dense color=primary")
+                            ui.label("Only enter when price is inside the 70% value area (mean reversion fades toward the mean).").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            mr_require_funding_switch = ui.switch(
+                                "No extreme funding",
+                                value=bool(_mr_cfg.get("require_no_extreme_funding", False)),
+                            ).props("dense color=primary")
+                            mr_funding_max_rate_input = ui.number(
+                                label="Max |funding| rate",
+                                value=float(_mr_cfg.get("funding_max_abs_rate") or 0.001),
+                                min=0.0001, max=0.01, step=0.0001, format="%.4f",
+                            ).classes("w-40").props("dense")
+                            ui.label("Block entries when funding is crowded in the trade direction beyond this rate.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            mr_require_balanced_switch = ui.switch(
+                                "Require balanced order book",
+                                value=bool(_mr_cfg.get("require_balanced_book", False)),
+                            ).props("dense color=primary")
+                            mr_imbalance_min_input = ui.number(
+                                label="Imbalance min",
+                                value=float(_mr_cfg.get("imbalance_min") or 0.6),
+                                min=0.1, max=3.0, step=0.05, format="%.2f",
+                            ).classes("w-32").props("dense")
+                            mr_imbalance_max_input = ui.number(
+                                label="Imbalance max",
+                                value=float(_mr_cfg.get("imbalance_max") or 1.4),
+                                min=0.1, max=3.0, step=0.05, format="%.2f",
+                            ).classes("w-32").props("dense")
+                            ui.label("Block when bid_qty/ask_qty is outside this range (no liquidity to fade into).").classes("text-xs text-slate-500")
                     _active_badge_mr = ui.badge("Active", color="positive").bind_visibility_from(
                         mr_enabled_switch, "value"
                     )
@@ -3451,6 +3487,13 @@ def register_pages(app: FastAPI) -> None:
                 # destroys the directional edge the strategy is built around.
                 mr_flip_switch.value = False
                 mr_flip_select.value = None
+                # Liquidity-aware gates default OFF (opt-in).
+                mr_require_in_va_switch.value = False
+                mr_require_funding_switch.value = False
+                mr_funding_max_rate_input.value = 0.001
+                mr_require_balanced_switch.value = False
+                mr_imbalance_min_input.value = 0.6
+                mr_imbalance_max_input.value = 1.4
                 ui.notify("Mean Reversion fields set to recommended defaults — click Save to persist", color="info")
 
             # ── Spike Continuation ───────────────────────────────────────────────────
@@ -3702,6 +3745,20 @@ def register_pages(app: FastAPI) -> None:
                                 label="Flip direction",
                             ).classes("w-40").props("dense")
                             ui.label("Invert the Launcher's trade direction before execution.").classes("text-xs text-slate-500")
+                        # ── Liquidity-aware gates (§3) ───────────────────
+                        ui.separator().classes("my-2")
+                        ui.label("Liquidity-Aware Gates").classes("text-xs font-semibold text-slate-600")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            sc_require_oi_switch = ui.switch(
+                                "Require OI confirmation",
+                                value=bool(_sc_cfg.get("require_oi_confirmation", False)),
+                            ).props("dense color=primary")
+                            sc_oi_min_zscore_input = ui.number(
+                                label="Min OI z-score",
+                                value=float(_sc_cfg.get("oi_min_zscore") or 1.0),
+                                min=0.0, max=5.0, step=0.1, format="%.1f",
+                            ).classes("w-40").props("dense")
+                            ui.label("Momentum entries need fresh leverage (rising open interest z-score beyond threshold).").classes("text-xs text-slate-500")
                     _active_badge_sc = ui.badge("Active", color="positive").bind_visibility_from(
                         sc_enabled_switch, "value"
                     )
@@ -3740,6 +3797,9 @@ def register_pages(app: FastAPI) -> None:
                 # destroys the directional edge the strategy is built around.
                 sc_flip_switch.value = False
                 sc_flip_select.value = None
+                # Liquidity-aware gates default OFF (opt-in).
+                sc_require_oi_switch.value = False
+                sc_oi_min_zscore_input.value = 1.0
                 ui.notify("Spike Continuation fields set to recommended defaults — click Save to persist", color="info")
 
             # ── Liquidity Sweep ───────────────────────────────────────────────────
@@ -3940,6 +4000,26 @@ def register_pages(app: FastAPI) -> None:
                                 label="Flip direction",
                             ).classes("w-40").props("dense")
                             ui.label("Invert the Launcher's trade direction before execution.").classes("text-xs text-slate-500")
+                        # ── Liquidity-aware gates (§3) ───────────────────
+                        ui.separator().classes("my-2")
+                        ui.label("Liquidity-Aware Gates").classes("text-xs font-semibold text-slate-600")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            ls_require_close_in_va_switch = ui.switch(
+                                "Require close inside value area",
+                                value=bool(_ls_cfg.get("require_close_in_va", False)),
+                            ).props("dense color=primary")
+                            ui.label("Sweep candle must close back inside the value area (a close outside VA is a real break, not a stop-run).").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            ls_require_macro_sl_switch = ui.switch(
+                                "Macro swing SL",
+                                value=bool(_ls_cfg.get("require_macro_sl", False)),
+                            ).props("dense color=primary")
+                            ls_macro_sl_lookback_input = ui.number(
+                                label="Macro SL lookback",
+                                value=float(_ls_cfg.get("macro_sl_lookback") or 50),
+                                min=10, max=200, step=5, format="%.0f",
+                            ).classes("w-40").props("dense")
+                            ui.label("Place SL at the macro swing (look-back N candles) instead of the immediate wick, giving room to breathe.").classes("text-xs text-slate-500")
                     _active_badge_ls = ui.badge("Active", color="positive").bind_visibility_from(
                         ls_enabled_switch, "value"
                     )
@@ -3972,6 +4052,10 @@ def register_pages(app: FastAPI) -> None:
                 ls_min_rr_input.value = 1.0
                 ls_flip_switch.value = False
                 ls_flip_select.value = None
+                # Liquidity-aware gates default OFF (opt-in).
+                ls_require_close_in_va_switch.value = False
+                ls_require_macro_sl_switch.value = False
+                ls_macro_sl_lookback_input.value = 50
                 ui.notify("Liquidity Sweep fields set to recommended defaults — click Save to persist", color="info")
 
             # ── VWAP Reversion ────────────────────────────────────────────────────
@@ -4156,6 +4240,20 @@ def register_pages(app: FastAPI) -> None:
                                 label="Flip direction",
                             ).classes("w-40").props("dense")
                             ui.label("Invert the Launcher's trade direction before execution.").classes("text-xs text-slate-500")
+                        # ── Liquidity-aware gates (§3) ───────────────────
+                        ui.separator().classes("my-2")
+                        ui.label("Liquidity-Aware Gates").classes("text-xs font-semibold text-slate-600")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            vr_require_no_funding_switch = ui.switch(
+                                "No funding bias",
+                                value=bool(_vr_cfg.get("require_no_funding_bias", False)),
+                            ).props("dense color=primary")
+                            vr_funding_max_rate_input = ui.number(
+                                label="Max |funding| rate",
+                                value=float(_vr_cfg.get("funding_max_abs_rate") or 0.0007),
+                                min=0.0001, max=0.01, step=0.0001, format="%.4f",
+                            ).classes("w-40").props("dense")
+                            ui.label("Block reversion against heavy funding crowding in the trade direction (mirrors |funding_z| < 0.7).").classes("text-xs text-slate-500")
                     _active_badge_vr = ui.badge("Active", color="positive").bind_visibility_from(
                         vr_enabled_switch, "value"
                     )
@@ -4188,6 +4286,9 @@ def register_pages(app: FastAPI) -> None:
                 # destroys the directional edge the strategy is built around.
                 vr_flip_switch.value = False
                 vr_flip_select.value = None
+                # Liquidity-aware gates default OFF (opt-in).
+                vr_require_no_funding_switch.value = False
+                vr_funding_max_rate_input.value = 0.0007
                 ui.notify("VWAP Reversion fields set to recommended defaults — click Save to persist", color="info")
 
             # ── Trend Pullback ────────────────────────────────────────────────────
@@ -4374,6 +4475,20 @@ def register_pages(app: FastAPI) -> None:
                                 label="Flip direction",
                             ).classes("w-40").props("dense")
                             ui.label("Invert the Launcher's trade direction before execution.").classes("text-xs text-slate-500")
+                        # ── Liquidity-aware gates (§3) ───────────────────
+                        ui.separator().classes("my-2")
+                        ui.label("Liquidity-Aware Gates").classes("text-xs font-semibold text-slate-600")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            tp_require_poc_prox_switch = ui.switch(
+                                "Require POC proximity",
+                                value=bool(_tp_cfg.get("require_poc_proximity", False)),
+                            ).props("dense color=primary")
+                            tp_poc_prox_width_input = ui.number(
+                                label="POC proximity (×VA width)",
+                                value=float(_tp_cfg.get("poc_proximity_va_width") or 0.2),
+                                min=0.05, max=1.0, step=0.05, format="%.2f",
+                            ).classes("w-48").props("dense")
+                            ui.label("Pullback must be within this fraction of VA-width of POC / VA-high / VA-low (adds a liquidity node to the 21-EMA touch).").classes("text-xs text-slate-500")
                     _active_badge_tp = ui.badge("Active", color="positive").bind_visibility_from(
                         tp_enabled_switch, "value"
                     )
@@ -4404,6 +4519,9 @@ def register_pages(app: FastAPI) -> None:
                 tp_min_rr_input.value = 1.0
                 tp_flip_switch.value = False
                 tp_flip_select.value = None
+                # Liquidity-aware gates default OFF (opt-in).
+                tp_require_poc_prox_switch.value = False
+                tp_poc_prox_width_input.value = 0.2
                 ui.notify("Trend Pullback fields set to recommended defaults — click Save to persist", color="info")
 
             with ui.card().classes("w-full rounded-lg border border-slate-200 mb-1"):
@@ -5328,6 +5446,12 @@ def register_pages(app: FastAPI) -> None:
                 "min_reward_risk_ratio": (
                     float(mr_min_rr_input.value) if mr_min_rr_input.value not in (None, "") else None
                 ),
+                "require_price_in_va": bool(mr_require_in_va_switch.value),
+                "require_no_extreme_funding": bool(mr_require_funding_switch.value),
+                "funding_max_abs_rate": float(mr_funding_max_rate_input.value or 0.001),
+                "require_balanced_book": bool(mr_require_balanced_switch.value),
+                "imbalance_min": float(mr_imbalance_min_input.value or 0.6),
+                "imbalance_max": float(mr_imbalance_max_input.value or 1.4),
             }
             _strategies_cfg["spike_continuation"] = {
                 "enabled": bool(sc_enabled_switch.value),
@@ -5361,6 +5485,8 @@ def register_pages(app: FastAPI) -> None:
                     float(sc_min_rr_input.value) if sc_min_rr_input.value not in (None, "") else None
                 ),
                 "flip_launcher_direction": str(sc_flip_select.value) if sc_flip_switch.value else None,
+                "require_oi_confirmation": bool(sc_require_oi_switch.value),
+                "oi_min_zscore": float(sc_oi_min_zscore_input.value or 1.0),
             }
             _strategies_cfg["liquidity_sweep"] = {
                 "enabled": bool(ls_enabled_switch.value),
@@ -5392,6 +5518,9 @@ def register_pages(app: FastAPI) -> None:
                     float(ls_min_rr_input.value) if ls_min_rr_input.value not in (None, "") else None
                 ),
                 "flip_launcher_direction": str(ls_flip_select.value) if ls_flip_switch.value else None,
+                "require_close_in_va": bool(ls_require_close_in_va_switch.value),
+                "require_macro_sl": bool(ls_require_macro_sl_switch.value),
+                "macro_sl_lookback": int(ls_macro_sl_lookback_input.value or 50),
             }
             _strategies_cfg["vwap_reversion"] = {
                 "enabled": bool(vr_enabled_switch.value),
@@ -5420,6 +5549,8 @@ def register_pages(app: FastAPI) -> None:
                     float(vr_min_rr_input.value) if vr_min_rr_input.value not in (None, "") else None
                 ),
                 "flip_launcher_direction": str(vr_flip_select.value) if vr_flip_switch.value else None,
+                "require_no_funding_bias": bool(vr_require_no_funding_switch.value),
+                "funding_max_abs_rate": float(vr_funding_max_rate_input.value or 0.0007),
             }
             _strategies_cfg["trend_pullback"] = {
                 "enabled": bool(tp_enabled_switch.value),
@@ -5448,6 +5579,8 @@ def register_pages(app: FastAPI) -> None:
                     float(tp_min_rr_input.value) if tp_min_rr_input.value not in (None, "") else None
                 ),
                 "flip_launcher_direction": str(tp_flip_select.value) if tp_flip_switch.value else None,
+                "require_poc_proximity": bool(tp_require_poc_prox_switch.value),
+                "poc_proximity_va_width": float(tp_poc_prox_width_input.value or 0.2),
             }
             _launcher_cfg["strategies"] = _strategies_cfg
             config["launcher"] = _launcher_cfg

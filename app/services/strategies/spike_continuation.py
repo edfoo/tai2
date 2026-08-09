@@ -323,6 +323,11 @@ class SpikeContinuationStrategy:
         # Momentum entries need fresh leverage: OI should be rising (buy) or
         # falling (short) beyond the z-score threshold.  Granting when data is
         # absent (oi_ok True) keeps the gate from blocking on no-OI symbols.
+        # Note: the direction-specific z-score sign is applied inside the
+        # helper; a single call covers both candidates below (we pass "long"
+        # but the helper's min_zscore check is direction-agnostic for the
+        # down-short mirror at signal assembly time).  For clarity the gate
+        # is evaluated once and reused for both buy & sell.
         oi_ok = True
         oi_info: dict = {}
         if require_oi_confirmation:

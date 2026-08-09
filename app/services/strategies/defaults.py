@@ -57,6 +57,13 @@ DEFAULT_MEAN_REVERSION: dict[str, Any] = {
     "min_atr_pct": 1.0,
     "min_reward_risk_ratio": 1.0,
     "flip_launcher_direction": None,
+    # Liquidity-aware gates (§3) — all OFF by default (opt-in).
+    "require_price_in_va": False,
+    "require_no_extreme_funding": False,
+    "funding_max_abs_rate": 0.001,
+    "require_balanced_book": False,
+    "imbalance_min": 0.6,
+    "imbalance_max": 1.4,
     "dynamic_tp": False,
     "dynamic_tp_fraction": 0.7,
 }
@@ -91,6 +98,9 @@ DEFAULT_SPIKE_CONTINUATION: dict[str, Any] = {
     "min_atr_pct": 1.0,
     "min_reward_risk_ratio": 1.0,
     "flip_launcher_direction": None,
+    # Liquidity-aware gates (§3) — OFF by default (opt-in).
+    "require_oi_confirmation": False,
+    "oi_min_zscore": 1.0,
 }
 
 # ── Liquidity Sweep ─────────────────────────────────────────────────────────
@@ -121,6 +131,10 @@ DEFAULT_LIQUIDITY_SWEEP: dict[str, Any] = {
     "min_atr_pct": 0.8,
     "min_reward_risk_ratio": 1.0,
     "flip_launcher_direction": None,
+    # Liquidity-aware gates (§3) — OFF by default (opt-in).
+    "require_close_in_va": False,
+    "require_macro_sl": False,
+    "macro_sl_lookback": 50,
 }
 
 # ── VWAP Reversion ──────────────────────────────────────────────────────────
@@ -148,6 +162,9 @@ DEFAULT_VWAP_REVERSION: dict[str, Any] = {
     "min_atr_pct": 1.0,
     "min_reward_risk_ratio": 1.0,
     "flip_launcher_direction": None,
+    # Liquidity-aware gates (§3) — OFF by default (opt-in).
+    "require_no_funding_bias": False,
+    "funding_max_abs_rate": 0.0007,
 }
 
 # ── Trend Pullback ──────────────────────────────────────────────────────────
@@ -175,6 +192,9 @@ DEFAULT_TREND_PULLBACK: dict[str, Any] = {
     "min_atr_pct": 1.0,
     "min_reward_risk_ratio": 1.0,
     "flip_launcher_direction": None,
+    # Liquidity-aware gates (§3) — OFF by default (opt-in).
+    "require_poc_proximity": False,
+    "poc_proximity_va_width": 0.2,
 }
 
 # Registry keyed by strategy name.
