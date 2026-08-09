@@ -165,6 +165,54 @@ class TestLiquidityHelpers:
         assert ok is True
         assert info["available"] is False
 
+    # ── Phase 0d: z-score path tests ──────────────────────────────────
+
+    def test_funding_blocked_by_high_z_long(self) -> None:
+        # funding_z = 2.0 (top 2 %) → blocked for long entries.
+        blocked, info = funding_is_blocked({}, direction="long", funding_z=2.0, max_funding_z=1.28)
+        assert blocked is True
+        assert info["method"] == "zscore"
+
+    def test_funding_not_blocked_neutral_z_long(self) -> None:
+        # funding_z = 0.5 → not blocked.
+        blocked, info = funding_is_blocked({}, direction="long", funding_z=0.5, max_funding_z=1.28)
+        assert blocked is False
+        assert info["method"] == "zscore"
+
+    def test_funding_blocked_by_low_z_short(self) -> None:
+        # funding_z = -2.0 → blocked for short entries.
+        blocked, info = funding_is_blocked({}, direction="short", funding_z=-2.0, max_funding_z=1.28)
+        assert blocked is True
+
+    def test_funding_zscore_overrides_abs_rate(self) -> None:
+        # Rate is extreme (0.005) but z-score is low → z-score wins, not blocked.
+        blocked, info = funding_is_blocked(
+            {"fundingRate": "0.005"}, direction="long",
+            max_abs_rate=0.001, funding_z=0.3, max_funding_z=1.28,
+        )
+        assert blocked is False
+        assert info["method"] == "zscore"
+
+    def test_oi_confirmed_by_positive_zscore(self) -> None:
+        # oi_zscore = 1.5 > min 1.0 → ok for long.
+        ok, info = oi_confirms_momentum({}, direction="long", oi_zscore=1.5, min_zscore=1.0)
+        assert ok is True
+        assert info["method"] == "zscore"
+
+    def test_oi_blocked_by_low_zscore(self) -> None:
+        # oi_zscore = 0.5 < 1.0 → blocked for long.
+        ok, info = oi_confirms_momentum({}, direction="long", oi_zscore=0.5, min_zscore=1.0)
+        assert ok is False
+
+    def test_oi_zscore_overrides_prev_delta(self) -> None:
+        # Flat OI (oi==oi_prev) but z-score says rising → z-score wins.
+        ok, info = oi_confirms_momentum(
+            {"oi": "1000", "oi_prev": "1000"}, direction="long",
+            oi_zscore=2.0, min_zscore=1.0,
+        )
+        assert ok is True
+        assert info["method"] == "zscore"
+
 
 # ── Mean Reversion gates ────────────────────────────────────────────────────
 
@@ -250,6 +298,31 @@ class TestMeanReversionLiquidity:
         result = mr.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers())
         assert result is not None
 
+    def test_funding_z_blocks_crowded_long(self) -> None:
+        """Phase 0d: pre-computed funding_z in snapshot blocks buy signal."""
+        mr = MeanReversionStrategy()
+        snapshot = _snap(indicators={"rsi": 20.0})
+        snapshot["market_data"]["BTC-USDT-SWAP"]["funding_z"] = 2.0  # heavily long-crowded
+        config = _mr_bare(
+            rsi_oversold=30.0,
+            require_no_extreme_funding=True,
+            funding_max_abs_rate=0.001,  # rate proxy would pass but z-score wins
+        )
+        result = mr.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers())
+        assert result is None  # blocked by funding z-score
+
+    def test_funding_z_neutral_allows_buy(self) -> None:
+        """Phase 0d: neutral funding_z lets an oversold buy through."""
+        mr = MeanReversionStrategy()
+        snapshot = _snap(indicators={"rsi": 20.0})
+        snapshot["market_data"]["BTC-USDT-SWAP"]["funding_z"] = 0.4
+        config = _mr_bare(
+            rsi_oversold=30.0,
+            require_no_extreme_funding=True,
+        )
+        result = mr.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers())
+        assert result is not None
+
 
 # ── Spike Continuation OI gate ──────────────────────────────────────────────
 
@@ -299,6 +372,28 @@ class TestSpikeContinuationLiquidity:
             open_interest={"oi": "900", "oi_prev": "900"},
         )
         config = _sc_bare(require_oi_confirmation=False, require_volume_rsi_rising=False)
+        result = sc.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=112.0))
+        assert result is not None
+
+    def test_oi_zscore_from_snapshot_blocks(self) -> None:
+        """Phase 0d: pre-computed oi_zscore in snapshot blocks when below threshold."""
+        sc = SpikeContinuationStrategy()
+        snapshot = _snap(
+            indicators={"rsi": 65.0, "volume_rsi_series": [80.0, 85.0], **self._sc_rising_ohlcv()},
+        )
+        snapshot["market_data"]["BTC-USDT-SWAP"]["oi_zscore"] = 0.3  # below min 1.0
+        config = _sc_bare(require_oi_confirmation=True, oi_min_zscore=1.0, require_volume_rsi_rising=False)
+        result = sc.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=112.0))
+        assert result is None  # blocked by oi_zscore
+
+    def test_oi_zscore_from_snapshot_allows(self) -> None:
+        """Phase 0d: high oi_zscore in snapshot allows the momentum entry."""
+        sc = SpikeContinuationStrategy()
+        snapshot = _snap(
+            indicators={"rsi": 65.0, "volume_rsi_series": [80.0, 85.0], **self._sc_rising_ohlcv()},
+        )
+        snapshot["market_data"]["BTC-USDT-SWAP"]["oi_zscore"] = 2.5  # above min 1.0
+        config = _sc_bare(require_oi_confirmation=True, oi_min_zscore=1.0, require_volume_rsi_rising=False)
         result = sc.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=112.0))
         assert result is not None
 

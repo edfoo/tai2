@@ -30,6 +30,7 @@ from app.db.postgres import (
 )
 from app.lib.volume_profile import value_area
 from app.models.trade import ExecutedTrade
+from app.services.okx_metrics import fetch_funding_history, oi_delta_zscore, zscore_latest
 from app.services.okx_sdk_adapter import OkxAccountAdapter, OkxTradeAdapter
 from app.services.state_service import StateService
 from app.services.strategies import Strategy, StrategyHelpers, StrategySignal
@@ -207,6 +208,12 @@ class MarketService:
     value_area_bins: int = 50
     value_area_pct: float = 0.70
 
+    # Funding-rate and open-interest history buffers for rolling z-score.
+    # Funding settles every 8 h on OKX; 90 entries ≈ 30 days.
+    # OI is fetched every poll cycle (default 180 s); 480 entries ≈ 24 h.
+    FUNDING_HISTORY_MAXLEN: int = 90
+    OI_HISTORY_MAXLEN: int = 480
+
     def __init__(
         self,
         *,
@@ -308,6 +315,11 @@ class MarketService:
         # Populated alongside _trade_buffers in _handle_ws_message.
         # Each entry: {"ts": float (epoch s), "px": float, "vol": float, "side": float}
         self._footprint_buffers: dict[str, Deque[dict[str, float]]] = {}
+        # Phase 0d: per-symbol rolling histories for funding_z / oi_zscore.
+        # Funding history: list of floats (oldest-first), max FUNDING_HISTORY_MAXLEN.
+        # OI history: list of floats (oldest-first), max OI_HISTORY_MAXLEN.
+        self._funding_history: dict[str, list[float]] = {}
+        self._oi_history: dict[str, list[float]] = {}
         self._decision_state: dict[str, dict[str, Any]] = {}
         self._recent_trades: dict[str, Deque[float]] = {}
         self._position_activity: dict[str, float] = {}
@@ -447,6 +459,9 @@ class MarketService:
         self._positions_refresh_task = asyncio.create_task(
             self._positions_refresh_loop(), name="okx-positions-refresh"
         )
+        # Phase 0d: backfill 30-day funding-rate history in the background so
+        # funding_z is available from the very first poll cycle.
+        asyncio.create_task(self._seed_funding_history(), name="okx-funding-history-seed")
         logger.info("MarketService started for %s", ", ".join(self.symbols))
 
     async def stop(self) -> None:
@@ -484,6 +499,28 @@ class MarketService:
                 await self._positions_refresh_task
             self._positions_refresh_task = None
         logger.info("MarketService stopped for %s", ", ".join(self.symbols))
+
+    async def _seed_funding_history(self) -> None:
+        """Backfill per-symbol funding-rate history from OKX on startup.
+
+        Fetches up to ``FUNDING_HISTORY_MAXLEN`` historical rates (≈ 30 days at
+        OKX's 8-hour settlement cadence) for every tracked symbol so that
+        ``funding_z`` is meaningful from the first poll cycle.  Runs as a
+        fire-and-forget background task; failures are logged but do not block
+        the main poller.
+        """
+        for symbol in list(self.symbols):
+            try:
+                rates = await fetch_funding_history(symbol, limit=self.FUNDING_HISTORY_MAXLEN)
+                if rates:
+                    self._funding_history[symbol] = rates[-self.FUNDING_HISTORY_MAXLEN :]
+                    logger.debug(
+                        "Seeded %d funding-rate history entries for %s", len(rates), symbol
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # pragma: no cover - best-effort background task
+                logger.warning("Funding history seed failed for %s: %s", symbol, exc)
 
     async def _poll_loop(self) -> None:
         """Continuously refresh state snapshots on a fixed interval until cancelled."""
@@ -934,11 +971,43 @@ class MarketService:
                 custom_metrics["market_long_short_ratio"] = market_ls_ratio
             strategy_signal = self._derive_strategy_signal(indicators, custom_metrics, ticker)
             risk_metrics = self._derive_risk_metrics(indicators, ticker)
+
+            # ── Phase 0d: rolling z-scores for funding_z and oi_zscore ──────
+            # Update in-memory history with the latest snapshot values, then
+            # derive z-scores so strategies can use real 30-day statistics
+            # instead of the absolute-rate proxy.  Histories are capped at
+            # their respective maxlens; appending here keeps them current
+            # every poll cycle without an extra REST call.
+            _fr = funding.get("fundingRate") or funding.get("fundRate")
+            if _fr is not None:
+                try:
+                    _fr_float = float(_fr)
+                    hist_f = self._funding_history.setdefault(symbol, [])
+                    hist_f.append(_fr_float)
+                    if len(hist_f) > self.FUNDING_HISTORY_MAXLEN:
+                        del hist_f[: len(hist_f) - self.FUNDING_HISTORY_MAXLEN]
+                except (TypeError, ValueError):
+                    pass
+            _oi_val = open_interest.get("oi") or open_interest.get("oiCcy")
+            if _oi_val is not None:
+                try:
+                    _oi_float = float(_oi_val)
+                    hist_oi = self._oi_history.setdefault(symbol, [])
+                    hist_oi.append(_oi_float)
+                    if len(hist_oi) > self.OI_HISTORY_MAXLEN:
+                        del hist_oi[: len(hist_oi) - self.OI_HISTORY_MAXLEN]
+                except (TypeError, ValueError):
+                    pass
+            funding_z = zscore_latest(self._funding_history.get(symbol) or [])
+            oi_zscore = oi_delta_zscore(self._oi_history.get(symbol) or [])
+
             entry: dict[str, Any] = {
                 "order_book": order_book,
                 "ticker": ticker,
                 "funding_rate": funding,
                 "open_interest": open_interest,
+                "funding_z": funding_z,
+                "oi_zscore": oi_zscore,
                 "indicators": indicators,
                 "custom_metrics": custom_metrics,
                 "liquidations": self._latest_liquidations.get(symbol, []),

@@ -332,9 +332,13 @@ class SpikeContinuationStrategy:
         oi_info: dict = {}
         if require_oi_confirmation:
             open_interest = sym_data.get("open_interest") or {}
+            # Phase 0d: use the pre-computed OI delta z-score when available;
+            # falls back to the flat-delta proxy when history is not yet seeded.
+            _oi_zscore: float | None = sym_data.get("oi_zscore")
             oi_ok, oi_info = oi_confirms_momentum(
                 open_interest,
                 direction="long",
+                oi_zscore=_oi_zscore,
                 min_zscore=oi_min_zscore,
             )
 

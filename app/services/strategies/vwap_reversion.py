@@ -312,11 +312,14 @@ class VWAPReversionStrategy:
         # direction (e.g. don't buy the dip when longs are already extremely
         # crowded).  Neutral (no funding data) passes.
         funding = sym_data.get("funding_rate") or {}
+        # Phase 0d: use the pre-computed 30-day rolling z-score when available;
+        # falls back to the absolute-rate proxy when history is not yet seeded.
+        _funding_z: float | None = sym_data.get("funding_z")
         funding_blocked_long, f_info = funding_is_blocked(
-            funding, direction="long", max_abs_rate=funding_max_abs_rate
+            funding, direction="long", max_abs_rate=funding_max_abs_rate, funding_z=_funding_z
         )
         funding_blocked_short, _ = funding_is_blocked(
-            funding, direction="short", max_abs_rate=funding_max_abs_rate
+            funding, direction="short", max_abs_rate=funding_max_abs_rate, funding_z=_funding_z
         )
 
         # ── Direction decision ────────────────────────────────────────
