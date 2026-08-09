@@ -28,6 +28,7 @@ from app.db.postgres import (
     update_entry_fee,
     update_trade_pnl,
 )
+from app.lib.volume_profile import value_area
 from app.models.trade import ExecutedTrade
 from app.services.okx_sdk_adapter import OkxAccountAdapter, OkxTradeAdapter
 from app.services.state_service import StateService
@@ -198,6 +199,13 @@ class MarketService:
     # typical 15-minute range, which is concise enough to send to the LLM).
     FOOTPRINT_WINDOW_SECONDS: int = 900   # 15-minute sliding window
     FOOTPRINT_BUCKET_TICKS: int = 100     # bucket width = tick_size × 100
+
+    # Volume-profile (value-area) derived from OHLCV for the strategy filters.
+    # `value_area_bins` buckets the window; `value_area_pct` is the classic
+    # 70 % value-area volume share. Kept small so short intraday windows
+    # still produce a meaningful profile, matching `app/lib/volume_profile`.
+    value_area_bins: int = 50
+    value_area_pct: float = 0.70
 
     def __init__(
         self,
@@ -891,10 +899,34 @@ class MarketService:
             )
             indicators = self._compute_indicators(ohlcv)
             indicators["structure"] = self._compute_structure(ohlcv)
+            # Phase 0c: flatten the most recent confirmed swing pivot into
+            # scalar keys. Strategies and the TP/SL manager consume
+            # `swing_high`/`swing_low` (top-level scalars), while
+            # `_compute_structure` emits lists of pivots.  Only the last
+            # *confirmed* pivot is used (structure requires right-side
+            # context to confirm a pivot, so this is fully closed-bar data —
+            # no look-ahead).
+            _structure: dict[str, Any] = indicators.get("structure") or {}
+            _sw_highs = _structure.get("swing_highs") or []
+            _sw_lows = _structure.get("swing_lows") or []
+            indicators["swing_high"] = (
+                _sw_highs[-1].get("price") if _sw_highs and isinstance(_sw_highs[-1], dict) else None
+            )
+            indicators["swing_low"] = (
+                _sw_lows[-1].get("price") if _sw_lows and isinstance(_sw_lows[-1], dict) else None
+            )
             if ohlcv_htf:
                 htf_bar, _ = self._HTF_MAP.get(self._ohlc_bar, ("", 0))
                 indicators["ohlcv_htf"] = ohlcv_htf
                 indicators["htf_indicators"] = self._compute_indicators(ohlcv_htf)
+                # Phase 0b: flatten HTF regime scalars so `is_trending()`
+                # (which reads top-level `adx_htf`/`choppiness_htf`) actually
+                # fires instead of silently no-opping. `htf_indicators` is the
+                # same shape as `indicators` (ADX under `.adx.value`,
+                # choppiness under `.choppiness`).
+                _htf = indicators.get("htf_indicators") or {}
+                indicators["adx_htf"] = ((_htf.get("adx") or {}).get("value"))
+                indicators["choppiness_htf"] = _htf.get("choppiness")
                 if htf_bar:
                     indicators["ohlcv_htf_bar"] = htf_bar
             custom_metrics = self._compute_custom_metrics(symbol, order_book)
@@ -5827,10 +5859,15 @@ class MarketService:
                 "bollinger_bands": {},
                 "stoch_rsi": {},
                 "adx": {},
+                "choppiness": None,
                 "obv": {},
                 "cmf": {},
                 "vwap": None,
                 "volume": {},
+                "vpoc": None,
+                "value_area_high": None,
+                "value_area_low": None,
+                "value_area_width": None,
             }
 
         normalized_rows = [row[:6] for row in ohlcv if len(row) >= 6]
@@ -5839,10 +5876,15 @@ class MarketService:
                 "bollinger_bands": {},
                 "stoch_rsi": {},
                 "adx": {},
+                "choppiness": None,
                 "obv": {},
                 "cmf": {},
                 "vwap": None,
                 "volume": {},
+                "vpoc": None,
+                "value_area_high": None,
+                "value_area_low": None,
+                "value_area_width": None,
             }
 
         df = pd.DataFrame(normalized_rows, columns=["ts", "open", "high", "low", "close", "volume"])
@@ -5865,11 +5907,39 @@ class MarketService:
         vwap_series = ta.vwap(high=df["high"], low=df["low"], close=df["close"], volume=df["volume"])
         volume_rsi_series = ta.rsi(df["volume"], length=14)
         atr_series = ta.atr(high=df["high"], low=df["low"], close=df["close"], length=14)
+        chop_series = ta.chop(high=df["high"], low=df["low"], close=df["close"], length=14)
         volume_avg = float(df["volume"].tail(20).mean()) if not df.empty else 0.0
         tail_df = df
         last_close = float(df["close"].iloc[-1]) if not df.empty else None
         atr_value = float(atr_series.iloc[-1]) if atr_series is not None and not atr_series.empty else None
         atr_pct = (atr_value / last_close * 100) if atr_value and last_close else None
+
+        # ── Volume Profile / Value Area (Phase 0a) ─────────────────────────
+        # POC + 70 % value area derived from the OHLCV window (typical price
+        # weighted by volume). These feed the liquidity-aware entry filters
+        # and the unified TP/SL manager. Computed here so the keys are
+        # available in both live and backtest paths (the footprint tape is
+        # live-only). Degenerate/short windows fall back to None rather than
+        # raising, matching the `atr`/`atr_pct` style.
+        vpoc: float | None = None
+        va_high: float | None = None
+        va_low: float | None = None
+        va_width: float | None = None
+        if len(df) >= MarketService.value_area_bins:
+            _typ = (df["high"] + df["low"] + df["close"]) / 3.0
+            try:
+                _poc, _vah, _val = value_area(
+                    _typ, df["volume"], bins=MarketService.value_area_bins, va_pct=MarketService.value_area_pct
+                )
+                vpoc = _poc
+                va_high = _vah
+                va_low = _val
+                if _vah is not None and _val is not None and _vah >= _val:
+                    va_width = _vah - _val
+            except (ValueError, TypeError):
+                # Non-positive volume or degenerate input — leave VA keys None.
+                pass
+
         ohlcv_compact = [
             {
                 "ts": int(idx.timestamp() * 1000),
@@ -5909,6 +5979,10 @@ class MarketService:
             }
             if adx_df is not None
             else {},
+            "choppiness": float(chop_series.iloc[-1])
+            if chop_series is not None and not chop_series.empty
+            else None,
+            "choppiness_series": MarketService._series_to_list(chop_series),
             "obv": {
                 "value": float(obv_series.iloc[-1]) if obv_series is not None and not obv_series.empty else None,
                 "series": MarketService._series_to_list(obv_series),
@@ -5937,6 +6011,10 @@ class MarketService:
             "ohlcv": ohlcv_compact,
             "atr": atr_value,
             "atr_pct": atr_pct,
+            "vpoc": vpoc,
+            "value_area_high": va_high,
+            "value_area_low": va_low,
+            "value_area_width": va_width,
         }
         return indicators
 

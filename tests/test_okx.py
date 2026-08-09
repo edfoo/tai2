@@ -47,6 +47,83 @@ def test_indicator_helper_handles_empty_data() -> None:
     assert indicators["vwap"] is None
     assert indicators["bollinger_bands"] == {}
     assert indicators["stoch_rsi"] == {}
+    assert indicators["choppiness"] is None
+    assert indicators["vpoc"] is None
+    assert indicators["value_area_width"] is None
+
+
+def _ohlcv_rows(n: int, base: float = 100.0) -> list[list[Any]]:
+    """Build n synthetic OHLCV rows: [ts_ms, open, high, low, close, volume]."""
+    import math
+
+    rows: list[list[Any]] = []
+    start = 1_700_000_000_000
+    for i in range(n):
+        ts = start + i * 60_000
+        close = base + math.sin(i / 3) * 3 + i * 0.01
+        high = close + 1.0
+        low = close - 1.0
+        open_ = close - 0.2
+        volume = 10 + (i % 7)
+        rows.append([ts, open_, high, low, close, volume])
+    return rows
+
+
+def test_indicator_helper_populates_value_area_keys() -> None:
+    indicators = MarketService._compute_indicators(_ohlcv_rows(120, base=100.0))
+    assert indicators["atr_pct"] is not None
+    assert indicators["vpoc"] is not None
+    assert indicators["value_area_high"] is not None
+    assert indicators["value_area_low"] is not None
+    assert indicators["value_area_width"] is not None
+    assert 0.0 < indicators["value_area_width"]
+    assert indicators["value_area_low"] <= indicators["vpoc"] <= indicators["value_area_high"]
+
+
+def test_indicator_helper_populates_choppiness() -> None:
+    indicators = MarketService._compute_indicators(_ohlcv_rows(120, base=100.0))
+    # Choppiness index lives on a 0-100 scale.
+    v = indicators["choppiness"]
+    assert v is not None
+    assert 0.0 <= v <= 100.0
+    assert indicators["choppiness_series"]
+
+
+def test_htf_indicators_expose_adx_and_choppiness_for_flat_nesting() -> None:
+    # Phase 0b: `_build_snapshot` flattens `adx_htf` / `choppiness_htf` from
+    # the HTF indicators dict. This test verifies the source values exist so
+    # the flattening resolves to real numbers rather than None.
+    htf = MarketService._compute_indicators(_ohlcv_rows(150, base=100.0))
+    assert (htf.get("adx") or {}).get("value") is not None
+    assert htf.get("choppiness") is not None
+
+
+def test_compute_structure_emits_price_scalars_for_swing_flattening() -> None:
+    # Phase 0c: `_build_snapshot` reads the last swing high/low pivot price
+    # and flattens it into `swing_high`/`swing_low`. Craft an OHLCV series
+    # with a clear dip so at least one swing low pivot is confirmed.
+    import math
+
+    rows: list[list[Any]] = []
+    start = 1_700_000_000_000
+    # Steady uptrend with a single sharp lower low around index 40.
+    for i in range(90):
+        close = 100.0 + i * 0.5
+        if i == 40:
+            close = 96.0  # local low
+        high = close + 2.0
+        low = close - 2.0
+        ts = start + i * 60_000
+        rows.append([ts, low, high, low, close, 50.0])
+
+    structure = MarketService._compute_structure(rows, swing_lookback=5)
+    swing_lows = structure.get("swing_lows") or []
+    assert swing_lows, "expected at least one confirmed swing low"
+    # The flattened scalar is taken from the last pivot's "price".
+    assert isinstance(swing_lows[-1], dict)
+    assert swing_lows[-1].get("price") is not None
+    # Pivot price is the swing bar's LOW (close-2), well below the surrounding range.
+    assert 93.0 <= swing_lows[-1].get("price") <= 99.0
 
 
 def test_normalize_account_balances_preserves_unknown_available_margin() -> None:
