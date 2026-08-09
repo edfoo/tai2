@@ -207,79 +207,80 @@ async def _amain(args: argparse.Namespace) -> int:
     for gate_name, gate_cfg in gates:
         switch_key = gate_cfg["switch"]
         thresholds = gate_cfg["thresholds"]
-        # Each experiment = (switch, threshold).  OFF baseline first.
-        experiments: list[tuple[bool, Any | None]] = [(False, None)]
-        for thr in thresholds:
-            experiments.append((True, thr))
-        # If the gate has no numeric threshold, just ON with None.
-        if not thresholds:
-            experiments.append((True, None))
 
         for symbol in args.symbols:
             for ltf in args.timeframes:
-                for (switch_on, threshold) in experiments:
-                    tag = (
-                        f"{run_tag}_{symbol}_{ltf}_{gate_name}_"
-                        f"{'on' if switch_on else 'off'}"
-                        + (f"_t{threshold}" if switch_on and threshold is not None else "")
+                # ── 1. OFF baseline first ──────────────────────────────
+                off_tag = f"{run_tag}_{symbol}_{ltf}_{gate_name}_off"
+                print(f"▶ [baseline OFF] [{symbol} {ltf}] {strategy}.{switch_key}= off")
+                base_result = await _run_and_record(
+                    summaries=summaries,
+                    OC=OC,
+                    run_tag=run_tag,
+                    symbol=symbol,
+                    ltf=ltf,
+                    strategy=strategy,
+                    gate_cfg=gate_cfg,
+                    switch_on=False,
+                    threshold=None,
+                    start_ts=start_ts,
+                    end_ts=end_ts,
+                    capital=args.capital,
+                    warmup=args.warmup,
+                    tag=off_tag,
+                )
+                if base_result is None:
+                    exit_code = 1
+                    continue
+                base_trades = (base_result.metrics or {}).get("total_trades", 0) or 0
+
+                # ── 2. Optional: skip ON variants if baseline is sterile ──
+                # A gate only DROPS signals; it can never create them.  If the
+                # OFF baseline has (near-)zero trades, every ON threshold variant
+                # will also be (near-)zero — running them just wastes time.
+                if base_trades < args.min_trades:
+                    print(
+                        f"  ⏭  skipping ON variants: baseline has only {base_trades} trade(s) "
+                        f"< min_trades={args.min_trades} (a pure filter cannot create trades)."
                     )
+                    continue
+
+                # Build ON variants: one per threshold candidate; the plain ON
+                # (switch only, no threshold) is only emitted when the gate has
+                # no numeric threshold knob.
+                on_variants: list[tuple[bool, Any | None]] = [
+                    (True, thr) for thr in thresholds
+                ]
+                if not thresholds:
+                    on_variants.append((True, None))
+
+                for (switch_on, threshold) in on_variants:
                     thr_str = "None" if threshold is None else str(threshold)
-                    print(f"▶ [{symbol} {ltf}] {strategy}.{switch_key}= {'on' if switch_on else 'off'}"
-                          + (f" @{gate_cfg['threshold_key']}={thr_str}" if switch_on and gate_cfg['threshold_key'] else ""))
-                    t0 = time.time()
-                    try:
-                        _, result = await run_one(
-                            symbol=symbol,
-                            ltf=ltf,
-                            strategy_name=strategy,
-                            gate_cfg=gate_cfg,
-                            threshold=threshold,
-                            switch_on=switch_on,
-                            start_ts=start_ts,
-                            end_ts=end_ts,
-                            capital=args.capital,
-                            warmup=args.warmup,
-                        )
-                    except Exception as exc:  # noqa: BLE001
-                        print(f"  ✗ errored: {exc}")
-                        summaries.append({
-                            "run_id": tag, "symbol": symbol, "ltf": ltf,
-                            "strategy": strategy, "gate": gate_name, "switch": switch_on,
-                            "threshold_key": gate_cfg["threshold_key"], "threshold": thr_str,
-                            "error": str(exc),
-                        })
+                    tag = (
+                        f"{run_tag}_{symbol}_{ltf}_{gate_name}_on"
+                        + (f"_t{threshold}" if threshold is not None else "")
+                    )
+                    print(f"▶ [ON] [{symbol} {ltf}] {strategy}.{switch_key}= on"
+                          + (f" @{gate_cfg['threshold_key']}={thr_str}" if gate_cfg["threshold_key"] else ""))
+                    on_result = await _run_and_record(
+                        summaries=summaries,
+                        OC=OC,
+                        run_tag=run_tag,
+                        symbol=symbol,
+                        ltf=ltf,
+                        strategy=strategy,
+                        gate_cfg=gate_cfg,
+                        switch_on=True,
+                        threshold=threshold,
+                        start_ts=start_ts,
+                        end_ts=end_ts,
+                        capital=args.capital,
+                        warmup=args.warmup,
+                        tag=tag,
+                    )
+                    if on_result is None:
                         exit_code = 1
                         continue
-
-                    if result.error:
-                        print(f"  ⚠ engine error: {result.error}")
-
-                    htf = _htf_for(ltf)
-                    stop_out = _count_stop_out(result)
-                    metrics = result.metrics or {}
-                    summary = result_summary_row(result, run_id=tag, ltf=ltf, htf=htf)
-                    summary.update({
-                        "symbol": symbol,
-                        "strategy": strategy,
-                        "gate": gate_name,
-                        "switch": switch_on,
-                        "threshold_key": gate_cfg["threshold_key"],
-                        "threshold": thr_str,
-                        "stop_out_count": stop_out,
-                    })
-                    summaries.append(summary)
-
-                    # Persist full result.
-                    try:
-                        from app.services.backtest.persistence import save_result
-                        save_result(result, run_id=tag, output_dir=OC)
-                    except Exception as exc:  # noqa: BLE001
-                        print(f"  ⚠ persist failed: {exc}")
-
-                    print(f"  ✓ {metrics.get('total_trades')} trades, "
-                          f"win={metrics.get('win_rate')}, "
-                          f"sharpe={metrics.get('sharpe_per_candle')}, "
-                          f"net={metrics.get('net_profit')}, stop-outs={stop_out}")
 
     # Write comparison CSV (overwrite on each full invocation).
     csv_path = write_comparison_csv(summaries, output_dir=OUTPUT_DIR, append=False)
