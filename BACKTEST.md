@@ -1,4 +1,4 @@
-# Backtesting (headless CLI)
+# Backtesting (headless CLI + UI persistence)
 
 This document explains how to run **deterministic, headless** backtests and
 parse the results, outside of the NiceGUI UI. The UI is fine for a quick look,
@@ -6,17 +6,43 @@ but its results live on `app.state` and are **lost on refresh**. The CLI tools
 below persist everything to disk so results survive and can be diffed across
 runs.
 
+> **Note on the UI**: the BACKTEST page now **persists every completed result
+> to disk automatically** and has a **Saved Runs** browser, so results also
+> survive app restarts (not just page refreshes). See
+> [UI persistence](#ui-persistence-saved-runs) below.
+
 ---
 
 ## Overview
 
 | Interest | You want |
 |---|---|
-| Run backtests / compare timeframes | [`scripts/run_backtest_cli.py`](#1-run-backtests) |
-| Parse / compare results | [`scripts/parse_backtest_results.py`](#2-parse-results) |
+| Run backtests / compare timeframes (CLI) | [`scripts/run_backtest_cli.py`](#1-run-backtests) |
+| Parse / compare results (CLI) | [`scripts/parse_backtest_results.py`](#2-parse-results) |
+| Run / browse / load results (UI) | BACKTEST page → Saved Runs |
 
 Both scripts live in `scripts/` and use the project venv. Run them from the
-**repo root**.
+**repo root**. The UI and CLI share the same persistence format
+(`app/services/backtest/persistence.py`), so a run produced by either is
+viewable by the other.
+
+---
+
+## 0. UI persistence (Saved Runs)
+
+The BACKTEST page persists every **completed, trade-producing** backtest to
+disk automatically and exposes a **Saved Runs** browser:
+
+- **Saved Runs list** — each persisted result shows its time, LTF, strategies,
+  net PnL, win %, and trade count, with **Load** (renders the full result into
+  the results area) and **Delete** buttons.
+- **Saved Runs Comparison** — a sortable table built from the cumulative
+  `comparison.csv` showing every run side-by-side.
+- Results survive **app restarts**, not just page refreshes (plain files on
+  disk, no DB).
+
+Saved runs live in the same place as the CLI output: `backtest_cache/cli/`.
+A run created in the UI is visible to the CLI parser and vice-versa.
 
 ---
 

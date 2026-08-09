@@ -8536,7 +8536,156 @@ def register_pages(app: FastAPI) -> None:
             results_container = ui.column().classes("w-full gap-2")
             sweep_results_container = ui.column().classes("w-full gap-2")
 
+            # ── Saved runs browser ────────────────────────────────────────
+            # Lists all persisted backtest results (backtest_cache/cli/*_results.json)
+            # so they survive page refreshes and app restarts.
+            saved_runs_container = ui.column().classes("w-full gap-2")
+
         page_client = ui.context.client
+
+        # ── Persistence helpers ───────────────────────────────────────────
+        def _persist_result(result: Any, ltf: str) -> str | None:
+            """Persist a completed result to disk; returns its run_id or None."""
+            try:
+                from app.services.backtest.persistence import make_run_id, save_result
+                run_id = make_run_id(ltf)
+                save_result(result, run_id=run_id)
+                return run_id
+            except Exception as exc:  # noqa: BLE001 - persistence is best-effort
+                logger.warning("Failed to persist backtest result: %s", exc)
+                return None
+
+        def _fmt_ts(ms_val: Any) -> str:
+            try:
+                from datetime import datetime, timezone
+                return datetime.fromtimestamp(float(ms_val), tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+            except (TypeError, ValueError, OSError):
+                return str(ms_val)
+
+        def _load_saved_files() -> list[Any]:
+            """Return persisted result file paths newest-first (empty on error)."""
+            try:
+                from app.services.backtest.persistence import iter_result_files
+                return list(iter_result_files())
+            except Exception:  # noqa: BLE001
+                return []
+
+        def _render_saved_runs(container: ui.column) -> None:
+            """Render the list of persisted backtest runs as loadable cards."""
+            container.clear()
+            files = _load_saved_files()
+
+            with container:
+                with ui.card().classes("w-full rounded-lg border border-slate-200"):
+                    with ui.row().classes("w-full items-center justify-between"):
+                        ui.label("Saved Runs").classes("text-lg font-semibold")
+                        ui.button(
+                            "Refresh",
+                            icon="refresh",
+                            on_click=lambda: _render_saved_runs(container),
+                        ).props("dense flat color=primary size=sm")
+
+                    if not files:
+                        ui.label(
+                            "No saved runs yet. Run a backtest or sweep and the result "
+                            "is persisted to backtest_cache/cli/ automatically."
+                        ).classes("text-sm text-slate-500")
+                        return
+
+                    from app.services.backtest.persistence import load_result, delete_result
+                    for f in files:
+                        result = load_result(f)
+                        m = result.metrics if result else {}
+                        name = f.name.replace("_results.json", "")
+                        path_for_delete = f
+                        with ui.row().classes(
+                            "w-full items-center gap-3 border-t border-slate-100 py-2"
+                        ):
+                            ui.label(_fmt_ts(f.stat().st_mtime)).classes("text-xs text-slate-400 w-36")
+                            ui.label(result.config.timeframe).classes("text-sm font-medium w-12"
+                                                                     if result else "text-sm w-12")
+                            strat_str = ",".join(result.config.strategy_names) if result else "?"
+                            ui.label(strat_str).classes("text-sm text-slate-600 flex-1")
+                            if m:
+                                ui.label(f"{m.get('net_profit', 0):.2f} USDT · "
+                                         f"{m.get('win_rate', 0):.1f}% · "
+                                         f"{m.get('total_trades', 0)} trades").classes(
+                                    "text-xs text-slate-500 w-48")
+                            with ui.row().classes("gap-1"):
+                                ui.button(
+                                    "Load",
+                                    icon="open_in_new",
+                                    color="primary",
+                                    on_click=lambda r=result: _load_saved_result(r, container),
+                                ).props("dense size=sm")
+                                ui.button(
+                                    "Delete",
+                                    icon="delete",
+                                    color="negative",
+                                    on_click=lambda p=path_for_delete, c=container: (
+                                        delete_result(p), _render_saved_runs(c)
+                                    ),
+                                ).props("dense flat size=sm")
+
+                    _render_comparison_csv(container)
+
+        def _render_comparison_csv(container: ui.column) -> None:
+            """Render the cumulative comparison.csv as a sortable table."""
+            from app.services.backtest.persistence import read_comparison_csv
+            rows = read_comparison_csv()
+            if not rows:
+                return
+            # Prefer a stable column order: identity cols first, then metrics.
+            preferred = ["run_id", "ltf", "htf", "symbols", "strategies", "error",
+                         "duration_seconds", "candles_processed"]
+            cols = [c for c in preferred if c in rows[0]] + [c for c in rows[0] if c not in preferred]
+            # Human-readable column headers (strip m_ prefix, tidy metrics).
+            labels = {
+                "run_id": "Run", "ltf": "LTF", "htf": "HTF", "symbols": "Symbols",
+                "strategies": "Strategies", "error": "Error",
+                "duration_seconds": "Seconds", "candles_processed": "Candles",
+                "m_total_trades": "Trades", "m_win_rate": "Win %",
+                "m_profit_factor": "PF", "m_net_profit": "Net PnL",
+                "m_total_return_pct": "Return %", "m_max_drawdown_pct": "MaxDD %",
+                "m_sharpe_per_candle": "Sharpe", "m_expectancy": "Expectancy",
+            }
+            table_cols = [
+                {"name": c, "label": labels.get(c, c), "field": c, "align": "right", "sortable": True}
+                for c in cols
+            ]
+            table_rows = []
+            for r in rows:
+                clean = {}
+                for c in cols:
+                    v = r.get(c, "")
+                    clean[c] = f"{float(v):.2f}" if c.startswith("m_") and _is_num(v) else v
+                table_rows.append(clean)
+            with ui.card().classes("w-full rounded-lg border border-slate-200 mt-2"):
+                with ui.row().classes("w-full items-center justify-between"):
+                    ui.label("Saved Runs Comparison (comparison.csv)").classes("text-lg font-semibold")
+                    ui.button("Refresh", icon="refresh",
+                              on_click=lambda: (_render_saved_runs(container))).props(
+                        "dense flat color=primary size=sm")
+                with ui.table(columns=table_cols, rows=table_rows).classes("w-full"):
+                    pass
+
+        def _is_num(v: Any) -> bool:
+            try:
+                float(v)
+                return True
+            except (TypeError, ValueError):
+                return False
+
+        def _load_saved_result(result: Any, container: ui.column) -> None:
+            """Load a saved result into the main results view."""
+            if result is None or result.is_error:
+                ui.notify("Saved result could not be loaded.", color="negative")
+                return
+            backtest_result["value"] = result
+            app.state.backtest_result = result
+            results_container.clear()
+            _render_results(result, results_container)
+            ui.notify(f"Loaded saved run: {len(result.trades)} trades", color="positive")
 
         # ── Backtest runner ───────────────────────────────────────────────
 
@@ -8650,6 +8799,12 @@ def register_pages(app: FastAPI) -> None:
                 try:
                     result = await engine.run(progress_cb=progress_cb)
                     app.state.backtest_result = result
+                    # Persist the result to disk (survives app restarts) and
+                    # refresh the Saved Runs browser.
+                    if not result.is_error and result.trades:
+                        _persist_result(result, timeframe)
+                        ui.timer(0.2, lambda: _render_saved_runs(saved_runs_container),
+                                 once=True)
                     app.state.backtest_progress["text"] = "Done" if not result.is_error else f"Error: {result.error}"
                     app.state.backtest_progress["phase"] = "error" if result.is_error else "done"
                     app.state.backtest_progress["result"] = result
@@ -9078,6 +9233,9 @@ def register_pages(app: FastAPI) -> None:
         _stored_sweep = getattr(app.state, "sweep_result", None)
         if _stored_sweep and not _stored_sweep.is_error:
             _render_sweep_results(_stored_sweep, sweep_results_container)
+
+        # Render the Saved Runs browser (persisted results survive restarts).
+        _render_saved_runs(saved_runs_container)
 
 
 __all__ = ["register_pages"]

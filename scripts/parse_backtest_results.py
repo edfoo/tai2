@@ -29,14 +29,23 @@ Options
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import sys
 from pathlib import Path
 from typing import Any, Iterable
 
 ROOT = Path(__file__).resolve().parent.parent
-OUTPUT_DIR = ROOT / "backtest_cache" / "cli"
+sys.path.insert(0, str(ROOT))
+
+from app.services.backtest.persistence import (  # noqa: E402
+    DEFAULT_OUTPUT_DIR,
+    iter_result_files,
+    load_result,
+    read_comparison_csv,
+    result_summary_row,
+)
+
+OUTPUT_DIR = DEFAULT_OUTPUT_DIR
 CSV_PATH = OUTPUT_DIR / "comparison.csv"
 
 # Headline metrics worth displaying in the human table, in a sensible order.
@@ -63,49 +72,25 @@ def load_from_csv() -> list[dict[str, Any]]:
         print(f"│  Run `run_backtest_cli.py` first to generate results.       │")
         print(f"└──────────────────────────────────────────────────────────────┘", file=sys.stderr)
         return []
-    rows: list[dict[str, Any]] = []
-    with open(CSV_PATH, newline="") as fh:
-        for row in csv.DictReader(fh):
-            rows.append(row)
-    return rows
+    return read_comparison_csv()
 
 
 def load_from_json(results_dir: Path = OUTPUT_DIR) -> list[dict[str, Any]]:
-    """Load from ``*_results.json`` files, preserving unflattened metrics."""
+    """Load from ``*_results.json`` files via the shared persistence module."""
     rows: list[dict[str, Any]] = []
-    for p in sorted(results_dir.glob("*_results.json")):
-        try:
-            data = json.loads(p.read_text())
-        except (json.JSONDecodeError, OSError):
+    for p in iter_result_files(results_dir):
+        result = load_result(p)
+        if result is None:
             continue
-        if data.get("error"):
+        if result.error:
             continue
-        rows.append(_unflatten(data))
+        row = result_summary_row(result, run_id=p.stem, ltf=result.config.timeframe)
+        # Attach unflattened metrics + per-strategy so the human table can
+        # show breakdowns in JSON mode.
+        row["metrics"] = result.metrics or {}
+        row["per_strategy"] = result.per_strategy or {}
+        rows.append(row)
     return rows
-
-
-def _unflatten(data: dict[str, Any]) -> dict[str, Any]:
-    """Rebuild a row dict from a *_results.json payload.
-
-    Sets the flattened ``m_*`` keys (so downstream code and --json output
-    stay consistent with the CSV view) while keeping a reference to the
-    unflattened ``metrics`` dict.
-    """
-    cfg = data.get("config") or {}
-    ltf = cfg.get("timeframe", "")
-    summ = {
-        "run_id": f"{ltf}",
-        "ltf": ltf,
-        "htf": "",
-        "symbols": ",".join(cfg.get("symbols") or []),
-        "strategies": ",".join(cfg.get("strategy_names") or []),
-        "trades_count": data.get("trades_count"),
-        "metrics": data.get("metrics") or {},
-        "per_strategy": data.get("per_strategy") or {},
-    }
-    for k, v in (data.get("metrics") or {}).items():
-        summ[f"m_{k}"] = v
-    return summ
 
 
 def selected_rows(source: str, ltf_filter: str | None) -> list[dict[str, Any]]:

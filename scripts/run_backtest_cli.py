@@ -36,7 +36,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import csv
 import json
 import sys
 import time
@@ -51,9 +50,16 @@ sys.path.insert(0, str(ROOT))
 
 from app.services.backtest.engine import BacktestEngine, available_strategy_names  # noqa: E402
 from app.services.backtest.models import BacktestConfig, BacktestResult  # noqa: E402
+from app.services.backtest.persistence import (  # noqa: E402
+    DEFAULT_OUTPUT_DIR,
+    OVERVIEW_FILENAME,
+    result_summary_row,
+    save_result,
+    write_comparison_csv,
+)
 from app.services.strategies.defaults import strategy_defaults  # noqa: E402
 
-OUTPUT_DIR = ROOT / "backtest_cache" / "cli"
+OUTPUT_DIR = DEFAULT_OUTPUT_DIR
 _MS = 1_000
 
 
@@ -91,60 +97,9 @@ def _winning_strategy_cfg(name: str, enabled: bool = True) -> dict[str, Any]:
     return cfg
 
 
-def result_to_dict(result: BacktestResult) -> dict[str, Any]:
-    """Convert a BacktestResult into a JSON-serialisable dict.
-
-    Keeps the headline metrics plus a compact trade summary (no raw
-    dataclass instances, which asyncio/json can't serialise directly).
-    """
-    trades = []
-    for t in result.trades:
-        trades.append({
-            "symbol": t.symbol,
-            "direction": t.direction,
-            "strategy": t.strategy_name,
-            "entry_ts": t.entry_ts,
-            "entry_price": t.entry_price,
-            "tp_price": t.tp_price,
-            "sl_price": t.sl_price,
-            "close_reason": t.close_reason,
-            "pnl": t.pnl,
-            "pnl_pct": t.pnl_pct,
-            "candles_held": t.candles_held,
-        })
-    return {
-        "config": {
-            "timeframe": result.config.timeframe,
-            "symbols": result.config.symbols,
-            "start_ts": result.config.start_ts,
-            "end_ts": result.config.end_ts,
-            "strategy_names": result.config.strategy_names,
-            "initial_capital": result.config.initial_capital,
-        },
-        "metrics": result.metrics,
-        "per_strategy": result.per_strategy,
-        "trades_count": len(trades),
-        "trades": trades,
-        "duration_seconds": result.duration_seconds,
-        "candles_processed": result.candles_processed,
-        "error": result.error,
-    }
-
-
 def summarize(result: BacktestResult, run_id: str, ltf: str, htf: str) -> dict[str, Any]:
-    """Extract a one-row summary for the comparison CSV."""
-    m = result.metrics or {}
-    return {
-        "run_id": run_id,
-        "ltf": ltf,
-        "htf": htf,
-        "symbols": ",".join(result.config.symbols),
-        "strategies": ",".join(result.config.strategy_names),
-        "error": result.error or "",
-        "duration_seconds": round(result.duration_seconds, 2),
-        "candles_processed": result.candles_processed,
-        **{f"m_{k}": v for k, v in m.items()},
-    }
+    """Extract a one-row summary for the comparison CSV (shares persistence module)."""
+    return result_summary_row(result, run_id=run_id, ltf=ltf, htf=htf)
 
 
 async def run_one(
@@ -239,34 +194,25 @@ async def _amain(args: argparse.Namespace) -> int:
         if result.error:
             print(f"  ⚠ engine set error: {result.error}")
 
-        # Persist the full result.
-        full_path = OC / f"{run_id}_results.json"
-        full_path.write_text(json.dumps(result_to_dict(result), indent=2, default=str))
-        # Persist the per-strategy breakdowns too.
-        breakdown_path = OC / f"{run_id}_per_strategy.json"
-        breakdown_path.write_text(
-            json.dumps({"per_strategy": result.per_strategy, "metrics": result.metrics},
-                       indent=2, default=str)
-        )
+        # Persist the full result + per-strategy breakdown + CSV row using
+        # the shared persistence module (same format the UI writes).
+        try:
+            save_result(result, run_id=run_id, output_dir=OC)
+        except Exception as exc:  # noqa: BLE001 - persistence failure shouldn't kill the run
+            print(f"  ⚠ failed to persist result to {OC}: {exc}")
 
         summaries.append(summarize(result, run_id, ltf, htf))
 
     # Comparison CSV + overview.
-    csv_path = OUTPUT_DIR / "comparison.csv"
-    fieldnames = sorted({k for s in summaries for k in s.keys()})
-    with open(csv_path, "w", newline="") as fh:
-        writer = csv.DictWriter(fh, fieldnames=fieldnames)
-        writer.writeheader()
-        for s in enabled_or_all(summaries):
-            writer.writerow(s)
+    csv_path = write_comparison_csv(enabled_or_all(summaries), output_dir=OUTPUT_DIR, append=False)
 
-    overview_path = OUTPUT_DIR / "overview.json"
+    overview_path = OUTPUT_DIR / OVERVIEW_FILENAME
     overview = {"generated_at": run_tag, "days": args.days, "runs": summaries}
     overview_path.write_text(json.dumps(overview, indent=2, default=str))
 
     # Print a human-readable diff for the headline metric(s).
     print("\n── Comparison ──")
-    if args.rank_by in summaries[0]:
+    if summaries and args.rank_by in summaries[0]:
         ordered = sorted(enabled_or_all(summaries), key=lambda s: s.get(args.rank_by) or -1e18, reverse=True)
         for s in ordered:
             print(f"  {s.get('ltf')}/{s.get('htf'):<4} {args.rank_by}={s.get(args.rank_by)} "
