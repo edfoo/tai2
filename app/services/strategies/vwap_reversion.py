@@ -100,8 +100,11 @@ class VWAPReversionStrategy:
         # falls back to an acceptable, validated value.
         cfg = merged_config(config, self.name)
 
-        # ---- HTF regime gate (chop preferred) ------------------------------
-        from app.services.indicator_service import is_trending
+        # ---- HTF regime gate (chop preferred by default) -------------------
+        # Configurable per-strategy: "chop" (block when HTF trending — the
+        # legacy VWAP behaviour), "trend", or "off".  Neutral (no HTF data)
+        # never blocks.
+        from app.services.indicator_service import htf_regime_allows
 
         market_data: dict[str, Any] = snapshot.get("market_data") or {}
         sym_data = market_data.get(symbol) or {}
@@ -109,8 +112,9 @@ class VWAPReversionStrategy:
 
         adx_htf = helpers.extract_float(indicators.get("adx_htf"))
         chop_htf = helpers.extract_float(indicators.get("choppiness_htf"))
+        htf_pref = cfg.get("htf_regime_preference", "chop")
 
-        if is_trending(adx_htf, chop_htf) is True:
+        if not htf_regime_allows(adx_htf, chop_htf, htf_pref):
             return None  # Avoid fading VWAP on strong trend days
 
         # ── Config ────────────────────────────────────────────────────

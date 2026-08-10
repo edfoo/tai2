@@ -7,6 +7,7 @@ from typing import Any, List
 
 import pytest
 
+import app.services.market_service as market_service_module
 from app.services.market_service import MarketService
 
 
@@ -50,6 +51,51 @@ def test_indicator_helper_handles_empty_data() -> None:
     assert indicators["choppiness"] is None
     assert indicators["vpoc"] is None
     assert indicators["value_area_width"] is None
+
+
+def test_fetch_long_short_ratio_backoffs_after_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def scenario() -> None:
+        service = MarketService(
+            state_service=DummySnapshotStore(),
+            enable_websocket=False,
+            account_api=object(),
+            market_api=object(),
+            public_api=object(),
+            trade_api=object(),
+        )
+        service._trading_api = object()
+
+        class DummySemaphore:
+            def release(self) -> None:
+                return None
+
+        class DummyApi:
+            def get_long_short_ratio(self, *args: Any, **kwargs: Any) -> None:
+                raise asyncio.TimeoutError()
+
+        calls = 0
+
+        async def fake_to_thread(*args: Any, **kwargs: Any) -> None:
+            nonlocal calls
+            calls += 1
+            raise asyncio.TimeoutError()
+
+        monkeypatch.setattr(market_service_module.asyncio, "to_thread", fake_to_thread)
+
+        async def fake_acquire_pool_slot(_pool: Any) -> tuple[DummyApi, DummySemaphore]:
+            return DummyApi(), DummySemaphore()
+
+        monkeypatch.setattr(service, "_acquire_pool_slot", fake_acquire_pool_slot)
+
+        first = await service._fetch_long_short_ratio("BTC-USDT-SWAP")
+        assert first == {}
+        assert calls == 1
+
+        second = await service._fetch_long_short_ratio("BTC-USDT-SWAP")
+        assert second == {}
+        assert calls == 1
+
+    asyncio.run(scenario())
 
 
 def _ohlcv_rows(n: int, base: float = 100.0) -> list[list[Any]]:

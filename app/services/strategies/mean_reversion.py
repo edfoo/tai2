@@ -249,14 +249,17 @@ class MeanReversionStrategy:
             or (imbalance_min <= imbalance <= imbalance_max)
         )
 
-        # ---- Higher-timeframe trend filter ----------------------------------
-        from app.services.indicator_service import is_trending  # local import to avoid circulars
+        # ---- Higher-timeframe regime gate ----------------------------------
+        # Configurable per-strategy: "chop" (block when HTF trending — the
+        # legacy MR behaviour), "trend" (block when HTF not trending), or
+        # "off" (disable the gate).  Neutral (no HTF data) never blocks.
+        from app.services.indicator_service import htf_regime_allows  # local import to avoid circulars
 
         adx_htf = helpers.extract_float(indicators.get("adx_htf"))
         chop_htf = helpers.extract_float(indicators.get("choppiness_htf"))
+        htf_pref = cfg.get("htf_regime_preference", "chop")
 
-        # Neutral (None) when no HTF regime data → don't block.
-        if is_trending(adx_htf, chop_htf) is True:
+        if not htf_regime_allows(adx_htf, chop_htf, htf_pref):
             # Market is trending → disable mean-reversion entry prematurely.
             return None
 

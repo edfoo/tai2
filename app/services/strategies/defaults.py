@@ -27,6 +27,10 @@ DEFAULT_MEAN_REVERSION: dict[str, Any] = {
     "min_adx": 0.0,
     "max_adx": 28.0,
     "require_htf_trend": True,
+    # HTF regime gate preference: "chop" (block when HTF trending),
+    # "trend" (block when HTF not trending), or "off" (disable gate).
+    # MR wants a ranging HTF → default "chop" (preserves legacy behaviour).
+    "htf_regime_preference": "chop",
     "require_cmf": False,
     "require_htf_cmf": False,
     "require_cmf_cross": False,
@@ -98,6 +102,8 @@ DEFAULT_SPIKE_CONTINUATION: dict[str, Any] = {
     "min_atr_pct": 1.0,
     "min_reward_risk_ratio": 1.0,
     "flip_launcher_direction": None,
+    # HTF regime gate preference: SC wants a trending HTF → default "trend".
+    "htf_regime_preference": "trend",
     # Liquidity-aware gates (§3) — OFF by default (opt-in).
     "require_oi_confirmation": False,
     "oi_min_zscore": 1.0,
@@ -131,6 +137,8 @@ DEFAULT_LIQUIDITY_SWEEP: dict[str, Any] = {
     "min_atr_pct": 0.8,
     "min_reward_risk_ratio": 1.0,
     "flip_launcher_direction": None,
+    # HTF regime gate preference: sweep wants a ranging HTF → default "chop".
+    "htf_regime_preference": "chop",
     # Liquidity-aware gates (§3) — OFF by default (opt-in).
     "require_close_in_va": False,
     "require_macro_sl": False,
@@ -162,6 +170,8 @@ DEFAULT_VWAP_REVERSION: dict[str, Any] = {
     "min_atr_pct": 1.0,
     "min_reward_risk_ratio": 1.0,
     "flip_launcher_direction": None,
+    # HTF regime gate preference: VWAP reversion wants a ranging HTF → "chop".
+    "htf_regime_preference": "chop",
     # Liquidity-aware gates (§3) — OFF by default (opt-in).
     "require_no_funding_bias": False,
     "funding_max_abs_rate": 0.0007,
@@ -192,6 +202,8 @@ DEFAULT_TREND_PULLBACK: dict[str, Any] = {
     "min_atr_pct": 1.0,
     "min_reward_risk_ratio": 1.0,
     "flip_launcher_direction": None,
+    # HTF regime gate preference: trend pullback wants a trending HTF → "trend".
+    "htf_regime_preference": "trend",
     # Liquidity-aware gates (§3) — OFF by default (opt-in).
     "require_poc_proximity": False,
     "poc_proximity_va_width": 0.2,

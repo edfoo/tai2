@@ -3171,6 +3171,14 @@ def register_pages(app: FastAPI) -> None:
                             ).props("dense color=primary")
                             ui.label("HTF EMA50 > EMA200 for BUY / EMA50 < EMA200 for SELL.").classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            mr_htf_regime_select = ui.select(
+                                ["chop", "trend", "off"],
+                                label="HTF regime preference",
+                                value=str(_mr_cfg.get("htf_regime_preference", "chop")),
+                            ).classes("w-56").props(
+                                "hint='chop=block when HTF trending, trend=block when HTF ranging, off=disable gate' persistent-hint dense"
+                            )
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             mr_require_cmf_switch = ui.switch(
                                 "Require CMF confirmation",
                                 value=bool(_mr_cfg.get("require_cmf", True)),
@@ -3446,6 +3454,7 @@ def register_pages(app: FastAPI) -> None:
                 mr_min_adx_input.value = 0.0
                 mr_max_adx_input.value = 28.0
                 mr_require_htf_switch.value = True
+                mr_htf_regime_select.value = "chop"
                 mr_require_cmf_switch.value = False
                 mr_require_htf_cmf_switch.value = False
                 # CMF cross is rare and cuts frequency ~90%; BB position +
@@ -3681,6 +3690,14 @@ def register_pages(app: FastAPI) -> None:
                                 min=10, max=200, step=10, format="%.0f",
                             ).classes("w-40").props("dense")
                             ui.label("Number of historical candles to compute the percentile over.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            sc_htf_regime_select = ui.select(
+                                ["chop", "trend", "off"],
+                                label="HTF regime preference",
+                                value=str(_sc_cfg.get("htf_regime_preference", "trend")),
+                            ).classes("w-56").props(
+                                "hint='trend=block when HTF ranging, chop=block when HTF trending, off=disable gate' persistent-hint dense"
+                            )
                         # ── ATR-scaled TP/SL ────────────────────────────────────
                         ui.separator().classes("my-2")
                         ui.label("ATR-Scaled TP/SL").classes("text-xs font-semibold text-slate-600")
@@ -3787,6 +3804,7 @@ def register_pages(app: FastAPI) -> None:
                 sc_require_regime_switch.value = True
                 sc_min_bw_pct_input.value = 55.0
                 sc_regime_lookback_input.value = 50
+                sc_htf_regime_select.value = "trend"
                 sc_use_atr_sizing_switch.value = True
                 sc_atr_tp_mult_input.value = 1.2
                 sc_atr_sl_mult_input.value = 1.0
@@ -3869,6 +3887,14 @@ def register_pages(app: FastAPI) -> None:
                                 value=bool(_ls_cfg.get("require_htf_trend", True)),
                             ).props("dense color=primary")
                             ui.label("Only longs in HTF uptrends, shorts in downtrends.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            ls_htf_regime_select = ui.select(
+                                ["chop", "trend", "off"],
+                                label="HTF regime preference",
+                                value=str(_ls_cfg.get("htf_regime_preference", "chop")),
+                            ).classes("w-56").props(
+                                "hint='chop=block when HTF trending, trend=block when HTF ranging, off=disable gate' persistent-hint dense"
+                            )
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             ls_require_vol_switch = ui.switch(
                                 "Require volume spike",
@@ -4032,6 +4058,7 @@ def register_pages(app: FastAPI) -> None:
                 ls_sweep_buffer_input.value = 0.1
                 ls_reclaim_ratio_input.value = 0.5
                 ls_require_htf_switch.value = True
+                ls_htf_regime_select.value = "chop"
                 ls_require_vol_switch.value = True
                 ls_vol_ratio_input.value = 1.5
                 ls_max_adx_input.value = 28.0
@@ -4130,6 +4157,14 @@ def register_pages(app: FastAPI) -> None:
                                 value=bool(_vr_cfg.get("require_htf_trend", True)),
                             ).props("dense color=primary")
                             ui.label("Only longs in HTF uptrends, shorts in downtrends.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            vr_htf_regime_select = ui.select(
+                                ["chop", "trend", "off"],
+                                label="HTF regime preference",
+                                value=str(_vr_cfg.get("htf_regime_preference", "chop")),
+                            ).classes("w-56").props(
+                                "hint='chop=block when HTF trending, trend=block when HTF ranging, off=disable gate' persistent-hint dense"
+                            )
                         # ── Regime gate ──────────────────────────────────
                         ui.separator().classes("my-2")
                         ui.label("Regime Gate (BB Bandwidth Percentile)").classes("text-xs font-semibold text-slate-600")
@@ -4267,6 +4302,7 @@ def register_pages(app: FastAPI) -> None:
                 vr_max_adx_input.value = 25.0
                 vr_require_closeback_switch.value = True
                 vr_require_htf_switch.value = True
+                vr_htf_regime_select.value = "chop"
                 vr_require_regime_switch.value = True
                 vr_max_bw_pct_input.value = 55.0
                 vr_regime_lookback_input.value = 50
@@ -4357,6 +4393,14 @@ def register_pages(app: FastAPI) -> None:
                                 value=bool(_tp_cfg.get("require_htf_trend", True)),
                             ).props("dense color=primary")
                             ui.label("HTF EMA50/EMA200 must confirm the trend direction.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            tp_htf_regime_select = ui.select(
+                                ["chop", "trend", "off"],
+                                label="HTF regime preference",
+                                value=str(_tp_cfg.get("htf_regime_preference", "trend")),
+                            ).classes("w-56").props(
+                                "hint='trend=block when HTF ranging, chop=block when HTF trending, off=disable gate' persistent-hint dense"
+                            )
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             tp_require_bullish_switch = ui.switch(
                                 "Require bullish/bearish candle",
@@ -4501,6 +4545,7 @@ def register_pages(app: FastAPI) -> None:
                 tp_proximity_input.value = 0.3
                 tp_use_vwap_switch.value = True
                 tp_require_htf_switch.value = True
+                tp_htf_regime_select.value = "trend"
                 tp_require_bullish_switch.value = True
                 tp_candle_rejection_pct_input.value = 25.0
                 tp_min_adx_input.value = 20.0
@@ -5411,6 +5456,7 @@ def register_pages(app: FastAPI) -> None:
                 "min_adx": float(mr_min_adx_input.value or 0.0),
                 "max_adx": float(mr_max_adx_input.value or 0.0),
                 "require_htf_trend": bool(mr_require_htf_switch.value),
+                "htf_regime_preference": str(mr_htf_regime_select.value or "chop"),
                 "require_cmf": bool(mr_require_cmf_switch.value),
                 "require_htf_cmf": bool(mr_require_htf_cmf_switch.value),
                 "require_cmf_cross": bool(mr_require_cmf_cross_switch.value),
@@ -5477,6 +5523,7 @@ def register_pages(app: FastAPI) -> None:
                 "require_regime": bool(sc_require_regime_switch.value),
                 "min_bb_bandwidth_percentile": float(sc_min_bw_pct_input.value or 55.0),
                 "regime_lookback": int(sc_regime_lookback_input.value or 50),
+                "htf_regime_preference": str(sc_htf_regime_select.value or "trend"),
                 "use_atr_sizing": bool(sc_use_atr_sizing_switch.value),
                 "atr_tp_multiplier": float(sc_atr_tp_mult_input.value or 2.2),
                 "atr_sl_multiplier": float(sc_atr_sl_mult_input.value or 2.0),
@@ -5496,6 +5543,7 @@ def register_pages(app: FastAPI) -> None:
                 "sweep_buffer_pct": float(ls_sweep_buffer_input.value or 0.1),
                 "reclaim_ratio": float(ls_reclaim_ratio_input.value or 0.5),
                 "require_htf_trend": bool(ls_require_htf_switch.value),
+                "htf_regime_preference": str(ls_htf_regime_select.value or "chop"),
                 "require_volume_spike": bool(ls_require_vol_switch.value),
                 "volume_spike_ratio": float(ls_vol_ratio_input.value or 1.5),
                 "volume_lookback": 10,
@@ -5531,6 +5579,7 @@ def register_pages(app: FastAPI) -> None:
                 "max_adx": float(vr_max_adx_input.value or 25.0),
                 "require_closeback": bool(vr_require_closeback_switch.value),
                 "require_htf_trend": bool(vr_require_htf_switch.value),
+                "htf_regime_preference": str(vr_htf_regime_select.value or "chop"),
                     "use_adaptive_atr": bool(vr_use_adaptive_atr_switch.value),
                 "require_regime": bool(vr_require_regime_switch.value),
                 "max_bb_bandwidth_percentile": float(vr_max_bw_pct_input.value or 55.0),
@@ -5560,6 +5609,7 @@ def register_pages(app: FastAPI) -> None:
                 "pullback_proximity_pct": float(tp_proximity_input.value or 0.4),
                 "use_vwap_as_level": bool(tp_use_vwap_switch.value),
                 "require_htf_trend": bool(tp_require_htf_switch.value),
+                "htf_regime_preference": str(tp_htf_regime_select.value or "trend"),
                     "use_adaptive_atr": bool(tp_use_adaptive_atr_switch.value),
                 "require_bullish_candle": bool(tp_require_bullish_switch.value),
                 "candle_rejection_pct": float(tp_candle_rejection_pct_input.value or 25.0),

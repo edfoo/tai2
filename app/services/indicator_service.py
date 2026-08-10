@@ -66,3 +66,67 @@ def is_trending(
             pass
 
     return bool(trending)
+
+
+# Valid values for a strategy's ``htf_regime_preference`` config key.
+HTF_REGIME_PREFERENCE_CHOICES = ("chop", "trend", "off")
+
+
+def htf_regime_allows(
+    adx_htf: Optional[float] | float | None,
+    chop_htf: Optional[float] | float | None,
+    preference: str | None,
+    *,
+    adx_threshold: float = 25.0,
+    choppiness_threshold: float = 40.0,
+) -> bool:
+    """Return whether the HTF regime gate passes for a given preference.
+
+    This is the configurable replacement for the hard-coded ``is_trending``
+    checks that previously lived inside each strategy.  It lets an operator
+    choose, per strategy, whether the higher-timeframe regime must be trending,
+    ranging (chop), or ignored entirely.
+
+    Parameters
+    ----------
+    adx_htf, chop_htf
+        Higher-timeframe regime values (see :func:`is_trending`).
+    preference
+        One of ``"chop"``, ``"trend"``, or ``"off"``.
+
+        * ``"chop"``  — block when the HTF is trending (mean-reversion /
+          sweep / VWAP want a ranging HTF).  This preserves the legacy
+          behaviour of those strategies.
+        * ``"trend"`` — block when the HTF is *not* trending (spike
+          continuation / trend pullback want a trending HTF).  This preserves
+          the legacy behaviour of those strategies.
+        * ``"off"``   — never block on the HTF regime (gate disabled).
+
+    Returns ``True`` when the gate passes (entry allowed), ``False`` when it
+    blocks.  When no HTF regime data is available the gate is neutral and
+    returns ``True`` regardless of preference, mirroring the existing
+    auto-disable behaviour.
+    """
+    if preference is None or preference == "off":
+        return True
+
+    trending = is_trending(
+        adx_htf,
+        chop_htf,
+        adx_threshold=adx_threshold,
+        choppiness_threshold=choppiness_threshold,
+    )
+
+    # No HTF regime data → neutral, never block.
+    if trending is None:
+        return True
+
+    if preference == "chop":
+        # Block when trending (want a ranging HTF).
+        return not trending
+    if preference == "trend":
+        # Block when not trending (want a trending HTF).
+        return trending
+
+    # Unknown preference → treat as neutral (do not block).
+    return True

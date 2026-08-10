@@ -96,8 +96,11 @@ class TrendPullbackStrategy:
         # falls back to an acceptable, validated value.
         cfg = merged_config(config, self.name)
 
-        # ---- HTF regime gate (must BE trending) ----------------------------
-        from app.services.indicator_service import is_trending
+        # ---- HTF regime gate (must BE trending by default) -----------------
+        # Configurable per-strategy: "trend" (block when HTF not trending —
+        # the legacy trend-pullback behaviour), "chop", or "off".  Neutral
+        # (no HTF data) never blocks.
+        from app.services.indicator_service import htf_regime_allows
 
         market_data: dict[str, Any] = snapshot.get("market_data") or {}
         sym_data = market_data.get(symbol) or {}
@@ -105,10 +108,11 @@ class TrendPullbackStrategy:
 
         adx_htf = helpers.extract_float(indicators.get("adx_htf"))
         chop_htf = helpers.extract_float(indicators.get("choppiness_htf"))
+        htf_pref = cfg.get("htf_regime_preference", "trend")
 
         # Trend pullback only makes sense if the HTF is in a trend. Only block
         # on a definitive non-trending signal; neutral (no HTF data) passes.
-        if is_trending(adx_htf, chop_htf) is False:
+        if not htf_regime_allows(adx_htf, chop_htf, htf_pref):
             return None
 
         # ── Config ────────────────────────────────────────────────────

@@ -266,6 +266,30 @@ def _resolve_requested_symbol(snapshot: dict[str, Any], requested: str | None) -
     return None
 
 
+def _symbol_has_own_market_data(snapshot: dict[str, Any], symbol: str | None) -> bool:
+    """Return True only if the snapshot has a dedicated market-data block for ``symbol``.
+
+    Guards against cross-symbol contamination: ``PromptBuilder.build()`` falls back to
+    the primary symbol's ticker/funding/OI/custom metrics when a symbol's own block is
+    missing (e.g. its data fetch failed in ``_build_snapshot``).  Skipping such symbols
+    here ensures one token's indicators can never influence another token's decision.
+    """
+    if not symbol:
+        return False
+    target = _normalize_symbol(symbol)
+    if not target:
+        return False
+    market_data = snapshot.get("market_data") or {}
+    block = market_data.get(target) or market_data.get(symbol)
+    if not isinstance(block, dict) or not block:
+        return False
+    # Require at least one symbol-specific market field so an empty/placeholder
+    # block doesn't pass the guard.
+    return any(
+        block.get(key) for key in ("ticker", "indicators", "custom_metrics", "order_book")
+    )
+
+
 async def resolve_prompt_metadata(
     runtime_meta: dict[str, Any], requested_version_id: str | None
 ) -> Tuple[dict[str, Any], Optional[JSONResponse]]:
@@ -322,6 +346,15 @@ async def prepare_prompt_payload(
         wait_for_tp_sl = runtime_meta.get("wait_for_tp_sl", False)
     wait_for_tp_sl = bool(wait_for_tp_sl)
     resolved_symbol = _resolve_requested_symbol(snapshot, symbol)
+    # Guard against cross-symbol contamination: if this symbol has no dedicated
+    # market-data block (its fetch failed in _build_snapshot), PromptBuilder would
+    # silently fall back to the primary symbol's data.  Skip it instead so one
+    # token's indicators can never drive another token's decision.
+    if not _symbol_has_own_market_data(snapshot, resolved_symbol):
+        return None, _response(
+            f"no market data for symbol {resolved_symbol}; skipping to avoid cross-symbol contamination",
+            503,
+        )
     if wait_for_tp_sl and _symbol_has_open_position(snapshot, resolved_symbol):
         detail = (
             f"wait-for-tp-sl guard active; symbol {resolved_symbol} has an open position"

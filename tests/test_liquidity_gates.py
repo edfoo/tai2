@@ -15,6 +15,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.services.market_service import MarketService
+from app.services.indicator_service import htf_regime_allows, is_trending
 from app.services.strategies import StrategyHelpers
 from app.services.strategies.liquidity_helpers import (
     funding_is_blocked,
@@ -214,6 +215,49 @@ class TestLiquidityHelpers:
         assert info["method"] == "zscore"
 
 
+# ── HTF regime preference helper ───────────────────────────────────────────
+
+
+class TestHTFRegimePreference:
+    """Tests for the configurable per-strategy HTF regime gate."""
+
+    # Trending HTF: ADX_HTF=30 (>=25) → trending. Ranging HTF: ADX_HTF=15 → not.
+    TRENDING = (30.0, 35.0)   # adx_htf, chop_htf
+    RANGING = (15.0, 60.0)    # adx_htf, chop_htf
+
+    def test_chop_blocks_trending(self) -> None:
+        assert htf_regime_allows(*self.TRENDING, "chop") is False
+
+    def test_chop_allows_ranging(self) -> None:
+        assert htf_regime_allows(*self.RANGING, "chop") is True
+
+    def test_trend_allows_trending(self) -> None:
+        assert htf_regime_allows(*self.TRENDING, "trend") is True
+
+    def test_trend_blocks_ranging(self) -> None:
+        assert htf_regime_allows(*self.RANGING, "trend") is False
+
+    def test_off_never_blocks(self) -> None:
+        assert htf_regime_allows(*self.TRENDING, "off") is True
+        assert htf_regime_allows(*self.RANGING, "off") is True
+
+    def test_none_preference_is_neutral(self) -> None:
+        assert htf_regime_allows(*self.TRENDING, None) is True
+
+    def test_unknown_preference_is_neutral(self) -> None:
+        assert htf_regime_allows(*self.TRENDING, "bogus") is True
+
+    def test_no_htf_data_is_neutral(self) -> None:
+        # No adx_htf / chop_htf → never blocks regardless of preference.
+        assert htf_regime_allows(None, None, "chop") is True
+        assert htf_regime_allows(None, None, "trend") is True
+
+    def test_is_trending_consistency(self) -> None:
+        # Sanity: the helper's chop/trend semantics match is_trending.
+        assert is_trending(*self.TRENDING) is True
+        assert is_trending(*self.RANGING) is False
+
+
 # ── Mean Reversion gates ────────────────────────────────────────────────────
 
 
@@ -323,6 +367,47 @@ class TestMeanReversionLiquidity:
         result = mr.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers())
         assert result is not None
 
+    # ── HTF regime preference ──────────────────────────────────────────
+
+    def test_htf_chop_blocks_trending_htf(self) -> None:
+        """MR default (chop): a trending HTF blocks the reversion entry."""
+        mr = MeanReversionStrategy()
+        snapshot = _snap(
+            indicators={"rsi": 20.0, "adx_htf": 30.0, "choppiness_htf": 35.0},
+        )
+        config = _mr_bare(rsi_oversold=30.0, htf_regime_preference="chop")
+        result = mr.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers())
+        assert result is None  # blocked — HTF trending
+
+    def test_htf_chop_allows_ranging_htf(self) -> None:
+        mr = MeanReversionStrategy()
+        snapshot = _snap(
+            indicators={"rsi": 20.0, "adx_htf": 15.0, "choppiness_htf": 60.0},
+        )
+        config = _mr_bare(rsi_oversold=30.0, htf_regime_preference="chop")
+        result = mr.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers())
+        assert result is not None
+
+    def test_htf_off_disables_gate(self) -> None:
+        """MR with preference 'off' enters even on a trending HTF."""
+        mr = MeanReversionStrategy()
+        snapshot = _snap(
+            indicators={"rsi": 20.0, "adx_htf": 30.0, "choppiness_htf": 35.0},
+        )
+        config = _mr_bare(rsi_oversold=30.0, htf_regime_preference="off")
+        result = mr.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers())
+        assert result is not None  # gate disabled → entry allowed
+
+    def test_htf_trend_blocks_ranging_htf(self) -> None:
+        """MR flipped to 'trend': a ranging HTF blocks the entry."""
+        mr = MeanReversionStrategy()
+        snapshot = _snap(
+            indicators={"rsi": 20.0, "adx_htf": 15.0, "choppiness_htf": 60.0},
+        )
+        config = _mr_bare(rsi_oversold=30.0, htf_regime_preference="trend")
+        result = mr.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers())
+        assert result is None  # blocked — HTF ranging
+
 
 # ── Spike Continuation OI gate ──────────────────────────────────────────────
 
@@ -397,6 +482,46 @@ class TestSpikeContinuationLiquidity:
         result = sc.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=112.0))
         assert result is not None
 
+    # ── HTF regime preference ──────────────────────────────────────────
+
+    def test_htf_trend_blocks_ranging_htf(self) -> None:
+        """SC default (trend): a ranging HTF blocks the momentum entry."""
+        sc = SpikeContinuationStrategy()
+        snapshot = _snap(
+            indicators={
+                "rsi": 65.0,
+                "volume_rsi_series": [80.0, 85.0],
+                "adx_htf": 15.0,
+                "choppiness_htf": 60.0,
+                **self._sc_rising_ohlcv(),
+            },
+        )
+        config = _sc_bare(
+            require_volume_rsi_rising=False,
+            htf_regime_preference="trend",
+        )
+        result = sc.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=112.0))
+        assert result is None  # blocked — HTF ranging
+
+    def test_htf_off_disables_gate(self) -> None:
+        """SC with preference 'off' enters even on a ranging HTF."""
+        sc = SpikeContinuationStrategy()
+        snapshot = _snap(
+            indicators={
+                "rsi": 65.0,
+                "volume_rsi_series": [80.0, 85.0],
+                "adx_htf": 15.0,
+                "choppiness_htf": 60.0,
+                **self._sc_rising_ohlcv(),
+            },
+        )
+        config = _sc_bare(
+            require_volume_rsi_rising=False,
+            htf_regime_preference="off",
+        )
+        result = sc.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=112.0))
+        assert result is not None  # gate disabled → entry allowed
+
 
 # ── Liquidity Sweep gates ──────────────────────────────────────────────────
 
@@ -456,6 +581,48 @@ class TestLiquiditySweepLiquidity:
         }
         result = ls.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=104.0))
         assert result is None  # blocked — close outside VA
+
+    # ── HTF regime preference ──────────────────────────────────────────
+
+    def test_htf_chop_blocks_trending_htf(self) -> None:
+        """Sweep default (chop): a trending HTF blocks the sweep entry."""
+        ls = LiquiditySweepStrategy()
+        snapshot = _snap(
+            indicators={**self._sweep_ohlcv(curr_close=100.0), "adx_htf": 30.0, "choppiness_htf": 35.0},
+        )
+        config = {
+            "enabled": True,
+            "require_htf_trend": False,
+            "require_volume_spike": False,
+            "require_regime": False,
+            "max_adx": 30.0,
+            "use_structural_sizing": False,
+            "use_atr_sizing": False,
+            "min_atr_pct": 0.0,
+            "htf_regime_preference": "chop",
+        }
+        result = ls.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=100.5))
+        assert result is None  # blocked — HTF trending
+
+    def test_htf_off_disables_gate(self) -> None:
+        """Sweep with preference 'off' enters even on a trending HTF."""
+        ls = LiquiditySweepStrategy()
+        snapshot = _snap(
+            indicators={**self._sweep_ohlcv(curr_close=100.0), "adx_htf": 30.0, "choppiness_htf": 35.0},
+        )
+        config = {
+            "enabled": True,
+            "require_htf_trend": False,
+            "require_volume_spike": False,
+            "require_regime": False,
+            "max_adx": 30.0,
+            "use_structural_sizing": False,
+            "use_atr_sizing": False,
+            "min_atr_pct": 0.0,
+            "htf_regime_preference": "off",
+        }
+        result = ls.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=100.5))
+        assert result is not None  # gate disabled → entry allowed
 
 
 # ── VWAP Reversion gates ────────────────────────────────────────────────────
@@ -518,6 +685,52 @@ class TestVWAPReversionLiquidity:
         }
         result = vr.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=103.0))
         assert result is not None
+
+    # ── HTF regime preference ──────────────────────────────────────────
+
+    def test_htf_chop_blocks_trending_htf(self) -> None:
+        """VWAP default (chop): a trending HTF blocks the reversion."""
+        vr = VWAPReversionStrategy()
+        snapshot = self._vwap_snapshot(distance_above=True)
+        snapshot["market_data"]["BTC-USDT-SWAP"]["indicators"]["adx_htf"] = 30.0
+        snapshot["market_data"]["BTC-USDT-SWAP"]["indicators"]["choppiness_htf"] = 35.0
+        config = {
+            "enabled": True,
+            "vwap_min_distance_atr": 2.0,
+            "vwap_max_distance_atr": 3.0,
+            "max_adx": 25.0,
+            "require_closeback": True,
+            "require_htf_trend": False,
+            "require_regime": False,
+            "use_atr_sizing": False,
+            "use_structural_sizing": False,
+            "min_atr_pct": 0.0,
+            "htf_regime_preference": "chop",
+        }
+        result = vr.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=103.0))
+        assert result is None  # blocked — HTF trending
+
+    def test_htf_off_disables_gate(self) -> None:
+        """VWAP with preference 'off' reverts even on a trending HTF."""
+        vr = VWAPReversionStrategy()
+        snapshot = self._vwap_snapshot(distance_above=True)
+        snapshot["market_data"]["BTC-USDT-SWAP"]["indicators"]["adx_htf"] = 30.0
+        snapshot["market_data"]["BTC-USDT-SWAP"]["indicators"]["choppiness_htf"] = 35.0
+        config = {
+            "enabled": True,
+            "vwap_min_distance_atr": 2.0,
+            "vwap_max_distance_atr": 3.0,
+            "max_adx": 25.0,
+            "require_closeback": True,
+            "require_htf_trend": False,
+            "require_regime": False,
+            "use_atr_sizing": False,
+            "use_structural_sizing": False,
+            "min_atr_pct": 0.0,
+            "htf_regime_preference": "off",
+        }
+        result = vr.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=103.0))
+        assert result is not None  # gate disabled → entry allowed
 
 
 # ── Trend Pullback POC proximity gate ───────────────────────────────────────
@@ -627,3 +840,51 @@ class TestTrendPullbackLiquidity:
         }
         result = tp.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=100.8))
         assert result is not None
+
+    # ── HTF regime preference ──────────────────────────────────────────
+
+    def test_htf_trend_blocks_ranging_htf(self) -> None:
+        """Trend pullback default (trend): a ranging HTF blocks the entry."""
+        tp = TrendPullbackStrategy()
+        snapshot = self._tp_snapshot(near_poc=True)
+        snapshot["market_data"]["BTC-USDT-SWAP"]["indicators"]["adx_htf"] = 15.0
+        snapshot["market_data"]["BTC-USDT-SWAP"]["indicators"]["choppiness_htf"] = 60.0
+        config = {
+            "enabled": True,
+            "pullback_ema": 21,
+            "pullback_proximity_pct": 1.0,
+            "use_vwap_as_level": False,
+            "require_htf_trend": False,
+            "require_bullish_candle": False,
+            "min_adx": 0.0,
+            "max_adx_for_entry": 40.0,
+            "use_structural_sizing": False,
+            "use_atr_sizing": False,
+            "min_atr_pct": 0.0,
+            "htf_regime_preference": "trend",
+        }
+        result = tp.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=100.8))
+        assert result is None  # blocked — HTF ranging
+
+    def test_htf_off_disables_gate(self) -> None:
+        """Trend pullback with preference 'off' enters even on a ranging HTF."""
+        tp = TrendPullbackStrategy()
+        snapshot = self._tp_snapshot(near_poc=True)
+        snapshot["market_data"]["BTC-USDT-SWAP"]["indicators"]["adx_htf"] = 15.0
+        snapshot["market_data"]["BTC-USDT-SWAP"]["indicators"]["choppiness_htf"] = 60.0
+        config = {
+            "enabled": True,
+            "pullback_ema": 21,
+            "pullback_proximity_pct": 1.0,
+            "use_vwap_as_level": False,
+            "require_htf_trend": False,
+            "require_bullish_candle": False,
+            "min_adx": 0.0,
+            "max_adx_for_entry": 40.0,
+            "use_structural_sizing": False,
+            "use_atr_sizing": False,
+            "min_atr_pct": 0.0,
+            "htf_regime_preference": "off",
+        }
+        result = tp.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=100.8))
+        assert result is not None  # gate disabled → entry allowed

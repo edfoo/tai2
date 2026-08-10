@@ -185,6 +185,7 @@ class MarketService:
     # symbols), so a smaller pool than candles suffices; 4 keeps latency low
     # without over-allocating httpx connections.
     LS_RATIO_CLIENT_POOL_SIZE = 4
+    LONG_SHORT_RATIO_FAILURE_BACKOFF_SECONDS = 60.0
     # httpx.Client default read timeout is 5s, which is too short for some
     # OKX endpoints (candles for obscure symbols, fills-history, long/short
     # ratio). Set a generous read timeout on every OKX client so our outer
@@ -310,6 +311,7 @@ class MarketService:
         self._latest_ohlcv_htf: dict[str, list[list[Any]]] = {}
         self._latest_long_short_ratio: dict[str, dict[str, Any]] = {}
         self._last_long_short_fetch: dict[str, float] = {}
+        self._long_short_ratio_backoff_until: dict[str, float] = {}
         self._trade_buffers: dict[str, Deque[dict[str, float]]] = {}
         # Footprint chart: per-symbol deque of timestamped, price-tagged trades.
         # Populated alongside _trade_buffers in _handle_ws_message.
@@ -5086,6 +5088,7 @@ class MarketService:
             self._position_activity.pop(symbol, None)
             self._latest_long_short_ratio.pop(symbol, None)
             self._last_long_short_fetch.pop(symbol, None)
+            self._long_short_ratio_backoff_until.pop(symbol, None)
             self._latest_execution_limits.pop(symbol, None)
 
     def get_cached_ticker(self, symbol: str | None) -> dict[str, Any] | None:
@@ -6397,6 +6400,8 @@ class MarketService:
         last_fetch = self._last_long_short_fetch.get(symbol, 0.0)
         if cache and now - last_fetch < 60:
             return cache
+        if self._long_short_ratio_backoff_until.get(symbol, 0.0) > now:
+            return cache
         base_ccy = (symbol or "").split("-")[0]
         if not base_ccy:
             return cache
@@ -6417,9 +6422,11 @@ class MarketService:
                 )
             except asyncio.TimeoutError:
                 logger.debug("Long/short ratio fetch timed out for %s (10s)", symbol)
+                self._long_short_ratio_backoff_until[symbol] = now + self.LONG_SHORT_RATIO_FAILURE_BACKOFF_SECONDS
                 return cache
             except Exception as exc:  # pragma: no cover - network dependency
                 logger.debug("Long/short ratio fetch failed for %s: %s", symbol, exc)
+                self._long_short_ratio_backoff_until[symbol] = now + self.LONG_SHORT_RATIO_FAILURE_BACKOFF_SECONDS
                 return cache
             finally:
                 ls_sem.release()
@@ -6442,12 +6449,15 @@ class MarketService:
                 )
             except asyncio.TimeoutError:
                 logger.debug("Long/short ratio fetch timed out for %s (10s)", symbol)
+                self._long_short_ratio_backoff_until[symbol] = now + self.LONG_SHORT_RATIO_FAILURE_BACKOFF_SECONDS
                 return cache
             except Exception as exc:  # pragma: no cover - network dependency
                 logger.debug("Long/short ratio fetch failed for %s: %s", symbol, exc)
+                self._long_short_ratio_backoff_until[symbol] = now + self.LONG_SHORT_RATIO_FAILURE_BACKOFF_SECONDS
                 return cache
         data = self._safe_data(response)
         if not data:
+            self._long_short_ratio_backoff_until[symbol] = now + self.LONG_SHORT_RATIO_FAILURE_BACKOFF_SECONDS
             return cache
         trimmed = data[-200:]
         ratios: list[float] = []
@@ -6473,6 +6483,7 @@ class MarketService:
             ratios.append(ratio_val)
             timestamps.append(ts_val or 0)
         if not ratios:
+            self._long_short_ratio_backoff_until[symbol] = now + self.LONG_SHORT_RATIO_FAILURE_BACKOFF_SECONDS
             return cache
         record = {
             "value": ratios[-1],
@@ -6482,6 +6493,7 @@ class MarketService:
         }
         self._latest_long_short_ratio[symbol] = record
         self._last_long_short_fetch[symbol] = now
+        self._long_short_ratio_backoff_until.pop(symbol, None)
         return record
 
     def _derive_strategy_signal(
