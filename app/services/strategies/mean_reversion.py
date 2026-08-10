@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from . import StrategyHelpers, StrategySignal, compute_bb_bandwidth_percentile
+from . import StrategyHelpers, StrategySignal, compute_bb_bandwidth_percentile, resolve_analysis_block
 from .defaults import merged_config
 from .liquidity_helpers import funding_is_blocked, order_book_imbalance
 
@@ -213,7 +213,7 @@ class MeanReversionStrategy:
 
         market_data: dict[str, Any] = snapshot.get("market_data") or {}
         sym_data = market_data.get(symbol) or {}
-        indicators = sym_data.get("indicators") or {}
+        indicators = resolve_analysis_block(sym_data, cfg)
 
         # ── Liquidity-aware data extraction (§3) ──────────────────────
         # Read the same per-symbol fields the broader launcher uses so the

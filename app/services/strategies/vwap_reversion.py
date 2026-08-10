@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from . import StrategyHelpers, StrategySignal, compute_bb_bandwidth_percentile
+from . import StrategyHelpers, StrategySignal, compute_bb_bandwidth_percentile, resolve_analysis_block
 from .defaults import merged_config
 from .liquidity_helpers import funding_is_blocked
 
@@ -108,7 +108,7 @@ class VWAPReversionStrategy:
 
         market_data: dict[str, Any] = snapshot.get("market_data") or {}
         sym_data = market_data.get(symbol) or {}
-        indicators = sym_data.get("indicators") or {}
+        indicators = resolve_analysis_block(sym_data, cfg)
 
         adx_htf = helpers.extract_float(indicators.get("adx_htf"))
         chop_htf = helpers.extract_float(indicators.get("choppiness_htf"))
@@ -176,7 +176,7 @@ class VWAPReversionStrategy:
         # ── Snapshot data ─────────────────────────────────────────────
         market_data: dict[str, Any] = snapshot.get("market_data") or {}
         sym_data = market_data.get(symbol) or {}
-        indicators = sym_data.get("indicators") or {}
+        indicators = resolve_analysis_block(sym_data, cfg)
 
         vwap_value = helpers.extract_float(indicators.get("vwap"))
         last_price = helpers.get_last_price(symbol)
@@ -391,7 +391,7 @@ class VWAPReversionStrategy:
 
         market_data: dict[str, Any] = snapshot.get("market_data") or {}
         sym_data = market_data.get(symbol) or {}
-        indicators = sym_data.get("indicators") or {}
+        indicators = resolve_analysis_block(sym_data, cfg)
 
         atr_tf_pct = helpers.extract_float(indicators.get("atr_pct")) or 1.0
         atr_htf_pct = helpers.extract_float(indicators.get("atr_pct_htf")) or atr_tf_pct

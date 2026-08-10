@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from . import StrategyHelpers, StrategySignal, compute_bb_bandwidth_percentile
+from . import StrategyHelpers, StrategySignal, compute_bb_bandwidth_percentile, resolve_analysis_block
 from .defaults import merged_config
 from .liquidity_helpers import oi_confirms_momentum
 
@@ -99,7 +99,7 @@ class SpikeContinuationStrategy:
 
         market_data: dict[str, Any] = snapshot.get("market_data") or {}
         sym_data = market_data.get(symbol) or {}
-        indicators = sym_data.get("indicators") or {}
+        indicators = resolve_analysis_block(sym_data, cfg)
 
         adx_htf = helpers.extract_float(indicators.get("adx_htf"))
         chop_htf = helpers.extract_float(indicators.get("choppiness_htf"))
@@ -189,7 +189,7 @@ class SpikeContinuationStrategy:
 
         market_data: dict[str, Any] = snapshot.get("market_data") or {}
         sym_data = market_data.get(symbol) or {}
-        indicators = sym_data.get("indicators") or {}
+        indicators = resolve_analysis_block(sym_data, cfg)
 
         rsi = helpers.extract_float(indicators.get("rsi"))
         adx = helpers.extract_float((indicators.get("adx") or {}).get("value"))

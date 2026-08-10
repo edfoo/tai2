@@ -27,6 +27,11 @@ DEFAULT_MEAN_REVERSION: dict[str, Any] = {
     "min_adx": 0.0,
     "max_adx": 28.0,
     "require_htf_trend": True,
+    # Per-strategy analysis timeframe. None = use the global LTF (preserves
+    # current behaviour). Set to e.g. "15m" to analyze on that bar; the
+    # snapshot exposes a ``timeframes[<tf>]`` map for the distinct set of
+    # timeframes requested by enabled strategies.
+    "analysis_timeframe": None,
     # HTF regime gate preference: "chop" (block when HTF trending),
     # "trend" (block when HTF not trending), or "off" (disable gate).
     # MR wants a ranging HTF → default "chop" (preserves legacy behaviour).
@@ -102,6 +107,8 @@ DEFAULT_SPIKE_CONTINUATION: dict[str, Any] = {
     "min_atr_pct": 1.0,
     "min_reward_risk_ratio": 1.0,
     "flip_launcher_direction": None,
+    # Per-strategy analysis timeframe (None = global LTF).
+    "analysis_timeframe": None,
     # HTF regime gate preference: SC wants a trending HTF → default "trend".
     "htf_regime_preference": "trend",
     # Liquidity-aware gates (§3) — OFF by default (opt-in).
@@ -137,6 +144,8 @@ DEFAULT_LIQUIDITY_SWEEP: dict[str, Any] = {
     "min_atr_pct": 0.8,
     "min_reward_risk_ratio": 1.0,
     "flip_launcher_direction": None,
+    # Per-strategy analysis timeframe (None = global LTF).
+    "analysis_timeframe": None,
     # HTF regime gate preference: sweep wants a ranging HTF → default "chop".
     "htf_regime_preference": "chop",
     # Liquidity-aware gates (§3) — OFF by default (opt-in).
@@ -170,6 +179,8 @@ DEFAULT_VWAP_REVERSION: dict[str, Any] = {
     "min_atr_pct": 1.0,
     "min_reward_risk_ratio": 1.0,
     "flip_launcher_direction": None,
+    # Per-strategy analysis timeframe (None = global LTF).
+    "analysis_timeframe": None,
     # HTF regime gate preference: VWAP reversion wants a ranging HTF → "chop".
     "htf_regime_preference": "chop",
     # Liquidity-aware gates (§3) — OFF by default (opt-in).
@@ -202,6 +213,8 @@ DEFAULT_TREND_PULLBACK: dict[str, Any] = {
     "min_atr_pct": 1.0,
     "min_reward_risk_ratio": 1.0,
     "flip_launcher_direction": None,
+    # Per-strategy analysis timeframe (None = global LTF).
+    "analysis_timeframe": None,
     # HTF regime gate preference: trend pullback wants a trending HTF → "trend".
     "htf_regime_preference": "trend",
     # Liquidity-aware gates (§3) — OFF by default (opt-in).

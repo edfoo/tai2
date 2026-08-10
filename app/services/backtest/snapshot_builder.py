@@ -38,12 +38,56 @@ class SnapshotBuilder:
         ltf_candles: list[Candle],
         htf_candles: list[Candle] | None,
         ltf_timeframe: str,
+        *,
+        tf_candles: dict[str, list[Candle]] | None = None,
     ) -> None:
         self._symbol = symbol
         self._ltf_candles = ltf_candles
         self._htf_candles = htf_candles or []
         self._ltf_timeframe = ltf_timeframe
         self._htf_timeframe = htf_for(ltf_timeframe)
+        # Per-strategy analysis timeframes: {bar: candles}.  Each block's HTF
+        # is derived from that bar via htf_for().
+        self._tf_candles: dict[str, list[Candle]] = tf_candles or {}
+
+    @staticmethod
+    def _build_block(
+        candle_window: list[Candle],
+        current_ts: int,
+        htf_candles: list[Candle] | None,
+        htf_timeframe: str,
+    ) -> dict[str, Any]:
+        """Compute an indicator block from a candle window + its HTF.
+
+        Mirrors ``MarketService._build_timeframes_block``: builds the same
+        shape as ``indicators`` (with structure and flattened swing scalars)
+        and attaches the HTF layer (``htf_indicators`` / ``adx_htf`` /
+        ``choppiness_htf``) from the most recent closed HTF candle at or
+        before ``current_ts``.
+        """
+        raw = [SnapshotBuilder._candle_to_row(c) for c in candle_window]
+        block = MarketService._compute_indicators(raw)
+        block["structure"] = MarketService._compute_structure(raw)
+        _structure = block.get("structure") or {}
+        _sw_highs = _structure.get("swing_highs") or []
+        _sw_lows = _structure.get("swing_lows") or []
+        block["swing_high"] = (
+            _sw_highs[-1].get("price") if _sw_highs and isinstance(_sw_highs[-1], dict) else None
+        )
+        block["swing_low"] = (
+            _sw_lows[-1].get("price") if _sw_lows and isinstance(_sw_lows[-1], dict) else None
+        )
+        if htf_candles and htf_timeframe:
+            htf_window = [c for c in htf_candles if c.ts <= current_ts]
+            if htf_window:
+                htf_raw = [SnapshotBuilder._candle_to_row(c) for c in htf_window]
+                block["ohlcv_htf"] = htf_raw
+                block["htf_indicators"] = MarketService._compute_indicators(htf_raw)
+                block["ohlcv_htf_bar"] = htf_timeframe
+                _htf = block.get("htf_indicators") or {}
+                block["adx_htf"] = ((_htf.get("adx") or {}).get("value"))
+                block["choppiness_htf"] = _htf.get("choppiness")
+        return block
 
     def build(self, window_end_idx: int) -> dict[str, Any]:
         """Build a snapshot for the LTF candle at ``window_end_idx``.
@@ -74,6 +118,27 @@ class SnapshotBuilder:
                 indicators["htf_indicators"] = MarketService._compute_indicators(htf_window_raw)
                 indicators["ohlcv_htf_bar"] = htf_bar
 
+        # ── Per-strategy analysis timeframes ─────────────────────────
+        # Build a ``timeframes`` map for each requested bar, aligning each
+        # bar's candles to the current LTF step (closed candles at or before
+        # current_ts) and attaching that bar's own HTF.
+        timeframes: dict[str, dict[str, Any]] = {}
+        for tf, tf_candles in self._tf_candles.items():
+            tf_window = [c for c in tf_candles if c.ts <= current_ts]
+            if not tf_window:
+                continue
+            tf_htf = htf_for(tf)
+            tf_htf_candles: list[Candle] = []
+            if tf_htf:
+                tf_htf_candles = [c for c in tf_candles if c.ts <= current_ts]
+                # The HTF of a strategy tf is a separate bar; use the generic
+                # per-tf candle set if present, else reuse the strategy tf's
+                # own candles (best-effort).
+                tf_htf_candles = self._tf_candles.get(tf_htf) or tf_htf_candles
+            timeframes[tf] = self._build_block(
+                tf_window, current_ts, tf_htf_candles, tf_htf
+            )
+
         # ── Assemble snapshot ─────────────────────────────────────────
         last_price = float(self._ltf_candles[window_end_idx].close)
         return {
@@ -85,6 +150,7 @@ class SnapshotBuilder:
                 self._symbol: {
                     "ticker": {"last": str(last_price)},
                     "indicators": indicators,
+                    "timeframes": timeframes,
                     "custom_metrics": {
                         # Footprint/CVD/OFI are not available in backtest.
                         "cumulative_volume_delta": 0.0,
@@ -149,6 +215,20 @@ class SnapshotBuilder:
                 indicators["htf_indicators"] = MarketService._compute_indicators(htf_window_raw)
                 indicators["ohlcv_htf_bar"] = htf_bar
 
+        # ── Per-strategy analysis timeframes ─────────────────────────
+        timeframes: dict[str, dict[str, Any]] = {}
+        for tf, tf_candles in self._tf_candles.items():
+            tf_window = [c for c in tf_candles if c.ts <= current_ts]
+            if not tf_window:
+                continue
+            tf_htf = htf_for(tf)
+            tf_htf_candles: list[Candle] = []
+            if tf_htf:
+                tf_htf_candles = self._tf_candles.get(tf_htf) or tf_window
+            timeframes[tf] = self._build_block(
+                tf_window, current_ts, tf_htf_candles, tf_htf
+            )
+
         # ── Assemble snapshot ─────────────────────────────────────────
         last_price = float(incomplete_candle.close)
         return {
@@ -160,6 +240,7 @@ class SnapshotBuilder:
                 self._symbol: {
                     "ticker": {"last": str(last_price)},
                     "indicators": indicators,
+                    "timeframes": timeframes,
                     "custom_metrics": {
                         "cumulative_volume_delta": 0.0,
                         "cvd_series": [],

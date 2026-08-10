@@ -89,6 +89,39 @@ def compute_bb_bandwidth_percentile(
     return (count_below / len(recent)) * 100.0
 
 
+def resolve_analysis_block(
+    sym_data: dict[str, Any],
+    cfg: dict[str, Any],
+) -> dict[str, Any]:
+    """Return the indicator block a strategy should analyze.
+
+    A strategy may set ``analysis_timeframe`` in its config to analyze on a
+    specific bar.  When set, the snapshot exposes that bar's indicator block
+    under ``sym_data["timeframes"][<tf>]``; this helper resolves and returns
+    it.  When ``analysis_timeframe`` is unset (or the block is unavailable),
+    the global ``sym_data["indicators"]`` block is returned — preserving
+    legacy behaviour.
+
+    Parameters
+    ----------
+    sym_data:
+        The per-symbol snapshot entry (``snapshot["market_data"][symbol]``).
+    cfg:
+        This strategy's merged config (must contain ``analysis_timeframe``).
+
+    Returns
+    -------
+    The indicator dict to read signal inputs from.
+    """
+    tf = cfg.get("analysis_timeframe")
+    if tf:
+        timeframes = sym_data.get("timeframes") or {}
+        block = timeframes.get(str(tf))
+        if block is not None:
+            return block
+    return sym_data.get("indicators") or {}
+
+
 @dataclass
 class StrategySignal:
     """Signal returned by a strategy evaluation.

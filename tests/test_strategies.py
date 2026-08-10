@@ -18,7 +18,12 @@ from unittest.mock import MagicMock
 import pytest
 
 from app.services.market_service import MarketService
-from app.services.strategies import Strategy, StrategyHelpers, StrategySignal
+from app.services.strategies import (
+    Strategy,
+    StrategyHelpers,
+    StrategySignal,
+    resolve_analysis_block,
+)
 from app.services.strategies.mean_reversion import MeanReversionStrategy
 from app.services.strategies.spike_continuation import SpikeContinuationStrategy
 from app.services.strategies.liquidity_sweep import LiquiditySweepStrategy
@@ -224,6 +229,32 @@ class TestStrategyHelpers:
         assert messages == ["test message"]
 
 
+# ── resolve_analysis_block ──────────────────────────────────────────────────
+
+
+class TestResolveAnalysisBlock:
+    def test_returns_global_indicators_when_no_tf(self) -> None:
+        cfg = {"analysis_timeframe": None}
+        sym_data = {"indicators": {"rsi": 40.0}}
+        assert resolve_analysis_block(sym_data, cfg) == {"rsi": 40.0}
+
+    def test_returns_global_indicators_when_tf_missing_from_snapshot(self) -> None:
+        # Strategy asks for "15m" but the snapshot has no timeframes map → fallback.
+        cfg = {"analysis_timeframe": "15m"}
+        sym_data = {"indicators": {"rsi": 40.0}}
+        assert resolve_analysis_block(sym_data, cfg) == {"rsi": 40.0}
+
+    def test_returns_strategy_block_when_tf_present(self) -> None:
+        cfg = {"analysis_timeframe": "1H"}
+        sym_data = {
+            "indicators": {"rsi": 40.0},
+            "timeframes": {"1H": {"rsi": 55.0, "adx_htf": 30.0}},
+        }
+        block = resolve_analysis_block(sym_data, cfg)
+        assert block["rsi"] == 55.0
+        assert block["adx_htf"] == 30.0
+
+
 # ── MeanReversionStrategy ────────────────────────────────────────────────────
 
 
@@ -252,6 +283,38 @@ class TestMeanReversionStrategy:
         result = mr.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers())
         assert result is not None
         assert result.direction == "buy"
+
+    def test_reads_own_analysis_timeframe_block(self) -> None:
+        """MR with analysis_timeframe reads its strategy block, not global."""
+        mr = MeanReversionStrategy()
+        # Global indicators are neutral (rsi=50), but the "15m" block is oversold.
+        snapshot = _make_snapshot(rsi=50.0)
+        snapshot["market_data"]["BTC-USDT-SWAP"]["timeframes"] = {
+            "15m": {"rsi": 20.0, "cmf_14": {"value": 0.0}, "adx": {"value": 20.0},
+                    "bollinger_bands": {"lower": 95.0, "upper": 105.0, "middle": 100.0}}
+        }
+        config = _mr_bare(
+            rsi_oversold=30.0,
+            rsi_overbought=70.0,
+            require_htf_trend=False,
+            analysis_timeframe="15m",
+        )
+        result = mr.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers())
+        assert result is not None  # signal from the 15m block's oversold RSI
+        assert result.direction == "buy"
+
+    def test_analysis_timeframe_falls_back_to_global(self) -> None:
+        """MR with analysis_timeframe but no timeframes map → uses global."""
+        mr = MeanReversionStrategy()
+        snapshot = _make_snapshot(rsi=20.0)  # global oversold, no timeframes key
+        config = _mr_bare(
+            rsi_oversold=30.0,
+            rsi_overbought=70.0,
+            require_htf_trend=False,
+            analysis_timeframe="15m",
+        )
+        result = mr.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers())
+        assert result is not None  # falls back to global indicators
 
     def test_sell_signal_when_rsi_overbought(self) -> None:
         mr = MeanReversionStrategy()

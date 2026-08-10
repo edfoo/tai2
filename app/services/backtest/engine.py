@@ -35,7 +35,7 @@ from app.services.backtest.models import (
 )
 from app.services.backtest.simulator import Simulator
 from app.services.backtest.snapshot_builder import SnapshotBuilder
-from app.services.strategies import Strategy, StrategyHelpers
+from app.services.strategies import Strategy, StrategyHelpers, resolve_analysis_block
 from app.services.strategies.liquidity_sweep import LiquiditySweepStrategy
 from app.services.strategies.mean_reversion import MeanReversionStrategy
 from app.services.strategies.spike_continuation import SpikeContinuationStrategy
@@ -57,6 +57,30 @@ _AVAILABLE_STRATEGIES: dict[str, Strategy] = {
 def available_strategy_names() -> list[str]:
     """Return the names of all strategies available for backtesting."""
     return list(_AVAILABLE_STRATEGIES.keys())
+
+
+def _requested_tfs(launcher_config: dict[str, Any]) -> list[str]:
+    """Return the distinct analysis timeframes requested by enabled strategies.
+
+    Reads each enabled strategy's ``analysis_timeframe`` from
+    ``launcher_config["strategies"]``.  ``None``/empty means "use the global
+    LTF" (skipped here).  Constants like ``"15m"`` / ``"1H"`` are passed
+    through; the caller normalizes via the fetcher's timeframe handling.
+    """
+    strategies_cfg = launcher_config.get("strategies") or {}
+    requested: list[str] = []
+    for strat_cfg in strategies_cfg.values():
+        if not isinstance(strat_cfg, dict):
+            continue
+        if not bool(strat_cfg.get("enabled", False)):
+            continue
+        tf = strat_cfg.get("analysis_timeframe")
+        if not tf:
+            continue
+        tf_str = str(tf).strip().upper()
+        if tf_str and tf_str not in requested:
+            requested.append(tf_str)
+    return requested
 
 
 class BacktestEngine:
@@ -148,8 +172,19 @@ class BacktestEngine:
             symbol_candles: dict[str, list[Candle]] = {}
             symbol_htf_candles: dict[str, list[Candle]] = {}
             symbol_eval_candles: dict[str, list[Candle]] = {}
+            symbol_tf_candles: dict[str, dict[str, list[Candle]]] = {}
             htf_tf = htf_for(self._config.timeframe)
             use_finer_ltf = self._eval_mode == "finer_ltf"
+            # Distinct per-strategy analysis timeframes (plus their HTFs) to
+            # fetch for each symbol.
+            analysis_tfs = _requested_tfs(self._config.launcher_config or {})
+            all_tf_bars: list[str] = []
+            for tf in analysis_tfs:
+                if tf not in all_tf_bars:
+                    all_tf_bars.append(tf)
+                tf_htf = htf_for(tf)
+                if tf_htf and tf_htf not in all_tf_bars:
+                    all_tf_bars.append(tf_htf)
 
             for idx, symbol in enumerate(self._config.symbols):
                 candles = await self._fetcher.fetch_candles(
@@ -175,6 +210,21 @@ class BacktestEngine:
                     )
                     symbol_htf_candles[symbol] = htf_candles
 
+                # Fetch per-strategy analysis timeframe candles (and their
+                # HTFs) so the snapshot exposes ``timeframes[<tf>]``.
+                per_tf: dict[str, list[Candle]] = {}
+                for bar in all_tf_bars:
+                    tf_candles = await self._fetcher.fetch_htf_candles(
+                        symbol=symbol,
+                        ltf_timeframe=self._config.timeframe,
+                        htf_timeframe=bar,
+                        start_ts=self._config.start_ts,
+                        end_ts=self._config.end_ts,
+                        warmup_candles=self._config.warmup_candles,
+                    )
+                    per_tf[bar] = tf_candles
+                symbol_tf_candles[symbol] = per_tf
+
                 # Fetch the finer evaluation timeframe (e.g. 1m) for stepping.
                 # These candles drive the loop; indicators are still computed
                 # on the LTF (with the last LTF candle incomplete).
@@ -199,6 +249,7 @@ class BacktestEngine:
                     ltf_candles=symbol_candles[symbol],
                     htf_candles=symbol_htf_candles.get(symbol),
                     ltf_timeframe=self._config.timeframe,
+                    tf_candles=symbol_tf_candles.get(symbol) or {},
                 )
 
             # ── Phase 3: Determine backtest window ────────────────────
@@ -602,10 +653,11 @@ class BacktestEngine:
         ):
             dynamic_tp_fraction = _extract_float(strat_cfg.get("dynamic_tp_fraction")) or 0.7
             # The snapshot is single-symbol in backtest — grab the first
-            # symbol's indicator block.
+            # symbol's indicator block, resolved to the strategy's analysis
+            # timeframe so live/backtest stay aligned.
             _md = snapshot.get("market_data") or {}
             sym_data = next(iter(_md.values()), {}) or {}
-            sym_indicators = sym_data.get("indicators") or {}
+            sym_indicators = resolve_analysis_block(sym_data, strat_cfg)
             _bb = sym_indicators.get("bollinger_bands") or {}
             _bb_lower = _extract_float(_bb.get("lower"))
             _bb_upper = _extract_float(_bb.get("upper"))

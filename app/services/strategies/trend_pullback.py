@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from . import StrategyHelpers, StrategySignal
+from . import StrategyHelpers, StrategySignal, resolve_analysis_block
 from .defaults import merged_config
 
 
@@ -104,7 +104,7 @@ class TrendPullbackStrategy:
 
         market_data: dict[str, Any] = snapshot.get("market_data") or {}
         sym_data = market_data.get(symbol) or {}
-        indicators = sym_data.get("indicators") or {}
+        indicators = resolve_analysis_block(sym_data, cfg)
 
         adx_htf = helpers.extract_float(indicators.get("adx_htf"))
         chop_htf = helpers.extract_float(indicators.get("choppiness_htf"))
@@ -172,7 +172,7 @@ class TrendPullbackStrategy:
         # ── Snapshot data ─────────────────────────────────────────────
         market_data: dict[str, Any] = snapshot.get("market_data") or {}
         sym_data = market_data.get(symbol) or {}
-        indicators = sym_data.get("indicators") or {}
+        indicators = resolve_analysis_block(sym_data, cfg)
 
         last_price = helpers.get_last_price(symbol)
         atr_pct = helpers.extract_float(indicators.get("atr_pct"))

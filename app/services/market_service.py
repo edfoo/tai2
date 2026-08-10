@@ -309,6 +309,11 @@ class MarketService:
         self._latest_liquidations: dict[str, list[dict[str, Any]]] = {}
         self._latest_ohlcv: dict[str, list[list[Any]]] = {}
         self._latest_ohlcv_htf: dict[str, list[list[Any]]] = {}
+        # Per-timeframe OHLCV cache for per-strategy analysis timeframes,
+        # keyed by (symbol, bar) → candles.  Separate from the global
+        # LTF/HTF caches above so the snapshot's ``timeframes`` map is
+        # computed independently of the global execution timeframe.
+        self._latest_ohlcv_tf: dict[tuple[str, str], list[list[Any]]] = {}
         self._latest_long_short_ratio: dict[str, dict[str, Any]] = {}
         self._last_long_short_fetch: dict[str, float] = {}
         self._long_short_ratio_backoff_until: dict[str, float] = {}
@@ -917,6 +922,17 @@ class MarketService:
         snapshot_symbols = list(self.symbols) + [
             s for s in sorted(position_symbols) if s not in set(self.symbols)
         ]
+        # Distinct analysis timeframes requested by enabled strategies (plus
+        # each one's HTF, needed for the per-tf regime gate).  Computed once
+        # per snapshot so every symbol fetches the same set.
+        requested_tfs = self._requested_analysis_timeframes()
+        tf_fetch_bars: list[str] = []
+        for tf in requested_tfs:
+            if tf not in tf_fetch_bars:
+                tf_fetch_bars.append(tf)
+            htf_bar, _ = self._HTF_MAP.get(tf, ("", 0))
+            if htf_bar and htf_bar not in tf_fetch_bars:
+                tf_fetch_bars.append(htf_bar)
 
         async def _fetch_symbol_data(symbol: str) -> tuple[str, dict[str, Any], dict[str, float] | None]:
             """Fetch all market data for a single symbol concurrently.
@@ -936,6 +952,15 @@ class MarketService:
                     self._fetch_long_short_ratio(symbol),
                 )
             )
+            # Fetch per-strategy analysis timeframe candles (and their HTFs)
+            # concurrently, caching into the per-tf cache.
+            if tf_fetch_bars:
+                await asyncio.gather(
+                    *[
+                        self._fetch_ohlcv_bar(symbol, bar, self._latest_ohlcv_tf)
+                        for bar in tf_fetch_bars
+                    ]
+                )
             indicators = self._compute_indicators(ohlcv)
             indicators["structure"] = self._compute_structure(ohlcv)
             # Phase 0c: flatten the most recent confirmed swing pivot into
@@ -1003,6 +1028,18 @@ class MarketService:
             funding_z = zscore_latest(self._funding_history.get(symbol) or [])
             oi_zscore = oi_delta_zscore(self._oi_history.get(symbol) or [])
 
+            # ── Per-strategy analysis timeframes ─────────────────────────
+            # Build a ``timeframes`` map (keyed by bar string) for the distinct
+            # set of analysis timeframes requested by enabled strategies.  Each
+            # block is the same shape as ``indicators`` (with its own HTF
+            # scalars).  Strategies that set ``analysis_timeframe=None`` fall
+            # back to the global ``indicators`` block (legacy behaviour).
+            timeframes: dict[str, dict[str, Any]] = {}
+            for tf in requested_tfs:
+                block = self._build_timeframes_block(symbol, tf)
+                if block:
+                    timeframes[tf] = block
+
             entry: dict[str, Any] = {
                 "order_book": order_book,
                 "ticker": ticker,
@@ -1011,6 +1048,7 @@ class MarketService:
                 "funding_z": funding_z,
                 "oi_zscore": oi_zscore,
                 "indicators": indicators,
+                "timeframes": timeframes,
                 "custom_metrics": custom_metrics,
                 "liquidations": self._latest_liquidations.get(symbol, []),
                 "strategy_signal": strategy_signal,
@@ -2940,6 +2978,63 @@ class MarketService:
         # Unknown strategies: allow on the combined list / all symbols.
         return True
 
+    def _requested_analysis_timeframes(self) -> list[str]:
+        """Return the distinct, normalized analysis timeframes requested by enabled strategies.
+
+        Reads each enabled strategy's ``analysis_timeframe`` from the launcher
+        config.  ``None``/empty means "use the global LTF" and is skipped here
+        (the global LTF is always computed anyway).  Returns normalized OKX bar
+        strings (e.g. ``"15m"``, ``"1H"``) in a stable order.
+        """
+        strategies_cfg = self._launcher_config.get("strategies") or {}
+        requested: list[str] = []
+        for name, strat_cfg in strategies_cfg.items():
+            if not isinstance(strat_cfg, dict):
+                continue
+            if not bool(strat_cfg.get("enabled", False)):
+                continue
+            tf = strat_cfg.get("analysis_timeframe")
+            if not tf:
+                continue
+            bar = self._normalize_bar(str(tf))
+            if bar and bar not in requested:
+                requested.append(bar)
+        return requested
+
+    def _build_timeframes_block(self, symbol: str, bar: str) -> dict[str, Any] | None:
+        """Build a per-timeframe indicator block for ``bar`` (same shape as ``indicators``).
+
+        Fetches candles for ``bar`` (cached in ``_latest_ohlcv_tf``), computes
+        indicators + structure, and attaches the HTF of ``bar`` (its own
+        ``htf_indicators`` / ``adx_htf`` / ``choppiness_htf`` from
+        ``_HTF_MAP[bar]``).  Returns ``None`` when no candles are available.
+        """
+        ohlcv = self._latest_ohlcv_tf.get((symbol, bar))
+        if not ohlcv:
+            return None
+        block = self._compute_indicators(ohlcv)
+        block["structure"] = self._compute_structure(ohlcv)
+        _structure = block.get("structure") or {}
+        _sw_highs = _structure.get("swing_highs") or []
+        _sw_lows = _structure.get("swing_lows") or []
+        block["swing_high"] = (
+            _sw_highs[-1].get("price") if _sw_highs and isinstance(_sw_highs[-1], dict) else None
+        )
+        block["swing_low"] = (
+            _sw_lows[-1].get("price") if _sw_lows and isinstance(_sw_lows[-1], dict) else None
+        )
+        htf_bar, _ = self._HTF_MAP.get(bar, ("", 0))
+        if htf_bar:
+            htf_ohlcv = self._latest_ohlcv_tf.get((symbol, htf_bar))
+            if htf_ohlcv:
+                block["ohlcv_htf"] = htf_ohlcv
+                block["htf_indicators"] = self._compute_indicators(htf_ohlcv)
+                block["ohlcv_htf_bar"] = htf_bar
+                _htf = block.get("htf_indicators") or {}
+                block["adx_htf"] = ((_htf.get("adx") or {}).get("value"))
+                block["choppiness_htf"] = _htf.get("choppiness")
+        return block
+
     def _launcher_evaluate_signals(self, symbol: str) -> list[StrategySignal]:
         """Return all strategy signals for a symbol (concurrent evaluation).
 
@@ -3047,11 +3142,59 @@ class MarketService:
         new_indicators["ohlcv_htf_bar"] = indicators.get("ohlcv_htf_bar")
         new_indicators["structure"] = indicators.get("structure")
 
+        # ── Recompute per-strategy analysis timeframe blocks on closed candles ──
+        # Each ``timeframes[<tf>]`` block is built from that bar's candles
+        # (cached in ``_latest_ohlcv_tf``).  Trim the forming candle from each
+        # requested bar's cache entry and rebuild the block so live evaluation
+        # on closed candles matches the backtest.
+        new_timeframes: dict[str, dict[str, Any]] = {}
+        for tf, block in (sym_data.get("timeframes") or {}).items():
+            tf_candles = self._latest_ohlcv_tf.get((symbol, tf)) or []
+            if not tf_candles:
+                # No cached candles — keep the original block.
+                new_timeframes[tf] = block
+                continue
+            closed_rows = []
+            for c in tf_candles[:-1]:
+                closed_rows.append(
+                    [c.get("ts"), c.get("open"), c.get("high"), c.get("low"), c.get("close"), c.get("volume")]
+                    if isinstance(c, dict)
+                    else c
+                )
+            if len(closed_rows) < 3:
+                new_timeframes[tf] = block
+                continue
+            try:
+                tf_indicators = self._compute_indicators(closed_rows)
+                tf_indicators["structure"] = self._compute_structure(closed_rows)
+                _structure = tf_indicators.get("structure") or {}
+                _sw_highs = _structure.get("swing_highs") or []
+                _sw_lows = _structure.get("swing_lows") or []
+                tf_indicators["swing_high"] = (
+                    _sw_highs[-1].get("price") if _sw_highs and isinstance(_sw_highs[-1], dict) else None
+                )
+                tf_indicators["swing_low"] = (
+                    _sw_lows[-1].get("price") if _sw_lows and isinstance(_sw_lows[-1], dict) else None
+                )
+                # Preserve the HTF layer from the original block (HTF candles
+                # are already closed-bar aligned).
+                tf_indicators["htf_indicators"] = block.get("htf_indicators")
+                tf_indicators["ohlcv_htf"] = block.get("ohlcv_htf")
+                tf_indicators["ohlcv_htf_bar"] = block.get("ohlcv_htf_bar")
+                tf_indicators["adx_htf"] = block.get("adx_htf")
+                tf_indicators["choppiness_htf"] = block.get("choppiness_htf")
+                new_timeframes[tf] = tf_indicators
+            except Exception as exc:  # pragma: no cover - defensive
+                self._emit_debug(f"Closed-candle tf recompute failed for {symbol} ({tf}): {exc}")
+                new_timeframes[tf] = block
+
         # Shallow-copy the snapshot and patch only the target symbol's indicators.
         trimmed = dict(snapshot)
         trimmed_market = dict(market_data)
         trimmed_sym = dict(sym_data)
         trimmed_sym["indicators"] = new_indicators
+        if new_timeframes:
+            trimmed_sym["timeframes"] = new_timeframes
         trimmed_market[symbol] = trimmed_sym
         trimmed["market_data"] = trimmed_market
         return trimmed
@@ -5081,6 +5224,9 @@ class MarketService:
             self._latest_liquidations.pop(symbol, None)
             self._latest_ohlcv.pop(symbol, None)
             self._latest_ohlcv_htf.pop(symbol, None)
+            # Drop any per-strategy timeframe cache entries for this symbol.
+            for _key in [k for k in self._latest_ohlcv_tf if k[0] == symbol]:
+                self._latest_ohlcv_tf.pop(_key, None)
             self._trade_buffers.pop(symbol, None)
             self._footprint_buffers.pop(symbol, None)
             self._recent_trades.pop(symbol, None)
@@ -5790,7 +5936,33 @@ class MarketService:
         shared ``_market_api_prod`` / ``_market_api`` client (serialized by its
         own semaphore) when the pool is unavailable.
         """
-        cached = self._latest_ohlcv.get(symbol)
+        return await self._fetch_ohlcv_bar(symbol, self._ohlc_bar, self._latest_ohlcv)
+
+    async def _fetch_ohlcv_htf(self, symbol: str) -> list[list[Any]]:
+        """Fetch OHLCV candles at the next-higher timeframe for the same wall-clock window.
+
+        Always uses the production endpoint — candle data is public. Shares the
+        same pool-based concurrency strategy as ``_fetch_ohlcv``.
+        """
+        htf_bar, _ = self._HTF_MAP.get(self._ohlc_bar, ("", 0))
+        if not htf_bar:
+            return []
+        return await self._fetch_ohlcv_bar(symbol, htf_bar, self._latest_ohlcv_htf)
+
+    async def _fetch_ohlcv_bar(
+        self,
+        symbol: str,
+        bar: str,
+        cache: dict[str, list[list[Any]]],
+    ) -> list[list[Any]]:
+        """Fetch OHLCV candles for an explicit ``bar`` timeframe with cached fallback.
+
+        Shared implementation behind ``_fetch_ohlcv`` (global LTF) and
+        ``_fetch_ohlcv_htf`` (global HTF), and reused for per-strategy analysis
+        timeframes.  ``cache`` is the dict to read/write the cached candles for
+        this bar (callers pass the appropriate per-bar cache).
+        """
+        cached = cache.get(symbol)
         slot = await self._acquire_candle_slot()
         if slot is not None:
             candle_api, candle_sem = slot
@@ -5799,18 +5971,18 @@ class MarketService:
                     asyncio.to_thread(
                         candle_api.get_candlesticks,
                         instId=symbol,
-                        bar=self._ohlc_bar,
+                        bar=bar,
                         limit=self._ohlcv_fetch_limit,
                     ),
                     timeout=15.0,
                 )
             except asyncio.TimeoutError:
-                logger.warning("OHLCV fetch timed out for %s (15s)", symbol)
-                self._emit_debug(f"OHLCV fetch fallback for {symbol}: timeout (15s)")
+                logger.warning("OHLCV fetch timed out for %s (%s) (15s)", symbol, bar)
+                self._emit_debug(f"OHLCV fetch fallback for {symbol} ({bar}): timeout (15s)")
                 return cached or []
             except Exception as exc:  # pragma: no cover - network failures
-                logger.warning("OHLCV fetch failed for %s: %s", symbol, exc)
-                self._emit_debug(f"OHLCV fetch fallback for {symbol}: {exc}")
+                logger.warning("OHLCV fetch failed for %s (%s): %s", symbol, bar, exc)
+                self._emit_debug(f"OHLCV fetch fallback for {symbol} ({bar}): {exc}")
                 return cached or []
             finally:
                 candle_sem.release()
@@ -5827,82 +5999,22 @@ class MarketService:
                         candle_sem,
                         candle_api.get_candlesticks,
                         instId=symbol,
-                        bar=self._ohlc_bar,
+                        bar=bar,
                         limit=self._ohlcv_fetch_limit,
                     ),
                     timeout=15.0,
                 )
             except asyncio.TimeoutError:
-                logger.warning("OHLCV fetch timed out for %s (15s)", symbol)
-                self._emit_debug(f"OHLCV fetch fallback for {symbol}: timeout (15s)")
+                logger.warning("OHLCV fetch timed out for %s (%s) (15s)", symbol, bar)
+                self._emit_debug(f"OHLCV fetch fallback for {symbol} ({bar}): timeout (15s)")
                 return cached or []
             except Exception as exc:  # pragma: no cover - network failures
-                logger.warning("OHLCV fetch failed for %s: %s", symbol, exc)
-                self._emit_debug(f"OHLCV fetch fallback for {symbol}: {exc}")
+                logger.warning("OHLCV fetch failed for %s (%s): %s", symbol, bar, exc)
+                self._emit_debug(f"OHLCV fetch fallback for {symbol} ({bar}): {exc}")
                 return cached or []
         data = self._safe_data(response)
         if data:
-            self._latest_ohlcv[symbol] = data
-            return data
-        return cached or []
-
-    async def _fetch_ohlcv_htf(self, symbol: str) -> list[list[Any]]:
-        """Fetch OHLCV candles at the next-higher timeframe for the same wall-clock window.
-
-        Always uses the production endpoint — candle data is public. Shares the
-        same pool-based concurrency strategy as ``_fetch_ohlcv``.
-        """
-        htf_bar, _ = self._HTF_MAP.get(self._ohlc_bar, ("", 0))
-        if not htf_bar:
-            return []
-        limit = self._ohlcv_fetch_limit
-        cached = self._latest_ohlcv_htf.get(symbol)
-        slot = await self._acquire_candle_slot()
-        if slot is not None:
-            candle_api, candle_sem = slot
-            try:
-                response = await asyncio.wait_for(
-                    asyncio.to_thread(
-                        candle_api.get_candlesticks,
-                        instId=symbol,
-                        bar=htf_bar,
-                        limit=limit,
-                    ),
-                    timeout=15.0,
-                )
-            except asyncio.TimeoutError:
-                logger.warning("HTF OHLCV fetch timed out for %s (%s) (15s)", symbol, htf_bar)
-                return cached or []
-            except Exception as exc:  # pragma: no cover - network failures
-                logger.warning("HTF OHLCV fetch failed for %s (%s): %s", symbol, htf_bar, exc)
-                return cached or []
-            finally:
-                candle_sem.release()
-        else:
-            candle_api = self._market_api_prod or self._market_api
-            if not candle_api:
-                return cached or []
-            candle_sem = self._market_api_prod_sem if self._market_api_prod else self._market_api_sem
-            try:
-                response = await asyncio.wait_for(
-                    self._guarded_to_thread(
-                        candle_sem,
-                        candle_api.get_candlesticks,
-                        instId=symbol,
-                        bar=htf_bar,
-                        limit=limit,
-                    ),
-                    timeout=15.0,
-                )
-            except asyncio.TimeoutError:
-                logger.warning("HTF OHLCV fetch timed out for %s (%s) (15s)", symbol, htf_bar)
-                return cached or []
-            except Exception as exc:  # pragma: no cover - network failures
-                logger.warning("HTF OHLCV fetch failed for %s (%s): %s", symbol, htf_bar, exc)
-                return cached or []
-        data = self._safe_data(response)
-        if data:
-            self._latest_ohlcv_htf[symbol] = data
+            cache[symbol] = data
             return data
         return cached or []
 
