@@ -99,7 +99,7 @@ ipython_config.py
 #   commonly ignored for libraries.
 uv.lock
 
-/backtest_cache
+backtest_cache/
 
 # poetry
 #   Similar to Pipfile.lock, it is generally recommended to include poetry.lock in version control.
