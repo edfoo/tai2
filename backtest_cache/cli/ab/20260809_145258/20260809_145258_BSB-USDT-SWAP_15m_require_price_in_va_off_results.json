@@ -1,0 +1,22 @@
+{
+  "config": {
+    "timeframe": "15m",
+    "symbols": [
+      "BSB-USDT-SWAP"
+    ],
+    "start_ts": 1786027978419,
+    "end_ts": 1786287178419,
+    "strategy_names": [
+      "mean_reversion"
+    ],
+    "initial_capital": 1000.0
+  },
+  "metrics": {},
+  "per_strategy": {},
+  "trades_count": 0,
+  "trades": [],
+  "equity_curve": [],
+  "duration_seconds": 30.062,
+  "candles_processed": 0,
+  "error": "max() iterable argument is empty"
+}

@@ -3179,6 +3179,14 @@ def register_pages(app: FastAPI) -> None:
                                 "hint='chop=block when HTF trending, trend=block when HTF ranging, off=disable gate' persistent-hint dense"
                             )
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            mr_exit_regime_switch = ui.switch(
+                                "Exit on regime breakdown",
+                                value=bool(_mr_cfg.get("exit_on_regime_breakdown", False)),
+                            ).props("dense color=amber")
+                            ui.label(
+                                "Flatten an open MR position when the HTF regime flips from chop to trend while underwater."
+                            ).classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             _mr_analysis_tf = _mr_cfg.get("analysis_timeframe") or "·"
                             mr_analysis_tf_select = ui.select(
                                 ["·", "15m", "1H", "4H", "1D"],
@@ -3333,14 +3341,14 @@ def register_pages(app: FastAPI) -> None:
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             mr_atr_tp_mult_input = ui.number(
                                 label="ATR TP multiplier",
-                                value=float(_mr_cfg.get("atr_tp_multiplier") or 2.0),
+                                value=float(_mr_cfg.get("atr_tp_multiplier") or 1.8),
                                 min=0.1, max=10.0, step=0.1, format="%.1f",
                             ).classes("w-40").props("dense")
                             ui.label("TP = multiplier × ATR% (must be >= SL multiplier for R:R >= 1.0).").classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             mr_atr_sl_mult_input = ui.number(
                                 label="ATR SL multiplier",
-                                value=float(_mr_cfg.get("atr_sl_multiplier") or 1.5),
+                                value=float(_mr_cfg.get("atr_sl_multiplier") or 1.0),
                                 min=0.1, max=10.0, step=0.1, format="%.1f",
                             ).classes("w-40").props("dense")
                             ui.label("SL = multiplier × ATR% (must be <= TP multiplier for R:R >= 1.0).").classes("text-xs text-slate-500")
@@ -3363,7 +3371,7 @@ def register_pages(app: FastAPI) -> None:
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             mr_structural_sl_buffer_input = ui.number(
                                 label="SL buffer (ATR)",
-                                value=float(_mr_cfg.get("structural_sl_buffer_atr") or 0.15),
+                                value=float(_mr_cfg.get("structural_sl_buffer_atr") or 1.0),
                                 min=0.0, max=2.0, step=0.05, format="%.2f",
                             ).classes("w-32").props("dense")
                             ui.label("SL placed this many ATR units beyond the entry candle low/high.").classes("text-xs text-slate-500")
@@ -3411,6 +3419,15 @@ def register_pages(app: FastAPI) -> None:
                                 label="Flip direction",
                             ).classes("w-40").props("dense")
                             ui.label("Invert the Launcher's trade direction before execution.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            mr_exit_regime_switch = ui.switch(
+                                "Exit on HTF regime breakdown",
+                                value=bool(_mr_cfg.get("exit_on_regime_breakdown", False)),
+                            ).props("dense color=amber")
+                            ui.label(
+                                "Flatten an open MR position when the HTF regime flips from chop to trend "
+                                "while the position is underwater (reversion thesis invalidated)."
+                            ).classes("text-xs text-slate-500")
                         # ── Liquidity-aware gates (§3) ───────────────────
                         ui.separator().classes("my-2")
                         ui.label("Liquidity-Aware Gates").classes("text-xs font-semibold text-slate-600")
@@ -3465,7 +3482,8 @@ def register_pages(app: FastAPI) -> None:
                 mr_max_adx_input.value = 28.0
                 mr_require_htf_switch.value = True
                 mr_htf_regime_select.value = "chop"
-                mr_analysis_tf_select.value = "·"
+                mr_exit_regime_switch.value = False
+                mr_analysis_tf_select.value = "15m"
                 mr_require_cmf_switch.value = False
                 mr_require_htf_cmf_switch.value = False
                 # CMF cross is rare and cuts frequency ~90%; BB position +
@@ -3489,16 +3507,16 @@ def register_pages(app: FastAPI) -> None:
                 mr_max_bw_pct_input.value = 55.0
                 mr_regime_lookback_input.value = 50
                 mr_use_atr_sizing_switch.value = True
-                mr_use_structural_switch.value = False
-                mr_structural_sl_buffer_input.value = 0.15
+                mr_use_structural_switch.value = True
+                mr_structural_sl_buffer_input.value = 1.0
                 mr_atr_min_tp_input.value = 0.5
                 mr_atr_max_tp_input.value = 4.0
                 mr_atr_min_sl_input.value = 0.3
                 mr_atr_max_sl_input.value = 3.0
-                # Noise-capture scalping: TP ~= SL (R:R ~1.0) to bank small wins
-                # often in a noisy market. Structural sizing is disabled because
-                # it placed wide 3-4x TPs that rarely hit before the SL.
-                mr_atr_tp_mult_input.value = 1.0
+                # Real R:R: wider SL to survive 15m wicks, modest TP to bank
+                # the snapback.  Structural sizing anchors SL to validated
+                # structure (swing/VA/closed-candle) with a 1.0×ATR buffer.
+                mr_atr_tp_mult_input.value = 1.8
                 mr_atr_sl_mult_input.value = 1.0
                 mr_min_atr_pct_input.value = 1.0
                 # R:R guardrail: enforce >= 1.0 for this strategy.
@@ -3826,7 +3844,7 @@ def register_pages(app: FastAPI) -> None:
                 sc_min_bw_pct_input.value = 55.0
                 sc_regime_lookback_input.value = 50
                 sc_htf_regime_select.value = "trend"
-                sc_analysis_tf_select.value = "·"
+                sc_analysis_tf_select.value = "15m"
                 sc_use_atr_sizing_switch.value = True
                 sc_atr_tp_mult_input.value = 1.2
                 sc_atr_sl_mult_input.value = 1.0
@@ -4091,7 +4109,7 @@ def register_pages(app: FastAPI) -> None:
                 ls_reclaim_ratio_input.value = 0.5
                 ls_require_htf_switch.value = True
                 ls_htf_regime_select.value = "chop"
-                ls_analysis_tf_select.value = "·"
+                ls_analysis_tf_select.value = "15m"
                 ls_require_vol_switch.value = True
                 ls_vol_ratio_input.value = 1.5
                 ls_max_adx_input.value = 28.0
@@ -4346,7 +4364,7 @@ def register_pages(app: FastAPI) -> None:
                 vr_require_closeback_switch.value = True
                 vr_require_htf_switch.value = True
                 vr_htf_regime_select.value = "chop"
-                vr_analysis_tf_select.value = "·"
+                vr_analysis_tf_select.value = "15m"
                 vr_require_regime_switch.value = True
                 vr_max_bw_pct_input.value = 55.0
                 vr_regime_lookback_input.value = 50
@@ -4600,7 +4618,7 @@ def register_pages(app: FastAPI) -> None:
                 tp_use_vwap_switch.value = True
                 tp_require_htf_switch.value = True
                 tp_htf_regime_select.value = "trend"
-                tp_analysis_tf_select.value = "·"
+                tp_analysis_tf_select.value = "1H"
                 tp_require_bullish_switch.value = True
                 tp_candle_rejection_pct_input.value = 25.0
                 tp_min_adx_input.value = 20.0
@@ -5512,6 +5530,7 @@ def register_pages(app: FastAPI) -> None:
                 "max_adx": float(mr_max_adx_input.value or 0.0),
                 "require_htf_trend": bool(mr_require_htf_switch.value),
                 "htf_regime_preference": str(mr_htf_regime_select.value or "chop"),
+                "exit_on_regime_breakdown": bool(mr_exit_regime_switch.value),
                 "analysis_timeframe": (str(mr_analysis_tf_select.value) if str(mr_analysis_tf_select.value) != "·" else None),
                 "require_cmf": bool(mr_require_cmf_switch.value),
                 "require_htf_cmf": bool(mr_require_htf_cmf_switch.value),

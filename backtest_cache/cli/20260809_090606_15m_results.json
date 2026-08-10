@@ -1,0 +1,7564 @@
+{
+  "config": {
+    "timeframe": "15m",
+    "symbols": [
+      "AEON-USDT-SWAP",
+      "BEAT-USDT-SWAP",
+      "BICO-USDT-SWAP",
+      "EDEN-USDT-SWAP",
+      "HMSTR-USDT-SWAP"
+    ],
+    "start_ts": 1786178122370,
+    "end_ts": 1786264522370,
+    "strategy_names": [
+      "mean_reversion",
+      "spike_continuation",
+      "liquidity_sweep",
+      "vwap_reversion",
+      "trend_pullback"
+    ],
+    "initial_capital": 100.0
+  },
+  "metrics": {
+    "total_trades": 17,
+    "winning_trades": 11,
+    "losing_trades": 6,
+    "break_even_trades": 0,
+    "win_rate": 64.70588235294117,
+    "gross_profit": 5.475,
+    "gross_loss": 4.8777,
+    "net_profit": 0.5973,
+    "net_profit_pct": 0.6,
+    "profit_factor": 1.1225,
+    "average_win": 0.4977,
+    "average_loss": -0.813,
+    "average_trade": 0.0351,
+    "largest_win": 1.2,
+    "largest_loss": -0.9,
+    "expectancy": 0.0351,
+    "max_win_streak": 3,
+    "max_loss_streak": 2,
+    "final_equity": 100.5973,
+    "total_return_pct": 0.6,
+    "max_drawdown": 2.172,
+    "max_drawdown_pct": 2.12,
+    "sharpe_per_candle": 0.0059
+  },
+  "per_strategy": {
+    "trend_pullback": {
+      "total_trades": 16,
+      "winning_trades": 11,
+      "losing_trades": 5,
+      "break_even_trades": 0,
+      "win_rate": 68.75,
+      "gross_profit": 5.475,
+      "gross_loss": 4.5,
+      "net_profit": 0.975,
+      "net_profit_pct": 0.0,
+      "profit_factor": 1.2167,
+      "average_win": 0.4977,
+      "average_loss": -0.9,
+      "average_trade": 0.0609,
+      "largest_win": 1.2,
+      "largest_loss": -0.9,
+      "expectancy": 0.0609,
+      "max_win_streak": 3,
+      "max_loss_streak": 2,
+      "final_equity": 0.0,
+      "total_return_pct": 0.0,
+      "max_drawdown": 0.0,
+      "max_drawdown_pct": 0.0,
+      "sharpe_per_candle": 0.0,
+      "trades": 16
+    },
+    "vwap_reversion": {
+      "total_trades": 1,
+      "winning_trades": 0,
+      "losing_trades": 1,
+      "break_even_trades": 0,
+      "win_rate": 0.0,
+      "gross_profit": 0,
+      "gross_loss": 0.3777,
+      "net_profit": -0.3777,
+      "net_profit_pct": 0.0,
+      "profit_factor": 0.0,
+      "average_win": 0.0,
+      "average_loss": -0.3777,
+      "average_trade": -0.3777,
+      "largest_win": 0.0,
+      "largest_loss": -0.3777,
+      "expectancy": -0.3777,
+      "max_win_streak": 0,
+      "max_loss_streak": 1,
+      "final_equity": 0.0,
+      "total_return_pct": 0.0,
+      "max_drawdown": 0.0,
+      "max_drawdown_pct": 0.0,
+      "sharpe_per_candle": 0.0,
+      "trades": 1
+    }
+  },
+  "trades_count": 17,
+  "trades": [
+    {
+      "symbol": "BICO-USDT-SWAP",
+      "direction": "long",
+      "strategy": "trend_pullback",
+      "entry_ts": 1786178520000,
+      "entry_price": 0.05702,
+      "tp_price": 0.0593008,
+      "sl_price": 0.0553094,
+      "close_reason": "tp",
+      "close_price": 0.0593008,
+      "close_ts": 1786183560000,
+      "pnl": 1.1999999999999997,
+      "pnl_pct": 3.9999999999999987,
+      "candles_held": 85
+    },
+    {
+      "symbol": "AEON-USDT-SWAP",
+      "direction": "short",
+      "strategy": "trend_pullback",
+      "entry_ts": 1786178940000,
+      "entry_price": 0.0533,
+      "tp_price": 0.051168,
+      "sl_price": 0.054899,
+      "close_reason": "sl",
+      "close_price": 0.054899,
+      "close_ts": 1786195920000,
+      "pnl": -0.9000000000000018,
+      "pnl_pct": -3.000000000000006,
+      "candles_held": 284
+    },
+    {
+      "symbol": "HMSTR-USDT-SWAP",
+      "direction": "long",
+      "strategy": "trend_pullback",
+      "entry_ts": 1786192800000,
+      "entry_price": 0.0002019,
+      "tp_price": 0.000209976,
+      "sl_price": 0.000195843,
+      "close_reason": "partial_tp",
+      "close_price": 0.0002067456,
+      "close_ts": 1786208520000,
+      "pnl": 0.36,
+      "pnl_pct": 2.4,
+      "candles_held": 263
+    },
+    {
+      "symbol": "HMSTR-USDT-SWAP",
+      "direction": "long",
+      "strategy": "trend_pullback",
+      "entry_ts": 1786192800000,
+      "entry_price": 0.0002019,
+      "tp_price": 0.000209976,
+      "sl_price": 0.00020290949999999999,
+      "close_reason": "tp",
+      "close_price": 0.000209976,
+      "close_ts": 1786209900000,
+      "pnl": 0.6000000000000006,
+      "pnl_pct": 4.000000000000004,
+      "candles_held": 286
+    },
+    {
+      "symbol": "HMSTR-USDT-SWAP",
+      "direction": "long",
+      "strategy": "trend_pullback",
+      "entry_ts": 1786221900000,
+      "entry_price": 0.0002089,
+      "tp_price": 0.000217256,
+      "sl_price": 0.000202633,
+      "close_reason": "partial_tp",
+      "close_price": 0.00021391360000000002,
+      "close_ts": 1786223400000,
+      "pnl": 0.3600000000000011,
+      "pnl_pct": 2.4000000000000075,
+      "candles_held": 26
+    },
+    {
+      "symbol": "EDEN-USDT-SWAP",
+      "direction": "long",
+      "strategy": "trend_pullback",
+      "entry_ts": 1786221180000,
+      "entry_price": 0.04412,
+      "tp_price": 0.0458848,
+      "sl_price": 0.0427964,
+      "close_reason": "sl",
+      "close_price": 0.0427964,
+      "close_ts": 1786229520000,
+      "pnl": -0.9000000000000008,
+      "pnl_pct": -3.0000000000000027,
+      "candles_held": 140
+    },
+    {
+      "symbol": "HMSTR-USDT-SWAP",
+      "direction": "long",
+      "strategy": "trend_pullback",
+      "entry_ts": 1786221900000,
+      "entry_price": 0.0002089,
+      "tp_price": 0.000217256,
+      "sl_price": 0.00020994449999999998,
+      "close_reason": "tp",
+      "close_price": 0.000217256,
+      "close_ts": 1786232100000,
+      "pnl": 0.5999999999999999,
+      "pnl_pct": 3.9999999999999996,
+      "candles_held": 171
+    },
+    {
+      "symbol": "HMSTR-USDT-SWAP",
+      "direction": "long",
+      "strategy": "trend_pullback",
+      "entry_ts": 1786233600000,
+      "entry_price": 0.0002165,
+      "tp_price": 0.00022516000000000002,
+      "sl_price": 0.000210005,
+      "close_reason": "partial_tp",
+      "close_price": 0.000221696,
+      "close_ts": 1786235280000,
+      "pnl": 0.36000000000000065,
+      "pnl_pct": 2.4000000000000044,
+      "candles_held": 29
+    },
+    {
+      "symbol": "HMSTR-USDT-SWAP",
+      "direction": "long",
+      "strategy": "trend_pullback",
+      "entry_ts": 1786233600000,
+      "entry_price": 0.0002165,
+      "tp_price": 0.00022516000000000002,
+      "sl_price": 0.00021758249999999997,
+      "close_reason": "tp",
+      "close_price": 0.00022516000000000002,
+      "close_ts": 1786235940000,
+      "pnl": 0.6000000000000011,
+      "pnl_pct": 4.000000000000007,
+      "candles_held": 40
+    },
+    {
+      "symbol": "BEAT-USDT-SWAP",
+      "direction": "short",
+      "strategy": "trend_pullback",
+      "entry_ts": 1786234860000,
+      "entry_price": 2.9073,
+      "tp_price": 2.791008,
+      "sl_price": 2.9945190000000004,
+      "close_reason": "sl",
+      "close_price": 2.9945190000000004,
+      "close_ts": 1786237440000,
+      "pnl": -0.9000000000000016,
+      "pnl_pct": -3.000000000000005,
+      "candles_held": 44
+    },
+    {
+      "symbol": "AEON-USDT-SWAP",
+      "direction": "short",
+      "strategy": "trend_pullback",
+      "entry_ts": 1786250760000,
+      "entry_price": 0.06213,
+      "tp_price": 0.0596448,
+      "sl_price": 0.06399389999999999,
+      "close_reason": "sl",
+      "close_price": 0.06399389999999999,
+      "close_ts": 1786252560000,
+      "pnl": -0.8999999999999975,
+      "pnl_pct": -2.9999999999999916,
+      "candles_held": 31
+    },
+    {
+      "symbol": "HMSTR-USDT-SWAP",
+      "direction": "long",
+      "strategy": "trend_pullback",
+      "entry_ts": 1786253040000,
+      "entry_price": 0.0002221,
+      "tp_price": 0.00023098400000000002,
+      "sl_price": 0.000215437,
+      "close_reason": "partial_tp",
+      "close_price": 0.0002274304,
+      "close_ts": 1786254180000,
+      "pnl": 0.3600000000000004,
+      "pnl_pct": 2.4000000000000026,
+      "candles_held": 20
+    },
+    {
+      "symbol": "HMSTR-USDT-SWAP",
+      "direction": "long",
+      "strategy": "trend_pullback",
+      "entry_ts": 1786253040000,
+      "entry_price": 0.0002221,
+      "tp_price": 0.00023098400000000002,
+      "sl_price": 0.00022321049999999998,
+      "close_reason": "sl",
+      "close_price": 0.00022321049999999998,
+      "close_ts": 1786256220000,
+      "pnl": 0.07499999999999832,
+      "pnl_pct": 0.49999999999998884,
+      "candles_held": 54
+    },
+    {
+      "symbol": "AEON-USDT-SWAP",
+      "direction": "short",
+      "strategy": "trend_pullback",
+      "entry_ts": 1786253700000,
+      "entry_price": 0.0625,
+      "tp_price": 0.06,
+      "sl_price": 0.064375,
+      "close_reason": "partial_tp",
+      "close_price": 0.061,
+      "close_ts": 1786256820000,
+      "pnl": 0.3600000000000003,
+      "pnl_pct": 2.400000000000002,
+      "candles_held": 53
+    },
+    {
+      "symbol": "BEAT-USDT-SWAP",
+      "direction": "short",
+      "strategy": "trend_pullback",
+      "entry_ts": 1786256880000,
+      "entry_price": 3.0275,
+      "tp_price": 2.9063999999999997,
+      "sl_price": 3.118325,
+      "close_reason": "sl",
+      "close_price": 3.118325,
+      "close_ts": 1786257240000,
+      "pnl": -0.9000000000000016,
+      "pnl_pct": -3.0000000000000053,
+      "candles_held": 7
+    },
+    {
+      "symbol": "AEON-USDT-SWAP",
+      "direction": "short",
+      "strategy": "trend_pullback",
+      "entry_ts": 1786253700000,
+      "entry_price": 0.0625,
+      "tp_price": 0.06,
+      "sl_price": 0.064375,
+      "close_reason": "tp",
+      "close_price": 0.06,
+      "close_ts": 1786258620000,
+      "pnl": 0.6000000000000005,
+      "pnl_pct": 4.0000000000000036,
+      "candles_held": 83
+    },
+    {
+      "symbol": "EDEN-USDT-SWAP",
+      "direction": "long",
+      "strategy": "vwap_reversion",
+      "entry_ts": 1786230600000,
+      "entry_price": 0.04289,
+      "tp_price": 0.043747799999999996,
+      "sl_price": 0.041603299999999996,
+      "close_reason": "end_of_data",
+      "close_price": 0.04235,
+      "close_ts": 1786264500000,
+      "pnl": -0.37771042200979166,
+      "pnl_pct": -1.259034740032639,
+      "candles_held": 566
+    }
+  ],
+  "equity_curve": [
+    {
+      "ts": 1786178160000,
+      "equity": 100.0,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786178220000,
+      "equity": 100.0,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786178280000,
+      "equity": 100.0,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786178340000,
+      "equity": 100.0,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786178400000,
+      "equity": 100.0,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786178460000,
+      "equity": 100.0,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786178520000,
+      "equity": 100.0,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786178580000,
+      "equity": 99.94212556997545,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786178640000,
+      "equity": 99.98421606453876,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786178700000,
+      "equity": 100.05261311820414,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786178760000,
+      "equity": 100.35250789196773,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786178820000,
+      "equity": 99.80533146264469,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786178880000,
+      "equity": 99.82111539810593,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786178940000,
+      "equity": 99.63170817257102,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786179000000,
+      "equity": 99.59903868363887,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786179060000,
+      "equity": 99.53211045398639,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786179120000,
+      "equity": 99.71136226188369,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786179180000,
+      "equity": 99.9153313770949,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786179240000,
+      "equity": 99.98947737635918,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786179300000,
+      "equity": 99.92071311669056,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786179360000,
+      "equity": 99.53247765998961,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786179420000,
+      "equity": 99.57860742058841,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786179480000,
+      "equity": 99.62706084498181,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786179540000,
+      "equity": 99.5263615083875,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786179600000,
+      "equity": 99.79505561723182,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786179660000,
+      "equity": 99.9521605598378,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786179720000,
+      "equity": 100.05249269042889,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786179780000,
+      "equity": 100.19112282777579,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786179840000,
+      "equity": 100.47474603229965,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786179900000,
+      "equity": 100.24704080000895,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786179960000,
+      "equity": 100.2477752120154,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786180020000,
+      "equity": 100.28154631895724,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786180080000,
+      "equity": 100.20152502364135,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786180140000,
+      "equity": 100.09324071143202,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786180200000,
+      "equity": 99.88878396244233,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786180260000,
+      "equity": 99.90677113392293,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786180320000,
+      "equity": 99.81316913916515,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786180380000,
+      "equity": 99.92292227538739,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786180440000,
+      "equity": 100.11355154670723,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786180500000,
+      "equity": 100.0177463159301,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786180560000,
+      "equity": 100.18574108818011,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786180620000,
+      "equity": 100.12064888854377,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786180680000,
+      "equity": 100.04870020262138,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786180740000,
+      "equity": 100.24483756398959,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786180800000,
+      "equity": 100.31372225143345,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786180860000,
+      "equity": 100.07060028968473,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786180920000,
+      "equity": 99.91997870468411,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786180980000,
+      "equity": 99.87837584389928,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786181040000,
+      "equity": 100.08723906492769,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786181100000,
+      "equity": 100.0658266116428,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786181160000,
+      "equity": 100.37575637526874,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786181220000,
+      "equity": 100.32351046306783,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786181280000,
+      "equity": 100.34675894636884,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786181340000,
+      "equity": 100.27199896287337,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786181400000,
+      "equity": 100.10510580863303,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786181460000,
+      "equity": 100.00918015008065,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786181520000,
+      "equity": 99.84840314744243,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786181580000,
+      "equity": 100.09201274296962,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786181640000,
+      "equity": 99.95668745965176,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786181700000,
+      "equity": 99.64369962022477,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786181760000,
+      "equity": 99.55315570126805,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786181820000,
+      "equity": 99.41073307611364,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786181880000,
+      "equity": 99.47986454178547,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786181940000,
+      "equity": 99.51290123672086,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786182000000,
+      "equity": 99.77743565175446,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786182060000,
+      "equity": 99.91728783488628,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786182120000,
+      "equity": 100.06460456585786,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786182180000,
+      "equity": 99.97699829492696,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786182240000,
+      "equity": 100.1517232030103,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786182300000,
+      "equity": 100.18402548593923,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786182360000,
+      "equity": 100.41589041204067,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786182420000,
+      "equity": 100.01786674370534,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786182480000,
+      "equity": 99.98629887278285,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786182540000,
+      "equity": 99.98250638497535,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786182600000,
+      "equity": 100.21253528106065,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786182660000,
+      "equity": 100.09079069718469,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786182720000,
+      "equity": 100.07610837973313,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786182780000,
+      "equity": 99.91422975908523,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786182840000,
+      "equity": 99.78893354295225,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786182900000,
+      "equity": 99.75345275644699,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786182960000,
+      "equity": 99.80949115645542,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786183020000,
+      "equity": 99.67269704912466,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786183080000,
+      "equity": 99.78673622961036,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786183140000,
+      "equity": 99.84987197145533,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786183200000,
+      "equity": 99.85513328327575,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786183260000,
+      "equity": 99.93784544838947,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786183320000,
+      "equity": 100.18170182214463,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786183380000,
+      "equity": 100.14022531181251,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786183440000,
+      "equity": 100.16469584089846,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786183500000,
+      "equity": 100.47817131410393,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786183560000,
+      "equity": 101.35759849906192,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786183620000,
+      "equity": 101.36322701688556,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786183680000,
+      "equity": 101.34634146341463,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786183740000,
+      "equity": 101.35196998123827,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786183800000,
+      "equity": 101.36322701688556,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786183860000,
+      "equity": 101.37448405253284,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786183920000,
+      "equity": 101.35196998123827,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786183980000,
+      "equity": 101.34634146341463,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786184040000,
+      "equity": 101.36322701688556,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786184100000,
+      "equity": 101.37448405253284,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786184160000,
+      "equity": 101.36322701688556,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786184220000,
+      "equity": 101.38011257035647,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786184280000,
+      "equity": 101.3688555347092,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786184340000,
+      "equity": 101.36322701688556,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786184400000,
+      "equity": 101.35759849906192,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786184460000,
+      "equity": 101.37448405253284,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786184520000,
+      "equity": 101.49268292682927,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786184580000,
+      "equity": 101.42514071294559,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786184640000,
+      "equity": 101.47016885553471,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786184700000,
+      "equity": 101.49831144465291,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786184760000,
+      "equity": 101.3969981238274,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786184820000,
+      "equity": 101.43639774859287,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786184880000,
+      "equity": 101.17748592870545,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786184940000,
+      "equity": 101.13808630393997,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786185000000,
+      "equity": 101.18874296435273,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786185060000,
+      "equity": 101.19437148217636,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786185120000,
+      "equity": 101.20562851782364,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786185180000,
+      "equity": 101.18874296435273,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786185240000,
+      "equity": 101.06491557223265,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786185300000,
+      "equity": 101.05365853658537,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786185360000,
+      "equity": 101.06491557223265,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786185420000,
+      "equity": 100.90168855534709,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786185480000,
+      "equity": 100.93545966228893,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786185540000,
+      "equity": 100.89043151969982,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786185600000,
+      "equity": 100.94108818011257,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786185660000,
+      "equity": 100.90168855534709,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786185720000,
+      "equity": 100.87917448405254,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786185780000,
+      "equity": 100.82288930581613,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786185840000,
+      "equity": 100.8172607879925,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786185900000,
+      "equity": 100.87917448405254,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786185960000,
+      "equity": 100.87917448405254,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786186020000,
+      "equity": 100.81163227016886,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786186080000,
+      "equity": 100.85103189493434,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786186140000,
+      "equity": 100.8454033771107,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786186200000,
+      "equity": 100.83977485928706,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786186260000,
+      "equity": 100.8172607879925,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786186320000,
+      "equity": 100.87917448405254,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786186380000,
+      "equity": 100.80600375234522,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786186440000,
+      "equity": 100.83414634146342,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786186500000,
+      "equity": 100.74971857410883,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786186560000,
+      "equity": 100.74971857410883,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786186620000,
+      "equity": 100.75534709193246,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786186680000,
+      "equity": 100.77223264540338,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786186740000,
+      "equity": 100.74971857410883,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786186800000,
+      "equity": 100.83414634146342,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786186860000,
+      "equity": 100.94108818011257,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786186920000,
+      "equity": 100.95797373358349,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786186980000,
+      "equity": 101.00863039399626,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786187040000,
+      "equity": 101.00863039399626,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786187100000,
+      "equity": 101.0142589118199,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786187160000,
+      "equity": 101.0030018761726,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786187220000,
+      "equity": 101.03114446529081,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786187280000,
+      "equity": 101.05365853658537,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786187340000,
+      "equity": 101.02551594746717,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786187400000,
+      "equity": 100.95797373358349,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786187460000,
+      "equity": 100.96923076923078,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786187520000,
+      "equity": 101.0030018761726,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786187580000,
+      "equity": 101.04240150093808,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786187640000,
+      "equity": 101.02551594746717,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786187700000,
+      "equity": 101.07054409005629,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786187760000,
+      "equity": 101.1155722326454,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786187820000,
+      "equity": 101.03114446529081,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786187880000,
+      "equity": 101.03677298311445,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786187940000,
+      "equity": 101.1155722326454,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786188000000,
+      "equity": 101.07617260787993,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786188060000,
+      "equity": 101.07617260787993,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786188120000,
+      "equity": 101.1155722326454,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786188180000,
+      "equity": 101.10994371482177,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786188240000,
+      "equity": 101.12682926829268,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786188300000,
+      "equity": 101.08180112570356,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786188360000,
+      "equity": 101.10994371482177,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786188420000,
+      "equity": 101.09868667917449,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786188480000,
+      "equity": 101.05928705440901,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786188540000,
+      "equity": 101.13808630393997,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786188600000,
+      "equity": 101.09868667917449,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786188660000,
+      "equity": 101.12682926829268,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786188720000,
+      "equity": 101.14934333958725,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786188780000,
+      "equity": 101.16060037523452,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786188840000,
+      "equity": 101.14934333958725,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786188900000,
+      "equity": 101.2,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786188960000,
+      "equity": 101.21125703564728,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786189020000,
+      "equity": 101.20562851782364,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786189080000,
+      "equity": 101.22251407129455,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786189140000,
+      "equity": 101.21688555347092,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786189200000,
+      "equity": 101.21688555347092,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786189260000,
+      "equity": 101.16060037523452,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786189320000,
+      "equity": 101.18311444652909,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786189380000,
+      "equity": 101.16622889305816,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786189440000,
+      "equity": 101.18874296435273,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786189500000,
+      "equity": 101.18874296435273,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786189560000,
+      "equity": 101.20562851782364,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786189620000,
+      "equity": 101.20562851782364,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786189680000,
+      "equity": 101.20562851782364,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786189740000,
+      "equity": 101.21125703564728,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786189800000,
+      "equity": 101.2,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786189860000,
+      "equity": 101.21688555347092,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786189920000,
+      "equity": 101.21688555347092,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786189980000,
+      "equity": 101.21688555347092,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786190040000,
+      "equity": 101.18311444652909,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786190100000,
+      "equity": 101.20562851782364,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786190160000,
+      "equity": 101.21125703564728,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786190220000,
+      "equity": 101.23377110694184,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786190280000,
+      "equity": 101.27879924953096,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786190340000,
+      "equity": 101.30131332082551,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786190400000,
+      "equity": 101.35196998123827,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786190460000,
+      "equity": 101.35196998123827,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786190520000,
+      "equity": 101.2844277673546,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786190580000,
+      "equity": 101.16060037523452,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786190640000,
+      "equity": 101.21125703564728,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786190700000,
+      "equity": 101.12682926829268,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786190760000,
+      "equity": 101.1718574108818,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786190820000,
+      "equity": 101.10431519699813,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786190880000,
+      "equity": 101.07054409005629,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786190940000,
+      "equity": 101.10994371482177,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786191000000,
+      "equity": 101.1155722326454,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786191060000,
+      "equity": 101.14934333958725,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786191120000,
+      "equity": 101.10994371482177,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786191180000,
+      "equity": 101.04803001876174,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786191240000,
+      "equity": 101.00863039399626,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786191300000,
+      "equity": 101.02551594746717,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786191360000,
+      "equity": 101.03114446529081,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786191420000,
+      "equity": 101.05365853658537,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786191480000,
+      "equity": 101.07617260787993,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786191540000,
+      "equity": 101.07617260787993,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786191600000,
+      "equity": 101.07054409005629,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786191660000,
+      "equity": 101.01988742964353,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786191720000,
+      "equity": 100.9298311444653,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786191780000,
+      "equity": 100.91857410881802,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786191840000,
+      "equity": 100.94108818011257,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786191900000,
+      "equity": 100.94108818011257,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786191960000,
+      "equity": 100.96923076923078,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786192020000,
+      "equity": 101.0142589118199,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786192080000,
+      "equity": 100.93545966228893,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786192140000,
+      "equity": 100.94108818011257,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786192200000,
+      "equity": 100.88480300187618,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786192260000,
+      "equity": 100.91857410881802,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786192320000,
+      "equity": 100.95234521575985,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786192380000,
+      "equity": 101.01988742964353,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786192440000,
+      "equity": 101.03114446529081,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786192500000,
+      "equity": 101.0030018761726,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786192560000,
+      "equity": 101.0030018761726,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786192620000,
+      "equity": 101.00863039399626,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786192680000,
+      "equity": 101.05365853658537,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786192740000,
+      "equity": 101.05365853658537,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786192800000,
+      "equity": 101.07617260787993,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786192860000,
+      "equity": 101.09305816135084,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786192920000,
+      "equity": 101.09305816135084,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786192980000,
+      "equity": 100.97733761907284,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786193040000,
+      "equity": 100.95482354777829,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786193100000,
+      "equity": 100.83595281969508,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786193160000,
+      "equity": 100.84315643042132,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786193220000,
+      "equity": 100.85238675360809,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786193280000,
+      "equity": 100.90259179446292,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786193340000,
+      "equity": 100.93636290140476,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786193400000,
+      "equity": 100.91497230345489,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786193460000,
+      "equity": 100.89088313925772,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786193520000,
+      "equity": 100.90371526780761,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786193580000,
+      "equity": 101.07572098832202,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786193640000,
+      "equity": 101.0009751637121,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786193700000,
+      "equity": 100.96157553894662,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786193760000,
+      "equity": 100.9001134624445,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786193820000,
+      "equity": 100.89088313925772,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786193880000,
+      "equity": 101.06446395267473,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786193940000,
+      "equity": 101.03677298311445,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786194000000,
+      "equity": 101.02709104036977,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786194060000,
+      "equity": 101.10858885614802,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786194120000,
+      "equity": 101.06446395267473,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786194180000,
+      "equity": 100.9298311444653,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786194240000,
+      "equity": 100.96675243721234,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786194300000,
+      "equity": 100.76300232221662,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786194360000,
+      "equity": 100.80600375234522,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786194420000,
+      "equity": 100.82288930581613,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786194480000,
+      "equity": 100.80037523452158,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786194540000,
+      "equity": 100.80960555770834,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786194600000,
+      "equity": 100.73328464019582,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786194660000,
+      "equity": 100.75377199902985,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786194720000,
+      "equity": 100.73846153846154,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786194780000,
+      "equity": 100.72923121527478,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786194840000,
+      "equity": 100.88907666102607,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786194900000,
+      "equity": 100.82761458452394,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786194960000,
+      "equity": 100.84202180597643,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786195020000,
+      "equity": 100.74116010470883,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786195080000,
+      "equity": 100.74048825092206,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786195140000,
+      "equity": 100.71234566180387,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786195200000,
+      "equity": 100.67137094413577,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786195260000,
+      "equity": 100.68577816558827,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786195320000,
+      "equity": 100.76975431338495,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786195380000,
+      "equity": 100.57320780911547,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786195440000,
+      "equity": 100.5342598039079,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786195500000,
+      "equity": 100.46356740421902,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786195560000,
+      "equity": 100.40773384554053,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786195620000,
+      "equity": 100.36113061004882,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786195680000,
+      "equity": 100.33096130847011,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786195740000,
+      "equity": 100.26792413906537,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786195800000,
+      "equity": 100.30484543181242,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786195860000,
+      "equity": 100.3325364013727,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786195920000,
+      "equity": 100.18112927191679,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786195980000,
+      "equity": 100.18112927191679,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786196040000,
+      "equity": 100.15141158989599,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786196100000,
+      "equity": 100.3891530460624,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786196160000,
+      "equity": 100.3891530460624,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786196220000,
+      "equity": 100.3,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786196280000,
+      "equity": 100.28514115898959,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786196340000,
+      "equity": 100.34457652303121,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786196400000,
+      "equity": 100.3148588410104,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786196460000,
+      "equity": 100.52288261515602,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786196520000,
+      "equity": 100.56745913818722,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786196580000,
+      "equity": 100.58231797919761,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786196640000,
+      "equity": 100.61203566121843,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786196700000,
+      "equity": 100.68632986627043,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786196760000,
+      "equity": 100.65661218424962,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786196820000,
+      "equity": 100.61203566121843,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786196880000,
+      "equity": 100.59717682020802,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786196940000,
+      "equity": 100.59717682020802,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786197000000,
+      "equity": 100.59717682020802,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786197060000,
+      "equity": 100.59717682020802,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786197120000,
+      "equity": 100.55260029717681,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786197180000,
+      "equity": 100.62689450222882,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786197240000,
+      "equity": 100.67147102526003,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786197300000,
+      "equity": 100.59717682020802,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786197360000,
+      "equity": 100.65661218424962,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786197420000,
+      "equity": 100.4337295690936,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786197480000,
+      "equity": 100.3297176820208,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786197540000,
+      "equity": 100.4040118870728,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786197600000,
+      "equity": 100.28514115898959,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786197660000,
+      "equity": 100.28514115898959,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786197720000,
+      "equity": 100.24056463595839,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786197780000,
+      "equity": 100.22570579494798,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786197840000,
+      "equity": 100.22570579494798,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786197900000,
+      "equity": 100.21084695393759,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786197960000,
+      "equity": 100.22570579494798,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786198020000,
+      "equity": 100.1959881129272,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786198080000,
+      "equity": 100.22570579494798,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786198140000,
+      "equity": 100.34457652303121,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786198200000,
+      "equity": 100.4040118870728,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786198260000,
+      "equity": 100.3594353640416,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786198320000,
+      "equity": 100.34457652303121,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786198380000,
+      "equity": 100.3,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786198440000,
+      "equity": 100.34457652303121,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786198500000,
+      "equity": 100.3148588410104,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786198560000,
+      "equity": 100.3148588410104,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786198620000,
+      "equity": 100.3,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786198680000,
+      "equity": 100.25542347696879,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786198740000,
+      "equity": 100.28514115898959,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786198800000,
+      "equity": 100.28514115898959,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786198860000,
+      "equity": 100.28514115898959,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786198920000,
+      "equity": 100.28514115898959,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786198980000,
+      "equity": 100.22570579494798,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786199040000,
+      "equity": 100.24056463595839,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786199100000,
+      "equity": 100.24056463595839,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786199160000,
+      "equity": 100.1959881129272,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786199220000,
+      "equity": 100.21084695393759,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786199280000,
+      "equity": 100.15141158989599,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786199340000,
+      "equity": 100.13655274888558,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786199400000,
+      "equity": 100.13655274888558,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786199460000,
+      "equity": 100.15141158989599,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786199520000,
+      "equity": 100.1959881129272,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786199580000,
+      "equity": 100.22570579494798,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786199640000,
+      "equity": 100.2702823179792,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786199700000,
+      "equity": 100.28514115898959,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786199760000,
+      "equity": 100.24056463595839,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786199820000,
+      "equity": 100.25542347696879,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786199880000,
+      "equity": 100.1662704309064,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786199940000,
+      "equity": 100.1662704309064,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786200000000,
+      "equity": 100.24056463595839,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786200060000,
+      "equity": 100.3,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786200120000,
+      "equity": 100.2702823179792,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786200180000,
+      "equity": 100.25542347696879,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786200240000,
+      "equity": 100.3,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786200300000,
+      "equity": 100.3297176820208,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786200360000,
+      "equity": 100.3148588410104,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786200420000,
+      "equity": 100.3,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786200480000,
+      "equity": 100.4188707280832,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786200540000,
+      "equity": 100.47830609212481,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786200600000,
+      "equity": 100.3594353640416,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786200660000,
+      "equity": 100.3297176820208,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786200720000,
+      "equity": 100.3297176820208,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786200780000,
+      "equity": 100.3297176820208,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786200840000,
+      "equity": 100.34457652303121,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786200900000,
+      "equity": 100.3148588410104,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786200960000,
+      "equity": 100.3148588410104,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786201020000,
+      "equity": 100.3297176820208,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786201080000,
+      "equity": 100.25542347696879,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786201140000,
+      "equity": 100.28514115898959,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786201200000,
+      "equity": 100.28514115898959,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786201260000,
+      "equity": 100.3594353640416,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786201320000,
+      "equity": 100.3297176820208,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786201380000,
+      "equity": 100.3148588410104,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786201440000,
+      "equity": 100.3148588410104,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786201500000,
+      "equity": 100.24056463595839,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786201560000,
+      "equity": 100.18112927191679,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786201620000,
+      "equity": 100.18112927191679,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786201680000,
+      "equity": 100.1959881129272,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786201740000,
+      "equity": 100.21084695393759,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786201800000,
+      "equity": 100.22570579494798,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786201860000,
+      "equity": 100.21084695393759,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786201920000,
+      "equity": 100.21084695393759,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786201980000,
+      "equity": 100.1959881129272,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786202040000,
+      "equity": 100.21084695393759,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786202100000,
+      "equity": 100.25542347696879,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786202160000,
+      "equity": 100.25542347696879,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786202220000,
+      "equity": 100.25542347696879,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786202280000,
+      "equity": 100.21084695393759,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786202340000,
+      "equity": 100.1662704309064,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786202400000,
+      "equity": 100.18112927191679,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786202460000,
+      "equity": 100.21084695393759,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786202520000,
+      "equity": 100.18112927191679,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786202580000,
+      "equity": 100.18112927191679,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786202640000,
+      "equity": 100.1959881129272,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786202700000,
+      "equity": 100.1959881129272,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786202760000,
+      "equity": 100.22570579494798,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786202820000,
+      "equity": 100.22570579494798,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786202880000,
+      "equity": 100.22570579494798,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786202940000,
+      "equity": 100.25542347696879,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786203000000,
+      "equity": 100.3,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786203060000,
+      "equity": 100.3297176820208,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786203120000,
+      "equity": 100.374294205052,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786203180000,
+      "equity": 100.3891530460624,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786203240000,
+      "equity": 100.4337295690936,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786203300000,
+      "equity": 100.44858841010401,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786203360000,
+      "equity": 100.56745913818722,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786203420000,
+      "equity": 100.56745913818722,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786203480000,
+      "equity": 100.62689450222882,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786203540000,
+      "equity": 100.65661218424962,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786203600000,
+      "equity": 100.67147102526003,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786203660000,
+      "equity": 100.62689450222882,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786203720000,
+      "equity": 100.59717682020802,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786203780000,
+      "equity": 100.65661218424962,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786203840000,
+      "equity": 100.64175334323923,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786203900000,
+      "equity": 100.71604754829123,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786203960000,
+      "equity": 100.67147102526003,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786204020000,
+      "equity": 100.67147102526003,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786204080000,
+      "equity": 100.61203566121843,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786204140000,
+      "equity": 100.50802377414561,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786204200000,
+      "equity": 100.46344725111442,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786204260000,
+      "equity": 100.47830609212481,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786204320000,
+      "equity": 100.53774145616642,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786204380000,
+      "equity": 100.50802377414561,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786204440000,
+      "equity": 100.58231797919761,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786204500000,
+      "equity": 100.52288261515602,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786204560000,
+      "equity": 100.53774145616642,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786204620000,
+      "equity": 100.59717682020802,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786204680000,
+      "equity": 100.55260029717681,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786204740000,
+      "equity": 100.50802377414561,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786204800000,
+      "equity": 100.50802377414561,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786204860000,
+      "equity": 100.52288261515602,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786204920000,
+      "equity": 100.3891530460624,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786204980000,
+      "equity": 100.374294205052,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786205040000,
+      "equity": 100.3891530460624,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786205100000,
+      "equity": 100.374294205052,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786205160000,
+      "equity": 100.46344725111442,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786205220000,
+      "equity": 100.4337295690936,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786205280000,
+      "equity": 100.3148588410104,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786205340000,
+      "equity": 100.374294205052,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786205400000,
+      "equity": 100.47830609212481,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786205460000,
+      "equity": 100.47830609212481,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786205520000,
+      "equity": 100.52288261515602,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786205580000,
+      "equity": 100.52288261515602,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786205640000,
+      "equity": 100.65661218424962,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786205700000,
+      "equity": 100.71604754829123,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786205760000,
+      "equity": 100.79034175334324,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786205820000,
+      "equity": 100.74576523031203,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786205880000,
+      "equity": 100.73090638930162,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786205940000,
+      "equity": 100.70118870728083,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786206000000,
+      "equity": 100.74576523031203,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786206060000,
+      "equity": 100.74576523031203,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786206120000,
+      "equity": 100.77548291233283,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786206180000,
+      "equity": 100.71604754829123,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786206240000,
+      "equity": 100.70118870728083,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786206300000,
+      "equity": 100.80520059435364,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786206360000,
+      "equity": 100.95378900445765,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786206420000,
+      "equity": 100.93893016344725,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786206480000,
+      "equity": 100.87949479940565,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786206540000,
+      "equity": 100.87949479940565,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786206600000,
+      "equity": 100.83491827637444,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786206660000,
+      "equity": 100.71604754829123,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786206720000,
+      "equity": 100.67147102526003,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786206780000,
+      "equity": 100.59717682020802,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786206840000,
+      "equity": 100.67147102526003,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786206900000,
+      "equity": 100.68632986627043,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786206960000,
+      "equity": 100.65661218424962,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786207020000,
+      "equity": 100.55260029717681,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786207080000,
+      "equity": 100.58231797919761,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786207140000,
+      "equity": 100.62689450222882,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786207200000,
+      "equity": 100.65661218424962,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786207260000,
+      "equity": 100.65661218424962,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786207320000,
+      "equity": 100.65661218424962,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786207380000,
+      "equity": 100.62689450222882,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786207440000,
+      "equity": 100.64175334323923,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786207500000,
+      "equity": 100.47830609212481,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786207560000,
+      "equity": 100.52288261515602,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786207620000,
+      "equity": 100.53774145616642,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786207680000,
+      "equity": 100.49316493313522,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786207740000,
+      "equity": 100.44858841010401,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786207800000,
+      "equity": 100.47830609212481,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786207860000,
+      "equity": 100.49316493313522,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786207920000,
+      "equity": 100.44858841010401,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786207980000,
+      "equity": 100.50802377414561,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786208040000,
+      "equity": 100.44858841010401,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786208100000,
+      "equity": 100.4337295690936,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786208160000,
+      "equity": 100.4188707280832,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786208220000,
+      "equity": 100.67147102526003,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786208280000,
+      "equity": 100.76062407132244,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786208340000,
+      "equity": 100.68632986627043,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786208400000,
+      "equity": 100.74576523031203,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786208460000,
+      "equity": 100.84977711738485,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786208520000,
+      "equity": 101.02404160475483,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786208580000,
+      "equity": 101.05375928677563,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786208640000,
+      "equity": 101.06861812778602,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786208700000,
+      "equity": 100.96460624071322,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786208760000,
+      "equity": 100.92002971768201,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786208820000,
+      "equity": 100.91260029717682,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786208880000,
+      "equity": 100.89774145616641,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786208940000,
+      "equity": 100.92002971768201,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786209000000,
+      "equity": 101.06118870728083,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786209060000,
+      "equity": 101.05375928677563,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786209120000,
+      "equity": 101.12805349182763,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786209180000,
+      "equity": 101.15034175334324,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786209240000,
+      "equity": 101.12805349182763,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786209300000,
+      "equity": 101.15777117384843,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786209360000,
+      "equity": 101.15034175334324,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786209420000,
+      "equity": 101.18748885586923,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786209480000,
+      "equity": 101.09090638930164,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786209540000,
+      "equity": 101.06861812778602,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786209600000,
+      "equity": 101.07604754829123,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786209660000,
+      "equity": 101.15034175334324,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786209720000,
+      "equity": 101.13548291233283,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786209780000,
+      "equity": 101.17263001485884,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786209840000,
+      "equity": 101.18005943536404,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786209900000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786209960000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786210020000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786210080000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786210140000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786210200000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786210260000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786210320000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786210380000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786210440000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786210500000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786210560000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786210620000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786210680000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786210740000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786210800000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786210860000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786210920000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786210980000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786211040000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786211100000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786211160000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786211220000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786211280000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786211340000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786211400000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786211460000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786211520000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786211580000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786211640000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786211700000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786211760000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786211820000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786211880000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786211940000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786212000000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786212060000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786212120000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786212180000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786212240000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786212300000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786212360000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786212420000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786212480000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786212540000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786212600000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786212660000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786212720000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786212780000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786212840000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786212900000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786212960000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786213020000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786213080000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786213140000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786213200000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786213260000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786213320000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786213380000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786213440000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786213500000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786213560000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786213620000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786213680000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786213740000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786213800000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786213860000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786213920000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786213980000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786214040000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786214100000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786214160000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786214220000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786214280000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786214340000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786214400000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786214460000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786214520000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786214580000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786214640000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786214700000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786214760000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786214820000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786214880000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786214940000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786215000000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786215060000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786215120000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786215180000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786215240000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786215300000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786215360000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786215420000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786215480000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786215540000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786215600000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786215660000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786215720000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786215780000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786215840000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786215900000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786215960000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786216020000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786216080000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786216140000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786216200000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786216260000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786216320000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786216380000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786216440000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786216500000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786216560000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786216620000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786216680000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786216740000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786216800000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786216860000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786216920000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786216980000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786217040000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786217100000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786217160000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786217220000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786217280000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786217340000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786217400000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786217460000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786217520000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786217580000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786217640000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786217700000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786217760000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786217820000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786217880000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786217940000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786218000000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786218060000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786218120000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786218180000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786218240000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786218300000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786218360000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786218420000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786218480000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786218540000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786218600000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786218660000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786218720000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786218780000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786218840000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786218900000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786218960000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786219020000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786219080000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786219140000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786219200000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786219260000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786219320000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786219380000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786219440000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786219500000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786219560000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786219620000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786219680000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786219740000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786219800000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786219860000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786219920000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786219980000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786220040000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786220100000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786220160000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786220220000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786220280000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786220340000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786220400000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786220460000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786220520000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786220580000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786220640000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786220700000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786220760000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786220820000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786220880000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786220940000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786221000000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786221060000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786221120000,
+      "equity": 101.25999999999999,
+      "open_positions": 0
+    },
+    {
+      "ts": 1786221180000,
+      "equity": 101.25999999999999,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786221240000,
+      "equity": 101.32799637352674,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786221300000,
+      "equity": 101.36879419764279,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786221360000,
+      "equity": 101.36879419764279,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786221420000,
+      "equity": 101.37559383499546,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786221480000,
+      "equity": 101.32799637352674,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786221540000,
+      "equity": 101.30079782411603,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786221600000,
+      "equity": 101.29399818676336,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786221660000,
+      "equity": 101.30079782411603,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786221720000,
+      "equity": 101.30759746146872,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786221780000,
+      "equity": 101.30759746146872,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786221840000,
+      "equity": 101.32119673617406,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786221900000,
+      "equity": 101.29399818676336,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786221960000,
+      "equity": 101.32799637352674,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786222020000,
+      "equity": 101.30232115120127,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786222080000,
+      "equity": 101.30988245209656,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786222140000,
+      "equity": 101.3628115583636,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786222200000,
+      "equity": 101.36585821253406,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786222260000,
+      "equity": 101.30313814927476,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786222320000,
+      "equity": 101.25173237009295,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786222380000,
+      "equity": 101.27213128215098,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786222440000,
+      "equity": 101.27893091950365,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786222500000,
+      "equity": 101.29329185775161,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786222560000,
+      "equity": 101.30765279599959,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786222620000,
+      "equity": 101.27893091950365,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786222680000,
+      "equity": 101.27893091950365,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786222740000,
+      "equity": 101.29481518483685,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786222800000,
+      "equity": 101.36661987607668,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786222860000,
+      "equity": 101.4928216661379,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786222920000,
+      "equity": 101.55858838356767,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786222980000,
+      "equity": 101.60167119831156,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786223040000,
+      "equity": 101.53138983415698,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786223100000,
+      "equity": 101.59639488804413,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786223160000,
+      "equity": 101.71732036783791,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786223220000,
+      "equity": 101.78080209463982,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786223280000,
+      "equity": 101.86468273349978,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786223340000,
+      "equity": 101.96063931997983,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786223400000,
+      "equity": 101.98544226178049,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786223460000,
+      "equity": 101.98544226178049,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786223520000,
+      "equity": 101.9858230935518,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786223580000,
+      "equity": 101.85434499322314,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786223640000,
+      "equity": 101.83807989611863,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786223700000,
+      "equity": 101.81844264760322,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786223760000,
+      "equity": 101.83242275407989,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786223820000,
+      "equity": 101.80522420466919,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786223880000,
+      "equity": 101.83204192230858,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786223940000,
+      "equity": 101.82333812609936,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786224000000,
+      "equity": 101.82371895787067,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786224060000,
+      "equity": 101.78292113375463,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786224120000,
+      "equity": 101.72661987607668,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786224180000,
+      "equity": 101.72357322190622,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786224240000,
+      "equity": 101.71639275278224,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786224300000,
+      "equity": 101.71035477897217,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786224360000,
+      "equity": 101.72357322190622,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786224420000,
+      "equity": 101.74359130219293,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786224480000,
+      "equity": 101.74359130219293,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786224540000,
+      "equity": 101.74473379750685,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786224600000,
+      "equity": 101.73755332838287,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786224660000,
+      "equity": 101.68881337160023,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786224720000,
+      "equity": 101.68881337160023,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786224780000,
+      "equity": 101.64611138862763,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786224840000,
+      "equity": 101.65329185775161,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786224900000,
+      "equity": 101.65443435306554,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786224960000,
+      "equity": 101.7738365057741,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786225020000,
+      "equity": 101.80332004581264,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786225080000,
+      "equity": 101.78933993933599,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786225140000,
+      "equity": 101.76970269082058,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786225200000,
+      "equity": 101.74212330963857,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786225260000,
+      "equity": 101.76290305346791,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786225320000,
+      "equity": 101.78406362906854,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786225380000,
+      "equity": 101.7984245673165,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786225440000,
+      "equity": 101.81164301025055,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786225500000,
+      "equity": 101.79537791314604,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786225560000,
+      "equity": 101.84373703815739,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786225620000,
+      "equity": 101.9155417293972,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786225680000,
+      "equity": 101.9155417293972,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786225740000,
+      "equity": 101.9155417293972,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786225800000,
+      "equity": 101.9155417293972,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786225860000,
+      "equity": 101.90798042850192,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786225920000,
+      "equity": 101.90798042850192,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786225980000,
+      "equity": 101.90798042850192,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786226040000,
+      "equity": 101.9151608976259,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786226100000,
+      "equity": 101.99071857204794,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786226160000,
+      "equity": 101.90079995937793,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786226220000,
+      "equity": 101.82486145318458,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786226280000,
+      "equity": 101.81050051493662,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786226340000,
+      "equity": 101.79690124023128,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786226400000,
+      "equity": 101.81050051493662,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786226460000,
+      "equity": 101.79652040845997,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786226520000,
+      "equity": 101.79010160287861,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786226580000,
+      "equity": 101.77688315994456,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786226640000,
+      "equity": 101.76970269082058,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786226700000,
+      "equity": 101.74892294699124,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786226760000,
+      "equity": 101.74174247786726,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786226820000,
+      "equity": 101.69338335285592,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786226880000,
+      "equity": 101.67940324637927,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786226940000,
+      "equity": 101.70094465375122,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786227000000,
+      "equity": 101.68696454727456,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786227060000,
+      "equity": 101.62424448401525,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786227120000,
+      "equity": 101.62386365224394,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786227180000,
+      "equity": 101.61744484666258,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786227240000,
+      "equity": 101.43309297459776,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786227300000,
+      "equity": 101.427435832559,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786227360000,
+      "equity": 101.44745391284572,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786227420000,
+      "equity": 101.48335625846563,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786227480000,
+      "equity": 101.42781666433031,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786227540000,
+      "equity": 101.41421738962497,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786227600000,
+      "equity": 101.50984847886458,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786227660000,
+      "equity": 101.467146495892,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786227720000,
+      "equity": 101.42520617646203,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786227780000,
+      "equity": 101.43162498204339,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786227840000,
+      "equity": 101.32848792643935,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786227900000,
+      "equity": 101.287309270552,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786227960000,
+      "equity": 101.31450781996269,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786228020000,
+      "equity": 101.30694651906741,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786228080000,
+      "equity": 101.33528756379202,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786228140000,
+      "equity": 101.32810709466804,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786228200000,
+      "equity": 101.36286694497403,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786228260000,
+      "equity": 101.30694651906741,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786228320000,
+      "equity": 101.30656568729609,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786228380000,
+      "equity": 101.32054579377275,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786228440000,
+      "equity": 101.29334724436205,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786228500000,
+      "equity": 101.26614869495135,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786228560000,
+      "equity": 101.27256750053272,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786228620000,
+      "equity": 101.17318342811089,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786228680000,
+      "equity": 101.2011436410642,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786228740000,
+      "equity": 101.2094666055021,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786228800000,
+      "equity": 101.27447165938926,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786228860000,
+      "equity": 101.28241379205586,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786228920000,
+      "equity": 101.23519716235845,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786228980000,
+      "equity": 101.29753639384644,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786229040000,
+      "equity": 101.30471686297042,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786229100000,
+      "equity": 101.3542184832957,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786229160000,
+      "equity": 101.35459931506699,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786229220000,
+      "equity": 101.33305790769505,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786229280000,
+      "equity": 101.29149842003639,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786229340000,
+      "equity": 101.42678483807813,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786229400000,
+      "equity": 101.3436658627608,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786229460000,
+      "equity": 101.319839464761,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786229520000,
+      "equity": 101.03594064145523,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786229580000,
+      "equity": 101.05748204882717,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786229640000,
+      "equity": 101.02157970320727,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786229700000,
+      "equity": 100.99285782671133,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786229760000,
+      "equity": 100.98567735758735,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786229820000,
+      "equity": 101.00721876495929,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786229880000,
+      "equity": 100.98567735758735,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786229940000,
+      "equity": 100.97849688846337,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786230000000,
+      "equity": 100.95695548109141,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786230060000,
+      "equity": 100.9641359502154,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786230120000,
+      "equity": 100.98567735758735,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786230180000,
+      "equity": 101.05748204882717,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786230240000,
+      "equity": 101.04312111057921,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786230300000,
+      "equity": 101.04312111057921,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786230360000,
+      "equity": 101.04312111057921,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786230420000,
+      "equity": 101.03594064145523,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786230480000,
+      "equity": 101.03594064145523,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786230540000,
+      "equity": 101.02876017233125,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786230600000,
+      "equity": 101.07184298707514,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786230660000,
+      "equity": 101.17843503385875,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786230720000,
+      "equity": 101.17125456473477,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786230780000,
+      "equity": 101.13721053590841,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786230840000,
+      "equity": 101.11604079189517,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786230900000,
+      "equity": 101.13021589846379,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786230960000,
+      "equity": 101.18654466137951,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786231020000,
+      "equity": 101.15082814743894,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786231080000,
+      "equity": 101.13646720919098,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786231140000,
+      "equity": 101.19168098203056,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786231200000,
+      "equity": 101.1848721762653,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786231260000,
+      "equity": 101.18505800794465,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786231320000,
+      "equity": 101.24138677086037,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786231380000,
+      "equity": 101.28391209056619,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786231440000,
+      "equity": 101.31962860450676,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786231500000,
+      "equity": 101.2980871971348,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786231560000,
+      "equity": 101.26936532063887,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786231620000,
+      "equity": 101.25500438239091,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786231680000,
+      "equity": 101.28409792224555,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786231740000,
+      "equity": 101.3194427728274,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786231800000,
+      "equity": 101.38313783654645,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786231860000,
+      "equity": 100.94191818249696,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786231920000,
+      "equity": 100.99088064460935,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786231980000,
+      "equity": 101.06231367249046,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786232040000,
+      "equity": 101.11276278803768,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786232100000,
+      "equity": 101.13813942643971,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786232160000,
+      "equity": 101.14513406388433,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786232220000,
+      "equity": 101.13813942643971,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786232280000,
+      "equity": 101.10316623921658,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786232340000,
+      "equity": 101.15212870132896,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786232400000,
+      "equity": 101.15212870132896,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786232460000,
+      "equity": 101.20109116344135,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786232520000,
+      "equity": 101.20109116344135,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786232580000,
+      "equity": 101.20109116344135,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786232640000,
+      "equity": 101.19409652599671,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786232700000,
+      "equity": 101.19409652599671,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786232760000,
+      "equity": 101.21508043833059,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786232820000,
+      "equity": 101.22906971321984,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786232880000,
+      "equity": 101.19409652599671,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786232940000,
+      "equity": 101.20109116344135,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786233000000,
+      "equity": 101.20109116344135,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786233060000,
+      "equity": 101.18010725110746,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786233120000,
+      "equity": 101.13813942643971,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786233180000,
+      "equity": 101.17311261366284,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786233240000,
+      "equity": 101.15212870132896,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786233300000,
+      "equity": 101.15212870132896,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786233360000,
+      "equity": 101.18710188855209,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786233420000,
+      "equity": 101.14513406388433,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786233480000,
+      "equity": 101.14513406388433,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786233540000,
+      "equity": 101.14513406388433,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786233600000,
+      "equity": 101.12415015155047,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786233660000,
+      "equity": 101.24899392990392,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786233720000,
+      "equity": 101.25559118147986,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786233780000,
+      "equity": 101.33873205907801,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786233840000,
+      "equity": 101.33147249772094,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786233900000,
+      "equity": 101.32461032223253,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786233960000,
+      "equity": 101.44932163862977,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786234020000,
+      "equity": 101.44245946314136,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786234080000,
+      "equity": 101.5113461419378,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786234140000,
+      "equity": 101.55304904269312,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786234200000,
+      "equity": 101.45605135216194,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786234260000,
+      "equity": 101.47716772645204,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786234320000,
+      "equity": 101.35945104749943,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786234380000,
+      "equity": 101.415143223144,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786234440000,
+      "equity": 101.42213786058862,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786234500000,
+      "equity": 101.29742654419138,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786234560000,
+      "equity": 101.24978870164128,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786234620000,
+      "equity": 101.27750232750732,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786234680000,
+      "equity": 101.29135914044035,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786234740000,
+      "equity": 101.3607756670617,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786234800000,
+      "equity": 101.40920828134918,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786234860000,
+      "equity": 101.28436450299571,
+      "open_positions": 3
+    },
+    {
+      "ts": 1786234920000,
+      "equity": 101.3753028673356,
+      "open_positions": 3
+    },
+    {
+      "ts": 1786234980000,
+      "equity": 101.40219882985912,
+      "open_positions": 3
+    },
+    {
+      "ts": 1786235040000,
+      "equity": 101.53422944041654,
+      "open_positions": 3
+    },
+    {
+      "ts": 1786235100000,
+      "equity": 101.62216872299436,
+      "open_positions": 3
+    },
+    {
+      "ts": 1786235160000,
+      "equity": 101.95337473817432,
+      "open_positions": 3
+    },
+    {
+      "ts": 1786235220000,
+      "equity": 102.10018313549402,
+      "open_positions": 3
+    },
+    {
+      "ts": 1786235280000,
+      "equity": 102.09840218126378,
+      "open_positions": 3
+    },
+    {
+      "ts": 1786235340000,
+      "equity": 102.12696405180597,
+      "open_positions": 3
+    },
+    {
+      "ts": 1786235400000,
+      "equity": 102.08625667172846,
+      "open_positions": 3
+    },
+    {
+      "ts": 1786235460000,
+      "equity": 101.97526970630804,
+      "open_positions": 3
+    },
+    {
+      "ts": 1786235520000,
+      "equity": 102.03402069651774,
+      "open_positions": 3
+    },
+    {
+      "ts": 1786235580000,
+      "equity": 102.10301020917956,
+      "open_positions": 3
+    },
+    {
+      "ts": 1786235640000,
+      "equity": 102.03666802610084,
+      "open_positions": 3
+    },
+    {
+      "ts": 1786235700000,
+      "equity": 102.05789555012673,
+      "open_positions": 3
+    },
+    {
+      "ts": 1786235760000,
+      "equity": 101.99087418721533,
+      "open_positions": 3
+    },
+    {
+      "ts": 1786235820000,
+      "equity": 102.05447547595877,
+      "open_positions": 3
+    },
+    {
+      "ts": 1786235880000,
+      "equity": 101.86008342395978,
+      "open_positions": 3
+    },
+    {
+      "ts": 1786235940000,
+      "equity": 102.22528987206185,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786236000000,
+      "equity": 102.16566908664487,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786236060000,
+      "equity": 101.9830253966232,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786236120000,
+      "equity": 101.7882276428851,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786236180000,
+      "equity": 101.85369353258156,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786236240000,
+      "equity": 101.74431369561943,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786236300000,
+      "equity": 101.66188052318144,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786236360000,
+      "equity": 101.79923890992207,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786236420000,
+      "equity": 101.75406451806613,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786236480000,
+      "equity": 101.63928995901063,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786236540000,
+      "equity": 101.44632067995967,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786236600000,
+      "equity": 101.35551477757602,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786236660000,
+      "equity": 101.43634803466276,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786236720000,
+      "equity": 101.34806302145961,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786236780000,
+      "equity": 101.29818632200366,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786236840000,
+      "equity": 101.29772246684618,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786236900000,
+      "equity": 101.29371257373954,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786236960000,
+      "equity": 101.32765387570831,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786237020000,
+      "equity": 101.29646875874163,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786237080000,
+      "equity": 101.3227230087724,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786237140000,
+      "equity": 101.32662199045394,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786237200000,
+      "equity": 101.33223853539752,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786237260000,
+      "equity": 101.3046061928657,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786237320000,
+      "equity": 101.28912791405031,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786237380000,
+      "equity": 101.07885188149682,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786237440000,
+      "equity": 101.0932198647703,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786237500000,
+      "equity": 101.14917696432732,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786237560000,
+      "equity": 101.10021450221494,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786237620000,
+      "equity": 101.12119841454881,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786237680000,
+      "equity": 101.0932198647703,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786237740000,
+      "equity": 101.0932198647703,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786237800000,
+      "equity": 101.06524131499181,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786237860000,
+      "equity": 101.07923058988106,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786237920000,
+      "equity": 101.07223595243643,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786237980000,
+      "equity": 101.0932198647703,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786238040000,
+      "equity": 101.05824667754719,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786238100000,
+      "equity": 101.0092842154348,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786238160000,
+      "equity": 101.0372627652133,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786238220000,
+      "equity": 101.02327349032406,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786238280000,
+      "equity": 101.0372627652133,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786238340000,
+      "equity": 101.08622522732568,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786238400000,
+      "equity": 101.07223595243643,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786238460000,
+      "equity": 101.07923058988106,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786238520000,
+      "equity": 101.08622522732568,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786238580000,
+      "equity": 101.07223595243643,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786238640000,
+      "equity": 101.1701608766612,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786238700000,
+      "equity": 101.16316623921657,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786238760000,
+      "equity": 101.21912333877357,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786238820000,
+      "equity": 101.26109116344134,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786238880000,
+      "equity": 101.23311261366283,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786238940000,
+      "equity": 101.1981394264397,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786239000000,
+      "equity": 101.2540965259967,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786239060000,
+      "equity": 101.29606435066447,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786239120000,
+      "equity": 101.2540965259967,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786239180000,
+      "equity": 101.26808580088596,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786239240000,
+      "equity": 101.28906971321983,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786239300000,
+      "equity": 101.2540965259967,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786239360000,
+      "equity": 101.28207507577521,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786239420000,
+      "equity": 101.21212870132895,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786239480000,
+      "equity": 101.21212870132895,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786239540000,
+      "equity": 101.24010725110745,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786239600000,
+      "equity": 101.26109116344134,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786239660000,
+      "equity": 101.2261179762182,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786239720000,
+      "equity": 101.2261179762182,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786239780000,
+      "equity": 101.2261179762182,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786239840000,
+      "equity": 101.2261179762182,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786239900000,
+      "equity": 101.24710188855208,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786239960000,
+      "equity": 101.26109116344134,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786240020000,
+      "equity": 101.2540965259967,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786240080000,
+      "equity": 101.1981394264397,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786240140000,
+      "equity": 101.20513406388432,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786240200000,
+      "equity": 101.14917696432732,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786240260000,
+      "equity": 101.18415015155045,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786240320000,
+      "equity": 101.19114478899508,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786240380000,
+      "equity": 101.19114478899508,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786240440000,
+      "equity": 101.21912333877357,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786240500000,
+      "equity": 101.24010725110745,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786240560000,
+      "equity": 101.19114478899508,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786240620000,
+      "equity": 101.2261179762182,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786240680000,
+      "equity": 101.2261179762182,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786240740000,
+      "equity": 101.26109116344134,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786240800000,
+      "equity": 101.28906971321983,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786240860000,
+      "equity": 101.28207507577521,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786240920000,
+      "equity": 101.33103753788758,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786240980000,
+      "equity": 101.3100536255537,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786241040000,
+      "equity": 101.30305898810909,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786241100000,
+      "equity": 101.3100536255537,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786241160000,
+      "equity": 101.33103753788758,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786241220000,
+      "equity": 101.36601072511071,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786241280000,
+      "equity": 101.34502681277684,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786241340000,
+      "equity": 101.34502681277684,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786241400000,
+      "equity": 101.3100536255537,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786241460000,
+      "equity": 101.33103753788758,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786241520000,
+      "equity": 101.35202145022147,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786241580000,
+      "equity": 101.39398927488922,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786241640000,
+      "equity": 101.46393564933548,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786241700000,
+      "equity": 101.4149731872231,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786241760000,
+      "equity": 101.46393564933548,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786241820000,
+      "equity": 101.46393564933548,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786241880000,
+      "equity": 101.45694101189085,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786241940000,
+      "equity": 101.48491956166936,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786242000000,
+      "equity": 101.48491956166936,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786242060000,
+      "equity": 101.39398927488922,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786242120000,
+      "equity": 101.40098391233384,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786242180000,
+      "equity": 101.40098391233384,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786242240000,
+      "equity": 101.40098391233384,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786242300000,
+      "equity": 101.39398927488922,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786242360000,
+      "equity": 101.40797854977848,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786242420000,
+      "equity": 101.3869946374446,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786242480000,
+      "equity": 101.40098391233384,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786242540000,
+      "equity": 101.40098391233384,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786242600000,
+      "equity": 101.4149731872231,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786242660000,
+      "equity": 101.40098391233384,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786242720000,
+      "equity": 101.40797854977848,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786242780000,
+      "equity": 101.40797854977848,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786242840000,
+      "equity": 101.4149731872231,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786242900000,
+      "equity": 101.42196782466773,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786242960000,
+      "equity": 101.42196782466773,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786243020000,
+      "equity": 101.42196782466773,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786243080000,
+      "equity": 101.2261179762182,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786243140000,
+      "equity": 101.19114478899508,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786243200000,
+      "equity": 101.21912333877357,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786243260000,
+      "equity": 101.24710188855208,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786243320000,
+      "equity": 101.26109116344134,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786243380000,
+      "equity": 101.24710188855208,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786243440000,
+      "equity": 101.19114478899508,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786243500000,
+      "equity": 101.1981394264397,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786243560000,
+      "equity": 101.2261179762182,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786243620000,
+      "equity": 101.21212870132895,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786243680000,
+      "equity": 101.17715551410582,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786243740000,
+      "equity": 101.17715551410582,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786243800000,
+      "equity": 101.21912333877357,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786243860000,
+      "equity": 101.1981394264397,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786243920000,
+      "equity": 101.1981394264397,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786243980000,
+      "equity": 101.18415015155045,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786244040000,
+      "equity": 101.1701608766612,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786244100000,
+      "equity": 101.16316623921657,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786244160000,
+      "equity": 101.15617160177194,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786244220000,
+      "equity": 101.15617160177194,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786244280000,
+      "equity": 101.14917696432732,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786244340000,
+      "equity": 101.14218232688269,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786244400000,
+      "equity": 101.12119841454881,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786244460000,
+      "equity": 101.21912333877357,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786244520000,
+      "equity": 101.21212870132895,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786244580000,
+      "equity": 101.21212870132895,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786244640000,
+      "equity": 101.1981394264397,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786244700000,
+      "equity": 101.1981394264397,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786244760000,
+      "equity": 101.20513406388432,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786244820000,
+      "equity": 101.18415015155045,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786244880000,
+      "equity": 101.14917696432732,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786244940000,
+      "equity": 101.13518768943807,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786245000000,
+      "equity": 101.13518768943807,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786245060000,
+      "equity": 101.15617160177194,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786245120000,
+      "equity": 101.15617160177194,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786245180000,
+      "equity": 101.12819305199343,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786245240000,
+      "equity": 101.12119841454881,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786245300000,
+      "equity": 101.15617160177194,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786245360000,
+      "equity": 101.14218232688269,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786245420000,
+      "equity": 101.13518768943807,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786245480000,
+      "equity": 101.14218232688269,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786245540000,
+      "equity": 101.1142037771042,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786245600000,
+      "equity": 101.12119841454881,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786245660000,
+      "equity": 101.12819305199343,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786245720000,
+      "equity": 101.12819305199343,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786245780000,
+      "equity": 101.16316623921657,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786245840000,
+      "equity": 101.18415015155045,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786245900000,
+      "equity": 101.18415015155045,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786245960000,
+      "equity": 101.18415015155045,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786246020000,
+      "equity": 101.18415015155045,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786246080000,
+      "equity": 101.20513406388432,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786246140000,
+      "equity": 101.24710188855208,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786246200000,
+      "equity": 101.37999999999997,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786246260000,
+      "equity": 101.35901608766609,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786246320000,
+      "equity": 101.37999999999997,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786246380000,
+      "equity": 101.37300536255535,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786246440000,
+      "equity": 101.37300536255535,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786246500000,
+      "equity": 101.34502681277684,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786246560000,
+      "equity": 101.33103753788758,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786246620000,
+      "equity": 101.39398927488922,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786246680000,
+      "equity": 101.40098391233384,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786246740000,
+      "equity": 101.33803217533222,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786246800000,
+      "equity": 101.33803217533222,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786246860000,
+      "equity": 101.31704826299834,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786246920000,
+      "equity": 101.33103753788758,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786246980000,
+      "equity": 101.3100536255537,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786247040000,
+      "equity": 101.32404290044296,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786247100000,
+      "equity": 101.31704826299834,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786247160000,
+      "equity": 101.26109116344134,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786247220000,
+      "equity": 101.26109116344134,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786247280000,
+      "equity": 101.32404290044296,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786247340000,
+      "equity": 101.3100536255537,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786247400000,
+      "equity": 101.28207507577521,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786247460000,
+      "equity": 101.32404290044296,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786247520000,
+      "equity": 101.32404290044296,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786247580000,
+      "equity": 101.35202145022147,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786247640000,
+      "equity": 101.33803217533222,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786247700000,
+      "equity": 101.35901608766609,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786247760000,
+      "equity": 101.34502681277684,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786247820000,
+      "equity": 101.33103753788758,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786247880000,
+      "equity": 101.32404290044296,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786247940000,
+      "equity": 101.33103753788758,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786248000000,
+      "equity": 101.27508043833058,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786248060000,
+      "equity": 101.31704826299834,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786248120000,
+      "equity": 101.31704826299834,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786248180000,
+      "equity": 101.2540965259967,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786248240000,
+      "equity": 101.27508043833058,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786248300000,
+      "equity": 101.3100536255537,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786248360000,
+      "equity": 101.3100536255537,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786248420000,
+      "equity": 101.3100536255537,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786248480000,
+      "equity": 101.3100536255537,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786248540000,
+      "equity": 101.3100536255537,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786248600000,
+      "equity": 101.33103753788758,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786248660000,
+      "equity": 101.33103753788758,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786248720000,
+      "equity": 101.31704826299834,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786248780000,
+      "equity": 101.31704826299834,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786248840000,
+      "equity": 101.3100536255537,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786248900000,
+      "equity": 101.26109116344134,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786248960000,
+      "equity": 101.24710188855208,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786249020000,
+      "equity": 101.24710188855208,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786249080000,
+      "equity": 101.28207507577521,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786249140000,
+      "equity": 101.3100536255537,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786249200000,
+      "equity": 101.3100536255537,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786249260000,
+      "equity": 101.3100536255537,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786249320000,
+      "equity": 101.3100536255537,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786249380000,
+      "equity": 101.32404290044296,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786249440000,
+      "equity": 101.32404290044296,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786249500000,
+      "equity": 101.34502681277684,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786249560000,
+      "equity": 101.34502681277684,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786249620000,
+      "equity": 101.33803217533222,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786249680000,
+      "equity": 101.33803217533222,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786249740000,
+      "equity": 101.33103753788758,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786249800000,
+      "equity": 101.31704826299834,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786249860000,
+      "equity": 101.07223595243643,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786249920000,
+      "equity": 101.1142037771042,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786249980000,
+      "equity": 101.12119841454881,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786250040000,
+      "equity": 101.17715551410582,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786250100000,
+      "equity": 101.14917696432732,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786250160000,
+      "equity": 101.19114478899508,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786250220000,
+      "equity": 101.1701608766612,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786250280000,
+      "equity": 101.16316623921657,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786250340000,
+      "equity": 101.14218232688269,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786250400000,
+      "equity": 101.13518768943807,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786250460000,
+      "equity": 101.13518768943807,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786250520000,
+      "equity": 101.13518768943807,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786250580000,
+      "equity": 101.13518768943807,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786250640000,
+      "equity": 101.10720913965956,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786250700000,
+      "equity": 101.10720913965956,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786250760000,
+      "equity": 101.0932198647703,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786250820000,
+      "equity": 101.16465568156958,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786250880000,
+      "equity": 101.08356269432124,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786250940000,
+      "equity": 101.1077056204439,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786251000000,
+      "equity": 101.00463575929302,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786251060000,
+      "equity": 101.05775019676285,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786251120000,
+      "equity": 100.80580702613749,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786251180000,
+      "equity": 100.81045548227927,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786251240000,
+      "equity": 100.82810025174162,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786251300000,
+      "equity": 100.87855215620701,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786251360000,
+      "equity": 100.83825390297501,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786251420000,
+      "equity": 100.83942699362643,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786251480000,
+      "equity": 100.8454286695024,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786251540000,
+      "equity": 100.8309429138288,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786251600000,
+      "equity": 100.77083383891436,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786251660000,
+      "equity": 100.711401373867,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786251720000,
+      "equity": 100.70007463198218,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786251780000,
+      "equity": 100.60616546049603,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786251840000,
+      "equity": 100.65878341718151,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786251900000,
+      "equity": 100.53856526735262,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786251960000,
+      "equity": 100.5530510230262,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786252020000,
+      "equity": 100.4516507333111,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786252080000,
+      "equity": 100.449484681091,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786252140000,
+      "equity": 100.50526165156525,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786252200000,
+      "equity": 100.46663296976902,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786252260000,
+      "equity": 100.47629014021807,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786252320000,
+      "equity": 100.54989200923744,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786252380000,
+      "equity": 100.36207366626513,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786252440000,
+      "equity": 100.3572450810406,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786252500000,
+      "equity": 100.45647931853561,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786252560000,
+      "equity": 100.11627885287943,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786252620000,
+      "equity": 100.10228957799018,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786252680000,
+      "equity": 100.11627885287943,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786252740000,
+      "equity": 100.10228957799018,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786252800000,
+      "equity": 100.10928421543481,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786252860000,
+      "equity": 100.09529494054556,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786252920000,
+      "equity": 100.08130566565632,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786252980000,
+      "equity": 100.0533271158778,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786253040000,
+      "equity": 100.08130566565632,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786253100000,
+      "equity": 100.23326030622505,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786253160000,
+      "equity": 100.28174092253418,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786253220000,
+      "equity": 100.26172070180682,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786253280000,
+      "equity": 100.32877600143355,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786253340000,
+      "equity": 100.1727177982397,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786253400000,
+      "equity": 100.2472495811143,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786253460000,
+      "equity": 100.33577063887817,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786253520000,
+      "equity": 100.4308044882834,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786253580000,
+      "equity": 100.56587877914338,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786253640000,
+      "equity": 100.6278668245385,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786253700000,
+      "equity": 100.72193698233723,
+      "open_positions": 3
+    },
+    {
+      "ts": 1786253760000,
+      "equity": 100.59144564091736,
+      "open_positions": 3
+    },
+    {
+      "ts": 1786253820000,
+      "equity": 100.7876178652467,
+      "open_positions": 3
+    },
+    {
+      "ts": 1786253880000,
+      "equity": 100.8164178652467,
+      "open_positions": 3
+    },
+    {
+      "ts": 1786253940000,
+      "equity": 100.69347535726133,
+      "open_positions": 3
+    },
+    {
+      "ts": 1786254000000,
+      "equity": 100.7251467445542,
+      "open_positions": 3
+    },
+    {
+      "ts": 1786254060000,
+      "equity": 100.87703272341871,
+      "open_positions": 3
+    },
+    {
+      "ts": 1786254120000,
+      "equity": 100.93723685647996,
+      "open_positions": 3
+    },
+    {
+      "ts": 1786254180000,
+      "equity": 101.00161640602026,
+      "open_positions": 3
+    },
+    {
+      "ts": 1786254240000,
+      "equity": 101.07944998882515,
+      "open_positions": 3
+    },
+    {
+      "ts": 1786254300000,
+      "equity": 101.08571939857663,
+      "open_positions": 3
+    },
+    {
+      "ts": 1786254360000,
+      "equity": 101.12267509066099,
+      "open_positions": 3
+    },
+    {
+      "ts": 1786254420000,
+      "equity": 101.00354378923328,
+      "open_positions": 3
+    },
+    {
+      "ts": 1786254480000,
+      "equity": 101.01053965617203,
+      "open_positions": 3
+    },
+    {
+      "ts": 1786254540000,
+      "equity": 101.0478061623564,
+      "open_positions": 3
+    },
+    {
+      "ts": 1786254600000,
+      "equity": 101.14706317292415,
+      "open_positions": 3
+    },
+    {
+      "ts": 1786254660000,
+      "equity": 101.34955574383815,
+      "open_positions": 3
+    },
+    {
+      "ts": 1786254720000,
+      "equity": 101.34118546018215,
+      "open_positions": 3
+    },
+    {
+      "ts": 1786254780000,
+      "equity": 101.2529053253199,
+      "open_positions": 3
+    },
+    {
+      "ts": 1786254840000,
+      "equity": 101.28886976497365,
+      "open_positions": 3
+    },
+    {
+      "ts": 1786254900000,
+      "equity": 101.4460375896414,
+      "open_positions": 3
+    },
+    {
+      "ts": 1786254960000,
+      "equity": 101.57312844961439,
+      "open_positions": 3
+    },
+    {
+      "ts": 1786255020000,
+      "equity": 101.51188581577175,
+      "open_positions": 3
+    },
+    {
+      "ts": 1786255080000,
+      "equity": 101.45452673867337,
+      "open_positions": 3
+    },
+    {
+      "ts": 1786255140000,
+      "equity": 101.10029288926813,
+      "open_positions": 3
+    },
+    {
+      "ts": 1786255200000,
+      "equity": 101.1632022958955,
+      "open_positions": 3
+    },
+    {
+      "ts": 1786255260000,
+      "equity": 101.21069657775053,
+      "open_positions": 3
+    },
+    {
+      "ts": 1786255320000,
+      "equity": 101.05442009450263,
+      "open_positions": 3
+    },
+    {
+      "ts": 1786255380000,
+      "equity": 101.09185640289613,
+      "open_positions": 3
+    },
+    {
+      "ts": 1786255440000,
+      "equity": 101.16793240469713,
+      "open_positions": 3
+    },
+    {
+      "ts": 1786255500000,
+      "equity": 101.28412119813949,
+      "open_positions": 3
+    },
+    {
+      "ts": 1786255560000,
+      "equity": 101.26221961305575,
+      "open_positions": 3
+    },
+    {
+      "ts": 1786255620000,
+      "equity": 101.22285469195512,
+      "open_positions": 3
+    },
+    {
+      "ts": 1786255680000,
+      "equity": 101.17680840649811,
+      "open_positions": 3
+    },
+    {
+      "ts": 1786255740000,
+      "equity": 101.21682251662287,
+      "open_positions": 3
+    },
+    {
+      "ts": 1786255800000,
+      "equity": 101.25488291220462,
+      "open_positions": 3
+    },
+    {
+      "ts": 1786255860000,
+      "equity": 101.3373742536245,
+      "open_positions": 3
+    },
+    {
+      "ts": 1786255920000,
+      "equity": 101.26510945838115,
+      "open_positions": 3
+    },
+    {
+      "ts": 1786255980000,
+      "equity": 101.32205781036878,
+      "open_positions": 3
+    },
+    {
+      "ts": 1786256040000,
+      "equity": 101.32775038128277,
+      "open_positions": 3
+    },
+    {
+      "ts": 1786256100000,
+      "equity": 101.25760910279155,
+      "open_positions": 3
+    },
+    {
+      "ts": 1786256160000,
+      "equity": 101.22847195736156,
+      "open_positions": 3
+    },
+    {
+      "ts": 1786256220000,
+      "equity": 101.13359305199346,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786256280000,
+      "equity": 101.0580252273257,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786256340000,
+      "equity": 100.93020913965958,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786256400000,
+      "equity": 101.03841450221495,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786256460000,
+      "equity": 101.02181986477032,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786256520000,
+      "equity": 100.93541986477032,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786256580000,
+      "equity": 101.20559305199345,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786256640000,
+      "equity": 101.28692333877359,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786256700000,
+      "equity": 101.24715015155046,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786256760000,
+      "equity": 101.2531823268827,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786256820000,
+      "equity": 101.37839305199346,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786256880000,
+      "equity": 101.3956037771042,
+      "open_positions": 3
+    },
+    {
+      "ts": 1786256940000,
+      "equity": 101.13314762516364,
+      "open_positions": 3
+    },
+    {
+      "ts": 1786257000000,
+      "equity": 101.4748511179194,
+      "open_positions": 3
+    },
+    {
+      "ts": 1786257060000,
+      "equity": 101.08154839289875,
+      "open_positions": 3
+    },
+    {
+      "ts": 1786257120000,
+      "equity": 100.88035844846502,
+      "open_positions": 3
+    },
+    {
+      "ts": 1786257180000,
+      "equity": 100.77828364408094,
+      "open_positions": 3
+    },
+    {
+      "ts": 1786257240000,
+      "equity": 100.38829652599671,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786257300000,
+      "equity": 100.33830725110745,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786257360000,
+      "equity": 100.43190725110746,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786257420000,
+      "equity": 100.4314965259967,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786257480000,
+      "equity": 100.4386965259967,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786257540000,
+      "equity": 100.42169116344134,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786257600000,
+      "equity": 100.48786435066447,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786257660000,
+      "equity": 100.45145362555371,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786257720000,
+      "equity": 100.45844826299835,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786257780000,
+      "equity": 100.50925898810908,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786257840000,
+      "equity": 100.54724826299834,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786257900000,
+      "equity": 100.51008043833059,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786257960000,
+      "equity": 100.54827507577521,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786258020000,
+      "equity": 100.55046971321984,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786258080000,
+      "equity": 100.57707507577521,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786258140000,
+      "equity": 100.58907507577521,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786258200000,
+      "equity": 100.55547507577522,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786258260000,
+      "equity": 100.57426435066446,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786258320000,
+      "equity": 100.5884589881091,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786258380000,
+      "equity": 100.66341072511072,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786258440000,
+      "equity": 100.6540160876661,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786258500000,
+      "equity": 100.59044826299834,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786258560000,
+      "equity": 100.71524826299834,
+      "open_positions": 2
+    },
+    {
+      "ts": 1786258620000,
+      "equity": 100.89805898810909,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786258680000,
+      "equity": 100.87707507577521,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786258740000,
+      "equity": 100.87008043833058,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786258800000,
+      "equity": 100.85609116344133,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786258860000,
+      "equity": 100.85609116344133,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786258920000,
+      "equity": 100.85609116344133,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786258980000,
+      "equity": 100.86308580088595,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786259040000,
+      "equity": 100.86308580088595,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786259100000,
+      "equity": 100.8490965259967,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786259160000,
+      "equity": 100.84210188855208,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786259220000,
+      "equity": 100.81412333877357,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786259280000,
+      "equity": 100.80712870132895,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786259340000,
+      "equity": 100.8211179762182,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786259400000,
+      "equity": 100.80712870132895,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786259460000,
+      "equity": 100.80712870132895,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786259520000,
+      "equity": 100.77915015155045,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786259580000,
+      "equity": 100.7931394264397,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786259640000,
+      "equity": 100.8490965259967,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786259700000,
+      "equity": 100.84210188855208,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786259760000,
+      "equity": 100.77915015155045,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786259820000,
+      "equity": 100.82811261366282,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786259880000,
+      "equity": 100.77915015155045,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786259940000,
+      "equity": 100.77915015155045,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786260000000,
+      "equity": 100.78614478899507,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786260060000,
+      "equity": 100.68122522732568,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786260120000,
+      "equity": 100.70220913965956,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786260180000,
+      "equity": 100.6882198647703,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786260240000,
+      "equity": 100.75117160177194,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786260300000,
+      "equity": 100.75117160177194,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786260360000,
+      "equity": 100.77215551410582,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786260420000,
+      "equity": 100.89106435066446,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786260480000,
+      "equity": 100.91904290044296,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786260540000,
+      "equity": 100.91904290044296,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786260600000,
+      "equity": 100.87707507577521,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786260660000,
+      "equity": 100.94002681277684,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786260720000,
+      "equity": 100.91904290044296,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786260780000,
+      "equity": 100.84210188855208,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786260840000,
+      "equity": 100.84210188855208,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786260900000,
+      "equity": 100.89106435066446,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786260960000,
+      "equity": 100.81412333877357,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786261020000,
+      "equity": 100.80013406388431,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786261080000,
+      "equity": 100.80712870132895,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786261140000,
+      "equity": 100.7931394264397,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786261200000,
+      "equity": 100.78614478899507,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786261260000,
+      "equity": 100.73718232688269,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786261320000,
+      "equity": 100.72319305199343,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786261380000,
+      "equity": 100.72319305199343,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786261440000,
+      "equity": 100.7092037771042,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786261500000,
+      "equity": 100.69521450221494,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786261560000,
+      "equity": 100.63925740265793,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786261620000,
+      "equity": 100.6322627652133,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786261680000,
+      "equity": 100.68122522732568,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786261740000,
+      "equity": 100.68122522732568,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786261800000,
+      "equity": 100.73018768943807,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786261860000,
+      "equity": 100.66024131499181,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786261920000,
+      "equity": 100.61827349032406,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786261980000,
+      "equity": 100.64625204010255,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786262040000,
+      "equity": 100.66723595243643,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786262100000,
+      "equity": 100.66723595243643,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786262160000,
+      "equity": 100.63925740265793,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786262220000,
+      "equity": 100.62526812776868,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786262280000,
+      "equity": 100.59029494054555,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786262340000,
+      "equity": 100.6042842154348,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786262400000,
+      "equity": 100.5763056656563,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786262460000,
+      "equity": 100.58330030310093,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786262520000,
+      "equity": 100.6042842154348,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786262580000,
+      "equity": 100.61827349032406,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786262640000,
+      "equity": 100.66024131499181,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786262700000,
+      "equity": 100.67423058988106,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786262760000,
+      "equity": 100.67423058988106,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786262820000,
+      "equity": 100.67423058988106,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786262880000,
+      "equity": 100.67423058988106,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786262940000,
+      "equity": 100.67423058988106,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786263000000,
+      "equity": 100.68122522732568,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786263060000,
+      "equity": 100.68122522732568,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786263120000,
+      "equity": 100.66723595243643,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786263180000,
+      "equity": 100.67423058988106,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786263240000,
+      "equity": 100.67423058988106,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786263300000,
+      "equity": 100.67423058988106,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786263360000,
+      "equity": 100.71619841454881,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786263420000,
+      "equity": 100.71619841454881,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786263480000,
+      "equity": 100.71619841454881,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786263540000,
+      "equity": 100.72319305199343,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786263600000,
+      "equity": 100.75816623921656,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786263660000,
+      "equity": 100.73718232688269,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786263720000,
+      "equity": 100.73718232688269,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786263780000,
+      "equity": 100.75117160177194,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786263840000,
+      "equity": 100.74417696432732,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786263900000,
+      "equity": 100.72319305199343,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786263960000,
+      "equity": 100.66024131499181,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786264020000,
+      "equity": 100.67423058988106,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786264080000,
+      "equity": 100.69521450221494,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786264140000,
+      "equity": 100.71619841454881,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786264200000,
+      "equity": 100.55532175332242,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786264260000,
+      "equity": 100.52734320354392,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786264320000,
+      "equity": 100.59728957799017,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786264380000,
+      "equity": 100.59728957799017,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786264440000,
+      "equity": 100.59728957799017,
+      "open_positions": 1
+    },
+    {
+      "ts": 1786264500000,
+      "equity": 100.59728957799017,
+      "open_positions": 1
+    }
+  ],
+  "duration_seconds": 1844.595,
+  "candles_processed": 1440,
+  "error": null
+}

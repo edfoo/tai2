@@ -27,11 +27,11 @@ DEFAULT_MEAN_REVERSION: dict[str, Any] = {
     "min_adx": 0.0,
     "max_adx": 28.0,
     "require_htf_trend": True,
-    # Per-strategy analysis timeframe. None = use the global LTF (preserves
-    # current behaviour). Set to e.g. "15m" to analyze on that bar; the
-    # snapshot exposes a ``timeframes[<tf>]`` map for the distinct set of
-    # timeframes requested by enabled strategies.
-    "analysis_timeframe": None,
+    # Per-strategy analysis timeframe. None = use the global LTF. Set to e.g.
+    # "15m" to analyze on that bar; the snapshot exposes a ``timeframes[<tf>]``
+    # map for the distinct set of timeframes requested by enabled strategies.
+    # MR fades 15m overextension → analysis on 15m.
+    "analysis_timeframe": "15m",
     # HTF regime gate preference: "chop" (block when HTF trending),
     # "trend" (block when HTF not trending), or "off" (disable gate).
     # MR wants a ranging HTF → default "chop" (preserves legacy behaviour).
@@ -55,16 +55,21 @@ DEFAULT_MEAN_REVERSION: dict[str, Any] = {
     "max_bb_bandwidth_percentile": 55.0,
     "regime_lookback": 50,
     "use_atr_sizing": True,
-    "use_structural_sizing": False,
-    "structural_sl_buffer_atr": 0.15,
+    "use_structural_sizing": True,
+    "structural_sl_buffer_atr": 1.0,
     "atr_min_tp_mult": 0.5,
     "atr_max_tp_mult": 4.0,
     "atr_min_sl_mult": 0.3,
     "atr_max_sl_mult": 3.0,
-    "atr_tp_multiplier": 1.0,
+    "atr_tp_multiplier": 1.8,
     "atr_sl_multiplier": 1.0,
     "min_atr_pct": 1.0,
     "min_reward_risk_ratio": 1.0,
+    # Flatten an open MR position when the HTF regime flips from chop to
+    # trend while the position is underwater (the reversion thesis is
+    # invalidated).  Opt-in (default False) to preserve live behaviour until
+    # tuned.
+    "exit_on_regime_breakdown": False,
     "flip_launcher_direction": None,
     # Liquidity-aware gates (§3) — all OFF by default (opt-in).
     "require_price_in_va": False,
@@ -107,8 +112,8 @@ DEFAULT_SPIKE_CONTINUATION: dict[str, Any] = {
     "min_atr_pct": 1.0,
     "min_reward_risk_ratio": 1.0,
     "flip_launcher_direction": None,
-    # Per-strategy analysis timeframe (None = global LTF).
-    "analysis_timeframe": None,
+    # Per-strategy analysis timeframe. SC rides 15m impulses → analysis on 15m.
+    "analysis_timeframe": "15m",
     # HTF regime gate preference: SC wants a trending HTF → default "trend".
     "htf_regime_preference": "trend",
     # Liquidity-aware gates (§3) — OFF by default (opt-in).
@@ -144,8 +149,8 @@ DEFAULT_LIQUIDITY_SWEEP: dict[str, Any] = {
     "min_atr_pct": 0.8,
     "min_reward_risk_ratio": 1.0,
     "flip_launcher_direction": None,
-    # Per-strategy analysis timeframe (None = global LTF).
-    "analysis_timeframe": None,
+    # Per-strategy analysis timeframe. Sweeps are a 15m microstructure pattern.
+    "analysis_timeframe": "15m",
     # HTF regime gate preference: sweep wants a ranging HTF → default "chop".
     "htf_regime_preference": "chop",
     # Liquidity-aware gates (§3) — OFF by default (opt-in).
@@ -179,8 +184,8 @@ DEFAULT_VWAP_REVERSION: dict[str, Any] = {
     "min_atr_pct": 1.0,
     "min_reward_risk_ratio": 1.0,
     "flip_launcher_direction": None,
-    # Per-strategy analysis timeframe (None = global LTF).
-    "analysis_timeframe": None,
+    # Per-strategy analysis timeframe. VWAP reversion on 15m deviations.
+    "analysis_timeframe": "15m",
     # HTF regime gate preference: VWAP reversion wants a ranging HTF → "chop".
     "htf_regime_preference": "chop",
     # Liquidity-aware gates (§3) — OFF by default (opt-in).
@@ -213,8 +218,8 @@ DEFAULT_TREND_PULLBACK: dict[str, Any] = {
     "min_atr_pct": 1.0,
     "min_reward_risk_ratio": 1.0,
     "flip_launcher_direction": None,
-    # Per-strategy analysis timeframe (None = global LTF).
-    "analysis_timeframe": None,
+    # Per-strategy analysis timeframe. Trend pullbacks need cleaner 1H structure.
+    "analysis_timeframe": "1H",
     # HTF regime gate preference: trend pullback wants a trending HTF → "trend".
     "htf_regime_preference": "trend",
     # Liquidity-aware gates (§3) — OFF by default (opt-in).

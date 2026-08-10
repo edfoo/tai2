@@ -2808,3 +2808,136 @@ def test_submit_order_sets_isolated_leverage_before_order() -> None:
     assert leverage_payload["posSide"] == "net"
     assert leverage_payload["lever"] == "2.5"
     assert payloads[0]["tdMode"] == "isolated"
+
+
+def test_regime_breakdown_exit_flattens_underwater_mr_position(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An open MR position below breakeven should be flattened when HTF flips to trend."""
+    async def scenario() -> tuple[bool, list[str]]:
+        state = DummySnapshotStore()
+        service = MarketService(
+            state_service=state,
+            enable_websocket=False,
+            account_api=object(),
+            market_api=object(),
+            public_api=object(),
+            trade_api=object(),
+        )
+        symbol = service.symbol.upper()
+        # Enable the opt-in regime-breakdown exit for MR.
+        service.set_launcher_config({
+            "mode": "launcher_only",
+            "strategies": {
+                "mean_reversion": {
+                    "enabled": True,
+                    "exit_on_regime_breakdown": True,
+                    "htf_regime_preference": "chop",
+                }
+            },
+        })
+        # Track an open MR position that is underwater.
+        service._launcher_in_position[f"mean_reversion:{symbol}"] = {
+            "side": "long",
+            "pos_side": "long",
+            "strategy": "mean_reversion",
+        }
+        # Snapshot: HTF is trending (adx_htf high → chop gate blocks).
+        service._last_full_snapshot = {
+            "positions": [
+                {
+                    "instId": symbol,
+                    "pos": 1.0,
+                    "posSide": "long",
+                    "avgPx": 100.0,
+                    "mgnMode": "isolated",
+                }
+            ],
+            "market_data": {
+                symbol: {
+                    "indicators": {
+                        "adx_htf": 40.0,
+                        "choppiness_htf": 30.0,
+                    }
+                }
+            },
+        }
+        service._latest_ticker[symbol] = {"last": 95.0}  # underwater
+
+        submitted: list[str] = []
+
+        async def fake_submit_order(*args: Any, **kwargs: Any) -> tuple[dict[str, Any], bool]:
+            submitted.append(str(kwargs.get("side")))
+            return {"ordId": "regime-close"}, True
+
+        monkeypatch.setattr(service, "_submit_order", fake_submit_order)
+        await service._check_strategy_regime_exits()
+        # The close is submitted via asyncio.create_task — yield control so the
+        # background task runs to completion before we assert.
+        await asyncio.sleep(0.05)
+        return bool(submitted), submitted
+
+    submitted, sides = asyncio.run(scenario())
+    assert submitted is True
+    assert sides == ["sell"]  # flatten long → sell
+
+
+def test_regime_breakdown_exit_skips_when_not_underwater(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An MR position above breakeven should NOT be flattened on regime breakdown."""
+    async def scenario() -> bool:
+        state = DummySnapshotStore()
+        service = MarketService(
+            state_service=state,
+            enable_websocket=False,
+            account_api=object(),
+            market_api=object(),
+            public_api=object(),
+            trade_api=object(),
+        )
+        symbol = service.symbol.upper()
+        service.set_launcher_config({
+            "mode": "launcher_only",
+            "strategies": {
+                "mean_reversion": {
+                    "enabled": True,
+                    "exit_on_regime_breakdown": True,
+                    "htf_regime_preference": "chop",
+                }
+            },
+        })
+        service._launcher_in_position[f"mean_reversion:{symbol}"] = {
+            "side": "long",
+            "pos_side": "long",
+            "strategy": "mean_reversion",
+        }
+        service._last_full_snapshot = {
+            "positions": [
+                {
+                    "instId": symbol,
+                    "pos": 1.0,
+                    "posSide": "long",
+                    "avgPx": 100.0,
+                    "mgnMode": "isolated",
+                }
+            ],
+            "market_data": {
+                symbol: {
+                    "indicators": {
+                        "adx_htf": 40.0,
+                        "choppiness_htf": 30.0,
+                    }
+                }
+            },
+        }
+        service._latest_ticker[symbol] = {"last": 105.0}  # profitable
+
+        submitted: list[str] = []
+
+        async def fake_submit_order(*args: Any, **kwargs: Any) -> tuple[dict[str, Any], bool]:
+            submitted.append(str(kwargs.get("side")))
+            return {"ordId": "regime-close"}, True
+
+        monkeypatch.setattr(service, "_submit_order", fake_submit_order)
+        await service._check_strategy_regime_exits()
+        return bool(submitted)
+
+    submitted = asyncio.run(scenario())
+    assert submitted is False

@@ -118,6 +118,7 @@ def _make_snapshot(
     htf_ema200: float | None = 99.0,
     htf_cmf: float | None = None,
     cmf_series: list[float] | None = None,
+    atr_pct: float | None = None,
     symbol: str = "BTC-USDT-SWAP",
 ) -> dict[str, Any]:
     """Build a minimal snapshot with configurable indicator values."""
@@ -142,6 +143,8 @@ def _make_snapshot(
             "cmf": {"value": htf_cmf},
         },
     }
+    if atr_pct is not None:
+        indicators["atr_pct"] = atr_pct
 
     return {
         "market_data": {
@@ -520,6 +523,100 @@ class TestMeanReversionStrategy:
         result = mr.evaluate("BTC-USDT-SWAP", snapshot, config, helpers)
         assert result is not None
         assert result.direction == "buy"
+
+    def test_atr_sizing_produces_tp_sl(self) -> None:
+        """When use_atr_sizing is on, TP/SL should be ATR-scaled."""
+        mr = MeanReversionStrategy()
+        snapshot = _make_snapshot(rsi=20.0, atr_pct=2.0)
+        config = _mr_bare(
+            use_atr_sizing=True, use_structural_sizing=False,
+            atr_tp_multiplier=1.8, atr_sl_multiplier=1.0,
+        )
+        signal = mr.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers())
+        assert signal is not None
+        # TP = 1.8 × 2.0% = 3.6%, SL = 1.0 × 2.0% = 2.0%
+        assert signal.tp_pct is not None
+        assert abs(signal.tp_pct - 3.6) < 0.01
+        assert signal.sl_pct is not None
+        assert abs(signal.sl_pct - 2.0) < 0.01
+
+    def test_static_tp_sl_when_atr_sizing_off(self) -> None:
+        """When use_atr_sizing is off, static tp_pct/sl_pct should be used."""
+        mr = MeanReversionStrategy()
+        snapshot = _make_snapshot(rsi=20.0)
+        config = _mr_bare(
+            use_atr_sizing=False, use_structural_sizing=False,
+            tp_pct=2.0, sl_pct=3.0,
+        )
+        signal = mr.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers())
+        assert signal is not None
+        assert signal.tp_pct == 2.0
+        assert signal.sl_pct == 3.0
+
+    def test_structural_sizing_anchors_sl_to_swing_low(self) -> None:
+        """Structural SL should anchor to swing_low (validated structure), not the forming wick."""
+        mr = MeanReversionStrategy()
+        # Long MR entry below the BB middle: entry=90, TP at bb_middle=100.
+        # swing_low=89 → SL = swing_low - buffer*atr_price = 89 - 1.0*(2%*90) = 87.2.
+        # The forming candle low (88.5) is BELOW swing_low — if the code anchored
+        # to the forming wick, SL would be 88.5 - 1.8 = 86.7 instead.
+        snapshot = _make_snapshot(rsi=20.0, atr_pct=2.0, bb_middle=100.0)
+        snapshot["market_data"]["BTC-USDT-SWAP"]["indicators"]["swing_low"] = 89.0
+        snapshot["market_data"]["BTC-USDT-SWAP"]["indicators"]["ohlcv"] = [
+            {"ts": 1, "open": 92.0, "high": 93.0, "low": 91.0, "close": 92.0, "volume": 100.0},
+            {"ts": 2, "open": 91.0, "high": 91.5, "low": 88.5, "close": 90.0, "volume": 100.0},
+        ]
+        config = _mr_bare(
+            use_atr_sizing=False, use_structural_sizing=True,
+            structural_sl_buffer_atr=1.0,
+        )
+        signal = mr.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=90.0))
+        assert signal is not None
+        assert signal.direction == "buy"
+        # SL anchored to swing_low: (90 - 87.2) / 90 * 100 = 3.11%
+        assert signal.sl_pct is not None
+        assert abs(signal.sl_pct - 3.11) < 0.05
+
+    def test_structural_sizing_falls_back_to_va_low(self) -> None:
+        """When no swing_low, structural SL should anchor to value_area_low."""
+        mr = MeanReversionStrategy()
+        # entry=90, bb_middle=100, value_area_low=88 (no swing_low).
+        # SL = va_low - buffer*atr_price = 88 - 1.0*(2%*90) = 86.2 → SL% = 4.22%
+        snapshot = _make_snapshot(rsi=20.0, atr_pct=2.0, bb_middle=100.0)
+        snapshot["market_data"]["BTC-USDT-SWAP"]["indicators"]["value_area_low"] = 88.0
+        snapshot["market_data"]["BTC-USDT-SWAP"]["indicators"]["ohlcv"] = [
+            {"ts": 1, "open": 92.0, "high": 93.0, "low": 91.0, "close": 92.0, "volume": 100.0},
+            {"ts": 2, "open": 91.0, "high": 91.5, "low": 87.0, "close": 90.0, "volume": 100.0},
+        ]
+        config = _mr_bare(
+            use_atr_sizing=False, use_structural_sizing=True,
+            structural_sl_buffer_atr=1.0,
+        )
+        signal = mr.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=90.0))
+        assert signal is not None
+        # SL = va_low - 1.0*1.8 = 86.2 → SL% = (90-86.2)/90*100 = 4.22%
+        assert signal.sl_pct is not None
+        assert abs(signal.sl_pct - 4.22) < 0.05
+
+    def test_structural_sizing_logs_degradation_when_no_structure(self) -> None:
+        """When no swing/VA/candle structure exists, a debug message should be emitted."""
+        mr = MeanReversionStrategy()
+        messages: list[str] = []
+        helpers = StrategyHelpers(
+            extract_float=MarketService._extract_float,
+            emit_debug=messages.append,
+            get_last_price=lambda symbol: 100.0,
+            compute_footprint=lambda symbol: {},
+        )
+        snapshot = _make_snapshot(rsi=20.0, atr_pct=2.0)
+        # No swing_low, no value_area_low, no ohlcv → structural SL unavailable.
+        config = _mr_bare(
+            use_atr_sizing=False, use_structural_sizing=True,
+            structural_sl_buffer_atr=1.0,
+        )
+        signal = mr.evaluate("BTC-USDT-SWAP", snapshot, config, helpers)
+        assert signal is not None
+        assert any("structural SL unavailable" in m for m in messages)
 
 
 # ── MarketService Strategy Registry ──────────────────────────────────────────

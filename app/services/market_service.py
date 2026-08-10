@@ -389,6 +389,7 @@ class MarketService:
         self._trade_mgmt_partial_closing: set[str] = set()
         self._trade_mgmt_time_closing: set[str] = set()
         self._trade_mgmt_be_updating: set[str] = set()
+        self._trade_mgmt_regime_closing: set[str] = set()
         self._reentry_cooldown_until: dict[str, float] = {}
         # Commutator strategy: when a position's loss hits the configured threshold,
         # close it and open the reversed side.  Tracks flips per position lifecycle
@@ -2196,6 +2197,7 @@ class MarketService:
         self._trade_mgmt_partial_closing.discard(symbol_key)
         self._trade_mgmt_time_closing.discard(symbol_key)
         self._trade_mgmt_be_updating.discard(symbol_key)
+        self._trade_mgmt_regime_closing.discard(symbol_key)
         if not had_state:
             return
         tm = self._trade_mgmt_config()
@@ -2593,6 +2595,141 @@ class MarketService:
             logger.warning("TradeMgmt time-stop close error for %s: %s", symbol_key, exc)
         finally:
             self._trade_mgmt_time_closing.discard(symbol_key)
+
+    async def _check_strategy_regime_exits(self) -> None:
+        """Flatten open Mean-Reversion positions when the HTF regime breaks down.
+
+        MR enters into chop and fades overextension.  When the HTF regime flips
+        from chop to trend while an MR position is open and underwater, the
+        reversion thesis is invalidated — the bot would otherwise hold the
+        losing fade to the time-stop.  This flattens such positions early.
+
+        Config (per-strategy, under ``launcher.strategies.mean_reversion``):
+          exit_on_regime_breakdown – bool (default False, opt-in)
+
+        Only applies to positions opened by the ``mean_reversion`` strategy and
+        only when the position is below breakeven.  It runs *after* the
+        breakeven / partial-TP / time-stop logic in ``_check_trade_management``
+        so it never conflicts with those (a position already being closed by
+        them is skipped).
+        """
+        strategies_cfg = (self._launcher_config.get("strategies") or {})
+        mr_cfg = strategies_cfg.get("mean_reversion") or {}
+        if not bool(mr_cfg.get("exit_on_regime_breakdown", False)):
+            return
+        snapshot = self._last_full_snapshot
+        if not snapshot:
+            return
+        positions: list[dict[str, Any]] = snapshot.get("positions") or []
+        if not positions:
+            return
+
+        from app.services.indicator_service import htf_regime_allows  # local import to avoid circulars
+
+        htf_pref = str(mr_cfg.get("htf_regime_preference", "chop"))
+        # Only meaningful when the strategy gates on a chop HTF.
+        if htf_pref != "chop":
+            return
+
+        for pos in positions:
+            if not isinstance(pos, dict):
+                continue
+            symbol = str(pos.get("instId", "")).upper()
+            if not symbol:
+                continue
+            pos_val = self._extract_float(pos.get("pos"))
+            if not pos_val or pos_val == 0:
+                continue
+            # Only manage launcher-tracked MR positions.
+            strat_key = f"mean_reversion:{symbol}"
+            tracked = self._launcher_in_position.get(strat_key)
+            if tracked is None:
+                continue
+            # Skip if trade-management is already closing this symbol.
+            if symbol in self._trade_mgmt_time_closing or symbol in self._trade_mgmt_regime_closing:
+                continue
+
+            # Read the HTF regime from the snapshot's per-symbol indicators.
+            market_data: dict[str, Any] = snapshot.get("market_data") or {}
+            sym_data = market_data.get(symbol) or {}
+            indicators = sym_data.get("indicators") or {}
+            adx_htf = self._extract_float(indicators.get("adx_htf"))
+            chop_htf = self._extract_float(indicators.get("choppiness_htf"))
+            if not htf_regime_allows(adx_htf, chop_htf, htf_pref):
+                # HTF is now trending → gate blocks → thesis invalidated.
+                # Only flatten when the position is below breakeven.
+                entry_price = self._extract_float(pos.get("avgPx"))
+                last_price = self.get_last_price(symbol)
+                if last_price is None or last_price <= 0:
+                    last_price = self._extract_float(pos.get("markPx") or pos.get("last"))
+                if entry_price is None or entry_price <= 0 or last_price is None or last_price <= 0:
+                    continue
+                pos_side = str(pos.get("posSide", "")).lower()
+                is_long = pos_side == "long" or (not pos_side and pos_val > 0)
+                if is_long:
+                    underwater = last_price < entry_price
+                else:
+                    underwater = last_price > entry_price
+                if not underwater:
+                    continue
+
+                resolved_pos_side = pos_side if pos_side in ("long", "short") else None
+                trade_mode = str(pos.get("mgnMode") or "").lower() or "isolated"
+                close_side = "sell" if is_long else "buy"
+                self._emit_debug(
+                    f"TradeMgmt regime-breakdown: {symbol} HTF flipped to trend "
+                    f"(adx_htf={adx_htf}, chop_htf={chop_htf}) while underwater "
+                    f"(entry={entry_price:.6f}, last={last_price:.6f}) — flattening"
+                )
+                self._trade_mgmt_regime_closing.add(symbol)
+                asyncio.create_task(
+                    self._trade_mgmt_regime_close(
+                        symbol=symbol,
+                        close_side=close_side,
+                        pos_side=resolved_pos_side,
+                        contracts=abs(pos_val),
+                        trade_mode=trade_mode,
+                    ),
+                    name=f"trade-mgmt-regime-{symbol}",
+                )
+
+    async def _trade_mgmt_regime_close(
+        self,
+        *,
+        symbol: str,
+        close_side: str,
+        pos_side: str | None,
+        contracts: float,
+        trade_mode: str,
+    ) -> None:
+        """Fully close a position on HTF regime breakdown (reduce-only)."""
+        symbol_key = symbol.upper()
+        coid = self._generate_client_order_id("tm-r")
+        try:
+            result = await self._submit_order(
+                symbol=symbol,
+                side=close_side,
+                pos_side=pos_side,
+                size=contracts,
+                trade_mode=trade_mode or "isolated",
+                order_type="market",
+                reduce_only=True,
+                client_order_id=coid,
+                attach_algo_orders=None,
+            )
+            if result is None:
+                self._emit_debug(f"TradeMgmt regime-breakdown: {symbol_key} — trade API unavailable")
+            else:
+                order_result = result[0] if isinstance(result, tuple) else result
+                if order_result:
+                    self._emit_debug(f"TradeMgmt regime-breakdown: {symbol_key} close accepted")
+                    self._clear_trade_mgmt_state(symbol_key, reason="regime_breakdown")
+                else:
+                    self._emit_debug(f"TradeMgmt regime-breakdown: {symbol_key} close rejected")
+        except Exception as exc:
+            logger.warning("TradeMgmt regime-breakdown close error for %s: %s", symbol_key, exc)
+        finally:
+            self._trade_mgmt_regime_closing.discard(symbol_key)
 
     # ── Commutator strategy ──────────────────────────────────────────────────
 
@@ -5295,6 +5432,12 @@ class MarketService:
                 raise
             except Exception as exc:  # pragma: no cover - best-effort
                 logger.debug("Trade management check error: %s", exc)
+            try:
+                await self._check_strategy_regime_exits()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # pragma: no cover - best-effort
+                logger.debug("Strategy regime-exit check error: %s", exc)
             try:
                 await self._check_commutator()
             except asyncio.CancelledError:

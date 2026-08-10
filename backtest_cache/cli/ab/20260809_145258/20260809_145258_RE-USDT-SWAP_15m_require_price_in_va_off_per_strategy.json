@@ -1,0 +1,28 @@
+{
+  "per_strategy": {},
+  "metrics": {
+    "total_trades": 0,
+    "winning_trades": 0,
+    "losing_trades": 0,
+    "break_even_trades": 0,
+    "win_rate": 0.0,
+    "gross_profit": 0,
+    "gross_loss": 0,
+    "net_profit": 0,
+    "net_profit_pct": 0.0,
+    "profit_factor": 0.0,
+    "average_win": 0.0,
+    "average_loss": 0.0,
+    "average_trade": 0.0,
+    "largest_win": 0.0,
+    "largest_loss": 0.0,
+    "expectancy": 0.0,
+    "max_win_streak": 0,
+    "max_loss_streak": 0,
+    "final_equity": 1000.0,
+    "total_return_pct": 0.0,
+    "max_drawdown": 0.0,
+    "max_drawdown_pct": 0.0,
+    "sharpe_per_candle": 0.0
+  }
+}

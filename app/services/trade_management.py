@@ -22,9 +22,12 @@ Design Goals
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass
 from typing import Final, Literal, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -220,5 +223,22 @@ def compute_tp_sl_pct(
         tp_pct = abs(tp_price - entry) / entry * 100.0
         sl_pct = abs(sl_price - entry) / entry * 100.0
         return tp_pct, sl_pct
-    except ValueError:
+    except ValueError as exc:
+        # The dynamic (structural) exit was rejected — most commonly because
+        # the reward-to-risk fell below the 1.8× floor in `calculate()`.  We
+        # deliberately do NOT drop the trade here: the launcher guardrail
+        # (`require_reward_risk_ratio`) is the single owner of the R:R
+        # decision.  But we must surface the degradation so it is auditable
+        # in /debug and the log file — otherwise positions execute at 1:1 or
+        # worse without ever satisfying the intended reward-to-risk.
+        logger.warning(
+            "compute_tp_sl_pct: dynamic exit rejected for %s @ %.6f — %s. "
+            "Falling back to static/ATR exits (tp=%s, sl=%s). The launcher "
+            "R:R guardrail will re-evaluate the final geometry.",
+            side,
+            entry,
+            exc,
+            static_tp_pct,
+            static_sl_pct,
+        )
         return static_tp_pct, static_sl_pct
