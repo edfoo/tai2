@@ -1,8 +1,0 @@
-run_id,ltf,htf,symbols,strategies,error,duration_seconds,candles_processed,m_winning_trades,m_win_rate,m_total_trades,m_total_return_pct,m_sharpe_per_candle,m_profit_factor,m_net_profit_pct,m_net_profit,m_max_win_streak,m_max_loss_streak,m_max_drawdown_pct,m_max_drawdown,m_losing_trades,m_largest_win,m_largest_loss,m_gross_profit,m_gross_loss,m_final_equity,m_expectancy,m_break_even_trades,m_average_win,m_average_trade,m_average_loss
-20260809_074211_15m,15m,1H,BTC-USDT-SWAP,"liquidity_sweep,trend_pullback",,482.18,1440,0,0.0,0,0.0,0.0,0.0,0.0,0,0,0,0.0,0.0,0,0.0,0.0,0,0,1000.0,0.0,0,0.0,0.0,0.0
-20260809_074211_1H,1H,4H,BTC-USDT-SWAP,"liquidity_sweep,trend_pullback",,372.43,1440,0,0.0,0,0.0,0.0,0.0,0.0,0,0,0,0.0,0.0,0,0.0,0.0,0,0,1000.0,0.0,0,0.0,0.0,0.0
-20260101_000000_15m,15m,,BTC-USDT-SWAP,"mean_reversion,liquidity_sweep",,0.5,200,,100.0,1,,0.0,2.0,,200.0,,,0.0,,,,,,,,,,,,
-run_x,15m,,BTC-USDT-SWAP,"mean_reversion,liquidity_sweep",,0.5,200,,100.0,1,,0.0,2.0,,200.0,,,0.0,,,,,,,,,,,,
-aaa,15m,,BTC-USDT-SWAP,"mean_reversion,liquidity_sweep",,0.5,200,,100.0,1,,0.0,2.0,,200.0,,,0.0,,,,,,,,,,,,
-bbb,15m,,BTC-USDT-SWAP,"mean_reversion,liquidity_sweep",,0.5,200,,100.0,1,,0.0,2.0,,200.0,,,0.0,,,,,,,,,,,,
-20260809_090606_15m,15m,,"AEON-USDT-SWAP,BEAT-USDT-SWAP,BICO-USDT-SWAP,EDEN-USDT-SWAP,HMSTR-USDT-SWAP","mean_reversion,spike_continuation,liquidity_sweep,vwap_reversion,trend_pullback",,1844.6,1440,11,64.70588235294117,17,0.6,0.0059,1.1225,0.6,0.5973,3,2,2.12,2.172,6,1.2,-0.9,5.475,4.8777,100.5973,0.0351,0,0.4977,0.0351,-0.813
