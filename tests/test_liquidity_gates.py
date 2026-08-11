@@ -108,7 +108,7 @@ def _sc_bare(**overrides: Any) -> dict[str, Any]:
         "require_momentum_acceleration": False,
         "require_rsi_rising": False,
         "require_volume_rsi_rising": False,
-        "max_spike_extension_pct": 0.0,
+        "max_spike_extension_atr": 0.0,
         "min_bb_bandwidth": 0.0,
         "volume_rsi_min": 0.0,
         "rsi_min": 0.0,
@@ -424,6 +424,18 @@ class TestSpikeContinuationLiquidity:
             ]
         }
 
+    def _sc_falling_ohlcv(self) -> dict[str, Any]:
+        """Bearish spike: price below BB lower, RSI in sell zone."""
+        return {
+            "ohlcv": [
+                {"open": 107.0, "high": 107.2, "low": 106.8, "close": 106.8, "volume": 100.0},
+                {"open": 106.8, "high": 107.0, "low": 106.0, "close": 106.2, "volume": 10.0},
+                {"open": 106.2, "high": 106.5, "low": 105.5, "close": 105.7, "volume": 10.0},
+                {"open": 105.7, "high": 106.0, "low": 105.0, "close": 105.2, "volume": 10.0},
+                {"open": 105.2, "high": 105.5, "low": 103.0, "close": 103.5, "volume": 10.0},
+            ]
+        }
+
     def test_oi_confirmation_allows_rising_oi(self) -> None:
         sc = SpikeContinuationStrategy()
         snapshot = _snap(
@@ -445,7 +457,7 @@ class TestSpikeContinuationLiquidity:
             require_oi_confirmation=True,
             oi_min_zscore=1.0,
             require_volume_rsi_rising=False,
-            max_spike_extension_pct=0,
+            max_spike_extension_atr=0,
         )
         result = sc.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=112.0))
         assert result is None  # blocked — OI not confirming momentum
@@ -481,6 +493,63 @@ class TestSpikeContinuationLiquidity:
         config = _sc_bare(require_oi_confirmation=True, oi_min_zscore=1.0, require_volume_rsi_rising=False)
         result = sc.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=112.0))
         assert result is not None
+
+    # ── Short-direction OI gate (Fix 2 regression) ─────────────────────
+
+    def test_short_oi_gate_blocks_positive_zscore(self) -> None:
+        """A short must be BLOCKED when oi_zscore is strongly positive (rising OI
+        confirms longs, not shorts).  Regression for the shared-oi_ok bug where
+        the long confirmation was reused for shorts."""
+        sc = SpikeContinuationStrategy()
+        snapshot = _snap(
+            indicators={"rsi": 35.0, "volume_rsi_series": [80.0, 85.0], **self._sc_falling_ohlcv()},
+        )
+        snapshot["market_data"]["BTC-USDT-SWAP"]["oi_zscore"] = 2.5  # strongly positive
+        config = _sc_bare(
+            require_oi_confirmation=True,
+            oi_min_zscore=1.0,
+            require_volume_rsi_rising=False,
+            rsi_min=55.0,
+            rsi_max=75.0,
+        )
+        result = sc.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=103.5))
+        assert result is None  # short blocked — OI rising confirms longs
+
+    def test_short_oi_gate_allows_negative_zscore(self) -> None:
+        """A short must be ALLOWED when oi_zscore is strongly negative (falling OI
+        confirms shorts)."""
+        sc = SpikeContinuationStrategy()
+        snapshot = _snap(
+            indicators={"rsi": 35.0, "volume_rsi_series": [80.0, 85.0], **self._sc_falling_ohlcv()},
+        )
+        snapshot["market_data"]["BTC-USDT-SWAP"]["oi_zscore"] = -2.5  # strongly negative
+        config = _sc_bare(
+            require_oi_confirmation=True,
+            oi_min_zscore=1.0,
+            require_volume_rsi_rising=False,
+            rsi_min=55.0,
+            rsi_max=75.0,
+        )
+        result = sc.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=103.5))
+        assert result is not None  # short allowed — OI falling confirms shorts
+
+    def test_long_oi_gate_blocks_negative_zscore(self) -> None:
+        """A long must be BLOCKED when oi_zscore is strongly negative (falling OI
+        confirms shorts, not longs)."""
+        sc = SpikeContinuationStrategy()
+        snapshot = _snap(
+            indicators={"rsi": 65.0, "volume_rsi_series": [80.0, 85.0], **self._sc_rising_ohlcv()},
+        )
+        snapshot["market_data"]["BTC-USDT-SWAP"]["oi_zscore"] = -2.5  # strongly negative
+        config = _sc_bare(
+            require_oi_confirmation=True,
+            oi_min_zscore=1.0,
+            require_volume_rsi_rising=False,
+            rsi_min=55.0,
+            rsi_max=75.0,
+        )
+        result = sc.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=112.0))
+        assert result is None  # long blocked — OI falling confirms shorts
 
     # ── HTF regime preference ──────────────────────────────────────────
 

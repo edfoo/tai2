@@ -83,7 +83,7 @@ The workflow is:
 ### Spike Continuation
 - Best regime: volatility expansion with still-building momentum
 - Typical failure mode: entering at the top after extension is already exhausted
-- Most important controls: `max_spike_extension_pct`, `acceleration_min_ratio`, `require_rsi_rising`, `require_volume_rsi_rising`, `max_adx_for_entry`
+- Most important controls: `max_spike_extension_atr`, `acceleration_min_ratio`, `require_rsi_rising`, `require_volume_rsi_rising`, `max_adx_for_entry`
 
 ## Known repo-specific lessons
 
@@ -275,7 +275,7 @@ If TP is rarely reached:
 ### Spike Continuation
 
 If it buys tops or sells bottoms:
-- lower `max_spike_extension_pct`
+- lower `max_spike_extension_atr`
 - increase `acceleration_min_ratio`
 - keep RSI and volume-rising requirements on
 - lower `max_adx_for_entry` if the trend is already too mature when entries happen

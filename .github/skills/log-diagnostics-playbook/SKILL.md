@@ -182,7 +182,7 @@ Change first:
 Change first:
 - `max_adx_for_entry`
 - `pullback_proximity_pct`
-- `max_spike_extension_pct`
+- `max_spike_extension_atr`
 
 ### If logs show structural R:R blocks
 Change first:

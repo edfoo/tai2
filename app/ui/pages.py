@@ -3560,7 +3560,7 @@ def register_pages(app: FastAPI) -> None:
                             _sc_tp_raw = _sc_cfg.get("tp_pct")
                             sc_tp_input = ui.number(
                                 label="Take profit (%)",
-                                value=float(_sc_tp_raw) if _sc_tp_raw is not None else 5.0,
+                                value=float(_sc_tp_raw) if _sc_tp_raw is not None else 6.0,
                                 min=0.5, step=0.5, precision=1,
                             ).classes("w-40").props(
                                 "hint='Exit after this % price move' persistent-hint clearable"
@@ -3568,7 +3568,7 @@ def register_pages(app: FastAPI) -> None:
                             _sc_sl_raw = _sc_cfg.get("sl_pct")
                             sc_sl_input = ui.number(
                                 label="Stop loss (%)",
-                                value=float(_sc_sl_raw) if _sc_sl_raw is not None else 3.0,
+                                value=float(_sc_sl_raw) if _sc_sl_raw is not None else 4.0,
                                 min=0.5, step=0.5, precision=1,
                             ).classes("w-40").props(
                                 "hint='Exit if spike fails and reverses this %' persistent-hint clearable"
@@ -3593,8 +3593,8 @@ def register_pages(app: FastAPI) -> None:
                             _sc_rsi_max_raw = _sc_cfg.get("rsi_max")
                             sc_rsi_max_input = ui.number(
                                 label="RSI max (buy zone)",
-                                value=float(_sc_rsi_max_raw) if _sc_rsi_max_raw is not None else 70.0,
-                                min=60, max=90, step=1, precision=0,
+                                value=float(_sc_rsi_max_raw) if _sc_rsi_max_raw is not None else 80.0,
+                                min=60, max=95, step=1, precision=0,
                             ).classes("w-40").props(
                                 "hint='Dont enter if RSI above this (Mean Reversion territory)' persistent-hint"
                             )
@@ -3613,10 +3613,10 @@ def register_pages(app: FastAPI) -> None:
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             sc_candle_strength_pct_input = ui.number(
                                 label="Candle strength %",
-                                value=float(_sc_cfg.get("candle_strength_pct") or 75.0),
+                                value=float(_sc_cfg.get("candle_strength_pct") or 60.0),
                                 min=50, max=95, step=5, format="%.0f",
                             ).classes("w-48").props("dense")
-                            ui.label("Close must be in this % of the candle range from the direction (75 = top 25% for buys).").classes("text-xs text-slate-500")
+                            ui.label("Close must be in this % of the candle range from the direction (60 = top 40% for buys).").classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             sc_min_bb_bw_input = ui.number(
                                 label="Min BB Bandwidth %",
@@ -3649,9 +3649,9 @@ def register_pages(app: FastAPI) -> None:
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             sc_momentum_accel_switch = ui.switch(
                                 "Require momentum acceleration",
-                                value=bool(_sc_cfg.get("require_momentum_acceleration", True)),
+                                value=bool(_sc_cfg.get("require_momentum_acceleration", False)),
                             ).props("dense color=primary")
-                            ui.label("Current candle body must be larger than recent average — spike is accelerating, not peaking.").classes("text-xs text-slate-500")
+                            ui.label("Current candle body must be larger than recent average — spike is accelerating, not peaking. OPT-IN: the ATR extension gate below is the primary anti-late-entry filter.").classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             sc_accel_lookback_input = ui.number(
                                 label="Acceleration lookback",
@@ -3675,23 +3675,23 @@ def register_pages(app: FastAPI) -> None:
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             sc_vol_rsi_rising_switch = ui.switch(
                                 "Require volume RSI rising",
-                                value=bool(_sc_cfg.get("require_volume_rsi_rising", True)),
+                                value=bool(_sc_cfg.get("require_volume_rsi_rising", False)),
                             ).props("dense color=primary")
-                            ui.label("Volume RSI must be rising vs previous candle — volume momentum still building.").classes("text-xs text-slate-500")
+                            ui.label("Volume RSI must be rising vs previous candle — volume momentum still building. OPT-IN; volume_rsi_min is the primary volume gate.").classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             sc_max_spike_ext_input = ui.number(
-                                label="Max spike extension %",
-                                value=float(_sc_cfg.get("max_spike_extension_pct") or 2.5),
-                                min=0.0, max=20.0, step=0.5, format="%.1f",
+                                label="Max spike extension (ATR)",
+                                value=float(_sc_cfg.get("max_spike_extension_atr") or 2.0),
+                                min=0.0, max=10.0, step=0.1, format="%.1f",
                             ).classes("w-48").props("dense")
-                            ui.label("Block entry if price already moved more than this % from spike origin (0 = disabled). Prevents entering at the top.").classes("text-xs text-slate-500")
+                            ui.label("Block entry if price already moved more than this multiple of ATR% from the volume-expansion origin (0 = disabled). Volatility-normalised anti-late-entry gate.").classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             sc_spike_lookback_input = ui.number(
                                 label="Spike lookback",
                                 value=float(_sc_cfg.get("spike_lookback") or 5),
                                 min=2, max=20, step=1, format="%.0f",
                             ).classes("w-40").props("dense")
-                            ui.label("Candles to look back to find the spike origin (lowest low for buys, highest high for sells).").classes("text-xs text-slate-500")
+                            ui.label("Candles to look back to find the volume-expansion candle that anchors the spike origin.").classes("text-xs text-slate-500")
                         # ── Regime gate (BB bandwidth percentile) ──────────────
                         ui.separator().classes("my-2")
                         ui.label("Regime Gate (BB Bandwidth Percentile)").classes("text-xs font-semibold text-slate-600")
@@ -3702,16 +3702,16 @@ def register_pages(app: FastAPI) -> None:
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             sc_require_regime_switch = ui.switch(
                                 "Require regime (expansion)",
-                                value=bool(_sc_cfg.get("require_regime", False)),
+                                value=bool(_sc_cfg.get("require_regime", True)),
                             ).props("dense color=primary")
                             ui.label("Only enter when BB bandwidth is in the high percentile (expansion regime).").classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             sc_min_bw_pct_input = ui.number(
                                 label="Min BB bandwidth percentile",
-                                value=float(_sc_cfg.get("min_bb_bandwidth_percentile") or 60.0),
+                                value=float(_sc_cfg.get("min_bb_bandwidth_percentile") or 50.0),
                                 min=5.0, max=95.0, step=5.0, format="%.0f",
                             ).classes("w-48").props("dense")
-                            ui.label("Current bandwidth must be above this percentile (e.g. 60 = above 60th percentile).").classes("text-xs text-slate-500")
+                            ui.label("Current bandwidth must be above this percentile (e.g. 50 = above 50th percentile).").classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             sc_regime_lookback_input = ui.number(
                                 label="Regime lookback",
@@ -3755,27 +3755,27 @@ def register_pages(app: FastAPI) -> None:
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             sc_use_atr_sizing_switch = ui.switch(
                                 "Use ATR sizing",
-                                value=bool(_sc_cfg.get("use_atr_sizing", False)),
+                                value=bool(_sc_cfg.get("use_atr_sizing", True)),
                             ).props("dense color=primary")
                             ui.label("Override static TP/SL with ATR-scaled values.").classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             sc_atr_tp_mult_input = ui.number(
                                 label="ATR TP multiplier",
-                                value=float(_sc_cfg.get("atr_tp_multiplier") or 2.2),
+                                value=float(_sc_cfg.get("atr_tp_multiplier") or 3.0),
                                 min=0.1, max=10.0, step=0.1, format="%.1f",
                             ).classes("w-40").props("dense")
-                            ui.label("TP = multiplier × ATR% (e.g. 2.2 = 2.2 ATR).").classes("text-xs text-slate-500")
+                            ui.label("TP = multiplier × ATR% (e.g. 3.0 = 3.0 ATR).").classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             sc_atr_sl_mult_input = ui.number(
                                 label="ATR SL multiplier",
                                 value=float(_sc_cfg.get("atr_sl_multiplier") or 2.0),
                                 min=0.1, max=10.0, step=0.1, format="%.1f",
                             ).classes("w-40").props("dense")
-                            ui.label("SL = multiplier × ATR% (e.g. 2.0 = 2.0 ATR, room to breathe).").classes("text-xs text-slate-500")
+                            ui.label("SL = multiplier × ATR% (e.g. 2.0 = 2.0 ATR, room to breathe). ≥ 1.5 R:R.").classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             sc_min_atr_pct_input = ui.number(
                                 label="Min ATR%",
-                                value=float(_sc_cfg.get("min_atr_pct") or 1.2),
+                                value=float(_sc_cfg.get("min_atr_pct") or 1.0),
                                 min=0.0, max=10.0, step=0.1, format="%.1f",
                             ).classes("w-40").props("dense")
                             ui.label("Skip entries when ATR% is below this (0 = disabled). Filters out dead coins.").classes("text-xs text-slate-500")
@@ -3822,35 +3822,37 @@ def register_pages(app: FastAPI) -> None:
             def _set_sc_defaults() -> None:
                 """Fill all Spike Continuation fields with the recommended configuration."""
                 # Earlier impulse entry, block late tops, give SL room for noise.
-                sc_tp_input.value = 4.0
-                sc_sl_input.value = 3.0
+                sc_tp_input.value = 6.0
+                sc_sl_input.value = 4.0
                 sc_volume_rsi_min_input.value = 72.0
                 sc_rsi_min_input.value = 55.0
-                sc_rsi_max_input.value = 72.0
+                sc_rsi_max_input.value = 80.0
                 sc_bb_breakout_switch.value = True
                 sc_candle_strength_switch.value = True
-                sc_candle_strength_pct_input.value = 70.0
+                sc_candle_strength_pct_input.value = 60.0
                 sc_min_bb_bw_input.value = 3.0
                 sc_max_adx_input.value = 0.0
                 sc_max_adx_entry_input.value = 32.0
-                sc_momentum_accel_switch.value = True
+                # Body-ratio acceleration is opt-in (default OFF) — the ATR
+                # extension gate is the primary anti-late-entry filter.
+                sc_momentum_accel_switch.value = False
                 sc_accel_lookback_input.value = 3
                 sc_accel_min_ratio_input.value = 1.3
                 sc_rsi_rising_switch.value = True
-                sc_vol_rsi_rising_switch.value = True
-                sc_max_spike_ext_input.value = 3.5
+                sc_vol_rsi_rising_switch.value = False
+                sc_max_spike_ext_input.value = 2.0
                 sc_spike_lookback_input.value = 5
                 sc_require_regime_switch.value = True
-                sc_min_bw_pct_input.value = 55.0
+                sc_min_bw_pct_input.value = 50.0
                 sc_regime_lookback_input.value = 50
                 sc_htf_regime_select.value = "trend"
                 sc_analysis_tf_select.value = "15m"
                 sc_use_atr_sizing_switch.value = True
-                sc_atr_tp_mult_input.value = 1.2
-                sc_atr_sl_mult_input.value = 1.0
+                sc_atr_tp_mult_input.value = 3.0
+                sc_atr_sl_mult_input.value = 2.0
                 sc_min_atr_pct_input.value = 1.0
-                # R:R guardrail: enforce >= 1.0 for this strategy.
-                sc_min_rr_input.value = 1.0
+                # R:R guardrail: enforce >= 1.5 for this strategy.
+                sc_min_rr_input.value = 1.5
                 # Do not flip the strategy's chosen direction — flipping
                 # destroys the directional edge the strategy is built around.
                 sc_flip_switch.value = False
@@ -5592,7 +5594,7 @@ def register_pages(app: FastAPI) -> None:
                 "acceleration_min_ratio": float(sc_accel_min_ratio_input.value or 1.1),
                 "require_rsi_rising": bool(sc_rsi_rising_switch.value),
                 "require_volume_rsi_rising": bool(sc_vol_rsi_rising_switch.value),
-                "max_spike_extension_pct": float(sc_max_spike_ext_input.value or 4.0),
+                "max_spike_extension_atr": float(sc_max_spike_ext_input.value or 2.0),
                 "spike_lookback": int(sc_spike_lookback_input.value or 5),
                     "use_adaptive_atr": bool(sc_use_adaptive_atr_switch.value),
                 "require_regime": bool(sc_require_regime_switch.value),
@@ -8680,7 +8682,7 @@ def register_pages(app: FastAPI) -> None:
                         "MR TP % (optional)": ("strategies.mean_reversion.tp_pct", ""),
                         "MR SL % (optional)": ("strategies.mean_reversion.sl_pct", ""),
                         "SC volume RSI min": ("strategies.spike_continuation.volume_rsi_min", "70, 75, 80, 85"),
-                        "SC max spike ext %": ("strategies.spike_continuation.max_spike_extension_pct", "3.0, 5.0, 7.0, 10.0"),
+                        "SC max spike ext (ATR)": ("strategies.spike_continuation.max_spike_extension_atr", "1.0, 1.5, 2.0, 3.0"),
                         "SC accel min ratio": ("strategies.spike_continuation.acceleration_min_ratio", "1.0, 1.2, 1.5, 2.0"),
                         "SC TP %": ("strategies.spike_continuation.tp_pct", "3.0, 5.0, 7.0, 10.0"),
                         "SC SL %": ("strategies.spike_continuation.sl_pct", "2.0, 3.0, 4.0, 5.0"),
@@ -8762,7 +8764,7 @@ def register_pages(app: FastAPI) -> None:
                         ui.button(
                             "Add SC Extension Sweep",
                             on_click=lambda _: _add_sweep_row(
-                                "strategies.spike_continuation.max_spike_extension_pct", "3.0, 5.0, 7.0, 10.0"
+                                "strategies.spike_continuation.max_spike_extension_atr", "1.0, 1.5, 2.0, 3.0"
                             ),
                         ).props("dense flat color=primary size=sm")
 

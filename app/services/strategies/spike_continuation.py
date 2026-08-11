@@ -25,53 +25,68 @@ class SpikeContinuationStrategy:
 
     Config keys (all live under ``config["strategies"]["spike_continuation"]``):
       - ``enabled`` (bool): master switch
-      - ``volume_rsi_min`` (float, default 75): volume RSI must be above this
+      - ``volume_rsi_min`` (float, default 72): volume RSI must be above this
         to confirm the spike is volume-driven (not just a thin wick)
-      - ``rsi_min`` (float, default 58): RSI must be above this for buys
+      - ``rsi_min`` (float, default 55): RSI must be above this for buys
         (momentum confirmed but not yet extreme)
-      - ``rsi_max`` (float, default 70): don't enter if RSI is already extreme
-        (that's Mean Reversion territory / late top)
+      - ``rsi_max`` (float, default 80): don't enter if RSI is already extreme
+        (that's Mean Reversion territory / late top). Sell band mirrors to
+        ``100 - rsi_max``.
       - ``require_bb_breakout`` (bool, default True): price must be beyond BB band
       - ``require_candle_strength`` (bool, default True): candle must close near
         its high (for buys) or low (for sells) — strong momentum, no rejection
-      - ``candle_strength_pct`` (float, default 75): close must be within this
-        % of the candle range from the direction (75 = close is in top 25% for buys)
+      - ``candle_strength_pct`` (float, default 60): close must be within this
+        % of the candle range from the direction (60 = close is in top 40% for buys)
       - ``min_bb_bandwidth`` (float, default 3.0): only enter when bands are wide
         enough to suggest a real volatility expansion
-      - ``tp_pct`` (float, default 4.0): take-profit as % price move
-      - ``sl_pct`` (float, default 3.0): stop-loss as % price move
+      - ``tp_pct`` (float, default 6.0): take-profit as % price move (static fallback)
+      - ``sl_pct`` (float, default 4.0): stop-loss as % price move (static fallback)
       - ``max_adx`` (float, default 0): legacy hard ADX ceiling. 0 = disabled.
-      - ``max_adx_for_entry`` (float, default 30): late-entry killer. Blocks when
+      - ``max_adx_for_entry`` (float, default 32): late-entry killer. Blocks when
         ADX is already this high (trend is mature). 0 = disabled.
 
     Momentum acceleration filters (prevent entering at the top of a spike):
-      - ``require_momentum_acceleration`` (bool, default True): current candle
-        body must be larger than the average body of the last N candles
+      - ``require_momentum_acceleration`` (bool, default False): current candle
+        body must be larger than the average body of the last N candles.  This
+        is OPT-IN and default-off: it encodes the same "not too late" intent as
+        the ATR-anchored extension gate, so it must not compound it.
       - ``acceleration_lookback`` (int, default 3): number of prior candles to
         average for the acceleration comparison
-      - ``acceleration_min_ratio`` (float, default 1.5): current body must be
+      - ``acceleration_min_ratio`` (float, default 1.3): current body must be
         at least this multiple of the average recent body
       - ``require_rsi_rising`` (bool, default True): RSI must be rising vs the
         previous candle (momentum still building, not fading). Uses the actual
         RSI series, not a candle-direction proxy.
-      - ``require_volume_rsi_rising`` (bool, default True): volume RSI must be
-        rising vs the previous candle (volume momentum still building)
-      - ``max_spike_extension_pct`` (float, default 2.5): block entry if price
-        has already moved more than this % from the start of the spike.
-        Prevents entering at the top of an extended move. 0 = disabled.
+      - ``require_volume_rsi_rising`` (bool, default False): volume RSI must be
+        rising vs the previous candle (volume momentum still building).  OPT-IN
+        and default-off; ``volume_rsi_min`` is the primary volume gate.
+      - ``max_spike_extension_atr`` (float, default 2.0): volatility-normalised
+        anti-late-entry gate.  Block entry if price has already travelled more
+        than this multiple of ATR% from the volume-expansion origin.  The
+        origin is anchored to the candle where volume expansion began (Fix 3),
+        not a trailing window extreme.  0 = disabled.
       - ``spike_lookback`` (int, default 5): candles to look back to find the
-        spike origin (lowest low for buys, highest high for sells)
+        volume-expansion candle that anchors the spike origin
       - ``require_regime`` (bool, default True)
-      - ``min_bb_bandwidth_percentile`` (float, default 60)
+      - ``min_bb_bandwidth_percentile`` (float, default 50)
       - ``use_atr_sizing`` (bool, default True)
-      - ``atr_tp_multiplier`` (float, default 2.2)
+      - ``atr_tp_multiplier`` (float, default 3.0)
       - ``atr_sl_multiplier`` (float, default 2.0)
-      - ``min_atr_pct`` (float, default 1.2)
+      - ``min_atr_pct`` (float, default 1.0)
       - ``flip_launcher_direction`` (str, default None): invert the
         Launcher's trade direction before execution. One of "both",
         "from_long" (only BUY→SELL), "from_short" (only SELL→BUY),
         or None to disable. TP/SL are mirrored around last_price so
         they land on the correct side for the flipped direction.
+
+    ATR exit multipliers — SINGLE SOURCE OF TRUTH
+    --------------------------------------------
+    The canonical values live in ``DEFAULT_SPIKE_CONTINUATION``
+    (``app/services/strategies/defaults.py``): ``atr_tp_multiplier = 3.0`` and
+    ``atr_sl_multiplier = 2.0`` (≥ 1.5 R:R).  The inline fallbacks below and
+    this docstring MUST stay in sync with that dict.  When ``use_atr_sizing``
+    is disabled the static fallbacks (``tp_pct: 6.0``, ``sl_pct: 4.0``) keep
+    the same 1.5 R:R floor.
     """
 
     name = "spike_continuation"
@@ -118,12 +133,12 @@ class SpikeContinuationStrategy:
             rsi_min = 55.0
         rsi_max = helpers.extract_float(cfg.get("rsi_max"))
         if rsi_max is None:
-            rsi_max = 72.0
+            rsi_max = 80.0
         require_bb_breakout = bool(cfg.get("require_bb_breakout", True))
         require_candle_strength = bool(cfg.get("require_candle_strength", True))
         candle_strength_pct = helpers.extract_float(cfg.get("candle_strength_pct"))
         if candle_strength_pct is None:
-            candle_strength_pct = 70.0
+            candle_strength_pct = 60.0
         min_bb_bandwidth = helpers.extract_float(cfg.get("min_bb_bandwidth"))
         if min_bb_bandwidth is None:
             min_bb_bandwidth = 3.0
@@ -138,22 +153,23 @@ class SpikeContinuationStrategy:
         # SC works best in high-volatility expansion.  When require_regime
         # is True, the current BB bandwidth must be above
         # min_bb_bandwidth_percentile relative to the last N candles
-        # (e.g. > 60th percentile = volatility expansion).
+        # (e.g. > 50th percentile = volatility expansion).
         require_regime = bool(cfg.get("require_regime", True))
         min_bb_bandwidth_percentile = helpers.extract_float(cfg.get("min_bb_bandwidth_percentile"))
         if min_bb_bandwidth_percentile is None:
-            min_bb_bandwidth_percentile = 55.0
+            min_bb_bandwidth_percentile = 50.0
         regime_lookback = helpers.extract_float(cfg.get("regime_lookback"))
         if regime_lookback is None:
             regime_lookback = 50
         # ── ATR-scaled TP/SL ────────────────────────────────────────────
         # When use_atr_sizing is True, TP/SL are computed as
         # multiplier × ATR% instead of fixed percentages.
-        # SC uses wider SL (~2.0 ATR) to avoid being stopped by noise.
+        # SC uses a wide SL (2.0 ATR) to avoid being stopped by noise and a
+        # 3.0 ATR TP to keep ≥ 1.5 R:R — matching DEFAULT_SPIKE_CONTINUATION.
         use_atr_sizing = bool(cfg.get("use_atr_sizing", True))
         atr_tp_multiplier = helpers.extract_float(cfg.get("atr_tp_multiplier"))
         if atr_tp_multiplier is None:
-            atr_tp_multiplier = 2.2
+            atr_tp_multiplier = 3.0
         atr_sl_multiplier = helpers.extract_float(cfg.get("atr_sl_multiplier"))
         if atr_sl_multiplier is None:
             atr_sl_multiplier = 2.0
@@ -164,18 +180,21 @@ class SpikeContinuationStrategy:
         if min_atr_pct is None:
             min_atr_pct = 1.0
 
-        # Momentum acceleration filters
-        require_momentum_acceleration = bool(cfg.get("require_momentum_acceleration", True))
+        # Momentum acceleration filters (opt-in, default OFF).  The ATR
+        # extension gate below is the primary anti-late-entry filter; this
+        # body-ratio check must not compound it.
+        require_momentum_acceleration = bool(cfg.get("require_momentum_acceleration", False))
         _acceleration_lookback = helpers.extract_float(cfg.get("acceleration_lookback"))
         acceleration_lookback = int(_acceleration_lookback) if _acceleration_lookback is not None else 3
         acceleration_min_ratio = helpers.extract_float(cfg.get("acceleration_min_ratio"))
         if acceleration_min_ratio is None:
             acceleration_min_ratio = 1.3
         require_rsi_rising = bool(cfg.get("require_rsi_rising", True))
-        require_volume_rsi_rising = bool(cfg.get("require_volume_rsi_rising", True))
-        max_spike_extension_pct = helpers.extract_float(cfg.get("max_spike_extension_pct"))
-        if max_spike_extension_pct is None:
-            max_spike_extension_pct = 3.5
+        require_volume_rsi_rising = bool(cfg.get("require_volume_rsi_rising", False))
+        # Volatility-normalised spike extension (ATR-anchored, 0 = disabled).
+        max_spike_extension_atr = helpers.extract_float(cfg.get("max_spike_extension_atr"))
+        if max_spike_extension_atr is None:
+            max_spike_extension_atr = 2.0
         _spike_lookback = helpers.extract_float(cfg.get("spike_lookback"))
         spike_lookback = int(_spike_lookback) if _spike_lookback is not None else 5
         # ── Liquidity-aware gates (§3) ────────────────────────────────
@@ -285,33 +304,74 @@ class SpikeContinuationStrategy:
         if require_volume_rsi_rising and volume_rsi_value is not None and volume_rsi_prev is not None:
             volume_rsi_rising = volume_rsi_value > volume_rsi_prev
 
-        # Spike extension — don't enter if price has already moved too far from spike origin
+        # Spike extension — don't enter if price has already travelled too far
+        # from the volume-expansion origin.  The origin is anchored to the
+        # candle where volume expansion began (first candle in the lookback
+        # whose volume-RSI exceeded volume_rsi_min), NOT a trailing window
+        # extreme.  Extension is measured in ATR multiples (volatility
+        # normalised) so a fresh accelerating impulse reads as low extension
+        # while a move already > max_spike_extension_atr × ATR% is blocked.
         spike_extension_buy: float | None = None
         spike_extension_sell: float | None = None
         spike_extension_ok_buy = True
         spike_extension_ok_sell = True
-        if max_spike_extension_pct > 0 and current_close is not None and len(ohlcv_compact) >= 2:
+        spike_origin_buy_ts: int | None = None
+        spike_origin_sell_ts: int | None = None
+        atr_pct_value = helpers.extract_float(indicators.get("atr_pct"))
+        if max_spike_extension_atr > 0 and current_close is not None and len(ohlcv_compact) >= 2:
             lookback_candles = ohlcv_compact[-(spike_lookback + 1):-1]
-            lows = [
-                helpers.extract_float(c.get("low"))
-                for c in lookback_candles
-                if isinstance(c, dict) and helpers.extract_float(c.get("low")) is not None
-            ]
-            highs = [
-                helpers.extract_float(c.get("high"))
-                for c in lookback_candles
-                if isinstance(c, dict) and helpers.extract_float(c.get("high")) is not None
-            ]
-            if lows:
-                spike_origin_low = min(lows)
-                if spike_origin_low > 0:
-                    spike_extension_buy = (current_close - spike_origin_low) / spike_origin_low * 100.0
-                    spike_extension_ok_buy = spike_extension_buy <= max_spike_extension_pct
-            if highs:
-                spike_origin_high = max(highs)
-                if spike_origin_high > 0:
-                    spike_extension_sell = (spike_origin_high - current_close) / spike_origin_high * 100.0
-                    spike_extension_ok_sell = spike_extension_sell <= max_spike_extension_pct
+            # volume_rsi_series is aligned 1:1 with ohlcv_compact (both derived
+            # from the same df), so the first lookback candle sits at index
+            # len(ohlcv_compact) - (spike_lookback + 1) in the series (clamped
+            # to 0 to match Python slice clamping on a short window).
+            _series_offset = max(0, len(ohlcv_compact) - (spike_lookback + 1))
+            # Find the first candle in the window whose volume-RSI exceeded
+            # volume_rsi_min — the candle that started the spike.
+            origin_low: float | None = None
+            origin_high: float | None = None
+            origin_low_ts: int | None = None
+            origin_high_ts: int | None = None
+            for i, c in enumerate(lookback_candles):
+                if not isinstance(c, dict):
+                    continue
+                _vrsi = None
+                _series_idx = _series_offset + i
+                if volume_rsi_series and 0 <= _series_idx < len(volume_rsi_series):
+                    _vrsi = helpers.extract_float(volume_rsi_series[_series_idx])
+                if _vrsi is None or _vrsi < volume_rsi_min:
+                    continue
+                # This candle qualifies as the volume-expansion start.
+                if origin_low is None:
+                    _lo = helpers.extract_float(c.get("low"))
+                    if _lo is not None:
+                        origin_low = _lo
+                        origin_low_ts = helpers.extract_float(c.get("ts"))
+                if origin_high is None:
+                    _hi = helpers.extract_float(c.get("high"))
+                    if _hi is not None:
+                        origin_high = _hi
+                        origin_high_ts = helpers.extract_float(c.get("ts"))
+                if origin_low is not None and origin_high is not None:
+                    break
+
+            # ATR distance in price units (ATR% is a percentage of price).
+            _atr_price = (atr_pct_value / 100.0) if atr_pct_value and atr_pct_value > 0 else None
+
+            if origin_low is not None and origin_low > 0:
+                spike_origin_buy_ts = int(origin_low_ts) if origin_low_ts is not None else None
+                if _atr_price is not None:
+                    spike_extension_buy = (current_close - origin_low) / (origin_low * _atr_price)
+                    spike_extension_ok_buy = spike_extension_buy <= max_spike_extension_atr
+                else:
+                    # No ATR% available → cannot normalise → treat as not confirmed.
+                    spike_extension_ok_buy = False
+            if origin_high is not None and origin_high > 0:
+                spike_origin_sell_ts = int(origin_high_ts) if origin_high_ts is not None else None
+                if _atr_price is not None:
+                    spike_extension_sell = (origin_high - current_close) / (origin_high * _atr_price)
+                    spike_extension_ok_sell = spike_extension_sell <= max_spike_extension_atr
+                else:
+                    spike_extension_ok_sell = False
 
         # BB breakout checks
         bb_breakout_buy = (
@@ -327,21 +387,27 @@ class SpikeContinuationStrategy:
         # Momentum entries need fresh leverage: OI should be rising (buy) or
         # falling (short) beyond the z-score threshold.  Granting when data is
         # absent (oi_ok True) keeps the gate from blocking on no-OI symbols.
-        # Note: the direction-specific z-score sign is applied inside the
-        # helper; a single call covers both candidates below (we pass "long"
-        # but the helper's min_zscore check is direction-agnostic for the
-        # down-short mirror at signal assembly time).  For clarity the gate
-        # is evaluated once and reused for both buy & sell.
-        oi_ok = True
-        oi_info: dict = {}
+        # The direction-specific z-score sign is applied inside the helper, so
+        # we evaluate it SEPARATELY for each direction (Fix 2) — a short must
+        # see falling OI (oi_zscore < -min_zscore), never the long confirmation.
+        oi_ok_buy = True
+        oi_ok_sell = True
+        oi_info_buy: dict = {}
+        oi_info_sell: dict = {}
         if require_oi_confirmation:
             open_interest = sym_data.get("open_interest") or {}
             # Phase 0d: use the pre-computed OI delta z-score when available;
             # falls back to the flat-delta proxy when history is not yet seeded.
             _oi_zscore: float | None = sym_data.get("oi_zscore")
-            oi_ok, oi_info = oi_confirms_momentum(
+            oi_ok_buy, oi_info_buy = oi_confirms_momentum(
                 open_interest,
                 direction="long",
+                oi_zscore=_oi_zscore,
+                min_zscore=oi_min_zscore,
+            )
+            oi_ok_sell, oi_info_sell = oi_confirms_momentum(
+                open_interest,
+                direction="short",
                 oi_zscore=_oi_zscore,
                 min_zscore=oi_min_zscore,
             )
@@ -413,12 +479,12 @@ class SpikeContinuationStrategy:
             return None
 
         # Spike extension gate — don't enter at the top of an extended move
-        if max_spike_extension_pct > 0:
+        if max_spike_extension_atr > 0:
             if not spike_extension_ok_buy and not spike_extension_ok_sell:
                 _ext = spike_extension_buy if spike_extension_buy is not None else spike_extension_sell
                 helpers.emit_debug(
                     f"SpikeContinuation: {symbol} — no signal "
-                    f"(spike already extended: {_ext:.2f}% > max={max_spike_extension_pct:.2f}% — "
+                    f"(spike already extended: {_ext:.2f} ATR > max={max_spike_extension_atr:.2f} ATR — "
                     f"entering at the top, not the start)"
                 )
                 return None
@@ -438,7 +504,6 @@ class SpikeContinuationStrategy:
 
         # ── Minimum ATR% filter ──────────────────────────────────────
         # Skip entries on coins too quiet for a real spike.
-        atr_pct_value = helpers.extract_float(indicators.get("atr_pct"))
         atr_ok = (
             min_atr_pct <= 0
             or (atr_pct_value is not None and atr_pct_value >= min_atr_pct)
@@ -454,7 +519,7 @@ class SpikeContinuationStrategy:
             and spike_extension_ok_buy
             and regime_ok
             and atr_ok
-            and (not require_oi_confirmation or oi_ok)
+            and (not require_oi_confirmation or oi_ok_buy)
         )
         # Sell signal: mirror
         sell_signal = (
@@ -467,7 +532,7 @@ class SpikeContinuationStrategy:
             and spike_extension_ok_sell
             and regime_ok
             and atr_ok
-            and (not require_oi_confirmation or oi_ok)
+            and (not require_oi_confirmation or oi_ok_sell)
         )
 
         # ── Unified TP/SL via trade_management ─────────────────────────
@@ -524,9 +589,13 @@ class SpikeContinuationStrategy:
             parts.append(f"rsi_rising={'ok' if (rsi_rising_buy or rsi_rising_sell) else 'blocked'}")
         if require_volume_rsi_rising:
             parts.append(f"vol_rsi_rising={'ok' if volume_rsi_rising else 'blocked'}")
-        if max_spike_extension_pct > 0:
+        if max_spike_extension_atr > 0:
             _ext = spike_extension_buy if spike_extension_buy is not None else spike_extension_sell
-            parts.append(f"spike_ext={_ext:.2f}%" if _ext is not None else "spike_ext=n/a")
+            parts.append(f"spike_ext={_ext:.2f}ATR" if _ext is not None else "spike_ext=n/a")
+            if spike_origin_buy_ts is not None:
+                parts.append(f"origin_buy_ts={spike_origin_buy_ts}")
+            if spike_origin_sell_ts is not None:
+                parts.append(f"origin_sell_ts={spike_origin_sell_ts}")
         if min_bb_bandwidth > 0:
             parts.append(f"BB_bw={bb_bandwidth:.2f}%" if bb_bandwidth is not None else "BB_bw=n/a")
         if max_adx > 0 or max_adx_for_entry > 0:
@@ -534,12 +603,14 @@ class SpikeContinuationStrategy:
             if max_adx_for_entry > 0:
                 parts.append(f"max_adx_entry={max_adx_for_entry:.0f}")
         if require_oi_confirmation:
-            if oi_info.get("available"):
-                _oi = oi_info.get("zscore")
+            if oi_info_buy.get("available") or oi_info_sell.get("available"):
+                _oi = oi_info_buy.get("zscore") or oi_info_sell.get("zscore")
                 parts.append(
-                    f"oi_z={_oi:.2f} (ok={'true' if oi_ok else 'blocked'})"
+                    f"oi_z={_oi:.2f} (buy={'true' if oi_ok_buy else 'blocked'}, "
+                    f"sell={'true' if oi_ok_sell else 'blocked'})"
                     if _oi is not None
-                    else f"oi_delta_ok={'true' if oi_ok else 'blocked'}"
+                    else f"oi_delta(buy={'true' if oi_ok_buy else 'blocked'}, "
+                    f"sell={'true' if oi_ok_sell else 'blocked'})"
                 )
             else:
                 parts.append("oi=skipped(no data)")

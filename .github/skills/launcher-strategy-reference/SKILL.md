@@ -179,7 +179,7 @@ Ride a fresh spike before it exhausts.
 - `volume_rsi_min`
 - `rsi_min`, `rsi_max`
 - `acceleration_min_ratio`
-- `max_spike_extension_pct`
+- `max_spike_extension_atr`
 - `max_adx_for_entry`
 
 ### Tighten when

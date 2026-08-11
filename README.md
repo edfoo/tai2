@@ -279,15 +279,15 @@ The Spike Continuation strategy rides momentum spikes for 3-5% gains before reve
 
 | Setting | Recommended value | Rationale |
 |---|---|---|
-| `require_momentum_acceleration` | `true` | Current candle body must be larger than recent average — spike is still accelerating, not peaking |
+| `require_momentum_acceleration` | `false` | OPT-IN body-ratio check. The ATR-anchored extension gate below is the primary anti-late-entry filter; keep this off so the two cannot compound and collapse the entry window |
 | `acceleration_lookback` | `3` | Compare current body to average of last 3 candles |
-| `acceleration_min_ratio` | `1.5` | Current body must be at least 1.5× the recent average (50% larger) |
+| `acceleration_min_ratio` | `1.3` | Current body must be at least 1.3× the recent average |
 | `require_rsi_rising` | `true` | RSI must be moving in the spike direction (bullish candle for buys, bearish for sells) — momentum still building, not fading |
-| `require_volume_rsi_rising` | `true` | Volume RSI must be rising vs previous candle — volume momentum still building |
-| `max_spike_extension_pct` | `3.0` | Block entry if price already moved more than 3% from spike origin — prevents entering at the top |
-| `spike_lookback` | `5` | Candles to look back to find the spike origin (lowest low for buys, highest high for sells) |
+| `require_volume_rsi_rising` | `false` | OPT-IN; `volume_rsi_min` is the primary volume gate |
+| `max_spike_extension_atr` | `2.0` | Volatility-normalised anti-late-entry gate: block if price already moved more than 2× ATR% from the volume-expansion origin |
+| `spike_lookback` | `5` | Candles to look back to find the volume-expansion candle that anchors the spike origin |
 
-These filters together prevent the pattern where the strategy enters a long at the top of a spike right before price reverts. Instead, it only enters when the spike is still accelerating with building volume momentum and hasn't extended too far from its origin.
+These filters together prevent the pattern where the strategy enters a long at the top of a spike right before price reverts. Instead, it only enters when the spike is still accelerating with building volume momentum and hasn't extended too far from its volume-expansion origin.
 
 **When to use Spike Continuation vs Mean Reversion:**
 - Use **Spike Continuation** when you see a strong momentum spike with high volume RSI and want to ride it for 3-5%

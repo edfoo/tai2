@@ -83,34 +83,42 @@ DEFAULT_MEAN_REVERSION: dict[str, Any] = {
 }
 
 # ── Spike Continuation ──────────────────────────────────────────────────────
+# Single source of truth for the ATR exit multipliers.  The class docstring
+# and the inline fallbacks in ``spike_continuation.py`` MUST reference these
+# values (3.0 TP / 2.0 SL → ≥ 1.5 R:R) so they cannot drift again.
 DEFAULT_SPIKE_CONTINUATION: dict[str, Any] = {
     "enabled": False,
-    "tp_pct": 4.0,
-    "sl_pct": 3.0,
+    "tp_pct": 6.0,
+    "sl_pct": 4.0,
     "volume_rsi_min": 72.0,
     "rsi_min": 55.0,
-    "rsi_max": 72.0,
+    "rsi_max": 80.0,
     "require_bb_breakout": True,
     "require_candle_strength": True,
-    "candle_strength_pct": 70.0,
+    "candle_strength_pct": 60.0,
     "min_bb_bandwidth": 3.0,
     "max_adx": 0.0,
     "max_adx_for_entry": 32.0,
-    "require_momentum_acceleration": True,
+    # Anti-late-entry filter is the ATR-anchored extension gate below.
+    # The body-ratio acceleration check is opt-in and default-off so it
+    # cannot compound the extension gate and collapse the entry window.
+    "require_momentum_acceleration": False,
     "acceleration_lookback": 3,
     "acceleration_min_ratio": 1.3,
     "require_rsi_rising": True,
-    "require_volume_rsi_rising": True,
-    "max_spike_extension_pct": 3.5,
+    "require_volume_rsi_rising": False,
+    # Volatility-normalised spike extension: price may be at most
+    # max_spike_extension_atr × ATR% from the volume-expansion origin.
+    "max_spike_extension_atr": 2.0,
     "spike_lookback": 5,
     "require_regime": True,
-    "min_bb_bandwidth_percentile": 55.0,
+    "min_bb_bandwidth_percentile": 50.0,
     "regime_lookback": 50,
     "use_atr_sizing": True,
-    "atr_tp_multiplier": 1.2,
-    "atr_sl_multiplier": 1.0,
+    "atr_tp_multiplier": 3.0,
+    "atr_sl_multiplier": 2.0,
     "min_atr_pct": 1.0,
-    "min_reward_risk_ratio": 1.0,
+    "min_reward_risk_ratio": 1.5,
     "flip_launcher_direction": None,
     # Per-strategy analysis timeframe. SC rides 15m impulses → analysis on 15m.
     "analysis_timeframe": "15m",

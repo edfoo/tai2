@@ -96,7 +96,7 @@ def _sc_bare(**overrides: Any) -> dict[str, Any]:
         "require_momentum_acceleration": False,
         "require_rsi_rising": False,
         "require_volume_rsi_rising": False,
-        "max_spike_extension_pct": 0.0,
+        "max_spike_extension_atr": 0.0,
         "min_bb_bandwidth": 0.0,
         "volume_rsi_min": 0.0,
         "rsi_min": 0.0,
@@ -1313,7 +1313,7 @@ class TestBuildLauncherDecision:
                     "acceleration_min_ratio": 1.5,
                     "require_rsi_rising": True,
                     "require_volume_rsi_rising": True,
-                    "max_spike_extension_pct": 5.0,
+                    "max_spike_extension_atr": 5.0,
                     "spike_lookback": 5,
                     "require_regime": False,
                     "use_atr_sizing": False,
@@ -1326,7 +1326,7 @@ class TestBuildLauncherDecision:
         service._last_full_snapshot = _make_spike_snapshot(
             rsi=65.0,
             last_price=106.0,
-            volume_rsi_series=[70.0, 82.0],
+            volume_rsi_series=[40.0, 45.0, 50.0, 80.0, 82.0],
         )
 
         decisions = service.build_launcher_decisions("BTC-USDT-SWAP")
@@ -1366,7 +1366,7 @@ class TestBuildLauncherDecision:
                     "acceleration_min_ratio": 1.5,
                     "require_rsi_rising": True,
                     "require_volume_rsi_rising": True,
-                    "max_spike_extension_pct": 5.0,
+                    "max_spike_extension_atr": 5.0,
                     "spike_lookback": 5,
                     "require_regime": False,
                     "use_atr_sizing": False,
@@ -1379,7 +1379,7 @@ class TestBuildLauncherDecision:
         service._last_full_snapshot = _make_spike_snapshot(
             rsi=65.0,
             last_price=106.0,
-            volume_rsi_series=[70.0, 82.0],
+            volume_rsi_series=[40.0, 45.0, 50.0, 80.0, 82.0],
         )
 
         decisions = service.build_launcher_decisions("BTC-USDT-SWAP")
@@ -1405,17 +1405,14 @@ def _make_spike_snapshot(
     volume_rsi_series: list[float] | None = None,
     rsi_series: list[float] | None = None,
     ohlcv: list[dict[str, Any]] | None = None,
+    atr_pct: float | None = 2.0,
     symbol: str = "BTC-USDT-SWAP",
 ) -> dict[str, Any]:
     """Build a snapshot for Spike Continuation tests."""
-    if volume_rsi_series is None:
-        volume_rsi_series = [70.0, 82.0]  # rising by default
-    if rsi_series is None:
-        rsi_series = [60.0, 65.0]  # rising by default (matches rsi=65.0)
     if ohlcv is None:
         # Default: current candle is a strong bullish candle with large body.
-        # Spike origin (lowest low) is at 103.0, current close at 106.5 → ~3.4% extension.
-        # Keep extension under 5% so default max_spike_extension_pct=3.0 can be overridden in tests.
+        # The volume-expansion candle (volume RSI ≥ 75) is the 4th candle
+        # (low 104.0); current close 106.5 → ~2.4% move ≈ 1.2 ATR at atr_pct=2.0.
         ohlcv = [
             {"open": 103.0, "high": 103.5, "low": 102.8, "close": 103.2, "volume": 100.0},
             {"open": 103.2, "high": 104.0, "low": 103.0, "close": 103.8, "volume": 120.0},
@@ -1424,6 +1421,13 @@ def _make_spike_snapshot(
             # Current candle: large body, close near high
             {"open": 104.8, "high": 107.0, "low": 104.5, "close": 106.5, "volume": 250.0},
         ]
+    # volume_rsi_series is aligned 1:1 with ohlcv (both derived from the same
+    # df in production).  Default: last candle (current) has high volume RSI,
+    # the 4th candle is the volume-expansion start, earlier candles are quiet.
+    if volume_rsi_series is None:
+        volume_rsi_series = [40.0, 45.0, 50.0, 82.0, 82.0]
+    if rsi_series is None:
+        rsi_series = [60.0, 65.0]  # rising by default (matches rsi=65.0)
 
     indicators: dict[str, Any] = {
         "rsi": rsi,
@@ -1436,6 +1440,7 @@ def _make_spike_snapshot(
         },
         "volume_rsi_series": volume_rsi_series,
         "ohlcv": ohlcv,
+        "atr_pct": atr_pct,
     }
 
     return {
@@ -1471,7 +1476,7 @@ class TestSpikeContinuationStrategy:
         snapshot = _make_spike_snapshot(
             rsi=65.0,
             last_price=106.0,
-            volume_rsi_series=[70.0, 82.0],
+            volume_rsi_series=[40.0, 45.0, 50.0, 80.0, 82.0],
         )
         config = _sc_bare(
             volume_rsi_min=75.0,
@@ -1487,7 +1492,7 @@ class TestSpikeContinuationStrategy:
             acceleration_min_ratio=1.5,
             require_rsi_rising=True,
             require_volume_rsi_rising=True,
-            max_spike_extension_pct=5.0,  # allow up to 5% extension,
+            max_spike_extension_atr=2.0,  # allow up to 2 ATR extension,
             spike_lookback=5,
         )
         signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, helpers)
@@ -1511,7 +1516,7 @@ class TestSpikeContinuationStrategy:
         snapshot = _make_spike_snapshot(
             rsi=65.0,
             last_price=111.5,
-            volume_rsi_series=[80.0, 82.0],
+            volume_rsi_series=[40.0, 45.0, 50.0, 82.0, 82.0],
             ohlcv=ohlcv,
         )
         config = _sc_bare(
@@ -1523,7 +1528,7 @@ class TestSpikeContinuationStrategy:
             acceleration_min_ratio=1.5,
             require_rsi_rising=True,
             require_volume_rsi_rising=True,
-            max_spike_extension_pct=0,  # disable for this test,
+            max_spike_extension_atr=0,  # disable for this test,
         )
         signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, helpers)
         assert signal is None  # blocked — momentum decelerating
@@ -1535,23 +1540,25 @@ class TestSpikeContinuationStrategy:
         snapshot = _make_spike_snapshot(
             rsi=65.0,
             last_price=106.0,
-            volume_rsi_series=[88.0, 82.0],  # falling
+            volume_rsi_series=[40.0, 45.0, 50.0, 88.0, 82.0],  # falling on the spike leg
         )
         config = _sc_bare(
             volume_rsi_min=75.0,
             rsi_min=55.0,
             rsi_max=75.0,
             require_volume_rsi_rising=True,
-            max_spike_extension_pct=0,
+            max_spike_extension_atr=0,
         )
         signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, helpers)
         assert signal is None
 
     def test_blocks_when_spike_already_extended(self) -> None:
-        """If price has moved more than max_spike_extension_pct from origin, don't enter."""
+        """If price has moved more than max_spike_extension_atr ATR from origin, don't enter."""
         strategy = SpikeContinuationStrategy()
         helpers = _make_helpers(last_price=112.0)
-        # Spike origin (lowest low) is at 95.0, current close is at 112.0 → 17.9% extension
+        # Volume-expansion origin candle is the 4th (low 104.0); current close
+        # 112.0 → (112-104)/104 ≈ 7.7% move.  At atr_pct=2.0 (0.02 price units)
+        # that is ~3.85 ATR of extension → far beyond max_spike_extension_atr.
         ohlcv = [
             {"open": 96.0, "high": 97.0, "low": 95.0, "close": 96.5, "volume": 100.0},
             {"open": 96.5, "high": 100.0, "low": 96.0, "close": 99.5, "volume": 150.0},
@@ -1562,18 +1569,18 @@ class TestSpikeContinuationStrategy:
         snapshot = _make_spike_snapshot(
             rsi=65.0,
             last_price=112.0,
-            volume_rsi_series=[80.0, 85.0],
+            volume_rsi_series=[35.0, 40.0, 45.0, 82.0, 85.0],  # expansion starts @ 4th candle
             ohlcv=ohlcv,
         )
         config = _sc_bare(
             volume_rsi_min=75.0,
             rsi_min=55.0,
             rsi_max=75.0,
-            max_spike_extension_pct=3.0,  # only allow 3% extension,
+            max_spike_extension_atr=2.0,  # only allow 2 ATR extension,
             spike_lookback=5,
         )
         signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, helpers)
-        assert signal is None  # blocked — spike already extended 17.9%
+        assert signal is None  # blocked — spike already extended ~3.85 ATR
 
     def test_blocks_when_rsi_too_extreme(self) -> None:
         """If RSI is above rsi_max, don't enter — that's Mean Reversion territory."""
@@ -1582,13 +1589,13 @@ class TestSpikeContinuationStrategy:
         snapshot = _make_spike_snapshot(
             rsi=85.0,  # too extreme
             last_price=106.0,
-            volume_rsi_series=[80.0, 85.0],
+            volume_rsi_series=[40.0, 45.0, 50.0, 82.0, 85.0],
         )
         config = _sc_bare(
             volume_rsi_min=75.0,
             rsi_min=55.0,
             rsi_max=75.0,
-            max_spike_extension_pct=0,
+            max_spike_extension_atr=0,
         )
         signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, helpers)
         assert signal is None
@@ -1600,13 +1607,13 @@ class TestSpikeContinuationStrategy:
         snapshot = _make_spike_snapshot(
             rsi=65.0,
             last_price=106.0,
-            volume_rsi_series=[60.0, 65.0],  # below 75
+            volume_rsi_series=[40.0, 45.0, 50.0, 60.0, 65.0],  # below 75
         )
         config = _sc_bare(
             volume_rsi_min=75.0,
             rsi_min=55.0,
             rsi_max=75.0,
-            max_spike_extension_pct=0,
+            max_spike_extension_atr=0,
         )
         signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, helpers)
         assert signal is None
@@ -1616,7 +1623,8 @@ class TestSpikeContinuationStrategy:
         strategy = SpikeContinuationStrategy()
         helpers = _make_helpers(last_price=94.0)
         # Bearish spike: price below BB lower, RSI in sell zone (25-45)
-        # Keep extension small: origin high at 107.0, current close at 103.5 → ~3.3%
+        # Volume-expansion origin high is the 4th candle (106.0); current close
+        # 103.5 → (106-103.5)/106 ≈ 2.36% ≈ 1.18 ATR at atr_pct=2.0 → allowed.
         ohlcv = [
             {"open": 107.0, "high": 107.2, "low": 106.8, "close": 106.8, "volume": 100.0},
             {"open": 106.8, "high": 107.0, "low": 106.0, "close": 106.2, "volume": 120.0},
@@ -1631,7 +1639,7 @@ class TestSpikeContinuationStrategy:
             bb_upper=105.0,
             bb_middle=100.0,
             last_price=94.0,  # below BB lower
-            volume_rsi_series=[70.0, 82.0],
+            volume_rsi_series=[35.0, 40.0, 45.0, 80.0, 82.0],
             ohlcv=ohlcv,
         )
         config = _sc_bare(
@@ -1648,7 +1656,7 @@ class TestSpikeContinuationStrategy:
             acceleration_min_ratio=1.5,
             require_rsi_rising=True,
             require_volume_rsi_rising=True,
-            max_spike_extension_pct=5.0,  # allow up to 5% extension,
+            max_spike_extension_atr=2.0,
             spike_lookback=5,
         )
         signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, helpers)
@@ -1671,7 +1679,7 @@ class TestSpikeContinuationStrategy:
         snapshot = _make_spike_snapshot(
             rsi=65.0,
             last_price=105.3,
-            volume_rsi_series=[80.0, 82.0],
+            volume_rsi_series=[40.0, 45.0, 50.0, 80.0, 82.0],
             ohlcv=ohlcv,
         )
         config = _sc_bare(
@@ -1681,7 +1689,7 @@ class TestSpikeContinuationStrategy:
             require_momentum_acceleration=False,  # disabled,
             require_rsi_rising=True,
             require_volume_rsi_rising=True,
-            max_spike_extension_pct=0,  # disabled,
+            max_spike_extension_atr=0,  # disabled,
         )
         signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, helpers)
         assert signal is not None
@@ -1694,7 +1702,7 @@ class TestSpikeContinuationStrategy:
         snapshot = _make_spike_snapshot(
             rsi=65.0,
             last_price=106.0,
-            volume_rsi_series=[70.0, 82.0],
+            volume_rsi_series=[40.0, 45.0, 50.0, 82.0, 82.0],
             rsi_series=[70.0, 65.0],  # falling: prev=70, current=65
         )
         config = _sc_bare(
@@ -1703,7 +1711,7 @@ class TestSpikeContinuationStrategy:
             rsi_max=75.0,
             require_rsi_rising=True,
             require_volume_rsi_rising=True,
-            max_spike_extension_pct=0,  # disabled,
+            max_spike_extension_atr=0,  # disabled,
         )
         signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, helpers)
         assert signal is None  # blocked — RSI falling via series
@@ -1715,7 +1723,7 @@ class TestSpikeContinuationStrategy:
         snapshot = _make_spike_snapshot(
             rsi=65.0,
             last_price=106.0,
-            volume_rsi_series=[70.0, 82.0],
+            volume_rsi_series=[40.0, 45.0, 50.0, 80.0, 82.0],
             rsi_series=None,  # no series — will be removed from indicators
         )
         # Remove rsi_series to simulate unavailable data
@@ -1726,7 +1734,7 @@ class TestSpikeContinuationStrategy:
             rsi_max=75.0,
             require_rsi_rising=True,
             require_volume_rsi_rising=True,
-            max_spike_extension_pct=5.0,
+            max_spike_extension_atr=5.0,
         )
         signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, helpers)
         # Current candle is bullish (close > open) → fallback says RSI rising → buy

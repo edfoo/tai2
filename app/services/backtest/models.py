@@ -187,7 +187,7 @@ class GridParamDef:
         Dotted path into the ``launcher_config`` dict, using ``strategies``
         as the top-level key.  Examples:
           - ``"strategies.mean_reversion.rsi_oversold"``
-          - ``"strategies.spike_continuation.max_spike_extension_pct"``
+          - ``"strategies.spike_continuation.max_spike_extension_atr"``
           - ``"tp_pct"``  (launcher-level)
     values:
         List of values to try for this parameter.
