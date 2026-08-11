@@ -135,6 +135,60 @@ def test_indicator_helper_populates_choppiness() -> None:
     assert indicators["choppiness_series"]
 
 
+def _session_ohlcv_rows_per_day(
+    *,
+    day1_count: int = 50,
+    day2_count: int = 10,
+    day1_price: float = 100.0,
+    day2_price: float = 200.0,
+) -> list[list[Any]]:
+    """Build OHLCV rows spanning two UTC calendar days with distinct prices."""
+    import pandas as pd
+
+    rows: list[list[Any]] = []
+    step_ms = 15 * 60 * 1000  # 15m candles
+    # Day 1 starts at 2023-01-01 00:00 UTC.
+    day1_start = int(pd.Timestamp("2023-01-01T00:00:00+00:00").timestamp() * 1000)
+    for i in range(day1_count):
+        ts = day1_start + i * step_ms
+        c = day1_price
+        rows.append([ts, c - 0.2, c + 0.5, c - 0.5, c, 100.0])
+    # Day 2 starts at 2023-01-02 00:00 UTC.
+    day2_start = int(pd.Timestamp("2023-01-02T00:00:00+00:00").timestamp() * 1000)
+    for i in range(day2_count):
+        ts = day2_start + i * step_ms
+        c = day2_price
+        rows.append([ts, c - 0.2, c + 0.5, c - 0.5, c, 100.0])
+    return rows
+
+
+def test_session_vwap_uses_current_session_not_blend() -> None:
+    """The strategy-facing vwap must be the *current* session's cumulative,
+    not a blend over older sessions."""
+    rows = _session_ohlcv_rows_per_day(day1_price=100.0, day2_price=200.0)
+    indicators = MarketService._compute_indicators(rows)
+    vwap = indicators["vwap"]
+    assert vwap is not None
+    # Day 2 candles are all at price 200 and volume 100 → session VWAP = 200.
+    assert abs(vwap - 200.0) < 1e-6
+    assert indicators["vwap_session"] is not None
+    assert abs(indicators["vwap_session"] - 200.0) < 1e-6
+
+
+def test_session_vwap_immune_to_old_session_volume_steps() -> None:
+    """A huge-volume bar in an *older* session must not step the current
+    session's VWAP (the core F1 fix)."""
+    rows = _session_ohlcv_rows_per_day(day1_price=100.0, day2_price=200.0, day2_count=1)
+    # Inflate the last day-1 bar's volume massively — it would dominate a
+    # free-rolling cumulative, but must be irrelevant to the day-2 session VWAP.
+    day1_ends = 50
+    rows[day1_ends - 1][5] = 10_000_000.0
+    indicators = MarketService._compute_indicators(rows)
+    vwap = indicators["vwap"]
+    assert vwap is not None
+    assert abs(vwap - 200.0) < 1e-6
+
+
 def test_htf_indicators_expose_adx_and_choppiness_for_flat_nesting() -> None:
     # Phase 0b: `_build_snapshot` flattens `adx_htf` / `choppiness_htf` from
     # the HTF indicators dict. This test verifies the source values exist so

@@ -194,7 +194,10 @@ DEFAULT_VWAP_REVERSION: dict[str, Any] = {
     "enabled": False,
     "tp_pct": 2.0,
     "sl_pct": 3.0,
-    "vwap_min_distance_atr": 2.0,
+    # Minimum extension from VWAP (in ATR). Raised to 2.5 so the TP-hop back
+    # to VWAP is meaningful relative to the structural SL → better structural
+    # R:R and fewer guardrail blocks (F3).
+    "vwap_min_distance_atr": 2.5,
     "vwap_max_distance_atr": 3.0,
     "max_adx": 25.0,
     "require_closeback": True,
@@ -202,12 +205,18 @@ DEFAULT_VWAP_REVERSION: dict[str, Any] = {
     "require_regime": True,
     "max_bb_bandwidth_percentile": 55.0,
     "regime_lookback": 50,
+    # F4: ONE primary "not-trending" filter. "bb" makes the LTF BB-bandwidth
+    # percentile the blocking chop gate (reads the analysis TF); ADX then
+    # reports soft/secondary only. "adx" swaps them.
+    "regime_primary_gate": "bb",
     "use_atr_sizing": True,
-    "use_structural_sizing": False,
+    "use_structural_sizing": True,
     "structural_sl_buffer_atr": 0.15,
     "atr_min_tp_mult": 0.5,
     "atr_max_tp_mult": 4.0,
-    "atr_min_sl_mult": 0.3,
+    # SL floor raised from 0.3 so the stop survives an ordinary 15m wick
+    # instead of being clamped into a wick-able gap (F3).
+    "atr_min_sl_mult": 0.5,
     "atr_max_sl_mult": 3.0,
     "atr_tp_multiplier": 1.0,
     "atr_sl_multiplier": 1.0,

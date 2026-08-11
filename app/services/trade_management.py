@@ -25,7 +25,7 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass
-from typing import Final, Literal, Optional, Tuple
+from typing import Callable, Final, Literal, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -191,6 +191,7 @@ def compute_tp_sl_pct(
     static_sl_pct: float | None = None,
     atr_tp_multiplier: float | None = None,
     atr_sl_multiplier: float | None = None,
+    audit: Callable[[str], None] | None = None,
 ) -> tuple[float | None, float | None]:
     """Compute strategy-level TP% / SL%, honouring explicit static overrides.
 
@@ -210,18 +211,32 @@ def compute_tp_sl_pct(
     This deliberately does *not* drop the trade on an unacceptable R:R at the
     strategy layer — the launcher guardrail (``require_reward_risk_ratio``)
     owns that decision, so valid signals reach it for evaluation.
+
+    ``audit`` (optional) is called with a human-readable line describing which
+    sizing source was used (structural/dynamic vs fallback), so strategies can
+    surface the sizing source in /debug.  This makes it explicit *why* a
+    structurally-sized trade was downgraded instead of silently re-sizing.
     """
 
     if static_tp_pct is not None and static_sl_pct is not None:
+        if audit is not None:
+            audit(f"sizing=static tp={static_tp_pct} sl={static_sl_pct}")
         return static_tp_pct, static_sl_pct
 
     if atr_tp_multiplier is not None and atr_sl_multiplier is not None and ctx.atr_tf_pct > 0:
+        if audit is not None:
+            audit(
+                f"sizing=atr tp_mult={atr_tp_multiplier} sl_mult={atr_sl_multiplier} "
+                f"atr_pct={ctx.atr_tf_pct:.2f}"
+            )
         return atr_tp_multiplier * ctx.atr_tf_pct, atr_sl_multiplier * ctx.atr_tf_pct
 
     try:
         tp_price, sl_price = calculate(entry, side, ctx)
         tp_pct = abs(tp_price - entry) / entry * 100.0
         sl_pct = abs(sl_price - entry) / entry * 100.0
+        if audit is not None:
+            audit(f"sizing=structural tp_pct={tp_pct:.3f} sl_pct={sl_pct:.3f}")
         return tp_pct, sl_pct
     except ValueError as exc:
         # The dynamic (structural) exit was rejected — most commonly because
@@ -241,4 +256,9 @@ def compute_tp_sl_pct(
             static_tp_pct,
             static_sl_pct,
         )
+        if audit is not None:
+            audit(
+                f"sizing=fallback ({exc}) tp={static_tp_pct} sl={static_sl_pct} "
+                "(structural geometry rejected)"
+            )
         return static_tp_pct, static_sl_pct

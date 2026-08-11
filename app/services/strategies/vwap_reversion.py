@@ -163,6 +163,14 @@ class VWAPReversionStrategy:
         min_atr_pct = helpers.extract_float(cfg.get("min_atr_pct"))
         if min_atr_pct is None:
             min_atr_pct = 1.0
+        # ── Regime consolidation (F4) ──────────────────────────────────
+        # ``regime_primary_gate`` picks the *single* "not-trending" filter
+        # that actually blocks.  Default "adx" keeps the LTF ADX gate as the
+        # primary trend guard (it reads the analysis timeframe directly);
+        # the BB-bandwidth gate is then treated as soft (logged, not
+        # blocking).  Set "bb" to make the BB-bandwidth percentile the
+        # primary chop gate and demote ADX to soft.
+        regime_primary_gate = str(cfg.get("regime_primary_gate", "adx")).lower()
         # ── Liquidity-aware gates (§3) ────────────────────────────────
         # ``require_no_funding_bias`` (default off): block reversion against a
         # strong funding-rate crowding in the trade direction.  Mirrors the
@@ -178,16 +186,37 @@ class VWAPReversionStrategy:
         sym_data = market_data.get(symbol) or {}
         indicators = resolve_analysis_block(sym_data, cfg)
 
+        # ── Reference price (F2): ONE price for all entry gates ───────
+        # All signal gates (distance from VWAP, closeback, HTF alignment)
+        # must share the same reference so a live ticker print cannot
+        # arm-bandit the entry.  We use the previous *closed* analysis-frame
+        # candle's close.  The live ticker is reserved strictly for execution
+        # sizing / order construction below.
+        gate_ohlcv = indicators.get("ohlcv") or []
+        ref_price: float | None = None
+        if isinstance(gate_ohlcv, list) and gate_ohlcv and isinstance(gate_ohlcv[-1], dict):
+            ref_price = helpers.extract_float(gate_ohlcv[-1].get("close"))
+        if ref_price is None or ref_price <= 0:
+            # Fall back to the live ticker and make the path transparent.
+            ref_price = helpers.get_last_price(symbol)
+            if ref_price is None:
+                helpers.emit_debug(
+                    f"VWAPReversion: {symbol} — no signal (no closed-close reference price)"
+                )
+                return None
+            helpers.emit_debug(
+                f"VWAPReversion: {symbol} — reference price fell back to live ticker "
+                f"(no closed candle available)"
+            )
+
         vwap_value = helpers.extract_float(indicators.get("vwap"))
         last_price = helpers.get_last_price(symbol)
         atr_pct = helpers.extract_float(indicators.get("atr_pct"))
-        if atr_pct is not None and cfg.get("use_adaptive_atr", False):
-            if atr_pct < 1.5:
-                atr_pct *= 1.20
-            elif atr_pct < 3.0:
-                atr_pct *= 1.80
-            else:
-                atr_pct *= 2.50
+        if atr_pct is None or atr_pct <= 0:
+            helpers.emit_debug(
+                f"VWAPReversion: {symbol} — no signal (ATR% unavailable or zero)"
+            )
+            return None
 
         if vwap_value is None or vwap_value <= 0 or last_price is None:
             helpers.emit_debug(
@@ -195,14 +224,11 @@ class VWAPReversionStrategy:
             )
             return None
 
-        # ATR in price units = (atr_pct / 100) * last_price.
+        # ── ATR in price units, measured at the reference price ───────
         # atr_pct is "ATR as % of price", so ATR_price = atr_pct/100 * price.
-        if atr_pct is None or atr_pct <= 0:
-            helpers.emit_debug(
-                f"VWAPReversion: {symbol} — no signal (ATR% unavailable or zero)"
-            )
-            return None
-        atr_price = (atr_pct / 100.0) * last_price
+        # Use the reference (closed-close) price so the ATR-scaling is
+        # consistent with the gate reference (F2/F5).
+        atr_price = (atr_pct / 100.0) * ref_price
         if atr_price <= 0:
             helpers.emit_debug(
                 f"VWAPReversion: {symbol} — no signal (ATR price <= 0)"
@@ -217,25 +243,32 @@ class VWAPReversionStrategy:
             )
             return None
 
-        # ── ADX gate: block in strong trends ───────────────────────────
+        # ── ADX gate (F4): blocking only when it is the primary gate ──
         # A high ADX means the VWAP deviation is a real directional move,
         # not noise that will revert.  Entering is catching a falling knife.
         adx = helpers.extract_float((indicators.get("adx") or {}).get("value"))
-        if max_adx > 0 and adx is not None and adx > max_adx:
+        adx_blocks = regime_primary_gate == "adx" and max_adx > 0 and adx is not None and adx > max_adx
+        if adx_blocks:
             helpers.emit_debug(
                 f"VWAPReversion: {symbol} — no signal "
                 f"(ADX={adx:.1f} > max={max_adx:.1f} — strong trend, reversion unlikely)"
             )
             return None
+        if max_adx > 0 and adx is not None and adx > max_adx:
+            # Soft (secondary) ADX filter — surfaced in /debug, does not block.
+            helpers.emit_debug(
+                f"VWAPReversion: {symbol} — soft ADX={adx:.1f} > max={max_adx:.1f} "
+                f"(secondary filter; primary gate={regime_primary_gate})"
+            )
 
-        # ── Distance from VWAP in ATR units ───────────────────────────
-        distance = last_price - vwap_value  # positive = above VWAP
+        # ── Distance from VWAP in ATR units (F2: reference price) ─────
+        distance = ref_price - vwap_value  # positive = above VWAP
         distance_atr = abs(distance) / atr_price
         if distance_atr < vwap_min_distance_atr:
             helpers.emit_debug(
                 f"VWAPReversion: {symbol} — no signal "
                 f"(distance={distance_atr:.2f} ATR < min={vwap_min_distance_atr:.2f} ATR, "
-                f"VWAP={vwap_value:.6g}, price={last_price:.6g})"
+                f"VWAP={vwap_value:.6g}, ref_price={ref_price:.6g})"
             )
             return None
         if vwap_max_distance_atr > 0 and distance_atr > vwap_max_distance_atr:
@@ -249,18 +282,18 @@ class VWAPReversionStrategy:
         # ── Closeback confirmation ───────────────────────────────────
         # For longs: price below VWAP, current candle closes up (toward VWAP).
         # For shorts: price above VWAP, current candle closes down (toward VWAP).
+        # Uses the same closed-close reference as the distance gate (F2).
         closeback_long_ok = True
         closeback_short_ok = True
         if require_closeback:
-            ohlcv_compact = indicators.get("ohlcv") or []
-            if len(ohlcv_compact) < 2 or not isinstance(ohlcv_compact[-1], dict):
+            if len(gate_ohlcv) < 2 or not isinstance(gate_ohlcv[-1], dict) or not isinstance(gate_ohlcv[-2], dict):
                 helpers.emit_debug(
                     f"VWAPReversion: {symbol} — no signal "
                     f"(insufficient candles for closeback check)"
                 )
                 return None
-            _prev_close = helpers.extract_float(ohlcv_compact[-2].get("close"))
-            _curr_close = helpers.extract_float(ohlcv_compact[-1].get("close"))
+            _prev_close = helpers.extract_float(gate_ohlcv[-2].get("close"))
+            _curr_close = helpers.extract_float(gate_ohlcv[-1].get("close"))
             if _prev_close is None or _curr_close is None:
                 helpers.emit_debug(
                     f"VWAPReversion: {symbol} — no signal (closeback OHLC unavailable)"
@@ -284,7 +317,12 @@ class VWAPReversionStrategy:
                 f"VWAPReversion: {symbol} — HTF unavailable, auto-disabling require_htf_trend"
             )
 
-        # ── Regime gate: BB bandwidth percentile ─────────────────────
+        # ── Regime gate: BB bandwidth percentile (F4) ────────────────
+        # Reads the *analysis timeframe* (15m) and directly encodes "chop
+        # where VWAP reversion is reliable".  When ``regime_primary_gate`` is
+        # "bb" this blocks; otherwise it is a soft rationale-only filter.
+        # The BB gate is the recommended primary chop filter per the tuning
+        # guide because it reads the analysis TF.
         _bb = indicators.get("bollinger_bands") or {}
         bb_lower = helpers.extract_float(_bb.get("lower"))
         bb_upper = helpers.extract_float(_bb.get("upper"))
@@ -294,15 +332,16 @@ class VWAPReversionStrategy:
             if bb_upper is not None and bb_lower is not None and bb_middle and bb_middle > 0
             else None
         )
-        ohlcv_compact = indicators.get("ohlcv") or []
         bw_percentile = compute_bb_bandwidth_percentile(
-            ohlcv_compact, bb_bandwidth, lookback=regime_lookback
+            gate_ohlcv, bb_bandwidth, lookback=regime_lookback
         )
-        regime_ok = (
-            not require_regime
-            or (bw_percentile is not None and bw_percentile <= max_bb_bandwidth_percentile)
+        bb_fail = (
+            require_regime
+            and bw_percentile is not None
+            and bw_percentile > max_bb_bandwidth_percentile
         )
-        if require_regime and not regime_ok:
+        bb_primary = regime_primary_gate == "bb"
+        if bb_primary and bb_fail:
             helpers.emit_debug(
                 f"VWAPReversion: {symbol} — no signal "
                 f"(regime: BW pct={bw_percentile:.0f} > max={max_bb_bandwidth_percentile:.0f})"
@@ -310,6 +349,13 @@ class VWAPReversionStrategy:
                 f"VWAPReversion: {symbol} — no signal (regime: BW percentile unavailable)"
             )
             return None
+        if bb_fail:
+            # Soft (secondary) BB filter — surfaced, does not block.
+            helpers.emit_debug(
+                f"VWAPReversion: {symbol} — soft regime BW pct={bw_percentile:.0f} > "
+                f"max={max_bb_bandwidth_percentile:.0f} (secondary filter; "
+                f"primary gate={regime_primary_gate})"
+            )
 
         # ── Funding bias gate (§3) ────────────────────────────────────
         # Block reversion against heavy funding crowding in the trade
@@ -345,7 +391,7 @@ class VWAPReversionStrategy:
         if not buy_signal and not sell_signal:
             parts = [
                 f"dist={distance_atr:.2f} ATR (need >={vwap_min_distance_atr:.2f})",
-                f"VWAP={vwap_value:.6g}/price={last_price:.6g}",
+                f"VWAP={vwap_value:.6g}/ref_price={ref_price:.6g}",
             ]
             if require_closeback:
                 parts.append(
@@ -364,6 +410,10 @@ class VWAPReversionStrategy:
             if require_regime:
                 parts.append(
                     f"BW_pct={bw_percentile:.0f}" if bw_percentile is not None else "BW_pct=n/a"
+                )
+            if regime_primary_gate == "adx" and max_adx > 0 and adx is not None:
+                parts.append(
+                    f"ADX={adx:.1f}" + ("(soft)" if adx <= max_adx else "(primary-block)")
                 )
             if require_no_funding_bias:
                 if f_info.get("available"):
@@ -393,7 +443,20 @@ class VWAPReversionStrategy:
         sym_data = market_data.get(symbol) or {}
         indicators = resolve_analysis_block(sym_data, cfg)
 
+        # ── Sizing ATR (F5): adaptive scaling applies ONLY to the risk/sizing
+        # ATR, never the entry distance gate (which uses the unscaled ATR% so
+        # the extension threshold is stable).  This decouples "how far is the
+        # entry" from "how wide is the risk".
         atr_tf_pct = helpers.extract_float(indicators.get("atr_pct")) or 1.0
+        if atr_tf_pct > 0 and cfg.get("use_adaptive_atr", False):
+            _scaled = atr_tf_pct
+            if _scaled < 1.5:
+                _scaled *= 1.20
+            elif _scaled < 3.0:
+                _scaled *= 1.80
+            else:
+                _scaled *= 2.50
+            atr_tf_pct = _scaled
         atr_htf_pct = helpers.extract_float(indicators.get("atr_pct_htf")) or atr_tf_pct
         vpoc = helpers.extract_float(indicators.get("vpoc"))
         va_width = helpers.extract_float(indicators.get("value_area_width"))
@@ -422,6 +485,9 @@ class VWAPReversionStrategy:
                 if curr_high is not None:
                     sl_level = curr_high + structural_sl_buffer_atr * atr_price
 
+        def _audit(msg: str) -> None:
+            helpers.emit_debug(f"VWAPReversion: {symbol} — {msg} [trade_mgmt]")
+
         tp_pct_final, sl_pct_final = compute_tp_sl_pct(
             entry=entry_price,
             side=side,
@@ -445,6 +511,7 @@ class VWAPReversionStrategy:
             static_sl_pct=static_sl,
             atr_tp_multiplier=atr_tp_multiplier if use_atr_sizing else None,
             atr_sl_multiplier=atr_sl_multiplier if use_atr_sizing else None,
+            audit=_audit,
         )
 
         return StrategySignal(

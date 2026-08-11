@@ -6179,6 +6179,56 @@ class MarketService:
         return metrics
 
     @staticmethod
+    def session_vwap(df: pd.DataFrame, session: str = "day") -> float | None:
+        """Compute the *current session's* cumulative volume-weighted average price.
+
+        ``pandas_ta.vwap`` is cumulative over the entire input window, which
+        for a rolling ~200-bar analysis block is a ~50-hour blend — *not* today's
+        intraday magnet.  VWAP reversion needs to fade a level institutions
+        actually defend intraday, so this helper re-anchors the cumulative mean
+        at each ``session`` boundary and returns the volume-weighted average of
+        the **current** (most recent) session.
+
+        Because the anchor restarts every session, a large-volume bar from an
+        older session drops out cleanly and can never step the current-session
+        VWAP as old bars roll out of the window.
+
+        Parameters
+        ----------
+        df:
+            Candle frame with a ``datetime`` index and ``high/low/close/volume``
+            columns (as built inside ``_compute_indicators``).
+        session:
+            Session anchor granularity. ``"day"`` groups by UTC calendar day.
+            Other pandas-compatible groupings (e.g. ``"week"``) are accepted but
+            ``"day"`` matches the OKX funding day most clusters defend.
+
+        Returns
+        -------
+        The current session's cumulative VWAP, or ``None`` when the session has
+        no usable bars (or volume is non-positive).
+        """
+        if df is None or df.empty:
+            return None
+        df = df.sort_index()
+        try:
+            groups = list(df.groupby(df.index.date if session == "day" else df.index.to_period(session)))
+        except (TypeError, ValueError):  # pragma: no cover - unusual session strings
+            return None
+        if not groups:
+            return None
+        # Most recent session = the last bucket.
+        _, last_group = groups[-1]
+        if last_group.empty:
+            return None
+        typ = (last_group["high"] + last_group["low"] + last_group["close"]) / 3.0
+        pv = float((typ * last_group["volume"]).sum())
+        vol = float(last_group["volume"].sum())
+        if vol <= 0:
+            return None
+        return pv / vol
+
+    @staticmethod
     def _compute_indicators(ohlcv: list[list[Any]]) -> dict[str, Any]:
         """Build the technical indicator bundle consumed by downstream strategy logic."""
         if not ohlcv:
@@ -6327,8 +6377,11 @@ class MarketService:
                 "ema_50": float(ema_50.iloc[-1]) if ema_50 is not None and not ema_50.empty else None,
                 "ema_200": float(ema_200.iloc[-1]) if ema_200 is not None and not ema_200.empty else None,
             },
-            "vwap": float(vwap_series.iloc[-1]) if vwap_series is not None and not vwap_series.empty else None,
+            "vwap": MarketService.session_vwap(df),
+            # Legacy rolling-window cumulative VWAP, preserved for display and
+            # any consumer that still wants the multi-session blend.
             "vwap_series": MarketService._series_to_list(vwap_series),
+            "vwap_session": MarketService.session_vwap(df),
             "volume": {
                 "last": float(df["volume"].iloc[-1]) if not df.empty else 0.0,
                 "average": volume_avg,

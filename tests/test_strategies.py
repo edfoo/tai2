@@ -1064,9 +1064,9 @@ class TestBuildLauncherDecision:
                 },
             },
         })
-        # VWAP=100, ATR%=2% → ATR_price=2.0. Price=95 → 2.5 ATR below → buy signal.
+        # VWAP=100, ATR%=2% → ATR_price=2.0. Ref close=95 → 2.5 ATR below → buy signal.
         service._last_full_snapshot = _make_vr_snapshot(
-            vwap=100.0, atr_pct=2.0, ohlcv=_make_trend_ohlcv(), last_price=95.0,
+            vwap=100.0, atr_pct=2.0, ohlcv=_vr_ohlcv(95.0), last_price=95.0,
         )
 
         decisions = service.build_launcher_decisions("BTC-USDT-SWAP")
@@ -1104,9 +1104,9 @@ class TestBuildLauncherDecision:
                 },
             },
         })
-        # Price 105 → 2.5 ATR above VWAP → sell signal; from_long should NOT flip it.
+        # Ref close 105 → 2.5 ATR above VWAP → sell signal; from_long should NOT flip it.
         service._last_full_snapshot = _make_vr_snapshot(
-            vwap=100.0, atr_pct=2.0, ohlcv=_make_trend_ohlcv(), last_price=105.0,
+            vwap=100.0, atr_pct=2.0, ohlcv=_vr_ohlcv(105.0), last_price=105.0,
         )
 
         decisions = service.build_launcher_decisions("BTC-USDT-SWAP")
@@ -2309,6 +2309,24 @@ def _make_trend_ohlcv(n: int = 30, base: float = 100.0) -> list[dict[str, Any]]:
     return candles
 
 
+def _vr_ohlcv(last_close: float, n: int = 30) -> list[dict[str, Any]]:
+    """VWAP-test OHLCV whose *closed* candle closes at ``last_close``.
+
+    Under the F2 reference-price fix the strategy's entry gates read the
+    previous closed candle's close (not the live ticker), so tests must place
+    the intended gate reference in the last candle's close.
+    """
+    candles = _make_trend_ohlcv(n)
+    candles[-1] = {
+        "open": last_close - 0.05,
+        "high": last_close + 0.1,
+        "low": last_close - 0.1,
+        "close": last_close,
+        "volume": 100.0,
+    }
+    return candles
+
+
 class TestVWAPReversionStrategy:
     """Tests for the VWAPReversionStrategy."""
 
@@ -2345,9 +2363,9 @@ class TestVWAPReversionStrategy:
     def test_buy_signal_when_extended_below_vwap(self) -> None:
         """Price 2.5 ATR below VWAP → buy signal (no closeback required)."""
         strategy = VWAPReversionStrategy()
-        # VWAP=100, ATR%=2% → ATR_price=2.0. Price=95 → distance=5 → 2.5 ATR.
+        # VWAP=100, ATR%=2% → ATR_price=2.0. Ref close=95 → distance=5 → 2.5 ATR.
         snapshot = _make_vr_snapshot(
-            vwap=100.0, atr_pct=2.0, ohlcv=_make_trend_ohlcv(), last_price=95.0,
+            vwap=100.0, atr_pct=2.0, ohlcv=_vr_ohlcv(95.0), last_price=95.0,
         )
         config = _vr_bare(vwap_min_distance_atr=2.0, require_closeback=False)
         signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=95.0))
@@ -2358,9 +2376,9 @@ class TestVWAPReversionStrategy:
     def test_sell_signal_when_extended_above_vwap(self) -> None:
         """Price 2.5 ATR above VWAP → sell signal (no closeback required)."""
         strategy = VWAPReversionStrategy()
-        # VWAP=100, ATR%=2% → ATR_price=2.0. Price=105 → distance=5 → 2.5 ATR.
+        # VWAP=100, ATR%=2% → ATR_price=2.0. Ref close=105 → distance=5 → 2.5 ATR.
         snapshot = _make_vr_snapshot(
-            vwap=100.0, atr_pct=2.0, ohlcv=_make_trend_ohlcv(), last_price=105.0,
+            vwap=100.0, atr_pct=2.0, ohlcv=_vr_ohlcv(105.0), last_price=105.0,
         )
         config = _vr_bare(vwap_min_distance_atr=2.0, require_closeback=False)
         signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=105.0))
@@ -2370,9 +2388,9 @@ class TestVWAPReversionStrategy:
     def test_no_signal_when_not_extended(self) -> None:
         """Price within min_distance ATR of VWAP → no signal."""
         strategy = VWAPReversionStrategy()
-        # VWAP=100, ATR%=2% → ATR_price=2.0. Price=99 → distance=1 → 0.5 ATR.
+        # VWAP=100, ATR%=2% → ATR_price=2.0. Ref close=99 → distance=1 → 0.5 ATR.
         snapshot = _make_vr_snapshot(
-            vwap=100.0, atr_pct=2.0, ohlcv=_make_trend_ohlcv(), last_price=99.0,
+            vwap=100.0, atr_pct=2.0, ohlcv=_vr_ohlcv(99.0), last_price=99.0,
         )
         config = _vr_bare(vwap_min_distance_atr=2.0)
         result = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=99.0))
@@ -2412,7 +2430,7 @@ class TestVWAPReversionStrategy:
         strategy = VWAPReversionStrategy()
         snapshot = _make_vr_snapshot(
             vwap=100.0, atr_pct=2.0, htf_ema50=99.0, htf_ema200=101.0,
-            ohlcv=_make_trend_ohlcv(), last_price=95.0,
+            ohlcv=_vr_ohlcv(95.0), last_price=95.0,
         )
         config = _vr_bare(require_htf_trend=True)
         result = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=95.0))
@@ -2423,7 +2441,7 @@ class TestVWAPReversionStrategy:
         strategy = VWAPReversionStrategy()
         snapshot = _make_vr_snapshot(
             vwap=100.0, atr_pct=2.0, htf_ema50=101.0, htf_ema200=99.0,
-            ohlcv=_make_trend_ohlcv(), last_price=95.0,
+            ohlcv=_vr_ohlcv(95.0), last_price=95.0,
         )
         config = _vr_bare(require_htf_trend=True)
         signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=95.0))
@@ -2435,7 +2453,7 @@ class TestVWAPReversionStrategy:
         strategy = VWAPReversionStrategy()
         snapshot = _make_vr_snapshot(
             vwap=100.0, atr_pct=2.0, htf_ema50=None, htf_ema200=None,
-            ohlcv=_make_trend_ohlcv(), last_price=95.0,
+            ohlcv=_vr_ohlcv(95.0), last_price=95.0,
         )
         indicators = snapshot["market_data"]["BTC-USDT-SWAP"]["indicators"]
         if "htf_indicators" in indicators:
@@ -2448,9 +2466,9 @@ class TestVWAPReversionStrategy:
     def test_min_atr_pct_blocks_quiet_coins(self) -> None:
         """ATR% below min_atr_pct should block entry."""
         strategy = VWAPReversionStrategy()
-        # VWAP=100, ATR%=0.5% → ATR_price=0.5. Price=95 → distance=5 → 10 ATR (extended).
+        # VWAP=100, ATR%=0.5% → ATR_price=0.5. Ref close=95 → distance=5 → 10 ATR.
         snapshot = _make_vr_snapshot(
-            vwap=100.0, atr_pct=0.5, ohlcv=_make_trend_ohlcv(), last_price=95.0,
+            vwap=100.0, atr_pct=0.5, ohlcv=_vr_ohlcv(95.0), last_price=95.0,
         )
         config = _vr_bare(min_atr_pct=1.0)
         result = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=95.0))
@@ -2460,7 +2478,7 @@ class TestVWAPReversionStrategy:
         """When use_atr_sizing is on, TP/SL should be ATR-scaled."""
         strategy = VWAPReversionStrategy()
         snapshot = _make_vr_snapshot(
-            vwap=100.0, atr_pct=2.0, ohlcv=_make_trend_ohlcv(), last_price=95.0,
+            vwap=100.0, atr_pct=2.0, ohlcv=_vr_ohlcv(95.0), last_price=95.0,
         )
         config = _vr_bare(use_atr_sizing=True, use_structural_sizing=False, atr_tp_multiplier=1.5, atr_sl_multiplier=2.5)
         signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=95.0))
@@ -2475,13 +2493,125 @@ class TestVWAPReversionStrategy:
         """When use_atr_sizing is off, static tp_pct/sl_pct should be used."""
         strategy = VWAPReversionStrategy()
         snapshot = _make_vr_snapshot(
-            vwap=100.0, atr_pct=2.0, ohlcv=_make_trend_ohlcv(), last_price=95.0,
+            vwap=100.0, atr_pct=2.0, ohlcv=_vr_ohlcv(95.0), last_price=95.0,
         )
         config = _vr_bare(use_atr_sizing=False, use_structural_sizing=False, tp_pct=2.0, sl_pct=3.0)
         signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=95.0))
         assert signal is not None
         assert signal.tp_pct == 2.0
         assert signal.sl_pct == 3.0
+
+    # ── F2: consistent reference price (closed close, not live ticker) ──
+
+    def test_gate_uses_closed_close_not_live_ticker(self) -> None:
+        """The distance gate must read the previous closed candle's close, so a
+        live ticker far from the last close cannot arm-bandit the entry."""
+        strategy = VWAPReversionStrategy()
+        # Last closed close = 95 (extended 5 ATR from VWAP=100 at ATR%=2%).
+        # The live ticker is at 100.1 — near VWAP — which the OLD live-based
+        # gate would have used (0.05 ATR → no signal). With F2 the gate still
+        # fires because it reads the closed close.
+        snapshot = _make_vr_snapshot(
+            vwap=100.0, atr_pct=2.0, ohlcv=_vr_ohlcv(95.0), last_price=100.1,
+        )
+        config = _vr_bare(vwap_min_distance_atr=2.0, require_closeback=False)
+        signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=100.1))
+        assert signal is not None
+        assert signal.direction == "buy"
+
+    def test_live_ticker_whipsaw_cannot_flip_gate(self) -> None:
+        """A live print far the other side of VWAP must not trigger a fade that
+        the closed-close distance contradicts."""
+        strategy = VWAPReversionStrategy()
+        # Closed close = 105 above VWAP → distance +5 → 2.5 ATR (short setup).
+        # Live ticker at 95 would have looked like a long fade under the old code.
+        snapshot = _make_vr_snapshot(
+            vwap=100.0, atr_pct=2.0, ohlcv=_vr_ohlcv(105.0), last_price=95.0,
+        )
+        config = _vr_bare(vwap_min_distance_atr=2.0, require_closeback=False)
+        signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=95.0))
+        assert signal is not None
+        assert signal.direction == "sell"
+
+    # ── F4: regime consolidation (one primary gate) ────────────────────
+
+    def test_regime_primary_adx_blocks_on_high_adx(self) -> None:
+        """When regime_primary_gate='adx', a high LTF ADX blocks entry."""
+        strategy = VWAPReversionStrategy()
+        snapshot = _make_vr_snapshot(
+            vwap=100.0, atr_pct=2.0, ohlcv=_vr_ohlcv(95.0), last_price=95.0,
+        )
+        snapshot["market_data"]["BTC-USDT-SWAP"]["indicators"]["adx"] = {"value": 40.0}
+        config = _vr_bare(
+            vwap_min_distance_atr=2.0,
+            require_closeback=False,
+            regime_primary_gate="adx",
+            max_adx=25.0,
+        )
+        result = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=95.0))
+        assert result is None
+
+    def test_regime_primary_bb_soft_adx_allows_entry(self) -> None:
+        """When regime_primary_gate='bb', a high ADX is soft (does not block)."""
+        strategy = VWAPReversionStrategy()
+        snapshot = _make_vr_snapshot(
+            vwap=100.0, atr_pct=2.0, ohlcv=_vr_ohlcv(95.0), last_price=95.0,
+        )
+        snapshot["market_data"]["BTC-USDT-SWAP"]["indicators"]["adx"] = {"value": 40.0}
+        config = _vr_bare(
+            vwap_min_distance_atr=2.0,
+            require_closeback=False,
+            regime_primary_gate="bb",
+            max_adx=25.0,
+        )
+        signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=95.0))
+        assert signal is not None
+        assert signal.direction == "buy"
+
+    def test_regime_primary_bb_blocks_on_wide_bandwidth(self) -> None:
+        """When regime_primary_gate='bb', a wide BB bandwidth blocks entry."""
+        strategy = VWAPReversionStrategy()
+        # Wide bands (80/120 around 100) → high bandwidth percentile.
+        snapshot = _make_vr_snapshot(
+            vwap=100.0, atr_pct=2.0, bb_lower=80.0, bb_upper=120.0, bb_middle=100.0,
+            ohlcv=_make_trend_ohlcv(120), last_price=95.0,
+        )
+        config = _vr_bare(
+            vwap_min_distance_atr=2.0,
+            require_closeback=False,
+            require_regime=True,
+            regime_primary_gate="bb",
+            max_bb_bandwidth_percentile=40.0,
+            regime_lookback=50,
+        )
+        result = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=95.0))
+        assert result is None
+
+    # ── F5: adaptive ATR decoupled from the distance gate ──────────────
+
+    def test_adaptive_atr_does_not_shift_distance_gate(self) -> None:
+        """use_adaptive_atr must scale the sizing ATR only — the entry
+        distance gate uses the unscaled ATR%, so the extension threshold is
+        stable regardless of the adaptive scaling."""
+        strategy = VWAPReversionStrategy()
+        # ATR%=2.0 (scaled ×1.8 → 3.6 for sizing under adaptive). Ref close=96
+        # → distance=4=2.0 ATR at the *unscaled* ATR. If adaptive shifted the
+        # gate, distance_atr would be 4/3.6≈1.11 and the signal would be blocked.
+        snapshot = _make_vr_snapshot(
+            vwap=100.0, atr_pct=2.0, ohlcv=_vr_ohlcv(96.0), last_price=96.0,
+        )
+        config = _vr_bare(
+            vwap_min_distance_atr=2.0,
+            require_closeback=False,
+            use_adaptive_atr=True,
+            use_atr_sizing=False,
+            use_structural_sizing=False,
+            tp_pct=2.0,
+            sl_pct=3.0,
+        )
+        signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=96.0))
+        assert signal is not None
+        assert signal.direction == "buy"
 
 
 # ── TrendPullbackStrategy ────────────────────────────────────────────────────
