@@ -22,6 +22,7 @@ from app.services.strategies import (
     Strategy,
     StrategyHelpers,
     StrategySignal,
+    fractal_swings,
     resolve_analysis_block,
 )
 from app.services.strategies.mean_reversion import MeanReversionStrategy
@@ -1129,6 +1130,7 @@ class TestBuildLauncherDecision:
                     "tp_pct": 3.0,
                     "sl_pct": 5.0,
                     "lookback": 10,
+                    "sweep_penetration_mode": "pct",
                     "sweep_buffer_pct": 0.1,
                     "reclaim_ratio": 0.5,
                     "require_htf_trend": False,
@@ -1173,6 +1175,7 @@ class TestBuildLauncherDecision:
                     "tp_pct": 3.0,
                     "sl_pct": 5.0,
                     "lookback": 10,
+                    "sweep_penetration_mode": "pct",
                     "sweep_buffer_pct": 0.1,
                     "reclaim_ratio": 0.5,
                     "require_htf_trend": False,
@@ -1830,11 +1833,18 @@ def _make_ls_snapshot(
 
 
 def _ls_bare(**overrides: Any) -> dict[str, Any]:
-    """LS config with default-on filters explicitly disabled for unit tests."""
+    """LS config with default-on filters explicitly disabled for unit tests.
+
+    Uses ``sweep_penetration_mode: "pct"`` (the legacy flat-% buffer) so the
+    existing suite keeps its original sweep semantics; ATR-mode penetration is
+    exercised by dedicated tests below.
+    """
     cfg: dict[str, Any] = {
         "enabled": True,
         "lookback": 10,
+        "sweep_penetration_mode": "pct",
         "sweep_buffer_pct": 0.1,
+        "reclaim_buffer_pct": 0.1,
         "reclaim_ratio": 0.5,
         "require_htf_trend": False,
         "require_volume_spike": False,
@@ -2040,6 +2050,184 @@ class TestLiquiditySweepStrategy:
         signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers())
         assert signal is not None
         assert signal.direction == "buy"
+
+
+class TestLiquiditySweepImprovements:
+    """Tests for the improve_liquidity_sweep handoff (F1–F5)."""
+
+    # ── F1: reclaim must genuinely reclaim the swept level ────────────
+    def test_reclaim_requires_close_above_swing_low(self) -> None:
+        """Breakdown case: pierced + close high in its own body but still below
+        swing_low → no BUY (F1)."""
+        strategy = LiquiditySweepStrategy()
+        prior = _make_range_ohlcv(n=11, base=100.0, range_pct=2.0)
+        # swing_low ≈ 99.0; candle pierces to 90 but closes at 95.5 — well
+        # above 90 (close_pos ~0.77 ≥ 0.5) but entirely BELOW swing_low 99.
+        # Old logic fires; new logic must reject (breakdown, not stop-run).
+        sweep_candle = {"open": 97.0, "high": 97.1, "low": 90.0, "close": 95.5, "volume": 200.0}
+        ohlcv = prior + [sweep_candle]
+        snapshot = _make_ls_snapshot(ohlcv=ohlcv, last_price=95.5)
+        config = _ls_bare(reclaim_ratio=0.5)
+        result = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers())
+        assert result is None
+
+    def test_reclaim_allows_close_above_swing_low(self) -> None:
+        """True reclaim: pierced swing_low and closes back above it → BUY."""
+        strategy = LiquiditySweepStrategy()
+        prior = _make_range_ohlcv(n=11, base=100.0, range_pct=2.0)
+        # swing_low ≈ 99.0; close 100.5 reclaims above swing_low*(1+0.001).
+        sweep_candle = {"open": 99.5, "high": 100.8, "low": 98.5, "close": 100.5, "volume": 200.0}
+        ohlcv = prior + [sweep_candle]
+        snapshot = _make_ls_snapshot(ohlcv=ohlcv, last_price=100.5)
+        config = _ls_bare()
+        signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers())
+        assert signal is not None
+        assert signal.direction == "buy"
+
+    def test_reclaim_short_requires_close_below_swing_high(self) -> None:
+        """Short mirror: closes below swing_high → SELL; above → rejected."""
+        strategy = LiquiditySweepStrategy()
+        prior = _make_range_ohlcv(n=11, base=100.0, range_pct=2.0)
+        # swing_high ≈ 101.0; candle pierces to 110, closes back at 100.5 (< swing_high).
+        sweep_candle = {"open": 103.0, "high": 110.0, "low": 102.5, "close": 100.5, "volume": 200.0}
+        ohlcv = prior + [sweep_candle]
+        snapshot = _make_ls_snapshot(ohlcv=ohlcv, last_price=100.5)
+        config = _ls_bare()
+        signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers())
+        assert signal is not None
+        assert signal.direction == "sell"
+
+    # ── F2: fractal pivot swing detection ─────────────────────────────
+    def test_fractal_swings_picks_pivot(self) -> None:
+        """A clear pivot low/high is selected over trailing range noise."""
+        # Build candles where the tight-range noise makes trailing min/max
+        # useless, but a single clear pivot mid-run exists.
+        candles: list[dict[str, Any]] = []
+        for _ in range(20):
+            candles.append({"open": 100.0, "high": 100.6, "low": 99.4, "close": 100.0})
+        # Insert a clear pivot low at index 10 (98.0) and pivot high at 12 (102.0).
+        candles[10] = {"open": 100.5, "high": 100.8, "low": 98.0, "close": 99.5}
+        candles[12] = {"open": 99.0, "high": 102.0, "low": 99.6, "close": 101.0}
+        swing_low, swing_high, used_fallback = fractal_swings(candles, pivot_bars=3)
+        assert swing_low is not None
+        assert swing_high is not None
+        assert swing_low <= 98.02  # captures the pivot low
+        assert swing_high >= 101.98  # captures the pivot high
+        assert used_fallback is False
+
+    def test_fractal_swings_falls_back_to_minmax(self) -> None:
+        """No pivot structure → trailing min/max fallback fires."""
+        candles: list[dict[str, Any]] = []
+        for i in range(5):
+            candles.append({
+                "open": 100.0 + i,
+                "high": 101.0 + i,
+                "low": 99.0 + i,
+                "close": 100.0 + i,
+            })
+        # Monotonic → no strict local pivot at all.
+        swing_low, swing_high, used_fallback = fractal_swings(candles, pivot_bars=2)
+        assert used_fallback is True
+        assert swing_low is not None
+        assert swing_high is not None
+
+    # ── F3: ATR-scaled penetration ────────────────────────────────────
+    def test_atr_penetration_blocked_when_shallow(self) -> None:
+        """ATR mode: a wick that breaches by < the ATR-scaled buffer is not a
+        sweep (old 0.1% pct mode would have fired)."""
+        strategy = LiquiditySweepStrategy()
+        prior = _make_range_ohlcv(n=11, base=100.0, range_pct=2.0)
+        # swing_low ≈ 99.0; atr_pct=2.0 → pen ≈ 0.25*2%*99 ≈ 0.495.
+        # wick dips to 98.8 (< 99 but not by ~0.5) → NOT a sweep in ATR mode.
+        sweep_candle = {"open": 99.5, "high": 100.2, "low": 98.8, "close": 100.0, "volume": 200.0}
+        ohlcv = prior + [sweep_candle]
+        snapshot = _make_ls_snapshot(ohlcv=ohlcv, atr_pct=2.0, last_price=100.0)
+        config = _ls_bare(sweep_penetration_mode="atr", sweep_buffer_atr=0.25)
+        result = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers())
+        assert result is None
+
+    def test_atr_penetration_fires_when_deep(self) -> None:
+        """ATR mode: a wick breaching by ≥ the ATR-scaled buffer fires."""
+        strategy = LiquiditySweepStrategy()
+        prior = _make_range_ohlcv(n=11, base=100.0, range_pct=2.0)
+        # swing_low ≈ 99.0; pen ≈ 0.495. wick to 98.4 (< 98.505) → deep sweep.
+        sweep_candle = {"open": 99.5, "high": 100.2, "low": 98.4, "close": 100.0, "volume": 200.0}
+        ohlcv = prior + [sweep_candle]
+        snapshot = _make_ls_snapshot(ohlcv=ohlcv, atr_pct=2.0, last_price=100.0)
+        config = _ls_bare(sweep_penetration_mode="atr", sweep_buffer_atr=0.25)
+        signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers())
+        assert signal is not None
+        assert signal.direction == "buy"
+
+    # ── F4: order-book imbalance gate ─────────────────────────────────
+    def test_book_imbalance_blocks_long_on_ask_heavy_book(self) -> None:
+        """Long sweep + ask-heavy book → blocked when require_book_imbalance."""
+        strategy = LiquiditySweepStrategy()
+        prior = _make_range_ohlcv(n=11, base=100.0, range_pct=2.0)
+        sweep_candle = {"open": 99.5, "high": 100.8, "low": 98.5, "close": 100.5, "volume": 200.0}
+        ohlcv = prior + [sweep_candle]
+        snapshot = _make_ls_snapshot(ohlcv=ohlcv, last_price=100.5)
+        # Ask-heavy: bid_qty/ask_qty = 50/150 ≈ 0.33 < 1.0 → rejects a long.
+        snapshot["market_data"]["BTC-USDT-SWAP"]["order_book"] = {
+            "bids": [[100.5, 50]],
+            "asks": [[100.6, 150]],
+        }
+        config = _ls_bare(require_book_imbalance=True, imbalance_min_for_long=1.0)
+        result = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers())
+        assert result is None
+
+    def test_book_imbalance_allows_long_on_bid_supported_book(self) -> None:
+        """Long sweep + bid-supported book → passes."""
+        strategy = LiquiditySweepStrategy()
+        prior = _make_range_ohlcv(n=11, base=100.0, range_pct=2.0)
+        sweep_candle = {"open": 99.5, "high": 100.8, "low": 98.5, "close": 100.5, "volume": 200.0}
+        ohlcv = prior + [sweep_candle]
+        snapshot = _make_ls_snapshot(ohlcv=ohlcv, last_price=100.5)
+        snapshot["market_data"]["BTC-USDT-SWAP"]["order_book"] = {
+            "bids": [[100.5, 150]],
+            "asks": [[100.6, 50]],
+        }
+        config = _ls_bare(require_book_imbalance=True, imbalance_min_for_long=1.0)
+        signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers())
+        assert signal is not None
+        assert signal.direction == "buy"
+
+    def test_book_imbalance_short_requires_ask_heavy(self) -> None:
+        """Short sweep: bid-heavy book (>1.0) rejects; ask-heavy passes."""
+        strategy = LiquiditySweepStrategy()
+        prior = _make_range_ohlcv(n=11, base=100.0, range_pct=2.0)
+        sweep_candle = {"open": 103.0, "high": 110.0, "low": 102.5, "close": 100.5, "volume": 200.0}
+        ohlcv = prior + [sweep_candle]
+
+        # Bid-heavy (2.0) → above max_for_short (1.0) → reject.
+        ask_heavy_snap = _make_ls_snapshot(ohlcv=ohlcv, last_price=100.5)
+        ask_heavy_snap["market_data"]["BTC-USDT-SWAP"]["order_book"] = {
+            "bids": [[100.5, 150]],
+            "asks": [[100.6, 50]],
+        }
+        config = _ls_bare(require_book_imbalance=True, imbalance_max_for_short=1.0)
+        assert strategy.evaluate("BTC-USDT-SWAP", ask_heavy_snap, config, _make_helpers()) is None
+
+        # Ask-heavy (0.33) → below max_for_short → pass.
+        bid_heavy_snap = _make_ls_snapshot(ohlcv=ohlcv, last_price=100.5)
+        bid_heavy_snap["market_data"]["BTC-USDT-SWAP"]["order_book"] = {
+            "bids": [[100.5, 50]],
+            "asks": [[100.6, 150]],
+        }
+        signal = strategy.evaluate("BTC-USDT-SWAP", bid_heavy_snap, config, _make_helpers())
+        assert signal is not None
+        assert signal.direction == "sell"
+
+    def test_book_imbalance_gate_absent_book_passes(self) -> None:
+        """No order book in snapshot → gate degrades gracefully (passes)."""
+        strategy = LiquiditySweepStrategy()
+        prior = _make_range_ohlcv(n=11, base=100.0, range_pct=2.0)
+        sweep_candle = {"open": 99.5, "high": 100.8, "low": 98.5, "close": 100.5, "volume": 200.0}
+        ohlcv = prior + [sweep_candle]
+        snapshot = _make_ls_snapshot(ohlcv=ohlcv, last_price=100.5)
+        config = _ls_bare(require_book_imbalance=True)
+        signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers())
+        assert signal is not None
 
 
 # ── VWAPReversionStrategy ────────────────────────────────────────────────────

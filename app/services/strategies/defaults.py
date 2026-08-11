@@ -136,7 +136,23 @@ DEFAULT_LIQUIDITY_SWEEP: dict[str, Any] = {
     "sl_pct": 2.0,
     "lookback": 20,
     "sweep_buffer_pct": 0.1,
+    # Penetration mode: "atr" (volatility-scaled) or "pct" (legacy flat %).
+    # Volatile alt-coin 15m wicks routinely breach a level by >0.1%, so the
+    # legacy % buffer is nearly a no-op at default; ATR-scaled penetration is
+    # the correct discriminator.  ``sweep_buffer_pct`` still applies in "pct"
+    # mode (and is kept as the backtest-comparison baseline).
+    "sweep_penetration_mode": "atr",
+    "sweep_buffer_atr": 0.25,
+    # Reclaim: the close must genuinely reclaim the swept level (by this %
+    # margin, symmetrised with sweep_buffer_pct) — not merely sit high in its
+    # own candle body while remaining below/above the level (breakdown).
+    "reclaim_buffer_pct": 0.1,
     "reclaim_ratio": 0.5,
+    # Fractal pivot swing: ``swing_low/high`` come from real local pivots
+    # (candle i is a pivot when its low/high is the min/max of [i-n, i+n])
+    # rather than a trailing 20-bar min/max.  Falls back to min/max when too
+    # few pivots are available.
+    "pivot_bars": 3,
     "require_htf_trend": True,
     "require_volume_spike": True,
     "volume_spike_ratio": 1.5,
@@ -165,6 +181,12 @@ DEFAULT_LIQUIDITY_SWEEP: dict[str, Any] = {
     "require_close_in_va": False,
     "require_macro_sl": False,
     "macro_sl_lookback": 50,
+    # Order-book imbalance gate (§3) — OFF by default (opt-in).  A fade into a
+    # stop-run wants the book supportive after the reclaim: bid-heavy for a
+    # long sweep, ask-heavy for a short sweep.
+    "require_book_imbalance": False,
+    "imbalance_min_for_long": 1.0,
+    "imbalance_max_for_short": 1.0,
 }
 
 # ── VWAP Reversion ──────────────────────────────────────────────────────────

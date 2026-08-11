@@ -3909,13 +3909,40 @@ def register_pages(app: FastAPI) -> None:
                                 min=5, max=100, step=1, format="%.0f",
                             ).classes("w-40").props("dense")
                             ui.label("Bars to identify the swing high/low that gets swept.").classes("text-xs text-slate-500")
+                            ls_pivot_bars_input = ui.number(
+                                label="Pivot bars",
+                                value=float(_ls_cfg.get("pivot_bars") or 3),
+                                min=1, max=10, step=1, format="%.0f",
+                            ).classes("w-32").props("dense")
+                            ui.label("Swing comes from fractal pivots (±N bars). Falls back to min/max when unavailable.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-start"):
+                            ls_sweep_pen_mode_select = ui.select(
+                                ["atr", "pct"],
+                                label="Sweep penetration mode",
+                                value=str(_ls_cfg.get("sweep_penetration_mode", "atr")),
+                            ).classes("w-40").props(
+                                "hint='atr=volatility-scaled, pct=legacy flat %' persistent-hint dense"
+                            )
+                            ls_sweep_buffer_atr_input = ui.number(
+                                label="Sweep buffer (ATR)",
+                                value=float(_ls_cfg.get("sweep_buffer_atr") or 0.25),
+                                min=0.0, max=2.0, step=0.05, format="%.2f",
+                            ).classes("w-40").props("dense")
+                            ui.label("Penetration threshold in ATR units (atr mode).").classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-start"):
                             ls_sweep_buffer_input = ui.number(
                                 label="Sweep buffer %",
                                 value=float(_ls_cfg.get("sweep_buffer_pct") or 0.1),
                                 min=0.0, max=5.0, step=0.05, format="%.2f",
                             ).classes("w-40").props("dense")
-                            ui.label("Min % beyond swing level the wick must penetrate (0.1 = 0.1%).").classes("text-xs text-slate-500")
+                            ui.label("Min % beyond swing level the wick must penetrate (pct mode, 0.1 = 0.1%).").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-start"):
+                            ls_reclaim_buffer_input = ui.number(
+                                label="Reclaim buffer %",
+                                value=float(_ls_cfg.get("reclaim_buffer_pct") or 0.1),
+                                min=0.0, max=5.0, step=0.05, format="%.2f",
+                            ).classes("w-40").props("dense")
+                            ui.label("Close must reclaim the swept level by this % margin — a close still below/above the level is a breakdown, not a stop-run.").classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-start"):
                             ls_reclaim_ratio_input = ui.number(
                                 label="Reclaim ratio",
@@ -4098,6 +4125,23 @@ def register_pages(app: FastAPI) -> None:
                                 min=10, max=200, step=5, format="%.0f",
                             ).classes("w-40").props("dense")
                             ui.label("Place SL at the macro swing (look-back N candles) instead of the immediate wick, giving room to breathe.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            ls_require_book_imbalance_switch = ui.switch(
+                                "Require supportive book imbalance",
+                                value=bool(_ls_cfg.get("require_book_imbalance", False)),
+                            ).props("dense color=primary")
+                            ui.label("Long sweep needs bid-supported book (imbalance ≥ min), short sweep needs ask-heavy (imbalance ≤ max). Fade into supportive flow.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-start"):
+                            ls_imbalance_min_for_long_input = ui.number(
+                                label="Min imbalance (long)",
+                                value=float(_ls_cfg.get("imbalance_min_for_long") or 1.0),
+                                min=0.0, max=10.0, step=0.1, format="%.1f",
+                            ).classes("w-40").props("dense")
+                            ls_imbalance_max_for_short_input = ui.number(
+                                label="Max imbalance (short)",
+                                value=float(_ls_cfg.get("imbalance_max_for_short") or 1.0),
+                                min=0.0, max=10.0, step=0.1, format="%.1f",
+                            ).classes("w-40").props("dense")
                     _active_badge_ls = ui.badge("Active", color="positive").bind_visibility_from(
                         ls_enabled_switch, "value"
                     )
@@ -4107,7 +4151,11 @@ def register_pages(app: FastAPI) -> None:
                 ls_tp_input.value = 3.0
                 ls_sl_input.value = 2.0
                 ls_lookback_input.value = 20
+                ls_pivot_bars_input.value = 3
+                ls_sweep_pen_mode_select.value = "atr"
+                ls_sweep_buffer_atr_input.value = 0.25
                 ls_sweep_buffer_input.value = 0.1
+                ls_reclaim_buffer_input.value = 0.1
                 ls_reclaim_ratio_input.value = 0.5
                 ls_require_htf_switch.value = True
                 ls_htf_regime_select.value = "chop"
@@ -4136,6 +4184,9 @@ def register_pages(app: FastAPI) -> None:
                 ls_require_close_in_va_switch.value = False
                 ls_require_macro_sl_switch.value = False
                 ls_macro_sl_lookback_input.value = 50
+                ls_require_book_imbalance_switch.value = False
+                ls_imbalance_min_for_long_input.value = 1.0
+                ls_imbalance_max_for_short_input.value = 1.0
                 ui.notify("Liquidity Sweep fields set to recommended defaults — click Save to persist", color="info")
 
             # ── VWAP Reversion ────────────────────────────────────────────────────
@@ -5618,7 +5669,11 @@ def register_pages(app: FastAPI) -> None:
                 "tp_pct": float(ls_tp_input.value) if ls_tp_input.value not in (None, "") else None,
                 "sl_pct": float(ls_sl_input.value) if ls_sl_input.value not in (None, "") else None,
                 "lookback": int(ls_lookback_input.value or 20),
+                "pivot_bars": int(ls_pivot_bars_input.value or 3),
+                "sweep_penetration_mode": str(ls_sweep_pen_mode_select.value or "atr"),
+                "sweep_buffer_atr": float(ls_sweep_buffer_atr_input.value or 0.25),
                 "sweep_buffer_pct": float(ls_sweep_buffer_input.value or 0.1),
+                "reclaim_buffer_pct": float(ls_reclaim_buffer_input.value or 0.1),
                 "reclaim_ratio": float(ls_reclaim_ratio_input.value or 0.5),
                 "require_htf_trend": bool(ls_require_htf_switch.value),
                 "htf_regime_preference": str(ls_htf_regime_select.value or "chop"),
@@ -5648,6 +5703,9 @@ def register_pages(app: FastAPI) -> None:
                 "require_close_in_va": bool(ls_require_close_in_va_switch.value),
                 "require_macro_sl": bool(ls_require_macro_sl_switch.value),
                 "macro_sl_lookback": int(ls_macro_sl_lookback_input.value or 50),
+                "require_book_imbalance": bool(ls_require_book_imbalance_switch.value),
+                "imbalance_min_for_long": float(ls_imbalance_min_for_long_input.value or 1.0),
+                "imbalance_max_for_short": float(ls_imbalance_max_for_short_input.value or 1.0),
             }
             _strategies_cfg["vwap_reversion"] = {
                 "enabled": bool(vr_enabled_switch.value),

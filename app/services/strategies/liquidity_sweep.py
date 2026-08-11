@@ -23,7 +23,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from . import StrategyHelpers, StrategySignal, compute_bb_bandwidth_percentile, resolve_analysis_block
+from . import (
+    StrategyHelpers,
+    StrategySignal,
+    compute_bb_bandwidth_percentile,
+    fractal_swings,
+    resolve_analysis_block,
+)
 from .defaults import merged_config
 from .liquidity_helpers import order_book_imbalance
 
@@ -35,9 +41,24 @@ class LiquiditySweepStrategy:
       - ``enabled`` (bool): master switch
       - ``lookback`` (int, default 20): bars to identify the swing high/low
         that gets swept.
+      - ``pivot_bars`` (int, default 3): the swing is derived from fractal
+        pivots (a candle is a pivot when its low/high is the min/max of the
+        ``2 * pivot_bars + 1`` window).  Falls back to the trailing min/max
+        over ``lookback`` bars when too few pivots exist.
+      - ``sweep_penetration_mode`` (str, default "atr"): how far beyond the
+        swing level the wick must go to qualify as a sweep.  ``"atr"`` scales
+        the threshold by ``sweep_buffer_atr`` × ATR; ``"pct"`` uses the legacy
+        flat ``sweep_buffer_pct``.
+      - ``sweep_buffer_atr`` (float, default 0.25): penetration threshold in
+        ATR units when ``sweep_penetration_mode == "atr"``.
       - ``sweep_buffer_pct`` (float, default 0.1): minimum % beyond the swing
         level the wick must penetrate to qualify as a sweep (0.1 = 0.1%).
-        Prevents triggering on noise that barely touches the level.
+        Used when ``sweep_penetration_mode == "pct"``.
+      - ``reclaim_buffer_pct`` (float, default 0.1): the close must reclaim the
+        swept level by at least this % (symmetrised with the sweep buffer) —
+        not merely sit high in its own candle body while still beneath/above
+        the level.  A close that stays past the level is a breakdown, not a
+        reclaimed stop-run.
       - ``reclaim_ratio`` (float, default 0.5): close must reclaim at least
         this fraction of the candle range back inside the range.
         0.5 = close in the upper 50% of the candle (for longs).
@@ -128,9 +149,18 @@ class LiquiditySweepStrategy:
         # ── Config ────────────────────────────────────────────────────
         _lookback = helpers.extract_float(cfg.get("lookback"))
         lookback = int(_lookback) if _lookback is not None else 20
+        _pivot_bars = helpers.extract_float(cfg.get("pivot_bars"))
+        pivot_bars = int(_pivot_bars) if _pivot_bars is not None else 3
+        sweep_pen_mode = str(cfg.get("sweep_penetration_mode", "atr")).lower()
+        sweep_buffer_atr = helpers.extract_float(cfg.get("sweep_buffer_atr"))
+        if sweep_buffer_atr is None:
+            sweep_buffer_atr = 0.25
         sweep_buffer_pct = helpers.extract_float(cfg.get("sweep_buffer_pct"))
         if sweep_buffer_pct is None:
             sweep_buffer_pct = 0.1
+        reclaim_buffer_pct = helpers.extract_float(cfg.get("reclaim_buffer_pct"))
+        if reclaim_buffer_pct is None:
+            reclaim_buffer_pct = sweep_buffer_pct
         reclaim_ratio = helpers.extract_float(cfg.get("reclaim_ratio"))
         if reclaim_ratio is None:
             reclaim_ratio = 0.5
@@ -189,6 +219,18 @@ class LiquiditySweepStrategy:
         require_macro_sl = bool(cfg.get("require_macro_sl", False))
         _macro_lookback = helpers.extract_float(cfg.get("macro_sl_lookback"))
         macro_sl_lookback = int(_macro_lookback) if _macro_lookback is not None else 50
+        # Order-book imbalance gate (§3): a fade into a stop-run wants the
+        # book supportive after the reclaim — bid-heavy for a long sweep
+        # (imbalance >= min_for_long), ask-heavy for a short sweep
+        # (imbalance <= max_for_short).  Degrades gracefully when the book is
+        # unavailable or degenerate (imbalance=None → gate passes).
+        require_book_imbalance = bool(cfg.get("require_book_imbalance", False))
+        imbalance_min_for_long = helpers.extract_float(cfg.get("imbalance_min_for_long"))
+        if imbalance_min_for_long is None:
+            imbalance_min_for_long = 1.0
+        imbalance_max_for_short = helpers.extract_float(cfg.get("imbalance_max_for_short"))
+        if imbalance_max_for_short is None:
+            imbalance_max_for_short = 1.0
 
         # ── Snapshot data ─────────────────────────────────────────────
         market_data: dict[str, Any] = snapshot.get("market_data") or {}
@@ -233,23 +275,48 @@ class LiquiditySweepStrategy:
             helpers.emit_debug(f"LiquiditySweep: {symbol} — no signal (prior highs/lows unavailable)")
             return None
 
-        swing_low = min(prior_lows)
-        swing_high = max(prior_highs)
+        # Swing detection (F2): prefer fractal pivots — real, visible,
+        # freshly-respected levels that stop-hunters cluster at.  Fall back to
+        # the trailing min/max when pivot structure is unavailable (e.g. short
+        # history), logging the fallback so /debug distinguishes the two.
+        swing_low, swing_high, swing_fallback = fractal_swings(
+            ohlcv_compact[-(lookback + 1):],
+            pivot_bars=pivot_bars,
+        )
+        if swing_low is None or swing_high is None:
+            swing_low = min(prior_lows)
+            swing_high = max(prior_highs)
+            swing_fallback = True
+        if swing_fallback:
+            helpers.emit_debug(
+                f"LiquiditySweep: {symbol} — fractal pivots unavailable, using min/max swing "
+                f"({swing_low:.6g}/{swing_high:.6g})"
+            )
 
         # ── Sweep detection ───────────────────────────────────────────
         # Long sweep: wick below swing_low, close reclaims above it.
         # Short sweep: wick above swing_high, close reclaims below it.
-        sweep_buffer = sweep_buffer_pct / 100.0
+        # Penetration threshold is ATR-scaled by default (volatility-scaled
+        # for volatile alts) with a legacy flat-% mode for backtest comparison.
+        atr_pct_base = helpers.extract_float(indicators.get("atr_pct")) or 0.0
+        if sweep_pen_mode == "atr" and atr_pct_base > 0:
+            atr_price = (atr_pct_base / 100.0) * max(swing_low, swing_high)
+            pen_long = sweep_buffer_atr * atr_price
+            pen_short = sweep_buffer_atr * atr_price
+        else:
+            sweep_buffer = sweep_buffer_pct / 100.0
+            pen_long = sweep_buffer * swing_low
+            pen_short = sweep_buffer * swing_high
 
         long_sweep_pierced = (
             swing_low > 0
             and curr_low is not None
-            and curr_low < swing_low * (1.0 - sweep_buffer)
+            and curr_low < swing_low - pen_long
         )
         short_sweep_pierced = (
             swing_high > 0
             and curr_high is not None
-            and curr_high > swing_high * (1.0 + sweep_buffer)
+            and curr_high > swing_high + pen_short
         )
 
         if not long_sweep_pierced and not short_sweep_pierced:
@@ -260,7 +327,10 @@ class LiquiditySweepStrategy:
             )
             return None
 
-        # Reclaim check: close must be back inside the range.
+        # Reclaim check: close must be back inside the range AND genuinely
+        # reclaim the swept level (F1).  The body-position filter says where in
+        # the candle the close lands; the level check ensures the close is
+        # actually *past* the level, so a breakdown-close cannot qualify.
         candle_range = curr_high - curr_low
         if candle_range <= 0:
             helpers.emit_debug(f"LiquiditySweep: {symbol} — no signal (zero-range candle)")
@@ -269,14 +339,36 @@ class LiquiditySweepStrategy:
         # For longs: close should be in the upper portion of the candle
         # (rejection of the lower wick).  reclaim_ratio=0.5 → upper 50%.
         close_pos = (curr_close - curr_low) / candle_range  # 0=at low, 1=at high
-        long_reclaim_ok = long_sweep_pierced and close_pos >= reclaim_ratio
-        short_reclaim_ok = short_sweep_pierced and close_pos <= (1.0 - reclaim_ratio)
+        body_ok_long = close_pos >= reclaim_ratio
+        body_ok_short = close_pos <= (1.0 - reclaim_ratio)
+
+        # The close must reclaim the swept level by a margin.  Symmetrised with
+        # the sweep buffer so a candle that only returns to the *wrong* side of
+        # the level (a breakdown continuation) cannot pass.
+        reclaim_margin = reclaim_buffer_pct / 100.0
+        level_ok_long = (
+            curr_close > swing_low * (1.0 + reclaim_margin)
+        )
+        level_ok_short = (
+            curr_close < swing_high * (1.0 - reclaim_margin)
+        )
+
+        long_reclaim_ok = long_sweep_pierced and body_ok_long and level_ok_long
+        short_reclaim_ok = short_sweep_pierced and body_ok_short and level_ok_short
 
         if not long_reclaim_ok and not short_reclaim_ok:
+            _why = []
+            if long_sweep_pierced and not body_ok_long:
+                _why.append(f"long body close_pos={close_pos:.2f}<{reclaim_ratio:.2f}")
+            if long_sweep_pierced and not level_ok_long:
+                _why.append(f"long no-reclaim close={curr_close:.6g}<=swing_low*1+{reclaim_margin:.4f}")
+            if short_sweep_pierced and not body_ok_short:
+                _why.append(f"short body close_pos={close_pos:.2f}>{1.0 - reclaim_ratio:.2f}")
+            if short_sweep_pierced and not level_ok_short:
+                _why.append(f"short no-reclaim close={curr_close:.6g}>=swing_high*1-{reclaim_margin:.4f}")
             helpers.emit_debug(
                 f"LiquiditySweep: {symbol} — no signal "
-                f"(sweep pierced but no reclaim: close_pos={close_pos:.2f}, "
-                f"need >={reclaim_ratio} for long or <={1.0 - reclaim_ratio:.2f} for short)"
+                f"(sweep pierced but no reclaim: {'; '.join(_why) or 'n/a'})"
             )
             return None
 
@@ -416,78 +508,27 @@ class LiquiditySweepStrategy:
             )
             return None
 
-        # ── Compute effective TP/SL ───────────────────────────────────
-        # Structural mode: TP at opposite swing extreme, SL beyond sweep wick.
-        # ATR mode (fallback): TP/SL = multiplier × ATR%.
-        # In both modes, ATR clamps the structural distances to a sane range.
-        _static_tp = helpers.extract_float(config.get("tp_pct"))
-        _static_sl = helpers.extract_float(config.get("sl_pct"))
-        _effective_tp = _static_tp
-        _effective_sl = _static_sl
-        _sizing_source = "static"
-
-        atr_pct = helpers.extract_float(indicators.get("atr_pct"))
-        if atr_pct is not None and config.get("use_adaptive_atr", False):
-            if atr_pct < 1.5:
-                atr_pct *= 1.20
-            elif atr_pct < 3.0:
-                atr_pct *= 1.80
-            else:
-                atr_pct *= 2.50
-        last_price = helpers.get_last_price(symbol)
-
-        # ATR fallback / clamp values.
-        if use_atr_sizing and atr_pct is not None and atr_pct > 0:
-            _effective_tp = atr_tp_multiplier * atr_pct
-            _effective_sl = atr_sl_multiplier * atr_pct
-            _sizing_source = "atr"
-
-        # Structural sizing: use the swing levels we already computed.
-        if use_structural_sizing and last_price and last_price > 0 and atr_pct is not None and atr_pct > 0:
-            atr_price = (atr_pct / 100.0) * last_price
-            if atr_price > 0:
+        # ── Order-book imbalance gate (§3) ────────────────────────────
+        # A fade into a stop-run wants the book supportive after the reclaim:
+        # bid-heavy for a long sweep (imbalance >= min_for_long), ask-heavy for
+        # a short sweep (imbalance <= max_for_short).  Emits the computed ratio
+        # when the gate is enabled so /debug can audit it.  Degrades gracefully
+        # (passes) when the book is absent or degenerate.
+        if require_book_imbalance:
+            imbalance = order_book_imbalance(sym_data.get("order_book") or {})
+            imbalance_ok = True
+            if imbalance is not None:
                 if buy_signal:
-                    # Long: TP at swing_high (opposite extreme), SL beyond sweep wick low.
-                    raw_tp_dist = swing_high - last_price if swing_high > last_price else None
-                    # SL: sweep wick low minus a small ATR buffer beyond it.
-                    raw_sl_dist = last_price - (curr_low - structural_sl_buffer_atr * atr_price)
+                    imbalance_ok = imbalance >= imbalance_min_for_long
                 else:
-                    # Short: TP at swing_low (opposite extreme), SL beyond sweep wick high.
-                    raw_tp_dist = last_price - swing_low if swing_low < last_price else None
-                    raw_sl_dist = (curr_high + structural_sl_buffer_atr * atr_price) - last_price
-
-                # Convert distances to % of price for clamping.
-                tp_pct_raw = (raw_tp_dist / last_price * 100.0) if raw_tp_dist is not None and raw_tp_dist > 0 else None
-                sl_pct_raw = (raw_sl_dist / last_price * 100.0) if raw_sl_dist is not None and raw_sl_dist > 0 else None
-
-                # Clamp TP to [atr_min_tp_mult × ATR%, atr_max_tp_mult × ATR%].
-                tp_clamped = None
-                if tp_pct_raw is not None:
-                    tp_min = atr_min_tp_mult * atr_pct
-                    tp_max = atr_max_tp_mult * atr_pct
-                    tp_clamped = max(tp_min, min(tp_max, tp_pct_raw))
-
-                # Clamp SL to [atr_min_sl_mult × ATR%, atr_max_sl_mult × ATR%].
-                sl_clamped = None
-                if sl_pct_raw is not None:
-                    sl_min = atr_min_sl_mult * atr_pct
-                    sl_max = atr_max_sl_mult * atr_pct
-                    sl_clamped = max(sl_min, min(sl_max, sl_pct_raw))
-
-                if tp_clamped is not None and sl_clamped is not None:
-                    _effective_tp = tp_clamped
-                    _effective_sl = sl_clamped
-                    _sizing_source = (
-                        f"structural(tp={'%.2f' % tp_pct_raw}→{'%.2f' % tp_clamped}%, "
-                        f"sl={'%.2f' % sl_pct_raw}→{'%.2f' % sl_clamped}%)"
-                    )
-                elif tp_clamped is not None:
-                    _effective_tp = tp_clamped
-                    _sizing_source = f"structural(tp={'%.2f' % tp_clamped}%, sl=atr)"
-                elif sl_clamped is not None:
-                    _effective_sl = sl_clamped
-                    _sizing_source = f"structural(sl={'%.2f' % sl_clamped}%, tp=atr)"
-                # If neither clamped value is available, keep ATR/static fallback.
+                    imbalance_ok = imbalance <= imbalance_max_for_short
+            if not imbalance_ok:
+                helpers.emit_debug(
+                    f"LiquiditySweep: {symbol} — no signal "
+                    f"(book imbalance={imbalance:.2f} rejects "
+                    f"{'long (need >=' + str(imbalance_min_for_long) + ')' if buy_signal else 'short (need <=' + str(imbalance_max_for_short) + ')'})"
+                )
+                return None
 
         sweep_type = "low" if buy_signal else "high"
         direction = "buy" if buy_signal else "sell"
@@ -507,6 +548,16 @@ class LiquiditySweepStrategy:
 
         atr_tf_pct = helpers.extract_float(indicators.get("atr_pct")) or 1.0
         atr_htf_pct = helpers.extract_float(indicators.get("atr_pct_htf")) or atr_tf_pct
+        # Preserve the adaptive-ATR regime scaling in the surviving single
+        # sizing path (F5): widening TP/SL distances for higher-volatility
+        # regimes that used to be handled by the removed dead sizing block.
+        if config.get("use_adaptive_atr", False) and atr_tf_pct > 0:
+            if atr_tf_pct < 1.5:
+                atr_tf_pct *= 1.20
+            elif atr_tf_pct < 3.0:
+                atr_tf_pct *= 1.80
+            else:
+                atr_tf_pct *= 2.50
         vpoc = helpers.extract_float(indicators.get("vpoc"))
         va_width = helpers.extract_float(indicators.get("value_area_width"))
         swing_high_val = helpers.extract_float(indicators.get("swing_high"))

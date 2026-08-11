@@ -89,6 +89,95 @@ def compute_bb_bandwidth_percentile(
     return (count_below / len(recent)) * 100.0
 
 
+def fractal_swings(
+    candles: list[dict[str, Any]],
+    *,
+    pivot_bars: int = 3,
+) -> tuple[float | None, float | None, bool]:
+    """Identify fractal pivot swing low/high from a candle list.
+
+    A candle ``i`` is a **pivot low** when its ``low`` is the strict minimum of
+    the window ``[i - pivot_bars, i + pivot_bars]``, and a **pivot high** when
+    its ``high`` is the strict maximum of that window.  These are real, visible,
+    freshly-respected levels that stop-hunters actually cluster around — unlike
+    a trailing N-bar min/max which is a range edge inside the noise.
+
+    Parameters
+    ----------
+    candles:
+        List of candle dicts with ``"low"``/``"high"`` keys.  The most recent
+        candle (the potential sweep candle) is excluded from pivot detection
+        so it cannot qualify a forming wick as structure.
+    pivot_bars:
+        Number of bars on each side of a pivot to require (so a fractal needs
+        2 * pivot_bars + 1 candles).
+
+    Returns
+    -------
+    ``(swing_low, swing_high, used_fallback)``:
+        - ``swing_low`` / ``swing_high``: the extreme pivot low/high, or
+          ``None`` when no pivots of that type were found.
+        - ``used_fallback``: ``True`` when no pivot structure existed and the
+          values were derived from the trailing min/max instead (so callers
+          can log that the legacy path was used).
+    """
+    pivot_lows: list[float] = []
+    pivot_highs: list[float] = []
+    n = int(pivot_bars) if pivot_bars else 0
+
+    # Exclude the last candle: it is the forming/current sweep candle.
+    body = candles[:-1]
+    for i in range(1, len(body) - 1):
+        lo = body[i].get("low") if isinstance(body[i], dict) else None
+        hi = body[i].get("high") if isinstance(body[i], dict) else None
+        # Neighbours on both sides, excluding the pivot candle itself.
+        lo_idx = list(range(max(0, i - n), i)) + list(range(i + 1, min(len(body), i + n + 1)))
+        if lo is not None:
+            window_lows = [
+                body[j].get("low") if isinstance(body[j], dict) else None
+                for j in lo_idx
+            ]
+            try:
+                if all(w is not None and lo < w for w in window_lows):
+                    pivot_lows.append(float(lo))
+            except TypeError:
+                pass
+        if hi is not None:
+            window_highs = [
+                body[j].get("high") if isinstance(body[j], dict) else None
+                for j in lo_idx
+            ]
+            try:
+                if all(w is not None and hi > w for w in window_highs):
+                    pivot_highs.append(float(hi))
+            except TypeError:
+                pass
+
+    swing_low = min(pivot_lows) if pivot_lows else None
+    swing_high = max(pivot_highs) if pivot_highs else None
+    used_fallback = False
+
+    if swing_low is None or swing_high is None:
+        # Legacy fallback: trailing min/max (excludes the current candle).
+        lows = [
+            float(c["low"])
+            for c in body
+            if isinstance(c, dict) and c.get("low") is not None
+        ]
+        highs = [
+            float(c["high"])
+            for c in body
+            if isinstance(c, dict) and c.get("high") is not None
+        ]
+        used_fallback = True
+        if swing_low is None and lows:
+            swing_low = min(lows)
+        if swing_high is None and highs:
+            swing_high = max(highs)
+
+    return swing_low, swing_high, used_fallback
+
+
 def resolve_analysis_block(
     sym_data: dict[str, Any],
     cfg: dict[str, Any],
