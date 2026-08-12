@@ -43,9 +43,16 @@ DEFAULT_LOG_DIR = ROOT / "logs"
 # ── Log line patterns ─────────────────────────────────────────────────────────
 # Example PnL line:
 #   2026-08-01 10:43:05,984 UTC · DEBUG:...:Reconciled PnL for SATS-USDT-SWAP: -0.4926 USDT (fill 298022321, trade ad9178d8...)
+#
+# NOTE: The same closing fill can be reconciled multiple times against
+# different unreconciled trades (see market_service fill reconciliation),
+# producing several "Reconciled PnL" lines with the SAME fill id but different
+# trade ids.  We must deduplicate on fill id or the same realized PnL gets
+# counted multiple times (inflating profits / masking losses).
 _PNL_RE = re.compile(
     r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}).*Reconciled PnL for "
-    r"([A-Z0-9-]+-USDT-SWAP): ([+-][0-9.]+) USDT"
+    r"([A-Z0-9-]+-USDT-SWAP): ([+-][0-9.]+) USDT "
+    r"\(fill (\d+), trade ([0-9a-f-]+)\)"
 )
 
 # Example signal line:
@@ -117,6 +124,7 @@ class PnLTrade:
     ts: str
     symbol: str
     pnl: float
+    fill_id: str = ""
     mfe_peak_pct: Optional[float] = None
     mfe_peak_usd: Optional[float] = None
 
@@ -233,6 +241,10 @@ def parse_logs(files: list[Path]) -> tuple[list[PnLTrade], list[Signal], list[Se
     summary = Summary()
     active_peak_pct_by_symbol: dict[str, float] = {}
     active_peak_usd_by_symbol: dict[str, float] = {}
+    # Deduplicate realized PnL by OKX fill id: the same closing fill is often
+    # reconciled against multiple unreconciled trades, so only the FIRST
+    # occurrence of each fill id should count as a real trade.
+    seen_fills: set[str] = set()
 
     def _parse_optional_float(raw: str) -> Optional[float]:
         if raw == "None":
@@ -260,12 +272,18 @@ def parse_logs(files: list[Path]) -> tuple[list[PnLTrade], list[Signal], list[Se
             m = _PNL_RE.search(line)
             if m:
                 symbol = m.group(2)
+                fill_id = m.group(4)
+                # Skip duplicate reconciliations of the same closing fill.
+                if fill_id in seen_fills:
+                    continue
+                seen_fills.add(fill_id)
                 _track_period(m.group(1))
                 pnl_trades.append(
                     PnLTrade(
                         ts=m.group(1),
                         symbol=symbol,
                         pnl=float(m.group(3)),
+                        fill_id=fill_id,
                         mfe_peak_pct=active_peak_pct_by_symbol.pop(symbol, None),
                         mfe_peak_usd=active_peak_usd_by_symbol.pop(symbol, None),
                     )

@@ -36,3 +36,34 @@ def test_performance_summary_parses_peak_excursion_for_stop_out(tmp_path: Path) 
 
     payload = summary_to_dict(summary)
     assert payload["stopout_peak_trades"][0]["mfe_pct"] == 4.2
+
+
+def test_performance_summary_deduplicates_fills_by_fill_id(tmp_path: Path) -> None:
+    """The same closing fill reconciled against multiple trades must count once.
+
+    market_service fill reconciliation can log the same OKX fill id multiple
+    times (against different unreconciled trades).  Counting each line as a
+    distinct trade double-counts realized PnL and can turn a loss into a
+    profit.
+    """
+    log_file = tmp_path / "app.log"
+    log_file.write_text(
+        "\n".join(
+            [
+                "2026-08-02 10:00:00,000 UTC · DEBUG:app.services.market_service:Reconciled PnL for XYZ-USDT-SWAP: +0.5000 USDT (fill 42, trade aaaa)",
+                "2026-08-02 10:01:00,000 UTC · DEBUG:app.services.market_service:Reconciled PnL for XYZ-USDT-SWAP: +0.5000 USDT (fill 42, trade bbbb)",
+                "2026-08-02 10:02:00,000 UTC · DEBUG:app.services.market_service:Reconciled PnL for XYZ-USDT-SWAP: -1.0000 USDT (fill 43, trade cccc)",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    pnl_trades, signals, seeded, cleared, summary = parse_logs([log_file])
+    summary = build_summary(pnl_trades, signals, seeded, cleared, summary)
+
+    # fill 42 appears twice but must only count once.
+    assert len(pnl_trades) == 2
+    assert summary.total_trades == 2
+    assert summary.total_pnl == -0.5
+    assert summary.wins == 1
+    assert summary.losses == 1
