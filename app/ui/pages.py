@@ -4469,18 +4469,18 @@ def register_pages(app: FastAPI) -> None:
                             _tp_tp_raw = _tp_cfg.get("tp_pct")
                             tp_tp_input = ui.number(
                                 label="Take profit (%)",
-                                value=float(_tp_tp_raw) if _tp_tp_raw is not None else 4.0,
+                                value=float(_tp_tp_raw) if _tp_tp_raw is not None else 6.0,
                                 min=0.5, step=0.5, precision=1,
                             ).classes("w-40").props(
-                                "hint='Exit after this % price move (2 ATR proxy)' persistent-hint clearable"
+                                "hint='Exit after this % price move (3 ATR proxy)' persistent-hint clearable"
                             )
                             _tp_sl_raw = _tp_cfg.get("sl_pct")
                             tp_sl_input = ui.number(
                                 label="Stop loss (%)",
-                                value=float(_tp_sl_raw) if _tp_sl_raw is not None else 3.0,
+                                value=float(_tp_sl_raw) if _tp_sl_raw is not None else 4.0,
                                 min=0.5, step=0.5, precision=1,
                             ).classes("w-40").props(
-                                "hint='Exit below pullback low (1.5 ATR)' persistent-hint clearable"
+                                "hint='Exit below structural invalidation (2 ATR)' persistent-hint clearable"
                             )
                         with ui.row().classes("w-full flex-wrap gap-4 items-start"):
                             tp_pullback_ema_input = ui.number(
@@ -4495,7 +4495,13 @@ def register_pages(app: FastAPI) -> None:
                                 value=float(_tp_cfg.get("pullback_proximity_pct") or 0.3),
                                 min=0.05, max=5.0, step=0.05, format="%.2f",
                             ).classes("w-40").props("dense")
-                            ui.label("How close (in %) price must be to the EMA/VWAP level to qualify as a pullback.").classes("text-xs text-slate-500")
+                            ui.label("Hard floor (in %) for how close price must be to the EMA/VWAP level to qualify as a pullback.").classes("text-xs text-slate-500")
+                            tp_proximity_atr_input = ui.number(
+                                label="Pullback proximity (×ATR)",
+                                value=float(_tp_cfg.get("pullback_proximity_atr") or 0.5),
+                                min=0.0, max=5.0, step=0.1, format="%.1f",
+                            ).classes("w-48").props("dense")
+                            ui.label("Volatility-normalised proximity: effective band = max(% floor, this × ATR%). Scales with the market on volatile alts.").classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             tp_use_vwap_switch = ui.switch(
                                 "Use VWAP as level",
@@ -4554,6 +4560,13 @@ def register_pages(app: FastAPI) -> None:
                             ).classes("w-40").props(
                                 "hint='Block when trend already extended (pullback likely reversal)' persistent-hint"
                             )
+                            tp_max_ext_input = ui.number(
+                                label="Max pullback extension (×ATR)",
+                                value=float(_tp_cfg.get("max_pullback_extension_atr") or 2.0),
+                                min=0.0, max=10.0, step=0.5, format="%.1f",
+                            ).classes("w-48").props(
+                                "hint='Block when price is more than this × ATR% past the pullback level (0 = disabled)' persistent-hint"
+                            )
                         # ── TP/SL Sizing ────────────────────────────────
                         ui.separator().classes("my-2")
                         ui.label("TP/SL Sizing").classes("text-xs font-semibold text-slate-600")
@@ -4608,12 +4621,12 @@ def register_pages(app: FastAPI) -> None:
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             tp_atr_tp_mult_input = ui.number(
                                 label="ATR TP multiplier",
-                                value=float(_tp_cfg.get("atr_tp_multiplier") or 2.0),
+                                value=float(_tp_cfg.get("atr_tp_multiplier") or 3.0),
                                 min=0.1, max=10.0, step=0.1, format="%.1f",
                             ).classes("w-40").props("dense")
                             tp_atr_sl_mult_input = ui.number(
                                 label="ATR SL multiplier",
-                                value=float(_tp_cfg.get("atr_sl_multiplier") or 1.5),
+                                value=float(_tp_cfg.get("atr_sl_multiplier") or 2.0),
                                 min=0.1, max=10.0, step=0.1, format="%.1f",
                             ).classes("w-40").props("dense")
                             tp_min_atr_pct_input = ui.number(
@@ -4664,18 +4677,20 @@ def register_pages(app: FastAPI) -> None:
 
             def _set_tp_defaults() -> None:
                 """Fill all Trend Pullback fields with the recommended configuration."""
-                tp_tp_input.value = 4.0
-                tp_sl_input.value = 3.0
+                tp_tp_input.value = 6.0
+                tp_sl_input.value = 4.0
                 tp_pullback_ema_input.value = 21
                 tp_proximity_input.value = 0.3
+                tp_proximity_atr_input.value = 0.5
                 tp_use_vwap_switch.value = True
                 tp_require_htf_switch.value = True
                 tp_htf_regime_select.value = "trend"
-                tp_analysis_tf_select.value = "1H"
+                tp_analysis_tf_select.value = "15m"
                 tp_require_bullish_switch.value = True
                 tp_candle_rejection_pct_input.value = 25.0
-                tp_min_adx_input.value = 20.0
-                tp_max_adx_entry_input.value = 28.0
+                tp_min_adx_input.value = 18.0
+                tp_max_adx_entry_input.value = 40.0
+                tp_max_ext_input.value = 2.0
                 tp_use_atr_sizing_switch.value = True
                 tp_use_structural_switch.value = True
                 tp_structural_sl_buffer_input.value = 0.15
@@ -4683,11 +4698,12 @@ def register_pages(app: FastAPI) -> None:
                 tp_atr_max_tp_input.value = 4.0
                 tp_atr_min_sl_input.value = 0.3
                 tp_atr_max_sl_input.value = 3.0
-                tp_atr_tp_mult_input.value = 1.2
-                tp_atr_sl_mult_input.value = 1.0
+                tp_atr_tp_mult_input.value = 3.0
+                tp_atr_sl_mult_input.value = 2.0
+                tp_use_adaptive_atr_switch.value = False
                 tp_min_atr_pct_input.value = 1.0
-                # R:R guardrail: enforce >= 1.0 for this strategy.
-                tp_min_rr_input.value = 1.0
+                # R:R guardrail: enforce >= 1.5 for this strategy.
+                tp_min_rr_input.value = 1.5
                 tp_flip_switch.value = False
                 tp_flip_select.value = None
                 # Liquidity-aware gates default OFF (opt-in).
@@ -5744,7 +5760,8 @@ def register_pages(app: FastAPI) -> None:
                 "tp_pct": float(tp_tp_input.value) if tp_tp_input.value not in (None, "") else None,
                 "sl_pct": float(tp_sl_input.value) if tp_sl_input.value not in (None, "") else None,
                 "pullback_ema": int(tp_pullback_ema_input.value or 21),
-                "pullback_proximity_pct": float(tp_proximity_input.value or 0.4),
+                "pullback_proximity_pct": float(tp_proximity_input.value or 0.3),
+                "pullback_proximity_atr": float(tp_proximity_atr_input.value or 0.5),
                 "use_vwap_as_level": bool(tp_use_vwap_switch.value),
                 "require_htf_trend": bool(tp_require_htf_switch.value),
                 "htf_regime_preference": str(tp_htf_regime_select.value or "trend"),
@@ -5752,8 +5769,9 @@ def register_pages(app: FastAPI) -> None:
                     "use_adaptive_atr": bool(tp_use_adaptive_atr_switch.value),
                 "require_bullish_candle": bool(tp_require_bullish_switch.value),
                 "candle_rejection_pct": float(tp_candle_rejection_pct_input.value or 25.0),
-                "min_adx": float(tp_min_adx_input.value or 20.0),
-                "max_adx_for_entry": float(tp_max_adx_entry_input.value or 35.0),
+                "min_adx": float(tp_min_adx_input.value or 18.0),
+                "max_adx_for_entry": float(tp_max_adx_entry_input.value or 40.0),
+                "max_pullback_extension_atr": float(tp_max_ext_input.value or 2.0),
                 "use_structural_sizing": bool(tp_use_structural_switch.value),
                 "structural_sl_buffer_atr": float(tp_structural_sl_buffer_input.value or 0.15),
                 "atr_min_tp_mult": float(tp_atr_min_tp_input.value or 0.5),
@@ -5761,8 +5779,8 @@ def register_pages(app: FastAPI) -> None:
                 "atr_min_sl_mult": float(tp_atr_min_sl_input.value or 0.3),
                 "atr_max_sl_mult": float(tp_atr_max_sl_input.value or 3.0),
                 "use_atr_sizing": bool(tp_use_atr_sizing_switch.value),
-                "atr_tp_multiplier": float(tp_atr_tp_mult_input.value or 2.0),
-                "atr_sl_multiplier": float(tp_atr_sl_mult_input.value or 1.5),
+                "atr_tp_multiplier": float(tp_atr_tp_mult_input.value or 3.0),
+                "atr_sl_multiplier": float(tp_atr_sl_mult_input.value or 2.0),
                 "min_atr_pct": float(tp_min_atr_pct_input.value or 1.0),
                 "min_reward_risk_ratio": (
                     float(tp_min_rr_input.value) if tp_min_rr_input.value not in (None, "") else None

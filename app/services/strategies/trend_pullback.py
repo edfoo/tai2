@@ -11,8 +11,8 @@ Entry conditions (long example):
   3. Entry: bullish candle off the level (close > prev close, lower wick).
 
 Exit:
-  - TP: 2 ATR (recent swing high proxy).
-  - SL: 1.5 ATR (below pullback low).
+  - TP: 3 ATR (recent swing high proxy).
+  - SL: 2 ATR (below structural invalidation).
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from __future__ import annotations
 from typing import Any
 
 from . import StrategyHelpers, StrategySignal, resolve_analysis_block
-from .defaults import merged_config
+from .defaults import DEFAULT_TREND_PULLBACK, merged_config
 
 
 class TrendPullbackStrategy:
@@ -33,9 +33,15 @@ class TrendPullbackStrategy:
         ``indicators["moving_averages"]["ema_<n>"]``.
       - ``use_vwap_as_level`` (bool, default True): also accept VWAP as a
         valid pullback level (price near VWAP qualifies).
-            - ``pullback_proximity_pct`` (float, default 0.3): how close (in %)
-        price must be to the EMA/VWAP level to qualify as a pullback.
-        Tightened from 0.4 to reduce weak pullback entries.
+            - ``pullback_proximity_pct`` (float, default 0.3): hard floor (in %)
+        for how close price must be to the EMA/VWAP level to qualify as a
+        pullback.  The effective band is the wider of this floor and
+        ``pullback_proximity_atr × ATR%`` (volatility-normalised, Fix 2).
+            - ``pullback_proximity_atr`` (float, default 0.5): volatility-
+        normalised proximity — a level is touched when
+        ``abs(last_price - level) / level <= pullback_proximity_atr × ATR%``.
+        Keeps the band from collapsing to zero on dead coins (the fixed %
+        floor applies) while scaling with the market on volatile alts.
       - ``require_htf_trend`` (bool, default True): HTF EMA50/EMA200 must
         confirm the trend direction.  Auto-disabled when no HTF data.
       - ``require_bullish_candle`` (bool, default True): the trigger candle
@@ -43,11 +49,16 @@ class TrendPullbackStrategy:
         rejection wick off the level.
       - ``candle_rejection_pct`` (float, default 25): minimum wick size as %
         of candle range for the rejection confirmation.
-            - ``max_adx_for_entry`` (float, default 28): block when ADX is too high
+            - ``max_adx_for_entry`` (float, default 40): block when ADX is too high
         (trend already extended — pullback likely a reversal).  0 = disabled.
-        Tightened from 35 to avoid late entries in mature trends.
-            - ``min_adx`` (float, default 20): require a minimum trend strength so
+        Widened from 28 because ADX is lagging on volatile alts; the primary
+        anti-late-entry filter is the ATR-anchored extension gate below.
+            - ``min_adx`` (float, default 18): require a minimum trend strength so
         we only enter in real trends, not chop.  0 = disabled.
+            - ``max_pullback_extension_atr`` (float, default 2.0): volatility-
+        normalised extension gate — price must not be more than this × ATR%
+        past the pullback level (blocks late entries where the pullback has
+        already run too far).  0 = disabled.
       - ``use_structural_sizing`` (bool, default True): use structural TP/SL
         based on swing highs/lows from ``indicators["structure"]`` instead
         of (or clamped by) ATR.  TP targets the nearest swing high (longs) /
@@ -67,8 +78,12 @@ class TrendPullbackStrategy:
       - ``use_atr_sizing`` (bool, default True): ATR-scaled TP/SL fallback
         when structural levels are unavailable or ``use_structural_sizing``
         is False.
-      - ``atr_tp_multiplier`` (float, default 2.0): TP = multiplier × ATR%.
-      - ``atr_sl_multiplier`` (float, default 1.5): SL = multiplier × ATR%.
+      - ``atr_tp_multiplier`` (float, default 3.0): TP = multiplier × ATR%.
+      - ``atr_sl_multiplier`` (float, default 2.0): SL = multiplier × ATR%.
+        Together these yield ≥ 1.5 R:R when ATR sizing is active (Fix 1).
+      - ``use_adaptive_atr`` (bool, default False): when enabled, scales the
+        ATR distance used for SIZING only (never the min_atr_pct gate or the
+        proximity/extension checks) by volatility regime (Fix 5).
       - ``min_atr_pct`` (float, default 1.0): skip dead coins.
       - ``tp_pct`` (float, default None): static TP % fallback.
       - ``sl_pct`` (float, default None): static SL % fallback.
@@ -121,7 +136,10 @@ class TrendPullbackStrategy:
         use_vwap_as_level = bool(cfg.get("use_vwap_as_level", True))
         pullback_proximity_pct = helpers.extract_float(cfg.get("pullback_proximity_pct"))
         if pullback_proximity_pct is None:
-            pullback_proximity_pct = 0.3
+            pullback_proximity_pct = DEFAULT_TREND_PULLBACK["pullback_proximity_pct"]
+        pullback_proximity_atr = helpers.extract_float(cfg.get("pullback_proximity_atr"))
+        if pullback_proximity_atr is None:
+            pullback_proximity_atr = DEFAULT_TREND_PULLBACK["pullback_proximity_atr"]
         require_htf_trend = bool(cfg.get("require_htf_trend", True))
         require_bullish_candle = bool(cfg.get("require_bullish_candle", True))
         candle_rejection_pct = helpers.extract_float(cfg.get("candle_rejection_pct"))
@@ -129,10 +147,13 @@ class TrendPullbackStrategy:
             candle_rejection_pct = 25.0
         max_adx_for_entry = helpers.extract_float(cfg.get("max_adx_for_entry"))
         if max_adx_for_entry is None:
-            max_adx_for_entry = 28.0
+            max_adx_for_entry = DEFAULT_TREND_PULLBACK["max_adx_for_entry"]
         min_adx = helpers.extract_float(cfg.get("min_adx"))
         if min_adx is None:
-            min_adx = 20.0
+            min_adx = DEFAULT_TREND_PULLBACK["min_adx"]
+        max_pullback_extension_atr = helpers.extract_float(cfg.get("max_pullback_extension_atr"))
+        if max_pullback_extension_atr is None:
+            max_pullback_extension_atr = DEFAULT_TREND_PULLBACK["max_pullback_extension_atr"]
         use_structural_sizing = bool(cfg.get("use_structural_sizing", True))
         structural_sl_buffer_atr = helpers.extract_float(cfg.get("structural_sl_buffer_atr"))
         if structural_sl_buffer_atr is None:
@@ -152,10 +173,10 @@ class TrendPullbackStrategy:
         use_atr_sizing = bool(cfg.get("use_atr_sizing", True))
         atr_tp_multiplier = helpers.extract_float(cfg.get("atr_tp_multiplier"))
         if atr_tp_multiplier is None:
-            atr_tp_multiplier = 2.0
+            atr_tp_multiplier = DEFAULT_TREND_PULLBACK["atr_tp_multiplier"]
         atr_sl_multiplier = helpers.extract_float(cfg.get("atr_sl_multiplier"))
         if atr_sl_multiplier is None:
-            atr_sl_multiplier = 1.5
+            atr_sl_multiplier = DEFAULT_TREND_PULLBACK["atr_sl_multiplier"]
         min_atr_pct = helpers.extract_float(cfg.get("min_atr_pct"))
         if min_atr_pct is None:
             min_atr_pct = 1.0
@@ -175,14 +196,10 @@ class TrendPullbackStrategy:
         indicators = resolve_analysis_block(sym_data, cfg)
 
         last_price = helpers.get_last_price(symbol)
+        # ``atr_pct`` stays UNSCALED for the min_atr_pct gate and the
+        # volatility-normalised proximity/extension checks (Fix 5).  Adaptive
+        # ATR scaling is applied to SIZING only, later in the exit block.
         atr_pct = helpers.extract_float(indicators.get("atr_pct"))
-        if atr_pct is not None and cfg.get("use_adaptive_atr", False):
-            if atr_pct < 1.5:
-                atr_pct *= 1.20
-            elif atr_pct < 3.0:
-                atr_pct *= 1.80
-            else:
-                atr_pct *= 2.50
         adx = helpers.extract_float((indicators.get("adx") or {}).get("value"))
 
         if last_price is None:
@@ -261,8 +278,17 @@ class TrendPullbackStrategy:
             pullback_ema = helpers.extract_float(ltf_ma.get("ema_21"))
         vwap_value = helpers.extract_float(indicators.get("vwap"))
 
-        # A level is "touched" if price is within pullback_proximity_pct of it.
-        proximity = pullback_proximity_pct / 100.0
+        # A level is "touched" if price is within the effective proximity band.
+        # The band is volatility-normalised (Fix 2): the wider of the fixed %
+        # floor and ``pullback_proximity_atr × ATR%``, so it scales with the
+        # market instead of being a fixed % that is too tight on volatile alts.
+        effective_proximity_pct = pullback_proximity_pct
+        if atr_pct is not None:
+            effective_proximity_pct = max(
+                pullback_proximity_pct,
+                pullback_proximity_atr * atr_pct,
+            )
+        proximity = effective_proximity_pct / 100.0
         long_level_touched = False
         short_level_touched = False
         touched_levels: list[str] = []
@@ -288,7 +314,7 @@ class TrendPullbackStrategy:
                 f"TrendPullback: {symbol} — no signal "
                 f"(no pullback level touched: price={last_price:.6g}, "
                 f"EMA{pullback_ema_len}={pullback_ema}, VWAP={vwap_value}, "
-                f"proximity={pullback_proximity_pct:.2f}%)"
+                f"proximity={effective_proximity_pct:.2f}%)"
             )
             return None
 
@@ -340,18 +366,35 @@ class TrendPullbackStrategy:
                     )
             # No usable VA → leave True (neutral).
 
+        # ── Volatility-normalised extension gate (Fix 4) ─────────────
+        # Price must not be more than ``max_pullback_extension_atr × ATR%``
+        # past the pullback level — blocks late entries where the pullback
+        # has already run too far (the failure mode a raw ADX cap misses).
+        extension_ok_long = True
+        extension_ok_short = True
+        if max_pullback_extension_atr > 0 and atr_pct is not None:
+            ext_limit = max_pullback_extension_atr * (atr_pct / 100.0) * last_price
+            for level in (pullback_ema, vwap_value):
+                if level is not None and level > 0:
+                    if last_price - level > ext_limit:
+                        extension_ok_long = False
+                    if level - last_price > ext_limit:
+                        extension_ok_short = False
+
         # ── Direction decision ────────────────────────────────────────
         buy_signal = (
             want_long
             and long_level_touched
             and candle_long_ok
             and poc_proximity_ok
+            and extension_ok_long
         )
         sell_signal = (
             want_short
             and short_level_touched
             and candle_short_ok
             and poc_proximity_ok
+            and extension_ok_short
         )
 
         if not buy_signal and not sell_signal:
@@ -372,6 +415,11 @@ class TrendPullbackStrategy:
                 parts.append(
                     f"candle(long={'ok' if candle_long_ok else 'blocked'}, "
                     f"short={'ok' if candle_short_ok else 'blocked'})"
+                )
+            if max_pullback_extension_atr > 0:
+                parts.append(
+                    f"ext(long={'ok' if extension_ok_long else 'blocked'}, "
+                    f"short={'ok' if extension_ok_short else 'blocked'})"
                 )
             helpers.emit_debug(
                 f"TrendPullback: {symbol} — no signal ({', '.join(parts)})"
@@ -401,33 +449,54 @@ class TrendPullbackStrategy:
         if side is None:
             return None
 
-        market_data: dict[str, Any] = snapshot.get("market_data") or {}
-        sym_data = market_data.get(symbol) or {}
-        indicators_full = sym_data.get("indicators") or {}
-
-        atr_tf_pct = helpers.extract_float(indicators_full.get("atr_pct")) or 1.0
-        atr_htf_pct = helpers.extract_float(indicators_full.get("atr_pct_htf")) or atr_tf_pct
-        vpoc = helpers.extract_float(indicators_full.get("vpoc"))
-        va_width = helpers.extract_float(indicators_full.get("value_area_width"))
-        swing_high_val = helpers.extract_float(indicators_full.get("swing_high"))
-        swing_low_val = helpers.extract_float(indicators_full.get("swing_low"))
+        # Fix 3: size the exits to the ANALYSIS timeframe (now 15m), not the
+        # global LTF.  ``indicators`` is the resolved analysis block, so its
+        # ATR% matches the timeframe on which the fill occurs.  The HTF ATR
+        # (``atr_pct_htf``) is only used for the volatility multiplier.
+        atr_tf_pct = helpers.extract_float(indicators.get("atr_pct")) or 1.0
+        atr_htf_pct = helpers.extract_float(indicators.get("atr_pct_htf")) or atr_tf_pct
+        vpoc = helpers.extract_float(indicators.get("vpoc"))
+        va_width = helpers.extract_float(indicators.get("value_area_width"))
+        swing_high_val = helpers.extract_float(indicators.get("swing_high"))
+        swing_low_val = helpers.extract_float(indicators.get("swing_low"))
 
         static_tp = helpers.extract_float(config.get("tp_pct"))
         static_sl = helpers.extract_float(config.get("sl_pct"))
 
+        # Fix 5: adaptive ATR scaling applies to SIZING only (the ATR fallback
+        # and clamps).  The min_atr_pct gate and the proximity/extension checks
+        # above use the UNSCALED ``atr_pct``, so high-volatility regimes no
+        # longer simultaneously starve entries and widen stops.
+        sizing_atr_pct = atr_tf_pct
+        if cfg.get("use_adaptive_atr", False):
+            if sizing_atr_pct < 1.5:
+                sizing_atr_pct *= 1.20
+            elif sizing_atr_pct < 3.0:
+                sizing_atr_pct *= 1.80
+            else:
+                sizing_atr_pct *= 2.50
+
         # Thesis-specific structural levels: TP at the nearest swing high/low
-        # beyond price, SL beyond the pullback candle's extreme.
+        # beyond price, SL anchored to structural invalidation (Fix 6).
         tp_target: float | None = None
         sl_level: float | None = None
         if use_structural_sizing and entry_price and entry_price > 0:
-            atr_price = (atr_tf_pct / 100.0) * entry_price
-            structure = indicators_full.get("structure") or {}
+            atr_price = (sizing_atr_pct / 100.0) * entry_price
+            structure = indicators.get("structure") or {}
             swing_highs = structure.get("swing_highs") or []
             swing_lows = structure.get("swing_lows") or []
-            ohlcv_compact = indicators_full.get("ohlcv") or []
+            ohlcv_compact = indicators.get("ohlcv") or []
             _curr = ohlcv_compact[-1] if ohlcv_compact and isinstance(ohlcv_compact[-1], dict) else {}
             curr_low = helpers.extract_float(_curr.get("low"))
             curr_high = helpers.extract_float(_curr.get("high"))
+
+            # The pullback level (the value price pulled back to) for SL anchoring.
+            if side == "long":
+                _levels = [l for l in (pullback_ema, vwap_value) if l is not None and l > 0 and l <= entry_price]
+                pullback_level = max(_levels) if _levels else None
+            else:
+                _levels = [l for l in (pullback_ema, vwap_value) if l is not None and l > 0 and l >= entry_price]
+                pullback_level = min(_levels) if _levels else None
 
             if side == "long":
                 for sh in swing_highs:
@@ -435,22 +504,51 @@ class TrendPullbackStrategy:
                     if sh_price is not None and sh_price > entry_price:
                         tp_target = sh_price
                         break
-                if curr_low is not None:
+                # Fix 6: anchor SL to structural invalidation — the nearest
+                # swing low below entry, else below the pullback level by a
+                # volatility buffer, else (last resort) the candle wick.
+                _below = [
+                    helpers.extract_float(sl.get("price"))
+                    for sl in swing_lows if isinstance(sl, dict)
+                ]
+                _below = [p for p in _below if p is not None and p < entry_price]
+                _sl_anchor = max(_below) if _below else None
+                if _sl_anchor is not None:
+                    sl_level = _sl_anchor - structural_sl_buffer_atr * atr_price
+                elif pullback_level is not None:
+                    sl_level = pullback_level - structural_sl_buffer_atr * atr_price
+                elif curr_low is not None:
                     sl_level = curr_low - structural_sl_buffer_atr * atr_price
+                    helpers.emit_debug(
+                        f"TrendPullback: {symbol} — structural SL fell back to wick anchor (no swing/level)"
+                    )
             else:
                 for sl in swing_lows:
                     sl_price = helpers.extract_float(sl.get("price")) if isinstance(sl, dict) else None
                     if sl_price is not None and sl_price < entry_price:
                         tp_target = sl_price
                         break
-                if curr_high is not None:
+                _above = [
+                    helpers.extract_float(sh.get("price"))
+                    for sh in swing_highs if isinstance(sh, dict)
+                ]
+                _above = [p for p in _above if p is not None and p > entry_price]
+                _sl_anchor = min(_above) if _above else None
+                if _sl_anchor is not None:
+                    sl_level = _sl_anchor + structural_sl_buffer_atr * atr_price
+                elif pullback_level is not None:
+                    sl_level = pullback_level + structural_sl_buffer_atr * atr_price
+                elif curr_high is not None:
                     sl_level = curr_high + structural_sl_buffer_atr * atr_price
+                    helpers.emit_debug(
+                        f"TrendPullback: {symbol} — structural SL fell back to wick anchor (no swing/level)"
+                    )
 
         tp_pct_final, sl_pct_final = compute_tp_sl_pct(
             entry=entry_price,
             side=side,
             ctx=OrderContext(
-                atr_tf_pct=atr_tf_pct,
+                atr_tf_pct=sizing_atr_pct,
                 atr_htf_pct=atr_htf_pct,
                 vpoc=vpoc,
                 value_area_width=va_width,
@@ -469,6 +567,9 @@ class TrendPullbackStrategy:
             static_sl_pct=static_sl,
             atr_tp_multiplier=atr_tp_multiplier if use_atr_sizing else None,
             atr_sl_multiplier=atr_sl_multiplier if use_atr_sizing else None,
+            audit=lambda msg: helpers.emit_debug(
+                f"TrendPullback: {symbol} — {msg}"
+            ),
         )
 
         level_str = '+'.join(touched_levels)

@@ -2665,14 +2665,16 @@ def _tp_bare(**overrides: Any) -> dict[str, Any]:
         "pullback_ema": 21,
         "use_vwap_as_level": False,
         "pullback_proximity_pct": 0.5,
+        "pullback_proximity_atr": 0.5,
         "require_htf_trend": False,
         "require_bullish_candle": False,
         "candle_rejection_pct": 25.0,
         "min_adx": 0.0,
         "max_adx_for_entry": 0.0,
+        "max_pullback_extension_atr": 0.0,
         "use_atr_sizing": False,
-        "atr_tp_multiplier": 2.0,
-        "atr_sl_multiplier": 1.5,
+        "atr_tp_multiplier": 3.0,
+        "atr_sl_multiplier": 2.0,
         "min_atr_pct": 0.0,
     }
     cfg.update(overrides)
@@ -2919,3 +2921,173 @@ class TestTrendPullbackStrategy:
         assert signal is not None
         assert signal.tp_pct == 4.0
         assert signal.sl_pct == 3.0
+
+    # ── Fix 1: unified exit model / R:R floor ─────────────────────────
+
+    def test_atr_sizing_uses_3_2_multipliers(self) -> None:
+        """ATR sizing should use the unified 3.0/2.0 multipliers (≥1.5 R:R)."""
+        strategy = TrendPullbackStrategy()
+        ohlcv = _make_pullback_ohlcv(prev_close=99.5, last_close=100.0, last_low=99.6)
+        snapshot = _make_tp_snapshot(
+            ema_21=100.0, atr_pct=2.0, htf_ema50=101.0, htf_ema200=99.0,
+            ohlcv=ohlcv, last_price=100.0,
+        )
+        config = _tp_bare(
+            use_atr_sizing=True, use_structural_sizing=False,
+            atr_tp_multiplier=3.0, atr_sl_multiplier=2.0,
+            require_htf_trend=True, require_bullish_candle=True,
+        )
+        signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=100.0))
+        assert signal is not None
+        # TP = 3.0 × 2.0% = 6.0%, SL = 2.0 × 2.0% = 4.0% → 1.5 R:R
+        assert signal.tp_pct is not None
+        assert abs(signal.tp_pct - 6.0) < 0.01
+        assert signal.sl_pct is not None
+        assert abs(signal.sl_pct - 4.0) < 0.01
+        assert signal.tp_pct / signal.sl_pct >= 1.5
+
+    def test_static_fallback_floor_is_1_5_rr(self) -> None:
+        """Static fallback (6.0/4.0) must keep ≥1.5 R:R when ATR sizing is off."""
+        strategy = TrendPullbackStrategy()
+        ohlcv = _make_pullback_ohlcv(prev_close=99.5, last_close=100.0, last_low=99.6)
+        snapshot = _make_tp_snapshot(
+            ema_21=100.0, htf_ema50=101.0, htf_ema200=99.0,
+            ohlcv=ohlcv, last_price=100.0,
+        )
+        config = _tp_bare(
+            use_atr_sizing=False, use_structural_sizing=False,
+            tp_pct=6.0, sl_pct=4.0,
+            require_htf_trend=True, require_bullish_candle=True,
+        )
+        signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=100.0))
+        assert signal is not None
+        assert signal.tp_pct == 6.0
+        assert signal.sl_pct == 4.0
+        assert signal.tp_pct / signal.sl_pct >= 1.5
+
+    # ── Fix 2: ATR-normalised proximity ───────────────────────────────
+
+    def test_proximity_scales_with_atr(self) -> None:
+        """On a 2% ATR name the effective band is ~1% (0.5 × 2%), not 0.3%."""
+        strategy = TrendPullbackStrategy()
+        # EMA21=100, price=100.5 → 0.5% away. With ATR=2%, effective band =
+        # max(0.3, 0.5×2) = 1.0% → touched. With the old fixed 0.3% it would not.
+        ohlcv = _make_pullback_ohlcv(prev_close=99.5, last_close=100.0, last_low=99.6)
+        snapshot = _make_tp_snapshot(
+            ema_21=100.0, atr_pct=2.0, htf_ema50=101.0, htf_ema200=99.0,
+            ohlcv=ohlcv, last_price=100.5,
+        )
+        config = _tp_bare(
+            pullback_proximity_pct=0.3, pullback_proximity_atr=0.5,
+            require_htf_trend=True, require_bullish_candle=True,
+        )
+        signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=100.5))
+        assert signal is not None
+        assert signal.direction == "buy"
+
+    def test_proximity_floors_on_dead_coin(self) -> None:
+        """On a 0.5% ATR name the effective band floors at 0.3%."""
+        strategy = TrendPullbackStrategy()
+        # EMA21=100, price=100.4 → 0.4% away. ATR=0.5% → effective band =
+        # max(0.3, 0.5×0.5) = 0.3% → NOT touched (0.4% > 0.3%).
+        ohlcv = _make_pullback_ohlcv(prev_close=99.5, last_close=100.0, last_low=99.6)
+        snapshot = _make_tp_snapshot(
+            ema_21=100.0, atr_pct=0.5, htf_ema50=101.0, htf_ema200=99.0,
+            ohlcv=ohlcv, last_price=100.4,
+        )
+        config = _tp_bare(
+            pullback_proximity_pct=0.3, pullback_proximity_atr=0.5,
+            require_htf_trend=True, require_bullish_candle=True,
+        )
+        result = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=100.4))
+        assert result is None
+
+    # ── Fix 4: ADX band + extension gate ──────────────────────────────
+
+    def test_max_adx_widened_to_40(self) -> None:
+        """ADX=35 should now pass (band widened to 40) — no premature cap."""
+        strategy = TrendPullbackStrategy()
+        ohlcv = _make_pullback_ohlcv(prev_close=99.5, last_close=100.0, last_low=99.6)
+        snapshot = _make_tp_snapshot(
+            ema_21=100.0, adx_value=35.0, htf_ema50=101.0, htf_ema200=99.0,
+            ohlcv=ohlcv, last_price=100.0,
+        )
+        config = _tp_bare(
+            min_adx=18.0, max_adx_for_entry=40.0,
+            require_htf_trend=True, require_bullish_candle=True,
+        )
+        signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=100.0))
+        assert signal is not None
+
+    def test_extension_gate_blocks_late_entry(self) -> None:
+        """Price far past the pullback level should be blocked by the extension gate."""
+        strategy = TrendPullbackStrategy()
+        # EMA21=100, price=104 → 4% past. ATR=2% → ext limit = 2.0 × 2% = 4%.
+        # 4% is NOT > 4% (boundary), so use a larger gap to force a block.
+        ohlcv = _make_pullback_ohlcv(prev_close=99.5, last_close=100.0, last_low=99.6)
+        snapshot = _make_tp_snapshot(
+            ema_21=100.0, atr_pct=2.0, htf_ema50=101.0, htf_ema200=99.0,
+            ohlcv=ohlcv, last_price=105.0,
+        )
+        config = _tp_bare(
+            max_pullback_extension_atr=2.0,
+            require_htf_trend=True, require_bullish_candle=True,
+        )
+        result = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=105.0))
+        assert result is None
+
+    def test_extension_gate_allows_clean_pullback(self) -> None:
+        """A clean pullback (price at the level) passes the extension gate."""
+        strategy = TrendPullbackStrategy()
+        ohlcv = _make_pullback_ohlcv(prev_close=99.5, last_close=100.0, last_low=99.6)
+        snapshot = _make_tp_snapshot(
+            ema_21=100.0, atr_pct=2.0, htf_ema50=101.0, htf_ema200=99.0,
+            ohlcv=ohlcv, last_price=100.0,
+        )
+        config = _tp_bare(
+            max_pullback_extension_atr=2.0,
+            require_htf_trend=True, require_bullish_candle=True,
+        )
+        signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=100.0))
+        assert signal is not None
+
+    # ── Fix 5: adaptive ATR sizing-only ───────────────────────────────
+
+    def test_adaptive_atr_does_not_affect_min_atr_gate(self) -> None:
+        """Adaptive ATR must not inflate the min_atr_pct gate."""
+        strategy = TrendPullbackStrategy()
+        ohlcv = _make_pullback_ohlcv(prev_close=99.5, last_close=100.0, last_low=99.6)
+        snapshot = _make_tp_snapshot(
+            ema_21=100.0, atr_pct=1.0, htf_ema50=101.0, htf_ema200=99.0,
+            ohlcv=ohlcv, last_price=100.0,
+        )
+        # atr_pct=1.0 with adaptive on would scale to 1.2 for sizing, but the
+        # min_atr_pct gate must still see the raw 1.0 → passes (1.0 >= 1.0).
+        config = _tp_bare(
+            use_adaptive_atr=True, min_atr_pct=1.0,
+            require_htf_trend=True, require_bullish_candle=True,
+        )
+        signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=100.0))
+        assert signal is not None
+
+    def test_adaptive_atr_scales_sizing_only(self) -> None:
+        """Adaptive ATR should scale the ATR fallback sizing."""
+        strategy = TrendPullbackStrategy()
+        ohlcv = _make_pullback_ohlcv(prev_close=99.5, last_close=100.0, last_low=99.6)
+        snapshot = _make_tp_snapshot(
+            ema_21=100.0, atr_pct=2.0, htf_ema50=101.0, htf_ema200=99.0,
+            ohlcv=ohlcv, last_price=100.0,
+        )
+        # atr_pct=2.0 with adaptive on → sizing_atr = 2.0 × 1.8 = 3.6%.
+        # TP = 3.0 × 3.6% = 10.8%, SL = 2.0 × 3.6% = 7.2%.
+        config = _tp_bare(
+            use_atr_sizing=True, use_structural_sizing=False,
+            use_adaptive_atr=True, atr_tp_multiplier=3.0, atr_sl_multiplier=2.0,
+            require_htf_trend=True, require_bullish_candle=True,
+        )
+        signal = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=100.0))
+        assert signal is not None
+        assert signal.tp_pct is not None
+        assert abs(signal.tp_pct - 10.8) < 0.01
+        assert signal.sl_pct is not None
+        assert abs(signal.sl_pct - 7.2) < 0.01

@@ -233,18 +233,30 @@ DEFAULT_VWAP_REVERSION: dict[str, Any] = {
 }
 
 # ── Trend Pullback ──────────────────────────────────────────────────────────
+# Single source of truth for the ATR exit multipliers and the R:R floor.  The
+# class docstring and the inline fallbacks in ``trend_pullback.py`` MUST
+# reference these values (3.0 TP / 2.0 SL → ≥ 1.5 R:R) so they cannot drift.
 DEFAULT_TREND_PULLBACK: dict[str, Any] = {
     "enabled": False,
-    "tp_pct": 4.0,
-    "sl_pct": 3.0,
+    # Static fallback floor: 6.0 / 4.0 → 1.5 R:R (matches the ATR floor).
+    "tp_pct": 6.0,
+    "sl_pct": 4.0,
     "pullback_ema": 21,
+    # Fixed % proximity floor (never collapses to zero on dead coins).
     "pullback_proximity_pct": 0.3,
+    # Volatility-normalised proximity: effective band = max(floor, atr × ATR%).
+    "pullback_proximity_atr": 0.5,
     "use_vwap_as_level": True,
     "require_htf_trend": True,
     "require_bullish_candle": True,
     "candle_rejection_pct": 25.0,
-    "min_adx": 20.0,
-    "max_adx_for_entry": 28.0,
+    # ADX band widened (ADX is lagging on volatile alts); the primary
+    # anti-late-entry filter is the ATR-anchored extension gate below.
+    "min_adx": 18.0,
+    "max_adx_for_entry": 40.0,
+    # Volatility-normalised extension gate: price must not be more than this
+    # × ATR% past the pullback level (blocks late entries). 0 = disabled.
+    "max_pullback_extension_atr": 2.0,
     "use_atr_sizing": True,
     "use_structural_sizing": True,
     "structural_sl_buffer_atr": 0.15,
@@ -252,13 +264,19 @@ DEFAULT_TREND_PULLBACK: dict[str, Any] = {
     "atr_max_tp_mult": 4.0,
     "atr_min_sl_mult": 0.3,
     "atr_max_sl_mult": 3.0,
-    "atr_tp_multiplier": 1.2,
-    "atr_sl_multiplier": 1.0,
+    # Unified exit model (Fix 1): 3.0 / 2.0 → ≥ 1.5 R:R when ATR sizing active.
+    "atr_tp_multiplier": 3.0,
+    "atr_sl_multiplier": 2.0,
+    # Adaptive ATR applies to SIZING only (never the min_atr_pct gate).
+    "use_adaptive_atr": False,
     "min_atr_pct": 1.0,
-    "min_reward_risk_ratio": 1.0,
+    # R:R floor raised to 1.5 so structurally sub-1.5 exits are rejected, not
+    # silently degraded.
+    "min_reward_risk_ratio": 1.5,
     "flip_launcher_direction": None,
-    # Per-strategy analysis timeframe. Trend pullbacks need cleaner 1H structure.
-    "analysis_timeframe": "1H",
+    # Per-strategy analysis timeframe. Trend pullbacks execute at 15m, so the
+    # pullback level, candle confirmation, and ATR% are all 15m values (Fix 3).
+    "analysis_timeframe": "15m",
     # HTF regime gate preference: trend pullback wants a trending HTF → "trend".
     "htf_regime_preference": "trend",
     # Liquidity-aware gates (§3) — OFF by default (opt-in).
