@@ -2183,6 +2183,11 @@ class MarketService:
             "breakeven_done": False,
             "partial_done": False,
             "initial_contracts": None,
+            # Peak favorable excursion (best unrealized PnL reached during the
+            # trade), tracked so the performance summary can flag stop-outs
+            # that were once in profit.
+            "peak_pnl_pct": None,
+            "peak_pnl_usd": None,
         }
         self._emit_debug(
             f"TradeMgmt: seeded {symbol_key} side={side} entry={entry_price} "
@@ -2358,6 +2363,30 @@ class MarketService:
                         state["risk_pct"] = risk_pct
                         state["sl_price"] = sl_price
             r_multiple = (pnl_pct / risk_pct) if (risk_pct and risk_pct > 0) else None
+
+            # ── Peak favorable excursion tracking ───────────────────────────
+            # Track the best unrealized PnL reached during the trade so the
+            # performance summary can flag stop-outs that were once in profit.
+            # Uses the exchange-reported unrealized PnL (upl / uplRatio).
+            upl_ratio = self._extract_float(pos.get("uplRatio"))
+            upl_usd = self._extract_float(pos.get("upl"))
+            upl_pct = upl_ratio * 100.0 if upl_ratio is not None else None
+            peak_pct = state.get("peak_pnl_pct")
+            peak_usd = state.get("peak_pnl_usd")
+            peak_updated = False
+            if upl_pct is not None and (peak_pct is None or upl_pct > peak_pct):
+                state["peak_pnl_pct"] = upl_pct
+                peak_pct = upl_pct
+                peak_updated = True
+            if upl_usd is not None and (peak_usd is None or upl_usd > peak_usd):
+                state["peak_pnl_usd"] = upl_usd
+                peak_usd = upl_usd
+                peak_updated = True
+            if peak_updated:
+                self._emit_debug(
+                    f"TradeMgmt: {symbol} peak_pct={peak_pct!r} current_pct={upl_pct!r} "
+                    f"peak_usd={peak_usd!r} current_usd={upl_usd!r}"
+                )
 
             pos_side = str(pos.get("posSide", "")).lower()
             resolved_pos_side = pos_side if pos_side in ("long", "short") else None

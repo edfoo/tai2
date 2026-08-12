@@ -65,8 +65,10 @@ _SIGNAL_RE = re.compile(
 )
 
 # Peak-favorable-excursion line from profit-trailing supervision.
+# Emitted by the Alternator strategy (trailing profit/close) and by the
+# TradeMgmt supervision loop (peak PnL tracking).
 _PEAK_EXCURSION_RE = re.compile(
-    r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}).*Alternator: "
+    r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}).*(?:Alternator|TradeMgmt): "
     r"([A-Z0-9-]+-USDT-SWAP).*peak_pct=([0-9.eE+-]+|None) current_pct=([0-9.eE+-]+|None) "
     r"peak_usd=([0-9.eE+-]+|None) current_usd=([0-9.eE+-]+|None)"
 )
