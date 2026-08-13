@@ -359,7 +359,7 @@ def test_launcher_decision_seeds_trade_mgmt_state_on_success(monkeypatch: pytest
         service = MarketService(
             state_service=state,
             enable_websocket=False,
-            account_api=None,
+            account_api=object(),
             market_api=None,
             public_api=None,
             trade_api=object(),
@@ -385,9 +385,25 @@ def test_launcher_decision_seeds_trade_mgmt_state_on_success(monkeypatch: pytest
         async def fake_fetch_positions() -> list[dict[str, Any]]:
             return []
 
+        # The constructor builds a real AccountAPI when credentials exist in
+        # .env (account_api=None falls through to _build_account_api()). Pin a
+        # controlled balance so sizing isn't capped by a live OKX balance.
+        async def fake_fetch_account_balance(_self: MarketService) -> dict[str, Any]:
+            return {
+                "available_balances": {
+                    "USDT": {
+                        "available_usd": 1000.0,
+                        "cash": 1000.0,
+                    }
+                },
+                "available_eq_usd": 1000.0,
+                "total_eq_usd": 1000.0,
+            }
+
         monkeypatch.setattr(service, "_submit_order", fake_submit_order)
         monkeypatch.setattr(service, "_record_trade_execution", fake_record_trade_execution)
         monkeypatch.setattr(service, "_fetch_positions", fake_fetch_positions)
+        service._fetch_account_balance = MethodType(fake_fetch_account_balance, service)
 
         decision = {
             "action": "BUY",
