@@ -2974,6 +2974,15 @@ def register_pages(app: FastAPI) -> None:
             "time_stop_candles": 5,
             "time_stop_min_r": 0.3,
             "reentry_cooldown_seconds": 1800.0,
+            # Asymmetric exit: trail the remainder after partial TP so winners run.
+            "trailing_enabled": True,
+            "trailing_activate_r": 1.0,
+            "trailing_distance_atr": 1.5,
+            "trailing_floor_r": 0.5,
+            "trailing_step_r": 0.2,
+            # Software-stop loss: market-close when pnl_pct <= -sl_pct instead of
+            # relying on a visible resting SL (hides the exit level from the book).
+            "software_stop_loss_enabled": True,
         })
         commutator = strategy.setdefault("commutator", {
             "enabled": False,

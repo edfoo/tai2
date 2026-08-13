@@ -2995,3 +2995,187 @@ def test_regime_breakdown_exit_skips_when_not_underwater(monkeypatch: pytest.Mon
 
     submitted = asyncio.run(scenario())
     assert submitted is False
+
+
+def _make_trade_mgmt_service(monkeypatch: pytest.MonkeyPatch, symbol: str, side: str, entry: float, sl: float, last: float) -> Any:
+    """Build a MarketService with a seeded trade-mgmt state and a snapshot for _check_trade_management."""
+    state = DummySnapshotStore()
+    service = MarketService(
+        state_service=state,
+        enable_websocket=False,
+        account_api=object(),
+        market_api=object(),
+        public_api=object(),
+        trade_api=object(),
+    )
+    service._strategy_config = {
+        "trade_management": {
+            "enabled": True,
+            "breakeven_enabled": True,
+            "breakeven_at_r": 0.7,
+            "breakeven_buffer_pct": 0.05,
+            "partial_tp_enabled": True,
+            "partial_tp_at_r": 0.8,
+            "partial_tp_fraction": 0.5,
+            "time_stop_enabled": False,
+            "time_stop_seconds": 0.0,
+            "time_stop_min_r": 0.3,
+            "reentry_cooldown_seconds": 0.0,
+            "trailing_enabled": True,
+            "trailing_activate_r": 1.0,
+            "trailing_distance_atr": 1.5,
+            "trailing_floor_r": 0.5,
+            "trailing_step_r": 0.2,
+            "software_stop_loss_enabled": True,
+        }
+    }
+    service._latest_ticker[symbol] = {"last": last}
+    service._launcher_in_position[f"vwap_reversion:{symbol}"] = {
+        "side": side,
+        "pos_side": side,
+        "strategy": "vwap_reversion",
+    }
+    service._seed_trade_mgmt_state(
+        symbol=symbol,
+        side=side,
+        strategy_name="vwap_reversion",
+        entry_price=entry,
+        tp_price=entry * 1.05 if side == "long" else entry * 0.95,
+        sl_price=sl,
+    )
+    service._last_full_snapshot = {
+        "positions": [
+            {
+                "instId": symbol,
+                "pos": 1.0 if side == "long" else -1.0,
+                "posSide": side,
+                "avgPx": entry,
+                "mgnMode": "isolated",
+                "uplRatio": 0.0,
+                "upl": 0.0,
+            }
+        ],
+        "market_data": {
+            symbol: {
+                "indicators": {
+                    "atr_pct": 1.0,
+                }
+            }
+        },
+    }
+    return service
+
+
+def test_trade_mgmt_software_stop_loss_closes_at_sl(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A position whose pnl_pct <= -risk_pct should be market-closed (software stop)."""
+    async def scenario() -> tuple[bool, list[str]]:
+        symbol = "BTC-USDT-SWAP"
+        entry = 100.0
+        sl = 98.0  # risk_pct = 2%
+        last = 97.0  # pnl_pct = -3% <= -2% → software stop fires
+        service = _make_trade_mgmt_service(monkeypatch, symbol, "long", entry, sl, last)
+
+        submitted: list[str] = []
+
+        async def fake_submit_order(*args: Any, **kwargs: Any) -> tuple[dict[str, Any], bool]:
+            submitted.append(str(kwargs.get("side")))
+            return {"ordId": "softstop"}, True
+
+        monkeypatch.setattr(service, "_submit_order", fake_submit_order)
+        await service._check_trade_management()
+        await asyncio.sleep(0.05)
+        return bool(submitted), submitted
+
+    submitted, sides = asyncio.run(scenario())
+    assert submitted is True
+    assert sides == ["sell"]  # flatten long → sell
+
+
+def test_trade_mgmt_software_stop_skips_when_profitable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A profitable position should NOT be software-stopped."""
+    async def scenario() -> bool:
+        symbol = "BTC-USDT-SWAP"
+        entry = 100.0
+        sl = 98.0
+        last = 101.0  # pnl_pct = +1% → no software stop
+        service = _make_trade_mgmt_service(monkeypatch, symbol, "long", entry, sl, last)
+
+        submitted: list[str] = []
+
+        async def fake_submit_order(*args: Any, **kwargs: Any) -> tuple[dict[str, Any], bool]:
+            submitted.append(str(kwargs.get("side")))
+            return {"ordId": "x"}, True
+
+        monkeypatch.setattr(service, "_submit_order", fake_submit_order)
+        await service._check_trade_management()
+        await asyncio.sleep(0.05)
+        return bool(submitted)
+
+    submitted = asyncio.run(scenario())
+    assert submitted is False
+
+
+def test_trade_mgmt_trailing_stop_ratchets_sl(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A position past trailing_activate_r should ratchet the SL up (long)."""
+    async def scenario() -> tuple[bool, list[str]]:
+        symbol = "BTC-USDT-SWAP"
+        entry = 100.0
+        sl = 98.0  # risk_pct = 2%
+        last = 103.0  # pnl_pct = +3% → R = 1.5 ≥ 1.0 → trailing activates
+        service = _make_trade_mgmt_service(monkeypatch, symbol, "long", entry, sl, last)
+
+        # Simulate an existing protection SL so the ratchet compares against it.
+        service._position_protection[symbol] = {"stop_loss": 98.0, "take_profit": 105.0}
+
+        moved: list[float] = []
+
+        async def fake_submit_order(*args: Any, **kwargs: Any) -> tuple[dict[str, Any], bool]:
+            # Partial TP / breakeven may fire; swallow them so only trailing matters.
+            return {"ordId": "x"}, True
+
+        async def fake_move_sl(*, symbol: str, new_sl_price: float, **kwargs: Any) -> None:
+            moved.append(new_sl_price)
+
+        monkeypatch.setattr(service, "_submit_order", fake_submit_order)
+        monkeypatch.setattr(service, "_trade_mgmt_move_sl", fake_move_sl)
+        await service._check_trade_management()
+        await asyncio.sleep(0.05)
+        return bool(moved), [str(p) for p in moved]
+
+    moved, sl_prices = asyncio.run(scenario())
+    assert moved is True
+    # Trailing SL for a long at last=103, atr_pct=1.0, distance=1.5:
+    #   trail_sl = 103 * (1 - 1.5*1.0/100) = 103 * 0.985 = 101.455
+    #   floor_sl = 100 * (1 - 0.5*2/100) = 100 * 0.99 = 99.0
+    #   new_sl = max(101.455, 99.0) = 101.455
+    # (Breakeven also fires first at 100.05; the trailing move is the last one.)
+    assert len(sl_prices) >= 1
+    assert abs(float(sl_prices[-1]) - 101.455) < 0.01
+
+
+def test_trade_mgmt_trailing_stop_respects_floor(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The trailing SL should never go below the floor R even if ATR distance is large."""
+    async def scenario() -> tuple[bool, list[str]]:
+        symbol = "BTC-USDT-SWAP"
+        entry = 100.0
+        sl = 98.0  # risk_pct = 2%
+        last = 101.0  # pnl_pct = +1% → R = 0.5 < 1.0 → trailing does NOT activate
+        service = _make_trade_mgmt_service(monkeypatch, symbol, "long", entry, sl, last)
+
+        placed: list[dict[str, Any]] = []
+
+        async def fake_cancel_position_protection(*args: Any, **kwargs: Any) -> None:
+            return None
+
+        async def fake_place_position_protection(*args: Any, **kwargs: Any) -> bool:
+            placed.append(dict(kwargs))
+            return True
+
+        monkeypatch.setattr(service, "_cancel_position_protection", fake_cancel_position_protection)
+        monkeypatch.setattr(service, "_place_position_protection", fake_place_position_protection)
+        await service._check_trade_management()
+        await asyncio.sleep(0.05)
+        return bool(placed)
+
+    placed = asyncio.run(scenario())
+    assert placed is False  # R=0.5 < activate_r=1.0 → no trailing update

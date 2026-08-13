@@ -389,6 +389,7 @@ class MarketService:
         self._trade_mgmt_partial_closing: set[str] = set()
         self._trade_mgmt_time_closing: set[str] = set()
         self._trade_mgmt_be_updating: set[str] = set()
+        self._trade_mgmt_trailing_updating: set[str] = set()
         self._trade_mgmt_regime_closing: set[str] = set()
         self._reentry_cooldown_until: dict[str, float] = {}
         # Commutator strategy: when a position's loss hits the configured threshold,
@@ -2202,6 +2203,7 @@ class MarketService:
         self._trade_mgmt_partial_closing.discard(symbol_key)
         self._trade_mgmt_time_closing.discard(symbol_key)
         self._trade_mgmt_be_updating.discard(symbol_key)
+        self._trade_mgmt_trailing_updating.discard(symbol_key)
         self._trade_mgmt_regime_closing.discard(symbol_key)
         if not had_state:
             return
@@ -2228,7 +2230,7 @@ class MarketService:
         return True
 
     async def _check_trade_management(self) -> None:
-        """Apply breakeven stop, partial take-profit, and time-stop rules.
+        """Apply breakeven stop, partial take-profit, trailing stop, software-stop loss, and time-stop rules.
 
         Config lives under ``strategy.trade_management``:
           enabled                  – bool
@@ -2242,6 +2244,12 @@ class MarketService:
           time_stop_seconds        – float, max hold time (default 2700 = 45m)
           time_stop_min_r          – float, only time-stop if progress < this R (default 0.3)
           reentry_cooldown_seconds – float, block re-entry after close (default 1800)
+          trailing_enabled         – bool (default True), trail the remainder after partial TP
+          trailing_activate_r      – float, start trailing after this R (default 1.0)
+          trailing_distance_atr    – float, trail SL this many ATR% behind price (default 1.5)
+          trailing_floor_r         – float, never let trailing SL go below this R (default 0.5)
+          trailing_step_r          – float, only re-place SL when improvement exceeds this R (default 0.2)
+          software_stop_loss_enabled – bool (default True), market-close when pnl_pct <= -sl_pct
         """
         tm = self._trade_mgmt_config()
         if not tm.get("enabled"):
@@ -2287,6 +2295,22 @@ class MarketService:
         time_stop_min_r = self._extract_float(tm.get("time_stop_min_r"))
         if time_stop_min_r is None:
             time_stop_min_r = 0.3
+        # Asymmetric exit: trailing stop on the remainder after partial TP.
+        trailing_enabled = bool(tm.get("trailing_enabled", True))
+        trailing_activate_r = self._extract_float(tm.get("trailing_activate_r"))
+        if trailing_activate_r is None:
+            trailing_activate_r = 1.0
+        trailing_distance_atr = self._extract_float(tm.get("trailing_distance_atr"))
+        if trailing_distance_atr is None:
+            trailing_distance_atr = 1.5
+        trailing_floor_r = self._extract_float(tm.get("trailing_floor_r"))
+        if trailing_floor_r is None:
+            trailing_floor_r = 0.5
+        trailing_step_r = self._extract_float(tm.get("trailing_step_r"))
+        if trailing_step_r is None:
+            trailing_step_r = 0.2
+        # Software-stop loss: market-close when pnl_pct <= -sl_pct (hides the SL level).
+        software_stop_loss_enabled = bool(tm.get("software_stop_loss_enabled", True))
 
         for pos in positions:
             if not isinstance(pos, dict):
@@ -2394,6 +2418,37 @@ class MarketService:
             action = "BUY" if is_long else "SELL"
             close_side = "sell" if is_long else "buy"
 
+            # ── Software-stop loss ────────────────────────────────────────
+            # Market-close when the monitored PnL crosses the SL threshold instead
+            # of relying on a visible resting SL algo order. This hides the real
+            # exit level from the order book (anti stop-hunting). A wide structural
+            # disaster SL in the book remains as the safety net for process death /
+            # disconnect / flash crashes.
+            if (
+                software_stop_loss_enabled
+                and risk_pct is not None
+                and risk_pct > 0
+                and pnl_pct <= -risk_pct
+                and symbol not in self._trade_mgmt_time_closing
+                and symbol not in self._trade_mgmt_regime_closing
+            ):
+                self._emit_debug(
+                    f"TradeMgmt software-stop: {symbol} pnl_pct={pnl_pct:.2f}% "
+                    f"<= -risk_pct={-risk_pct:.2f}% (R={r_multiple:.2f}) — closing"
+                )
+                self._trade_mgmt_time_closing.add(symbol)
+                asyncio.create_task(
+                    self._trade_mgmt_full_close(
+                        symbol=symbol,
+                        close_side=close_side,
+                        pos_side=resolved_pos_side,
+                        contracts=abs(pos_val),
+                        trade_mode=trade_mode,
+                    ),
+                    name=f"trade-mgmt-softstop-{symbol}",
+                )
+                continue
+
             # ── Breakeven stop ──────────────────────────────────────────
             if (
                 be_enabled
@@ -2462,6 +2517,73 @@ class MarketService:
                             trade_mode=trade_mode,
                         ),
                         name=f"trade-mgmt-partial-{symbol}",
+                    )
+
+            # ── Trailing stop (asymmetric exit on the remainder) ─────────
+            # After the partial TP, let the remainder run and trail the SL behind
+            # price instead of capping it at a fixed TP. The trailing SL only ever
+            # moves in the profitable direction (ratchet) and never goes below the
+            # floor R, so a winner that reverses closes at no worse than the floor.
+            if (
+                trailing_enabled
+                and trailing_distance_atr > 0
+                and r_multiple is not None
+                and r_multiple >= trailing_activate_r
+                and risk_pct is not None
+                and risk_pct > 0
+                and symbol not in self._trade_mgmt_trailing_updating
+                and symbol not in self._trade_mgmt_time_closing
+                and symbol not in self._trade_mgmt_regime_closing
+            ):
+                # ATR% for the trade timeframe, from the snapshot indicators.
+                atr_tf_pct = self._extract_float(
+                    ((snapshot.get("market_data") or {}).get(symbol) or {})
+                    .get("indicators", {})
+                    .get("atr_pct")
+                )
+                if atr_tf_pct is None or atr_tf_pct <= 0:
+                    atr_tf_pct = risk_pct  # fallback: use the SL distance as ATR proxy
+
+                # Trailing SL distance behind price (in price units).
+                trail_dist = trailing_distance_atr * atr_tf_pct / 100.0 * last_price
+                if is_long:
+                    trail_sl = last_price - trail_dist
+                    floor_sl = entry_price * (1.0 - trailing_floor_r * risk_pct / 100.0)
+                    new_sl = max(trail_sl, floor_sl)
+                else:
+                    trail_sl = last_price + trail_dist
+                    floor_sl = entry_price * (1.0 + trailing_floor_r * risk_pct / 100.0)
+                    new_sl = min(trail_sl, floor_sl)
+
+                # Ratchet: only update if strictly better than the current SL by
+                # at least trailing_step_r * risk_pct (avoids re-placing every tick).
+                current_sl = self._extract_float(
+                    (self._position_protection.get(symbol) or {}).get("stop_loss")
+                ) or state.get("sl_price")
+                step_dist = trailing_step_r * risk_pct / 100.0 * entry_price
+                should_update = True
+                if current_sl is not None:
+                    if is_long and new_sl <= current_sl + step_dist:
+                        should_update = False
+                    if not is_long and new_sl >= current_sl - step_dist:
+                        should_update = False
+                if should_update:
+                    self._emit_debug(
+                        f"TradeMgmt trailing: {symbol} R={r_multiple:.2f} ≥ "
+                        f"{trailing_activate_r:.2f} → SL {current_sl if current_sl is not None else 'n/a'} "
+                        f"→ {new_sl:.6f} (floor {floor_sl:.6f}, atr_pct={atr_tf_pct:.2f})"
+                    )
+                    state["sl_price"] = new_sl
+                    self._trade_mgmt_trailing_updating.add(symbol)
+                    asyncio.create_task(
+                        self._trade_mgmt_move_sl(
+                            symbol=symbol,
+                            new_sl_price=new_sl,
+                            pos_side=resolved_pos_side,
+                            trade_mode=trade_mode,
+                            action=action,
+                        ),
+                        name=f"trade-mgmt-trailing-{symbol}",
                     )
 
             # ── Time stop ───────────────────────────────────────────────
@@ -2538,6 +2660,7 @@ class MarketService:
                 state["breakeven_done"] = False
         finally:
             self._trade_mgmt_be_updating.discard(symbol_key)
+            self._trade_mgmt_trailing_updating.discard(symbol_key)
 
     async def _trade_mgmt_partial_close(
         self,
