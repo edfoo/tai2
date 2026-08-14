@@ -193,20 +193,27 @@ def compute_tp_sl_pct(
     atr_sl_multiplier: float | None = None,
     audit: Callable[[str], None] | None = None,
 ) -> tuple[float | None, float | None]:
-    """Compute strategy-level TP% / SL%, honouring explicit static overrides.
+    """Compute strategy-level TP% / SL%.
 
-    Priority
-    --------
-    1. If both ``static_tp_pct`` and ``static_sl_pct`` are provided, use them
-       verbatim (user explicitly configured the exits).
-    2. If both ATR multipliers are provided, use them directly:
-       ``tp_pct = atr_tp_multiplier × atr_tf_pct``,
-       ``sl_pct = atr_sl_multiplier × atr_tf_pct``.  This preserves the
-       strategy's own ATR-scaled sizing (e.g. TP 2.0×ATR, SL 1.5×ATR).
-    3. Otherwise derive dynamically from ``calculate()``.
-    4. If dynamic sizing is rejected (reward-to-risk too low OR structure
-       data insufficient), gracefully fall back to whatever static % is
-       available (``None`` otherwise), rather than raising.
+    Priority (structure-first, volatility-aware; static is a *fallback*):
+    1. **Structural sizing** — the strategy's own thesis-specific levels
+       (``ctx.tp_target`` / ``ctx.sl_level``, e.g. TP at VWAP / BB middle /
+       swing, SL beyond the invalidation).  Computed via ``calculate()``,
+       which clamps to ATR bounds and enforces R:R >= 1.8.  If the structural
+       geometry is rejected (R:R too low or insufficient structure), fall
+       through to ATR.
+    2. **ATR sizing** — ``tp_pct = atr_tp_multiplier × atr_tf_pct``,
+       ``sl_pct = atr_sl_multiplier × atr_tf_pct`` (volatility-adaptive).
+    3. **Static %** — used only when neither structural nor ATR sizing is
+       active (i.e. the user explicitly opted out of both).  This is a
+       *fallback*, not the default: the canonical strategy defaults always
+       populate ``tp_pct``/``sl_pct``, so a static-first priority would
+       silently bypass the ATR/structural sizing the strategies are
+       configured for (the live path was executing static 6%/4% or inverted
+       2%/3% geometry instead of the tuned ATR/structural exits).
+    4. **Last resort** — derive dynamically from ``calculate()`` (generic
+       structure/ATR fallback) when no structural levels, ATR multipliers,
+       or static % are available.
 
     This deliberately does *not* drop the trade on an unacceptable R:R at the
     strategy layer — the launcher guardrail (``require_reward_risk_ratio``)
@@ -218,11 +225,36 @@ def compute_tp_sl_pct(
     structurally-sized trade was downgraded instead of silently re-sizing.
     """
 
-    if static_tp_pct is not None and static_sl_pct is not None:
-        if audit is not None:
-            audit(f"sizing=static tp={static_tp_pct} sl={static_sl_pct}")
-        return static_tp_pct, static_sl_pct
+    # 1. Structural sizing (thesis-specific levels present).
+    if ctx.tp_target is not None or ctx.sl_level is not None:
+        try:
+            tp_price, sl_price = calculate(entry, side, ctx)
+            tp_pct = abs(tp_price - entry) / entry * 100.0
+            sl_pct = abs(sl_price - entry) / entry * 100.0
+            if audit is not None:
+                audit(f"sizing=structural tp_pct={tp_pct:.3f} sl_pct={sl_pct:.3f}")
+            return tp_pct, sl_pct
+        except ValueError as exc:
+            # The structural exit was rejected — most commonly because the
+            # reward-to-risk fell below the 1.8× floor in `calculate()`.  We
+            # deliberately do NOT drop the trade here: the launcher guardrail
+            # (`require_reward_risk_ratio`) is the single owner of the R:R
+            # decision.  Fall through to ATR sizing (then static) so the
+            # strategy's configured volatility-adaptive exits still apply.
+            if audit is not None:
+                audit(
+                    f"sizing=structural-rejected ({exc}) — falling back to ATR/static"
+                )
+            logger.warning(
+                "compute_tp_sl_pct: structural exit rejected for %s @ %.6f — %s. "
+                "Falling back to ATR/static exits. The launcher R:R guardrail "
+                "will re-evaluate the final geometry.",
+                side,
+                entry,
+                exc,
+            )
 
+    # 2. ATR sizing.
     if atr_tp_multiplier is not None and atr_sl_multiplier is not None and ctx.atr_tf_pct > 0:
         if audit is not None:
             audit(
@@ -231,6 +263,13 @@ def compute_tp_sl_pct(
             )
         return atr_tp_multiplier * ctx.atr_tf_pct, atr_sl_multiplier * ctx.atr_tf_pct
 
+    # 3. Static fallback (only when neither structural nor ATR is active).
+    if static_tp_pct is not None and static_sl_pct is not None:
+        if audit is not None:
+            audit(f"sizing=static tp={static_tp_pct} sl={static_sl_pct}")
+        return static_tp_pct, static_sl_pct
+
+    # 4. Last resort: derive dynamically (generic structure/ATR fallback).
     try:
         tp_price, sl_price = calculate(entry, side, ctx)
         tp_pct = abs(tp_price - entry) / entry * 100.0
@@ -239,23 +278,6 @@ def compute_tp_sl_pct(
             audit(f"sizing=structural tp_pct={tp_pct:.3f} sl_pct={sl_pct:.3f}")
         return tp_pct, sl_pct
     except ValueError as exc:
-        # The dynamic (structural) exit was rejected — most commonly because
-        # the reward-to-risk fell below the 1.8× floor in `calculate()`.  We
-        # deliberately do NOT drop the trade here: the launcher guardrail
-        # (`require_reward_risk_ratio`) is the single owner of the R:R
-        # decision.  But we must surface the degradation so it is auditable
-        # in /debug and the log file — otherwise positions execute at 1:1 or
-        # worse without ever satisfying the intended reward-to-risk.
-        logger.warning(
-            "compute_tp_sl_pct: dynamic exit rejected for %s @ %.6f — %s. "
-            "Falling back to static/ATR exits (tp=%s, sl=%s). The launcher "
-            "R:R guardrail will re-evaluate the final geometry.",
-            side,
-            entry,
-            exc,
-            static_tp_pct,
-            static_sl_pct,
-        )
         if audit is not None:
             audit(
                 f"sizing=fallback ({exc}) tp={static_tp_pct} sl={static_sl_pct} "

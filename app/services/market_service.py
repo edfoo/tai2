@@ -1556,15 +1556,43 @@ class MarketService:
                 "pos_side": pos_side or None,
                 "strategy": "",
             }
+            # Recover the live TP/SL from OKX so the re-hydrated position gets
+            # full trade-management (breakeven / partial / time-stop all need
+            # tp_price/sl_price to compute R-multiples).  Without this, a
+            # position re-seeded after a warm restart has tp=None/sl=None and
+            # the position-management logic silently does nothing for it.
+            # Fall back to the in-memory protection cache when the OKX query
+            # is unavailable or returns nothing.
+            _tp = None
+            _sl = None
+            try:
+                _prot = await self._fetch_latest_symbol_protection(symbol, pos_side=pos_side or None)
+                if _prot:
+                    _tp = self._extract_float(
+                        _prot.get("tpTriggerPx") or _prot.get("tpOrdPx") or _prot.get("tp")
+                    )
+                    _sl = self._extract_float(
+                        _prot.get("slTriggerPx") or _prot.get("slOrdPx") or _prot.get("sl")
+                    )
+            except Exception as exc:  # pragma: no cover - network safety
+                self._emit_debug(f"Re-hydration TP/SL fetch failed for {symbol}: {exc}")
+            if _tp is None or _sl is None:
+                _cached = self._position_protection.get(symbol.upper()) or {}
+                if _tp is None:
+                    _tp = self._extract_float(_cached.get("take_profit"))
+                if _sl is None:
+                    _sl = self._extract_float(_cached.get("stop_loss"))
             self._seed_trade_mgmt_state(
                 symbol=symbol,
                 side=side,
                 entry_price=avg_px,
+                tp_price=_tp,
+                sl_price=_sl,
             )
             rehydrated += 1
             self._emit_debug(
                 f"Re-hydrated launcher tracking for open position {symbol} "
-                f"({side}, entry={avg_px})"
+                f"({side}, entry={avg_px}, tp={_tp}, sl={_sl})"
             )
 
         if rehydrated:
@@ -10057,8 +10085,21 @@ class MarketService:
 
         # Reward-to-risk guard: take-profit distance must be >= min_reward_risk_ratio * stop-loss distance.
         # This prevents trades where the potential loss greatly outweighs the potential gain.
+        #
+        # Launcher decisions are ALWAYS subject to the R:R guardrail, even if
+        # the persisted guardrails config has require_reward_risk_ratio=False.
+        # The launcher strategies are rule-based and can emit inverted-R:R
+        # geometry (e.g. vwap_reversion static 2%/3% → R:R 0.67) that the
+        # config default would otherwise let through.  Forcing the guardrail
+        # on for launcher-originated decisions is a hard safety invariant:
+        # a trade whose potential loss exceeds its potential gain must never
+        # reach the exchange, regardless of how the user configured the
+        # (LLM-facing) guardrail toggle.
+        _require_rr = bool(guardrails.get("require_reward_risk_ratio", True))
+        if _is_launcher_decision:
+            _require_rr = True
         if (
-            guardrails.get("require_reward_risk_ratio", True)
+            _require_rr
             and not reduce_only
             and take_profit_price
             and isinstance(take_profit_price, (int, float))
