@@ -4420,7 +4420,10 @@ def register_pages(app: FastAPI) -> None:
                 """Fill all VWAP Reversion fields with the recommended configuration."""
                 vr_tp_input.value = 2.0
                 vr_sl_input.value = 3.0
-                vr_min_dist_atr_input.value = 2.0
+                # Min extension raised to 2.5 so the TP-hop back to VWAP is
+                # meaningful relative to the structural SL → better structural
+                # R:R and fewer guardrail blocks (matches DEFAULT_VWAP_REVERSION).
+                vr_min_dist_atr_input.value = 2.5
                 vr_max_dist_atr_input.value = 3.0
                 vr_max_adx_input.value = 25.0
                 vr_require_closeback_switch.value = True
@@ -4431,11 +4434,17 @@ def register_pages(app: FastAPI) -> None:
                 vr_max_bw_pct_input.value = 55.0
                 vr_regime_lookback_input.value = 50
                 vr_use_atr_sizing_switch.value = True
-                vr_use_structural_switch.value = False
+                # Structural sizing ON: TP at VWAP (the magnet), SL beyond the
+                # extension candle.  This is the strategy's primary exit model
+                # (matches DEFAULT_VWAP_REVERSION).  ATR is the fallback.
+                vr_use_structural_switch.value = True
                 vr_structural_sl_buffer_input.value = 0.15
                 vr_atr_min_tp_input.value = 0.5
                 vr_atr_max_tp_input.value = 4.0
-                vr_atr_min_sl_input.value = 0.3
+                # SL floor raised to 0.5 so the stop survives an ordinary 15m
+                # wick instead of being clamped into a wick-able gap (matches
+                # DEFAULT_VWAP_REVERSION).
+                vr_atr_min_sl_input.value = 0.5
                 vr_atr_max_sl_input.value = 3.0
                 vr_atr_tp_mult_input.value = 1.0
                 vr_atr_sl_mult_input.value = 1.0
