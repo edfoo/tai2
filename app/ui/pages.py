@@ -5548,6 +5548,13 @@ def register_pages(app: FastAPI) -> None:
                     "time_stop_candles": int(tm_time_candles_input.value or 8),
                     "time_stop_min_r": float(tm_time_min_r_input.value or 0.3),
                     "reentry_cooldown_seconds": float(tm_cooldown_input.value or 900.0),
+                    # Software-stop loss: market-close when pnl_pct <= -sl_pct
+                    # (hides the exit level from the book).  No UI toggle — this
+                    # preserves the current value (default True) so it is no
+                    # longer silently dropped from the persisted config on Save.
+                    "software_stop_loss_enabled": bool(
+                        trade_management.get("software_stop_loss_enabled", True)
+                    ),
                 },
                 "commutator": {
                     "enabled": bool(commutator_switch.value),
