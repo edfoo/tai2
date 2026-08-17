@@ -2365,7 +2365,18 @@ class MarketService:
                     k.endswith(f":{symbol}") or k == symbol
                     for k in self._launcher_in_position
                 )
-                if not is_launcher:
+                # Also manage positions that carry live TP/SL protection on the
+                # exchange — evidence the bot opened them (the launcher places
+                # TP/SL algos on entry).  This covers the case where launcher
+                # tracking was cleared on a close but the position re-opened
+                # (e.g. a manual re-open, or a close/re-open race) and the
+                # position-alignment guardrail then blocks a fresh launcher
+                # entry, leaving the open position unmanaged.
+                has_protection = bool(
+                    (self._position_protection.get(symbol) or {}).get("stop_loss")
+                    or (self._position_protection.get(symbol) or {}).get("take_profit")
+                )
+                if not is_launcher and not has_protection:
                     continue
                 avg_px = self._extract_float(pos.get("avgPx"))
                 self._seed_trade_mgmt_state(
