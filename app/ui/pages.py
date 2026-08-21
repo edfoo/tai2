@@ -4965,7 +4965,7 @@ def register_pages(app: FastAPI) -> None:
                             ).props("dense color=primary")
                             tm_time_sec_input = ui.number(
                                 label="Max hold (seconds)",
-                                value=float(trade_management.get("time_stop_seconds") or 2700.0),
+                                value=float(trade_management.get("time_stop_seconds") or 1800.0),
                                 min=60, max=86400, step=60, format="%.0f",
                             ).classes("w-40").props("dense")
                             tm_time_candles_input = ui.number(
@@ -5555,7 +5555,7 @@ def register_pages(app: FastAPI) -> None:
                     "partial_tp_at_r": float(tm_partial_at_r_input.value or 1.0),
                     "partial_tp_fraction": float(tm_partial_frac_input.value or 0.5),
                     "time_stop_enabled": bool(tm_time_switch.value),
-                    "time_stop_seconds": float(tm_time_sec_input.value or 3600.0),
+                    "time_stop_seconds": float(tm_time_sec_input.value or 1800.0),
                     "time_stop_candles": int(tm_time_candles_input.value or 8),
                     "time_stop_min_r": float(tm_time_min_r_input.value or 0.3),
                     "time_stop_underwater_only": bool(tm_time_underwater_switch.value),
