@@ -2973,6 +2973,7 @@ def register_pages(app: FastAPI) -> None:
             "time_stop_seconds": 2700.0,
             "time_stop_candles": 5,
             "time_stop_min_r": 0.3,
+            "time_stop_underwater_only": True,
             "reentry_cooldown_seconds": 1800.0,
             # Asymmetric exit: trail the remainder after partial TP so winners run.
             "trailing_enabled": True,
@@ -4974,7 +4975,14 @@ def register_pages(app: FastAPI) -> None:
                                 value=float(trade_management.get("time_stop_min_r") or 0.3),
                                 min=0.0, max=2.0, step=0.1, format="%.1f",
                             ).classes("w-32").props("dense")
+                            tm_time_underwater_switch = ui.switch(
+                                "Underwater only",
+                                value=bool(trade_management.get("time_stop_underwater_only", True)),
+                            ).props("dense color=primary")
                         ui.label("Close if held too long without reaching min R progress.").classes("text-xs text-slate-500")
+                        ui.label(
+                            "Underwater only: keep stalled-but-profitable positions (don't churn flat); only time-stop negative positions."
+                        ).classes("text-xs text-slate-500")
                         ui.separator().classes("my-2")
                         ui.label("Re-entry cooldown").classes("text-xs font-semibold text-slate-600")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
@@ -5547,6 +5555,7 @@ def register_pages(app: FastAPI) -> None:
                     "time_stop_seconds": float(tm_time_sec_input.value or 3600.0),
                     "time_stop_candles": int(tm_time_candles_input.value or 8),
                     "time_stop_min_r": float(tm_time_min_r_input.value or 0.3),
+                    "time_stop_underwater_only": bool(tm_time_underwater_switch.value),
                     "reentry_cooldown_seconds": float(tm_cooldown_input.value or 900.0),
                     # Software-stop loss: market-close when pnl_pct <= -sl_pct
                     # (hides the exit level from the book).  No UI toggle — this
@@ -7040,6 +7049,13 @@ def register_pages(app: FastAPI) -> None:
                 ).props(
                     "hint='Block any new entry order that has no stop-loss; prevents unprotected positions' persistent-hint"
                 )
+                sl_limit_offset_input = ui.number(
+                    label="SL Limit Offset %",
+                    value=float(guardrails.get("sl_limit_offset_ratio", 0.001)) * 100,
+                    min=0.01, max=5.0, step=0.01, format="%.2f",
+                ).classes("w-full").props(
+                    "hint='Stop-loss is submitted as a limit offset past the trigger (not market) to bound slippage on thin alt books' persistent-hint suffix='%'"
+                )
                 flip_llm_decision_switch = ui.switch(
                     "Flip LLM Decision",
                     value=guardrails.get("flip_llm_decision", False),
@@ -8024,6 +8040,9 @@ def register_pages(app: FastAPI) -> None:
                 "fallback_orders_enabled": bool(fallback_orders_switch.value),
                 "require_reward_risk_ratio": bool(require_rr_switch.value),
                 "require_protection": bool(require_protection_switch.value),
+                "sl_limit_offset_ratio": _safe_float(sl_limit_offset_input.value) / 100.0
+                if _safe_float(sl_limit_offset_input.value) is not None
+                else 0.001,
                 "flip_llm_decision": bool(flip_llm_decision_switch.value),
                 "adjust_invalid_tp": bool(adjust_invalid_tp_switch.value),
                 "adjust_invalid_tp_pct": (_safe_float(adjust_invalid_tp_pct_input.value) or 10.0) / 100,
@@ -8466,6 +8485,9 @@ def register_pages(app: FastAPI) -> None:
                 "fallback_orders_enabled": bool(fallback_orders_switch.value),
                 "require_reward_risk_ratio": bool(require_rr_switch.value),
                 "require_protection": bool(require_protection_switch.value),
+                "sl_limit_offset_ratio": _safe_float(sl_limit_offset_input.value) / 100.0
+                if _safe_float(sl_limit_offset_input.value) is not None
+                else 0.001,
                 "flip_llm_decision": bool(flip_llm_decision_switch.value),
                 "adjust_invalid_tp": bool(adjust_invalid_tp_switch.value),
                 "adjust_invalid_tp_pct": (_safe_float(adjust_invalid_tp_pct_input.value) or 10.0) / 100,
