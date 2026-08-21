@@ -53,6 +53,7 @@ from app.services.openrouter_service import (
     list_openrouter_models,
 )
 from app.services.prompt_utils import sanitize_prompt_text
+from app.services.strategies.defaults import strategy_defaults, trade_management_defaults
 from app.ui.components import SnapshotStore, badge_stat
 
 NAV_LINKS = [
@@ -2961,30 +2962,9 @@ def register_pages(app: FastAPI) -> None:
             "step_pct": 10.0,
             "lock_ratio": 0.5,
         })
-        trade_management = strategy.setdefault("trade_management", {
-            "enabled": True,
-            "breakeven_enabled": True,
-            "breakeven_at_r": 0.7,
-            "breakeven_buffer_pct": 0.05,
-            "partial_tp_enabled": True,
-            "partial_tp_at_r": 0.8,
-            "partial_tp_fraction": 0.5,
-            "time_stop_enabled": True,
-            "time_stop_seconds": 1800.0,
-            "time_stop_candles": 5,
-            "time_stop_min_r": 0.3,
-            "time_stop_underwater_only": True,
-            "reentry_cooldown_seconds": 1800.0,
-            # Asymmetric exit: trail the remainder after partial TP so winners run.
-            "trailing_enabled": True,
-            "trailing_activate_r": 1.0,
-            "trailing_distance_atr": 1.5,
-            "trailing_floor_r": 0.5,
-            "trailing_step_r": 0.2,
-            # Software-stop loss: market-close when pnl_pct <= -sl_pct instead of
-            # relying on a visible resting SL (hides the exit level from the book).
-            "software_stop_loss_enabled": True,
-        })
+        trade_management = strategy.setdefault(
+            "trade_management", trade_management_defaults()
+        )
         commutator = strategy.setdefault("commutator", {
             "enabled": False,
             "reverse_at_loss_pct": None,
@@ -3188,14 +3168,6 @@ def register_pages(app: FastAPI) -> None:
                             ).classes("w-56").props(
                                 "hint='chop=block when HTF trending, trend=block when HTF ranging, off=disable gate' persistent-hint dense"
                             )
-                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
-                            mr_exit_regime_switch = ui.switch(
-                                "Exit on regime breakdown",
-                                value=bool(_mr_cfg.get("exit_on_regime_breakdown", False)),
-                            ).props("dense color=amber")
-                            ui.label(
-                                "Flatten an open MR position when the HTF regime flips from chop to trend while underwater."
-                            ).classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             _mr_analysis_tf = _mr_cfg.get("analysis_timeframe") or "·"
                             mr_analysis_tf_select = ui.select(
@@ -3480,69 +3452,57 @@ def register_pages(app: FastAPI) -> None:
 
             def _set_mr_defaults() -> None:
                 """Fill all Mean Reversion fields with the recommended configuration."""
-                # Wider invalidation, faster TP — harvest range noise, survive 15m wicks.
-                mr_tp_input.value = 2.0
-                mr_sl_input.value = 3.0
-                # Dynamic TP is redundant/harmful when ATR sizing is on.
-                mr_dynamic_tp_switch.value = False
-                mr_dynamic_tp_fraction_input.value = 0.7
-                mr_rsi_oversold_input.value = 30.0
-                mr_rsi_overbought_input.value = 70.0
-                mr_min_adx_input.value = 0.0
-                mr_max_adx_input.value = 28.0
-                mr_require_htf_switch.value = True
-                mr_htf_regime_select.value = "chop"
-                mr_exit_regime_switch.value = False
-                mr_analysis_tf_select.value = "15m"
-                mr_require_cmf_switch.value = False
-                mr_require_htf_cmf_switch.value = False
-                # CMF cross is rare and cuts frequency ~90%; BB position +
-                # candle rejection already confirm extension+exhaustion.
-                mr_require_cmf_cross_switch.value = False
-                mr_require_cmf_no_div_switch.value = False
-                mr_require_fp_delta_switch.value = False
-                mr_require_bb_switch.value = True
-                mr_bb_proximity_input.value = 0.5
-                mr_min_bb_bw_input.value = 2.0
-                mr_max_bb_bw_input.value = 0.0
-                mr_candle_rejection_switch.value = True
-                mr_candle_rejection_pct_input.value = 30.0
-                # VWAP reversion is redundant with BB position + candle rejection.
-                mr_vwap_reversion_switch.value = False
-                mr_vwap_min_dist_input.value = 1.0
-                # Volume cooling is redundant with candle rejection.
-                mr_volume_cooling_switch.value = False
-                mr_volume_rsi_max_input.value = 80.0
-                mr_require_regime_switch.value = True
-                mr_max_bw_pct_input.value = 55.0
-                mr_regime_lookback_input.value = 50
-                mr_use_atr_sizing_switch.value = True
-                mr_use_structural_switch.value = True
-                mr_structural_sl_buffer_input.value = 1.0
-                mr_atr_min_tp_input.value = 0.5
-                mr_atr_max_tp_input.value = 4.0
-                mr_atr_min_sl_input.value = 0.3
-                mr_atr_max_sl_input.value = 3.0
-                # Real R:R: wider SL to survive 15m wicks, modest TP to bank
-                # the snapback.  Structural sizing anchors SL to validated
-                # structure (swing/VA/closed-candle) with a 1.0×ATR buffer.
-                mr_atr_tp_mult_input.value = 1.8
-                mr_atr_sl_mult_input.value = 1.0
-                mr_min_atr_pct_input.value = 1.0
-                # R:R guardrail: enforce >= 1.0 for this strategy.
-                mr_min_rr_input.value = 1.0
-                # Do not flip the strategy's chosen direction — flipping
-                # destroys the directional edge the strategy is built around.
-                mr_flip_switch.value = False
-                mr_flip_select.value = None
-                # Liquidity-aware gates: require price inside value area ON by
-                # default (prevents fading breaks below value on thin alt books).
-                mr_require_in_va_switch.value = True
-                mr_require_funding_switch.value = False
-                mr_funding_max_rate_input.value = 0.001
-                mr_require_balanced_switch.value = False
-                mr_imbalance_min_input.value = 0.6
-                mr_imbalance_max_input.value = 1.4
+                d = strategy_defaults("mean_reversion")
+                mr_tp_input.value = d["tp_pct"]
+                mr_sl_input.value = d["sl_pct"]
+                mr_dynamic_tp_switch.value = d["dynamic_tp"]
+                mr_dynamic_tp_fraction_input.value = d["dynamic_tp_fraction"]
+                mr_rsi_oversold_input.value = d["rsi_oversold"]
+                mr_rsi_overbought_input.value = d["rsi_overbought"]
+                mr_min_adx_input.value = d["min_adx"]
+                mr_max_adx_input.value = d["max_adx"]
+                mr_require_htf_switch.value = d["require_htf_trend"]
+                mr_htf_regime_select.value = d["htf_regime_preference"]
+                mr_exit_regime_switch.value = d["exit_on_regime_breakdown"]
+                mr_analysis_tf_select.value = d["analysis_timeframe"]
+                mr_require_cmf_switch.value = d["require_cmf"]
+                mr_require_htf_cmf_switch.value = d["require_htf_cmf"]
+                mr_require_cmf_cross_switch.value = d["require_cmf_cross"]
+                mr_require_cmf_no_div_switch.value = d["require_cmf_no_divergence"]
+                mr_require_fp_delta_switch.value = d["require_footprint_delta"]
+                mr_require_bb_switch.value = d["require_bb_position"]
+                mr_bb_proximity_input.value = d["bb_proximity_pct"]
+                mr_min_bb_bw_input.value = d["min_bb_bandwidth"]
+                mr_max_bb_bw_input.value = d["max_bb_bandwidth"]
+                mr_candle_rejection_switch.value = d["require_candle_rejection"]
+                mr_candle_rejection_pct_input.value = d["candle_rejection_pct"]
+                mr_vwap_reversion_switch.value = d["require_vwap_reversion"]
+                mr_vwap_min_dist_input.value = d["vwap_min_distance_pct"]
+                mr_volume_cooling_switch.value = d["require_volume_cooling"]
+                mr_volume_rsi_max_input.value = d["volume_rsi_max"]
+                mr_require_regime_switch.value = d["require_regime"]
+                mr_max_bw_pct_input.value = d["max_bb_bandwidth_percentile"]
+                mr_regime_lookback_input.value = d["regime_lookback"]
+                mr_use_atr_sizing_switch.value = d["use_atr_sizing"]
+                mr_use_structural_switch.value = d["use_structural_sizing"]
+                mr_structural_sl_buffer_input.value = d["structural_sl_buffer_atr"]
+                mr_atr_min_tp_input.value = d["atr_min_tp_mult"]
+                mr_atr_max_tp_input.value = d["atr_max_tp_mult"]
+                mr_atr_min_sl_input.value = d["atr_min_sl_mult"]
+                mr_atr_max_sl_input.value = d["atr_max_sl_mult"]
+                mr_atr_tp_mult_input.value = d["atr_tp_multiplier"]
+                mr_atr_sl_mult_input.value = d["atr_sl_multiplier"]
+                mr_min_atr_pct_input.value = d["min_atr_pct"]
+                mr_min_rr_input.value = d["min_reward_risk_ratio"]
+                _flip = d["flip_launcher_direction"]
+                mr_flip_switch.value = _flip is not None
+                mr_flip_select.value = _flip
+                mr_require_in_va_switch.value = d["require_price_in_va"]
+                mr_require_funding_switch.value = d["require_no_extreme_funding"]
+                mr_funding_max_rate_input.value = d["funding_max_abs_rate"]
+                mr_require_balanced_switch.value = d["require_balanced_book"]
+                mr_imbalance_min_input.value = d["imbalance_min"]
+                mr_imbalance_max_input.value = d["imbalance_max"]
                 ui.notify("Mean Reversion fields set to recommended defaults — click Save to persist", color="info")
 
             # ── Spike Continuation ───────────────────────────────────────────────────
@@ -3832,45 +3792,40 @@ def register_pages(app: FastAPI) -> None:
 
             def _set_sc_defaults() -> None:
                 """Fill all Spike Continuation fields with the recommended configuration."""
-                # Earlier impulse entry, block late tops, give SL room for noise.
-                sc_tp_input.value = 6.0
-                sc_sl_input.value = 4.0
-                sc_volume_rsi_min_input.value = 72.0
-                sc_rsi_min_input.value = 55.0
-                sc_rsi_max_input.value = 80.0
-                sc_bb_breakout_switch.value = True
-                sc_candle_strength_switch.value = True
-                sc_candle_strength_pct_input.value = 60.0
-                sc_min_bb_bw_input.value = 3.0
-                sc_max_adx_input.value = 0.0
-                sc_max_adx_entry_input.value = 32.0
-                # Body-ratio acceleration is opt-in (default OFF) — the ATR
-                # extension gate is the primary anti-late-entry filter.
-                sc_momentum_accel_switch.value = False
-                sc_accel_lookback_input.value = 3
-                sc_accel_min_ratio_input.value = 1.3
-                sc_rsi_rising_switch.value = True
-                sc_vol_rsi_rising_switch.value = False
-                sc_max_spike_ext_input.value = 2.0
-                sc_spike_lookback_input.value = 5
-                sc_require_regime_switch.value = True
-                sc_min_bw_pct_input.value = 50.0
-                sc_regime_lookback_input.value = 50
-                sc_htf_regime_select.value = "trend"
-                sc_analysis_tf_select.value = "15m"
-                sc_use_atr_sizing_switch.value = True
-                sc_atr_tp_mult_input.value = 3.0
-                sc_atr_sl_mult_input.value = 2.0
-                sc_min_atr_pct_input.value = 1.0
-                # R:R guardrail: enforce >= 1.5 for this strategy.
-                sc_min_rr_input.value = 1.5
-                # Do not flip the strategy's chosen direction — flipping
-                # destroys the directional edge the strategy is built around.
-                sc_flip_switch.value = False
-                sc_flip_select.value = None
-                # Liquidity-aware gates default OFF (opt-in).
-                sc_require_oi_switch.value = False
-                sc_oi_min_zscore_input.value = 1.0
+                d = strategy_defaults("spike_continuation")
+                sc_tp_input.value = d["tp_pct"]
+                sc_sl_input.value = d["sl_pct"]
+                sc_volume_rsi_min_input.value = d["volume_rsi_min"]
+                sc_rsi_min_input.value = d["rsi_min"]
+                sc_rsi_max_input.value = d["rsi_max"]
+                sc_bb_breakout_switch.value = d["require_bb_breakout"]
+                sc_candle_strength_switch.value = d["require_candle_strength"]
+                sc_candle_strength_pct_input.value = d["candle_strength_pct"]
+                sc_min_bb_bw_input.value = d["min_bb_bandwidth"]
+                sc_max_adx_input.value = d["max_adx"]
+                sc_max_adx_entry_input.value = d["max_adx_for_entry"]
+                sc_momentum_accel_switch.value = d["require_momentum_acceleration"]
+                sc_accel_lookback_input.value = d["acceleration_lookback"]
+                sc_accel_min_ratio_input.value = d["acceleration_min_ratio"]
+                sc_rsi_rising_switch.value = d["require_rsi_rising"]
+                sc_vol_rsi_rising_switch.value = d["require_volume_rsi_rising"]
+                sc_max_spike_ext_input.value = d["max_spike_extension_atr"]
+                sc_spike_lookback_input.value = d["spike_lookback"]
+                sc_require_regime_switch.value = d["require_regime"]
+                sc_min_bw_pct_input.value = d["min_bb_bandwidth_percentile"]
+                sc_regime_lookback_input.value = d["regime_lookback"]
+                sc_htf_regime_select.value = d["htf_regime_preference"]
+                sc_analysis_tf_select.value = d["analysis_timeframe"]
+                sc_use_atr_sizing_switch.value = d["use_atr_sizing"]
+                sc_atr_tp_mult_input.value = d["atr_tp_multiplier"]
+                sc_atr_sl_mult_input.value = d["atr_sl_multiplier"]
+                sc_min_atr_pct_input.value = d["min_atr_pct"]
+                sc_min_rr_input.value = d["min_reward_risk_ratio"]
+                _flip = d["flip_launcher_direction"]
+                sc_flip_switch.value = _flip is not None
+                sc_flip_select.value = _flip
+                sc_require_oi_switch.value = d["require_oi_confirmation"]
+                sc_oi_min_zscore_input.value = d["oi_min_zscore"]
                 ui.notify("Spike Continuation fields set to recommended defaults — click Save to persist", color="info")
 
             # ── Liquidity Sweep ───────────────────────────────────────────────────
@@ -4159,46 +4114,45 @@ def register_pages(app: FastAPI) -> None:
 
             def _set_ls_defaults() -> None:
                 """Fill all Liquidity Sweep fields with the recommended configuration."""
-                ls_tp_input.value = 3.0
-                ls_sl_input.value = 2.0
-                ls_lookback_input.value = 20
-                ls_pivot_bars_input.value = 3
-                ls_sweep_pen_mode_select.value = "atr"
-                ls_sweep_buffer_atr_input.value = 0.25
-                ls_sweep_buffer_input.value = 0.1
-                ls_reclaim_buffer_input.value = 0.1
-                ls_reclaim_ratio_input.value = 0.5
-                ls_require_htf_switch.value = True
-                ls_htf_regime_select.value = "chop"
-                ls_analysis_tf_select.value = "15m"
-                ls_require_vol_switch.value = True
-                ls_vol_ratio_input.value = 1.5
-                ls_max_adx_input.value = 28.0
-                ls_require_regime_switch.value = True
-                ls_max_bw_pct_input.value = 60.0
-                ls_regime_lookback_input.value = 50
-                ls_use_atr_sizing_switch.value = True
-                ls_use_structural_switch.value = True
-                ls_structural_sl_buffer_input.value = 0.15
-                ls_atr_min_tp_input.value = 0.5
-                ls_atr_max_tp_input.value = 4.0
-                ls_atr_min_sl_input.value = 0.3
-                ls_atr_max_sl_input.value = 3.0
-                ls_atr_tp_mult_input.value = 1.2
-                ls_atr_sl_mult_input.value = 1.0
-                ls_min_atr_pct_input.value = 0.8
-                # R:R guardrail: enforce >= 1.0 for this strategy.
-                ls_min_rr_input.value = 1.0
-                ls_flip_switch.value = False
-                ls_flip_select.value = None
-                # Liquidity-aware gates: close-in-VA ON by default (the sweep must
-                # close back inside value; a close outside is a real break).
-                ls_require_close_in_va_switch.value = True
-                ls_require_macro_sl_switch.value = False
-                ls_macro_sl_lookback_input.value = 50
-                ls_require_book_imbalance_switch.value = False
-                ls_imbalance_min_for_long_input.value = 1.0
-                ls_imbalance_max_for_short_input.value = 1.0
+                d = strategy_defaults("liquidity_sweep")
+                ls_tp_input.value = d["tp_pct"]
+                ls_sl_input.value = d["sl_pct"]
+                ls_lookback_input.value = d["lookback"]
+                ls_pivot_bars_input.value = d["pivot_bars"]
+                ls_sweep_pen_mode_select.value = d["sweep_penetration_mode"]
+                ls_sweep_buffer_atr_input.value = d["sweep_buffer_atr"]
+                ls_sweep_buffer_input.value = d["sweep_buffer_pct"]
+                ls_reclaim_buffer_input.value = d["reclaim_buffer_pct"]
+                ls_reclaim_ratio_input.value = d["reclaim_ratio"]
+                ls_require_htf_switch.value = d["require_htf_trend"]
+                ls_htf_regime_select.value = d["htf_regime_preference"]
+                ls_analysis_tf_select.value = d["analysis_timeframe"]
+                ls_require_vol_switch.value = d["require_volume_spike"]
+                ls_vol_ratio_input.value = d["volume_spike_ratio"]
+                ls_max_adx_input.value = d["max_adx"]
+                ls_require_regime_switch.value = d["require_regime"]
+                ls_max_bw_pct_input.value = d["max_bb_bandwidth_percentile"]
+                ls_regime_lookback_input.value = d["regime_lookback"]
+                ls_use_atr_sizing_switch.value = d["use_atr_sizing"]
+                ls_use_structural_switch.value = d["use_structural_sizing"]
+                ls_structural_sl_buffer_input.value = d["structural_sl_buffer_atr"]
+                ls_atr_min_tp_input.value = d["atr_min_tp_mult"]
+                ls_atr_max_tp_input.value = d["atr_max_tp_mult"]
+                ls_atr_min_sl_input.value = d["atr_min_sl_mult"]
+                ls_atr_max_sl_input.value = d["atr_max_sl_mult"]
+                ls_atr_tp_mult_input.value = d["atr_tp_multiplier"]
+                ls_atr_sl_mult_input.value = d["atr_sl_multiplier"]
+                ls_min_atr_pct_input.value = d["min_atr_pct"]
+                ls_min_rr_input.value = d["min_reward_risk_ratio"]
+                _flip = d["flip_launcher_direction"]
+                ls_flip_switch.value = _flip is not None
+                ls_flip_select.value = _flip
+                ls_require_close_in_va_switch.value = d["require_close_in_va"]
+                ls_require_macro_sl_switch.value = d["require_macro_sl"]
+                ls_macro_sl_lookback_input.value = d["macro_sl_lookback"]
+                ls_require_book_imbalance_switch.value = d["require_book_imbalance"]
+                ls_imbalance_min_for_long_input.value = d["imbalance_min_for_long"]
+                ls_imbalance_max_for_short_input.value = d["imbalance_max_for_short"]
                 ui.notify("Liquidity Sweep fields set to recommended defaults — click Save to persist", color="info")
 
             # ── VWAP Reversion ────────────────────────────────────────────────────
@@ -4421,46 +4375,35 @@ def register_pages(app: FastAPI) -> None:
 
             def _set_vr_defaults() -> None:
                 """Fill all VWAP Reversion fields with the recommended configuration."""
-                vr_tp_input.value = 2.0
-                vr_sl_input.value = 3.0
-                # Min extension raised to 2.5 so the TP-hop back to VWAP is
-                # meaningful relative to the structural SL → better structural
-                # R:R and fewer guardrail blocks (matches DEFAULT_VWAP_REVERSION).
-                vr_min_dist_atr_input.value = 2.5
-                vr_max_dist_atr_input.value = 3.25
-                vr_max_adx_input.value = 25.0
-                vr_require_closeback_switch.value = True
-                vr_require_htf_switch.value = True
-                vr_htf_regime_select.value = "chop"
-                vr_analysis_tf_select.value = "15m"
-                vr_require_regime_switch.value = True
-                vr_max_bw_pct_input.value = 55.0
-                vr_regime_lookback_input.value = 50
-                vr_use_atr_sizing_switch.value = True
-                # Structural sizing ON: TP at VWAP (the magnet), SL beyond the
-                # extension candle.  This is the strategy's primary exit model
-                # (matches DEFAULT_VWAP_REVERSION).  ATR is the fallback.
-                vr_use_structural_switch.value = True
-                vr_structural_sl_buffer_input.value = 0.15
-                vr_atr_min_tp_input.value = 0.5
-                vr_atr_max_tp_input.value = 4.0
-                # SL floor raised to 0.5 so the stop survives an ordinary 15m
-                # wick instead of being clamped into a wick-able gap (matches
-                # DEFAULT_VWAP_REVERSION).
-                vr_atr_min_sl_input.value = 0.5
-                vr_atr_max_sl_input.value = 3.0
-                vr_atr_tp_mult_input.value = 1.0
-                vr_atr_sl_mult_input.value = 1.0
-                vr_min_atr_pct_input.value = 1.0
-                # R:R guardrail: enforce >= 1.0 for this strategy.
-                vr_min_rr_input.value = 1.0
-                # Do not flip the strategy's chosen direction — flipping
-                # destroys the directional edge the strategy is built around.
-                vr_flip_switch.value = False
-                vr_flip_select.value = None
-                # Liquidity-aware gates default OFF (opt-in).
-                vr_require_no_funding_switch.value = False
-                vr_funding_max_rate_input.value = 0.0007
+                d = strategy_defaults("vwap_reversion")
+                vr_tp_input.value = d["tp_pct"]
+                vr_sl_input.value = d["sl_pct"]
+                vr_min_dist_atr_input.value = d["vwap_min_distance_atr"]
+                vr_max_dist_atr_input.value = d["vwap_max_distance_atr"]
+                vr_max_adx_input.value = d["max_adx"]
+                vr_require_closeback_switch.value = d["require_closeback"]
+                vr_require_htf_switch.value = d["require_htf_trend"]
+                vr_htf_regime_select.value = d["htf_regime_preference"]
+                vr_analysis_tf_select.value = d["analysis_timeframe"]
+                vr_require_regime_switch.value = d["require_regime"]
+                vr_max_bw_pct_input.value = d["max_bb_bandwidth_percentile"]
+                vr_regime_lookback_input.value = d["regime_lookback"]
+                vr_use_atr_sizing_switch.value = d["use_atr_sizing"]
+                vr_use_structural_switch.value = d["use_structural_sizing"]
+                vr_structural_sl_buffer_input.value = d["structural_sl_buffer_atr"]
+                vr_atr_min_tp_input.value = d["atr_min_tp_mult"]
+                vr_atr_max_tp_input.value = d["atr_max_tp_mult"]
+                vr_atr_min_sl_input.value = d["atr_min_sl_mult"]
+                vr_atr_max_sl_input.value = d["atr_max_sl_mult"]
+                vr_atr_tp_mult_input.value = d["atr_tp_multiplier"]
+                vr_atr_sl_mult_input.value = d["atr_sl_multiplier"]
+                vr_min_atr_pct_input.value = d["min_atr_pct"]
+                vr_min_rr_input.value = d["min_reward_risk_ratio"]
+                _flip = d["flip_launcher_direction"]
+                vr_flip_switch.value = _flip is not None
+                vr_flip_select.value = _flip
+                vr_require_no_funding_switch.value = d["require_no_funding_bias"]
+                vr_funding_max_rate_input.value = d["funding_max_abs_rate"]
                 ui.notify("VWAP Reversion fields set to recommended defaults — click Save to persist", color="info")
 
             # ── Trend Pullback ────────────────────────────────────────────────────
@@ -4698,39 +4641,38 @@ def register_pages(app: FastAPI) -> None:
 
             def _set_tp_defaults() -> None:
                 """Fill all Trend Pullback fields with the recommended configuration."""
-                tp_tp_input.value = 6.0
-                tp_sl_input.value = 4.0
-                tp_pullback_ema_input.value = 21
-                tp_proximity_input.value = 0.3
-                tp_proximity_atr_input.value = 0.5
-                tp_use_vwap_switch.value = True
-                tp_require_htf_switch.value = True
-                tp_htf_regime_select.value = "trend"
-                tp_analysis_tf_select.value = "15m"
-                tp_require_bullish_switch.value = True
-                tp_candle_rejection_pct_input.value = 25.0
-                tp_min_adx_input.value = 18.0
-                tp_max_adx_entry_input.value = 30.0
-                tp_max_ext_input.value = 2.0
-                tp_use_atr_sizing_switch.value = True
-                tp_use_structural_switch.value = True
-                tp_structural_sl_buffer_input.value = 0.15
-                tp_atr_min_tp_input.value = 0.5
-                tp_atr_max_tp_input.value = 4.0
-                tp_atr_min_sl_input.value = 0.3
-                tp_atr_max_sl_input.value = 3.0
-                tp_atr_tp_mult_input.value = 3.0
-                tp_atr_sl_mult_input.value = 2.0
-                tp_use_adaptive_atr_switch.value = False
-                tp_min_atr_pct_input.value = 1.0
-                # R:R guardrail: enforce >= 1.5 for this strategy.
-                tp_min_rr_input.value = 1.5
-                tp_flip_switch.value = False
-                tp_flip_select.value = None
-                # Liquidity-aware gates: POC-proximity ON by default (pullback must
-                # occur at a value-area node, filtering noise touches on thin books).
-                tp_require_poc_prox_switch.value = True
-                tp_poc_prox_width_input.value = 0.2
+                d = strategy_defaults("trend_pullback")
+                tp_tp_input.value = d["tp_pct"]
+                tp_sl_input.value = d["sl_pct"]
+                tp_pullback_ema_input.value = d["pullback_ema"]
+                tp_proximity_input.value = d["pullback_proximity_pct"]
+                tp_proximity_atr_input.value = d["pullback_proximity_atr"]
+                tp_use_vwap_switch.value = d["use_vwap_as_level"]
+                tp_require_htf_switch.value = d["require_htf_trend"]
+                tp_htf_regime_select.value = d["htf_regime_preference"]
+                tp_analysis_tf_select.value = d["analysis_timeframe"]
+                tp_require_bullish_switch.value = d["require_bullish_candle"]
+                tp_candle_rejection_pct_input.value = d["candle_rejection_pct"]
+                tp_min_adx_input.value = d["min_adx"]
+                tp_max_adx_entry_input.value = d["max_adx_for_entry"]
+                tp_max_ext_input.value = d["max_pullback_extension_atr"]
+                tp_use_atr_sizing_switch.value = d["use_atr_sizing"]
+                tp_use_structural_switch.value = d["use_structural_sizing"]
+                tp_structural_sl_buffer_input.value = d["structural_sl_buffer_atr"]
+                tp_atr_min_tp_input.value = d["atr_min_tp_mult"]
+                tp_atr_max_tp_input.value = d["atr_max_tp_mult"]
+                tp_atr_min_sl_input.value = d["atr_min_sl_mult"]
+                tp_atr_max_sl_input.value = d["atr_max_sl_mult"]
+                tp_atr_tp_mult_input.value = d["atr_tp_multiplier"]
+                tp_atr_sl_mult_input.value = d["atr_sl_multiplier"]
+                tp_use_adaptive_atr_switch.value = d["use_adaptive_atr"]
+                tp_min_atr_pct_input.value = d["min_atr_pct"]
+                tp_min_rr_input.value = d["min_reward_risk_ratio"]
+                _flip = d["flip_launcher_direction"]
+                tp_flip_switch.value = _flip is not None
+                tp_flip_select.value = _flip
+                tp_require_poc_prox_switch.value = d["require_poc_proximity"]
+                tp_poc_prox_width_input.value = d["poc_proximity_va_width"]
                 ui.notify("Trend Pullback fields set to recommended defaults — click Save to persist", color="info")
 
             with ui.card().classes("w-full rounded-lg border border-slate-200 mb-1"):
@@ -5000,18 +4942,19 @@ def register_pages(app: FastAPI) -> None:
                     )
 
             def _set_tm_defaults() -> None:
-                tm_enabled_switch.value = True
-                tm_be_switch.value = True
-                tm_be_at_r_input.value = 0.7
-                tm_be_buffer_input.value = 0.05
-                tm_partial_switch.value = True
-                tm_partial_at_r_input.value = 0.8
-                tm_partial_frac_input.value = 0.5
-                tm_time_switch.value = True
-                tm_time_sec_input.value = 1800.0
-                tm_time_candles_input.value = 5
-                tm_time_min_r_input.value = 0.3
-                tm_cooldown_input.value = 1800.0
+                d = trade_management_defaults()
+                tm_enabled_switch.value = d["enabled"]
+                tm_be_switch.value = d["breakeven_enabled"]
+                tm_be_at_r_input.value = d["breakeven_at_r"]
+                tm_be_buffer_input.value = d["breakeven_buffer_pct"]
+                tm_partial_switch.value = d["partial_tp_enabled"]
+                tm_partial_at_r_input.value = d["partial_tp_at_r"]
+                tm_partial_frac_input.value = d["partial_tp_fraction"]
+                tm_time_switch.value = d["time_stop_enabled"]
+                tm_time_sec_input.value = d["time_stop_seconds"]
+                tm_time_candles_input.value = d["time_stop_candles"]
+                tm_time_min_r_input.value = d["time_stop_min_r"]
+                tm_cooldown_input.value = d["reentry_cooldown_seconds"]
                 ui.notify("Trade Management fields set to recommended defaults — click Save to persist", color="info")
 
             with ui.card().classes("w-full rounded-lg border border-slate-200 mb-1"):

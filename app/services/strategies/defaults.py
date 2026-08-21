@@ -308,10 +308,43 @@ DEFAULT_STRATEGY_CONFIG: dict[str, dict[str, Any]] = {
     "trend_pullback": DEFAULT_TREND_PULLBACK,
 }
 
+# ── Trade management (position-overlay) ─────────────────────────────────────
+# Canonical defaults for the trade-management sub-config.  This is NOT one of
+# the pluggable launcher strategies — it lives under
+# ``config["strategy"]["trade_management"]`` — but its "Set Recommended
+# Defaults" button in ``pages.py`` reads from here so the same drift-proof
+# single source of truth applies.
+DEFAULT_TRADE_MANAGEMENT: dict[str, Any] = {
+    "enabled": True,
+    "breakeven_enabled": True,
+    "breakeven_at_r": 0.7,
+    "breakeven_buffer_pct": 0.05,
+    "partial_tp_enabled": True,
+    "partial_tp_at_r": 0.8,
+    "partial_tp_fraction": 0.5,
+    "time_stop_enabled": True,
+    "time_stop_seconds": 1800.0,
+    "time_stop_candles": 5,
+    "time_stop_min_r": 0.3,
+    "time_stop_underwater_only": True,
+    "reentry_cooldown_seconds": 1800.0,
+    "trailing_enabled": True,
+    "trailing_activate_r": 1.0,
+    "trailing_distance_atr": 1.5,
+    "trailing_floor_r": 0.5,
+    "trailing_step_r": 0.2,
+    "software_stop_loss_enabled": True,
+}
+
 
 def strategy_defaults(name: str) -> dict[str, Any]:
     """Return a shallow copy of the canonical defaults for a strategy."""
     return dict(DEFAULT_STRATEGY_CONFIG.get(name, {}))
+
+
+def trade_management_defaults() -> dict[str, Any]:
+    """Return a shallow copy of the canonical trade-management defaults."""
+    return dict(DEFAULT_TRADE_MANAGEMENT)
 
 
 def merged_config(config: dict[str, Any] | None, name: str) -> dict[str, Any]:
