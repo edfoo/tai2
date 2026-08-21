@@ -103,3 +103,46 @@ def test_performance_summary_parses_trademgmt_peak_excursion(tmp_path: Path) -> 
             "mfe_usd": 4.2,
         }
     ]
+
+
+def test_performance_summary_parses_trademgmt_trough_excursion(tmp_path: Path) -> None:
+    """TradeMgmt trough_pct/trough_usd must be parsed from the correct groups.
+
+    Regression test for a capture-group index swap: the trough fields were
+    previously read from groups 6/7 (current_usd / trough_pct) instead of
+    7/8 (trough_pct / trough_usd), so the reported trough % was actually the
+    dollar-denominated current PnL and the trough $ was actually the %.
+    """
+    log_file = tmp_path / "app.log"
+    log_file.write_text(
+        "\n".join(
+            [
+                "2026-08-02 10:00:00,000 UTC · DEBUG:app.services.market_service:Launcher signal: XYZ-USDT-SWAP BUY [trend_pullback] last=10.0 notional=100.0 tp=11.0 sl=9.5",
+                # current_usd=-0.0936 must NOT be mistaken for trough_pct.
+                "2026-08-02 10:05:00,000 UTC · DEBUG:app.services.market_service:TradeMgmt: XYZ-USDT-SWAP peak_pct=4.2 current_pct=-1.86 peak_usd=4.2 current_usd=-0.0936 trough_pct=-1.86 trough_usd=-0.0936",
+                "2026-08-02 10:10:00,000 UTC · DEBUG:app.services.market_service:Reconciled PnL for XYZ-USDT-SWAP: +1.0000 USDT (fill 1, trade abc)",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    pnl_trades, signals, seeded, cleared, summary = parse_logs([log_file])
+    summary = build_summary(pnl_trades, signals, seeded, cleared, summary)
+
+    assert len(pnl_trades) == 1
+    # The trough % must be -1.86 (not the -0.0936 current_usd dollar value).
+    assert pnl_trades[0].mae_trough_pct == -1.86
+    assert pnl_trades[0].mae_trough_usd == -0.0936
+    assert summary.tp_trough_trades == [
+        {
+            "ts": "2026-08-02 10:10:00",
+            "symbol": "XYZ-USDT-SWAP",
+            "strategy": "trend_pullback",
+            "pnl_usdt": 1.0,
+            "mae_pct": -1.86,
+            "mae_usd": -0.0936,
+        }
+    ]
+
+    payload = summary_to_dict(summary)
+    assert payload["tp_trough_trades"][0]["mae_pct"] == -1.86
