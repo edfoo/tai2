@@ -329,8 +329,8 @@ def parse_logs(files: list[Path]) -> tuple[list[PnLTrade], list[Signal], list[Se
                 _track_period(m.group(1))
                 peak_pct = _parse_optional_float(m.group(3))
                 peak_usd = _parse_optional_float(m.group(5))
-                trough_pct = _parse_optional_float(m.group(6))
-                trough_usd = _parse_optional_float(m.group(7))
+                trough_pct = _parse_optional_float(m.group(7))
+                trough_usd = _parse_optional_float(m.group(8))
                 if peak_pct is not None:
                     active_peak_pct_by_symbol[symbol] = max(
                         active_peak_pct_by_symbol.get(symbol, peak_pct), peak_pct
