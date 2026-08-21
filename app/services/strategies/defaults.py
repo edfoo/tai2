@@ -205,7 +205,10 @@ DEFAULT_VWAP_REVERSION: dict[str, Any] = {
     # to VWAP is meaningful relative to the structural SL → better structural
     # R:R and fewer guardrail blocks (F3).
     "vwap_min_distance_atr": 2.5,
-    "vwap_max_distance_atr": 3.0,
+    # Loosened 3.0 → 3.25: VWAP reversion was the best per-trade performer
+    # (75% win rate) and under-firing; widening the cap captures more edge
+    # without entering knife-catch territory (ADX gate still guards trends).
+    "vwap_max_distance_atr": 3.25,
     "max_adx": 25.0,
     "require_closeback": True,
     "require_htf_trend": True,
@@ -259,8 +262,10 @@ DEFAULT_TREND_PULLBACK: dict[str, Any] = {
     "candle_rejection_pct": 25.0,
     # ADX band widened (ADX is lagging on volatile alts); the primary
     # anti-late-entry filter is the ATR-anchored extension gate below.
+    # Tightened from 40 → 30: 40 admitted late/mature-trend entries (the
+    # documented failure mode — entering as the move exhausts).
     "min_adx": 18.0,
-    "max_adx_for_entry": 40.0,
+    "max_adx_for_entry": 30.0,
     # Volatility-normalised extension gate: price must not be more than this
     # × ATR% past the pullback level (blocks late entries). 0 = disabled.
     "max_pullback_extension_atr": 2.0,

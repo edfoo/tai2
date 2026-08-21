@@ -2970,7 +2970,7 @@ def register_pages(app: FastAPI) -> None:
             "partial_tp_at_r": 0.8,
             "partial_tp_fraction": 0.5,
             "time_stop_enabled": True,
-            "time_stop_seconds": 2700.0,
+            "time_stop_seconds": 1800.0,
             "time_stop_candles": 5,
             "time_stop_min_r": 0.3,
             "time_stop_underwater_only": True,
@@ -3535,8 +3535,9 @@ def register_pages(app: FastAPI) -> None:
                 # destroys the directional edge the strategy is built around.
                 mr_flip_switch.value = False
                 mr_flip_select.value = None
-                # Liquidity-aware gates default OFF (opt-in).
-                mr_require_in_va_switch.value = False
+                # Liquidity-aware gates: require price inside value area ON by
+                # default (prevents fading breaks below value on thin alt books).
+                mr_require_in_va_switch.value = True
                 mr_require_funding_switch.value = False
                 mr_funding_max_rate_input.value = 0.001
                 mr_require_balanced_switch.value = False
@@ -3644,7 +3645,7 @@ def register_pages(app: FastAPI) -> None:
                             )
                             sc_max_adx_entry_input = ui.number(
                                 label="Max ADX for entry",
-                                value=float(_sc_cfg.get("max_adx_for_entry") if _sc_cfg.get("max_adx_for_entry") is not None else 30.0),
+                                value=float(_sc_cfg.get("max_adx_for_entry") if _sc_cfg.get("max_adx_for_entry") is not None else 32.0),
                                 min=0, max=100, step=1, precision=0,
                             ).classes("w-40").props(
                                 "hint='Late-entry killer: skip if ADX already this high (0 = off)' persistent-hint"
@@ -4190,8 +4191,9 @@ def register_pages(app: FastAPI) -> None:
                 ls_min_rr_input.value = 1.0
                 ls_flip_switch.value = False
                 ls_flip_select.value = None
-                # Liquidity-aware gates default OFF (opt-in).
-                ls_require_close_in_va_switch.value = False
+                # Liquidity-aware gates: close-in-VA ON by default (the sweep must
+                # close back inside value; a close outside is a real break).
+                ls_require_close_in_va_switch.value = True
                 ls_require_macro_sl_switch.value = False
                 ls_macro_sl_lookback_input.value = 50
                 ls_require_book_imbalance_switch.value = False
@@ -4248,7 +4250,7 @@ def register_pages(app: FastAPI) -> None:
                             ).classes("w-40").props("dense")
                             vr_max_dist_atr_input = ui.number(
                                 label="Max VWAP distance (ATR)",
-                                value=float(_vr_cfg.get("vwap_max_distance_atr") or 3.0),
+                                value=float(_vr_cfg.get("vwap_max_distance_atr") or 3.25),
                                 min=0.0, max=20.0, step=0.25, format="%.2f",
                             ).classes("w-40").props("dense")
                             ui.label("Min/max distance from VWAP in ATR units. Max prevents catching falling knives in breakouts (0=disabled).").classes("text-xs text-slate-500")
@@ -4425,7 +4427,7 @@ def register_pages(app: FastAPI) -> None:
                 # meaningful relative to the structural SL → better structural
                 # R:R and fewer guardrail blocks (matches DEFAULT_VWAP_REVERSION).
                 vr_min_dist_atr_input.value = 2.5
-                vr_max_dist_atr_input.value = 3.0
+                vr_max_dist_atr_input.value = 3.25
                 vr_max_adx_input.value = 25.0
                 vr_require_closeback_switch.value = True
                 vr_require_htf_switch.value = True
@@ -4574,7 +4576,7 @@ def register_pages(app: FastAPI) -> None:
                             )
                             tp_max_adx_entry_input = ui.number(
                                 label="Max ADX for entry",
-                                value=float(_tp_cfg.get("max_adx_for_entry") or 28.0),
+                                value=float(_tp_cfg.get("max_adx_for_entry") or 30.0),
                                 min=0, max=100, step=1, precision=0,
                             ).classes("w-40").props(
                                 "hint='Block when trend already extended (pullback likely reversal)' persistent-hint"
@@ -4708,7 +4710,7 @@ def register_pages(app: FastAPI) -> None:
                 tp_require_bullish_switch.value = True
                 tp_candle_rejection_pct_input.value = 25.0
                 tp_min_adx_input.value = 18.0
-                tp_max_adx_entry_input.value = 40.0
+                tp_max_adx_entry_input.value = 30.0
                 tp_max_ext_input.value = 2.0
                 tp_use_atr_sizing_switch.value = True
                 tp_use_structural_switch.value = True
@@ -4725,8 +4727,9 @@ def register_pages(app: FastAPI) -> None:
                 tp_min_rr_input.value = 1.5
                 tp_flip_switch.value = False
                 tp_flip_select.value = None
-                # Liquidity-aware gates default OFF (opt-in).
-                tp_require_poc_prox_switch.value = False
+                # Liquidity-aware gates: POC-proximity ON by default (pullback must
+                # occur at a value-area node, filtering noise touches on thin books).
+                tp_require_poc_prox_switch.value = True
                 tp_poc_prox_width_input.value = 0.2
                 ui.notify("Trend Pullback fields set to recommended defaults — click Save to persist", color="info")
 
@@ -5005,7 +5008,7 @@ def register_pages(app: FastAPI) -> None:
                 tm_partial_at_r_input.value = 0.8
                 tm_partial_frac_input.value = 0.5
                 tm_time_switch.value = True
-                tm_time_sec_input.value = 2700.0
+                tm_time_sec_input.value = 1800.0
                 tm_time_candles_input.value = 5
                 tm_time_min_r_input.value = 0.3
                 tm_cooldown_input.value = 1800.0
@@ -5762,7 +5765,7 @@ def register_pages(app: FastAPI) -> None:
                 "tp_pct": float(vr_tp_input.value) if vr_tp_input.value not in (None, "") else None,
                 "sl_pct": float(vr_sl_input.value) if vr_sl_input.value not in (None, "") else None,
                 "vwap_min_distance_atr": float(vr_min_dist_atr_input.value or 2.0),
-                "vwap_max_distance_atr": float(vr_max_dist_atr_input.value or 3.0),
+                "vwap_max_distance_atr": float(vr_max_dist_atr_input.value or 3.25),
                 "max_adx": float(vr_max_adx_input.value or 25.0),
                 "require_closeback": bool(vr_require_closeback_switch.value),
                 "require_htf_trend": bool(vr_require_htf_switch.value),
@@ -5804,7 +5807,7 @@ def register_pages(app: FastAPI) -> None:
                 "require_bullish_candle": bool(tp_require_bullish_switch.value),
                 "candle_rejection_pct": float(tp_candle_rejection_pct_input.value or 25.0),
                 "min_adx": float(tp_min_adx_input.value or 18.0),
-                "max_adx_for_entry": float(tp_max_adx_entry_input.value or 40.0),
+                "max_adx_for_entry": float(tp_max_adx_entry_input.value or 30.0),
                 "max_pullback_extension_atr": float(tp_max_ext_input.value or 2.0),
                 "use_structural_sizing": bool(tp_use_structural_switch.value),
                 "structural_sl_buffer_atr": float(tp_structural_sl_buffer_input.value or 0.15),
