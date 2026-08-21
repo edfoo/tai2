@@ -66,11 +66,13 @@ _SIGNAL_RE = re.compile(
 
 # Peak-favorable-excursion line from profit-trailing supervision.
 # Emitted by the Alternator strategy (trailing profit/close) and by the
-# TradeMgmt supervision loop (peak PnL tracking).
+# TradeMgmt supervision loop (peak PnL tracking).  The TradeMgmt line also
+# carries trough (worst unfavorable) excursion values.
 _PEAK_EXCURSION_RE = re.compile(
     r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}).*(?:Alternator|TradeMgmt): "
     r"([A-Z0-9-]+-USDT-SWAP).*peak_pct=([0-9.eE+-]+|None) current_pct=([0-9.eE+-]+|None) "
     r"peak_usd=([0-9.eE+-]+|None) current_usd=([0-9.eE+-]+|None)"
+    r"(?: trough_pct=([0-9.eE+-]+|None) trough_usd=([0-9.eE+-]+|None))?"
 )
 
 # TradeMgmt cleared line:
@@ -129,6 +131,8 @@ class PnLTrade:
     fill_id: str = ""
     mfe_peak_pct: Optional[float] = None
     mfe_peak_usd: Optional[float] = None
+    mae_trough_pct: Optional[float] = None
+    mae_trough_usd: Optional[float] = None
 
 
 @dataclass
@@ -198,6 +202,8 @@ class Summary:
     slippage_trades: list[dict] = field(default_factory=list)
     # Losing trades with observed peak favorable excursion
     stopout_peak_trades: list[dict] = field(default_factory=list)
+    # Winning trades with observed trough unfavorable excursion
+    tp_trough_trades: list[dict] = field(default_factory=list)
     # Screener
     screener_runs: int = 0
     screener_last_candidates: int = 0
@@ -243,13 +249,15 @@ def parse_logs(files: list[Path]) -> tuple[list[PnLTrade], list[Signal], list[Se
     summary = Summary()
     active_peak_pct_by_symbol: dict[str, float] = {}
     active_peak_usd_by_symbol: dict[str, float] = {}
+    active_trough_pct_by_symbol: dict[str, float] = {}
+    active_trough_usd_by_symbol: dict[str, float] = {}
     # Deduplicate realized PnL by OKX fill id: the same closing fill is often
     # reconciled against multiple unreconciled trades, so only the FIRST
     # occurrence of each fill id should count as a real trade.
     seen_fills: set[str] = set()
 
-    def _parse_optional_float(raw: str) -> Optional[float]:
-        if raw == "None":
+    def _parse_optional_float(raw: Optional[str]) -> Optional[float]:
+        if raw is None or raw == "None":
             return None
         try:
             return float(raw)
@@ -288,6 +296,8 @@ def parse_logs(files: list[Path]) -> tuple[list[PnLTrade], list[Signal], list[Se
                         fill_id=fill_id,
                         mfe_peak_pct=active_peak_pct_by_symbol.pop(symbol, None),
                         mfe_peak_usd=active_peak_usd_by_symbol.pop(symbol, None),
+                        mae_trough_pct=active_trough_pct_by_symbol.pop(symbol, None),
+                        mae_trough_usd=active_trough_usd_by_symbol.pop(symbol, None),
                     )
                 )
                 continue
@@ -309,14 +319,18 @@ def parse_logs(files: list[Path]) -> tuple[list[PnLTrade], list[Signal], list[Se
                 summary.strat_signals[sig.strategy] += 1
                 active_peak_pct_by_symbol.pop(sig.symbol, None)
                 active_peak_usd_by_symbol.pop(sig.symbol, None)
+                active_trough_pct_by_symbol.pop(sig.symbol, None)
+                active_trough_usd_by_symbol.pop(sig.symbol, None)
                 continue
-            # Peak favorable excursion
+            # Peak favorable excursion (and trough unfavorable excursion)
             m = _PEAK_EXCURSION_RE.search(line)
             if m:
                 symbol = m.group(2)
                 _track_period(m.group(1))
                 peak_pct = _parse_optional_float(m.group(3))
                 peak_usd = _parse_optional_float(m.group(5))
+                trough_pct = _parse_optional_float(m.group(6))
+                trough_usd = _parse_optional_float(m.group(7))
                 if peak_pct is not None:
                     active_peak_pct_by_symbol[symbol] = max(
                         active_peak_pct_by_symbol.get(symbol, peak_pct), peak_pct
@@ -324,6 +338,14 @@ def parse_logs(files: list[Path]) -> tuple[list[PnLTrade], list[Signal], list[Se
                 if peak_usd is not None:
                     active_peak_usd_by_symbol[symbol] = max(
                         active_peak_usd_by_symbol.get(symbol, peak_usd), peak_usd
+                    )
+                if trough_pct is not None:
+                    active_trough_pct_by_symbol[symbol] = min(
+                        active_trough_pct_by_symbol.get(symbol, trough_pct), trough_pct
+                    )
+                if trough_usd is not None:
+                    active_trough_usd_by_symbol[symbol] = min(
+                        active_trough_usd_by_symbol.get(symbol, trough_usd), trough_usd
                     )
                 continue
             # Seeded
@@ -503,11 +525,31 @@ def build_summary(
         strat = _attribute_strategy(trade, signals)
         summary.strat_trades[strat] += 1
         summary.strat_pnl[strat] += trade.pnl
+        best_sig = _most_recent_signal(trade.symbol, trade.ts, signals)
         if trade.pnl > 0:
             summary.strat_wins[strat] += 1
+            # Take-profits with trough unfavorable excursion: flag winning
+            # trades that were once deep underwater (nearly stopped out before
+            # recovering to TP).  Mirrors the stop-out peak tracking below.
+            mae_pct = trade.mae_trough_pct
+            if mae_pct is None and trade.mae_trough_usd is not None and best_sig is not None:
+                if best_sig.notional > 0:
+                    mae_pct = trade.mae_trough_usd / best_sig.notional * 100.0
+            if mae_pct is not None and mae_pct < 0:
+                summary.tp_trough_trades.append(
+                    {
+                        "ts": trade.ts,
+                        "symbol": trade.symbol,
+                        "strategy": strat,
+                        "pnl_usdt": round(trade.pnl, 4),
+                        "mae_pct": round(mae_pct, 2),
+                        "mae_usd": round(trade.mae_trough_usd, 4)
+                        if trade.mae_trough_usd is not None
+                        else None,
+                    }
+                )
         else:
             summary.strat_losses[strat] += 1
-            best_sig = _most_recent_signal(trade.symbol, trade.ts, signals)
             mfe_pct = trade.mfe_peak_pct
             if mfe_pct is None and trade.mfe_peak_usd is not None and best_sig is not None:
                 if best_sig.notional > 0:
@@ -667,6 +709,25 @@ def print_report(summary: Summary) -> None:
         print("  None detected in the parsed logs.")
     print()
 
+    # ── Take-profits with trough excursion ──
+    print("── Take-profits with trough unfavorable excursion ──────────────")
+    if summary.tp_trough_trades:
+        print(
+            f"  {'ts':<22}{'symbol':<18}{'strategy':<16}{'profit USDT':>12}{'trough%':>9}"
+        )
+        print(f"  {'-' * 22}{'-' * 18}{'-' * 16}{'-' * 12}{'-' * 9}")
+        for trade in sorted(
+            summary.tp_trough_trades,
+            key=lambda item: (item["mae_pct"], item["pnl_usdt"]),
+        ):
+            print(
+                f"  {trade['ts']:<22}{trade['symbol']:<18}{trade['strategy']:<16}"
+                f"{trade['pnl_usdt']:>+12.4f}{trade['mae_pct']:>8.2f}%"
+            )
+    else:
+        print("  None detected in the parsed logs.")
+    print()
+
     # ── Screener ──
     if summary.screener_runs:
         print("── Screener (last run) ──────────────────────────────────────────")
@@ -740,6 +801,7 @@ def summary_to_dict(summary: Summary) -> dict:
         },
         "sl_slippage": summary.slippage_trades,
         "stopout_peak_trades": summary.stopout_peak_trades,
+        "tp_trough_trades": summary.tp_trough_trades,
         "screener": {
             "runs": summary.screener_runs,
             "last_candidates": summary.screener_last_candidates,

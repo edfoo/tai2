@@ -2445,10 +2445,29 @@ class MarketService:
                 state["peak_pnl_usd"] = upl_usd
                 peak_usd = upl_usd
                 peak_updated = True
-            if peak_updated:
+
+            # ── Trough unfavorable excursion tracking ──────────────────────
+            # Track the WORST (most negative) unrealized PnL reached during the
+            # trade so the performance summary can flag take-profits that were
+            # once deep underwater (i.e. the trade nearly stopped out before
+            # recovering to TP).  Mirrors the peak tracking above.
+            trough_pct = state.get("trough_pnl_pct")
+            trough_usd = state.get("trough_pnl_usd")
+            trough_updated = False
+            if upl_pct is not None and (trough_pct is None or upl_pct < trough_pct):
+                state["trough_pnl_pct"] = upl_pct
+                trough_pct = upl_pct
+                trough_updated = True
+            if upl_usd is not None and (trough_usd is None or upl_usd < trough_usd):
+                state["trough_pnl_usd"] = upl_usd
+                trough_usd = upl_usd
+                trough_updated = True
+
+            if peak_updated or trough_updated:
                 self._emit_debug(
                     f"TradeMgmt: {symbol} peak_pct={peak_pct!r} current_pct={upl_pct!r} "
-                    f"peak_usd={peak_usd!r} current_usd={upl_usd!r}"
+                    f"peak_usd={peak_usd!r} current_usd={upl_usd!r} "
+                    f"trough_pct={trough_pct!r} trough_usd={trough_usd!r}"
                 )
 
             pos_side = str(pos.get("posSide", "")).lower()
