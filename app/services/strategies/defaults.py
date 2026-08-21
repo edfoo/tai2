@@ -71,8 +71,11 @@ DEFAULT_MEAN_REVERSION: dict[str, Any] = {
     # tuned.
     "exit_on_regime_breakdown": False,
     "flip_launcher_direction": None,
-    # Liquidity-aware gates (§3) — all OFF by default (opt-in).
-    "require_price_in_va": False,
+    # Liquidity-aware gates (§3).  ``require_price_in_va`` (default ON): only enter
+    # when price is inside the 70% value area — mean reversion wants price fading
+    # toward the mean, not trending out of value.  Prevents catching falling
+    # knives that have already broken below value on thin alt books.
+    "require_price_in_va": True,
     "require_no_extreme_funding": False,
     "funding_max_abs_rate": 0.001,
     "require_balanced_book": False,
@@ -177,8 +180,12 @@ DEFAULT_LIQUIDITY_SWEEP: dict[str, Any] = {
     "analysis_timeframe": "15m",
     # HTF regime gate preference: sweep wants a ranging HTF → default "chop".
     "htf_regime_preference": "chop",
-    # Liquidity-aware gates (§3) — OFF by default (opt-in).
-    "require_close_in_va": False,
+    # Liquidity-aware gates (§3).  The stop-hunt thesis only holds when the wick
+    # closes back *inside* value (absorbed) rather than breaking through it.
+    # Enabled by default: a bare "wick pierces swing + close reclaims" on 15m
+    # alts is far more often a real breakdown than a stop-run (27% live win rate
+    # on the ungated version).  A close outside value is treated as a breakout.
+    "require_close_in_va": True,
     "require_macro_sl": False,
     "macro_sl_lookback": 50,
     # Order-book imbalance gate (§3) — OFF by default (opt-in).  A fade into a
@@ -279,8 +286,11 @@ DEFAULT_TREND_PULLBACK: dict[str, Any] = {
     "analysis_timeframe": "15m",
     # HTF regime gate preference: trend pullback wants a trending HTF → "trend".
     "htf_regime_preference": "trend",
-    # Liquidity-aware gates (§3) — OFF by default (opt-in).
-    "require_poc_proximity": False,
+    # Liquidity-aware gates (§3).  ``require_poc_proximity`` (default ON): the
+    # pullback must occur at a POC / value-area node — adds a liquidity-confluence
+    # confirmation on top of the 21-EMA/VWAP touch, filtering pullbacks that are
+    # merely noise on thin books (the dominant trend_pullback drag in live logs).
+    "require_poc_proximity": True,
     "poc_proximity_va_width": 0.2,
 }
 

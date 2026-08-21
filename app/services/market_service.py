@@ -2323,6 +2323,13 @@ class MarketService:
         time_stop_min_r = self._extract_float(tm.get("time_stop_min_r"))
         if time_stop_min_r is None:
             time_stop_min_r = 0.3
+        # Time-stops only fire when the position is UNDERWATER (pnl_pct < 0) by
+        # default.  A profitable-but-stalled position is NOT churned: it either
+        # reaches the breakeven/partial/trailing rungs or hits its own SL.  This
+        # eliminates the ~40%-of-exits "time_stop on a flat/slightly-positive
+        # position" churn that dominated the log analysis.  Set to False to
+        # restore the legacy behaviour (time-stop whenever R < time_stop_min_r).
+        time_stop_underwater_only = bool(tm.get("time_stop_underwater_only", True))
         # Asymmetric exit: trailing stop on the remainder after partial TP.
         trailing_enabled = bool(tm.get("trailing_enabled", True))
         trailing_activate_r = self._extract_float(tm.get("trailing_activate_r"))
@@ -2656,7 +2663,10 @@ class MarketService:
                     r_multiple is None
                     or r_multiple < time_stop_min_r
                 )
-                if held_sec >= time_stop_seconds and progress_ok:
+                # Underwater-only gate: don't churn a position that is not
+                # actually losing money (see `time_stop_underwater_only`).
+                underwater_ok = (not time_stop_underwater_only) or pnl_pct < 0.0
+                if held_sec >= time_stop_seconds and progress_ok and underwater_ok:
                     self._emit_debug(
                         f"TradeMgmt time-stop: {symbol} held {held_sec:.0f}s ≥ "
                         f"{time_stop_seconds:.0f}s with R="
@@ -10739,6 +10749,7 @@ class MarketService:
                             take_profit_price=attachments_take_profit,
                             stop_loss_price=attachments_stop_loss,
                             symbol=symbol,
+                            action=action,
                         )
                 else:
                     if require_protection:
@@ -12908,8 +12919,17 @@ class MarketService:
         take_profit_price: float | None,
         stop_loss_price: float | None,
         symbol: str | None = None,
+        action: str | None = None,
     ) -> list[dict[str, Any]] | None:
-        """Construct the attach list for `place_order` when TP and/or SL prices exist."""
+        """Construct the attach list for `place_order` when TP and/or SL prices exist.
+
+        The stop-loss order price (``slOrdPx``) is placed as a LIMIT offset past
+        the trigger (rather than a market order, ``"-1"``) to bound slippage on
+        thin alt-coin books.  A market stop-loss routinely fills 2-5x past the
+        trigger; a limit at ``slTriggerPx ∓ sl_limit_offset_ratio`` caps the
+        realised loss at a known worst case.  The offset is small enough that the
+        limit remains marketable through the stop-run while still bounding the gap.
+        """
         if not (take_profit_price or stop_loss_price):
             return None
         attach_payload: dict[str, Any] = {}
@@ -12922,10 +12942,21 @@ class MarketService:
                 }
             )
         if stop_loss_price:
+            # Limit the SL fill to a small offset beyond the trigger.  For a long
+            # (BUY) the SL closes by selling, so the worst acceptable fill is a
+            # bit *below* the trigger (a larger adverse move); for a short (SELL)
+            # the close is a buy, so the worst acceptable fill is a bit *above*.
+            sl_limit_offset_ratio = float(
+                self._guardrails_config.get("sl_limit_offset_ratio", 0.001)
+            )
+            if (action or "").upper() == "SELL":
+                sl_order_price = stop_loss_price * (1.0 + sl_limit_offset_ratio)
+            else:
+                sl_order_price = stop_loss_price * (1.0 - sl_limit_offset_ratio)
             attach_payload.update(
                 {
                     "slTriggerPx": self._format_price(stop_loss_price, symbol),
-                    "slOrdPx": "-1",
+                    "slOrdPx": self._format_price(sl_order_price, symbol),
                     "slTriggerPxType": "last",
                 }
             )
@@ -12981,7 +13012,18 @@ class MarketService:
             payload["tpTriggerPxType"] = "last"
         if stop_loss_price:
             payload["slTriggerPx"] = self._format_price(stop_loss_price, symbol)
-            payload["slOrdPx"] = "-1"
+            # Limit the SL fill to a small offset beyond the trigger to bound
+            # market-order slippage on thin books (see `_build_attach_algo_orders`).
+            # Long (BUY entry) closes by selling → limit *below* the trigger;
+            # short (SELL entry) closes by buying → limit *above* the trigger.
+            sl_limit_offset_ratio = float(
+                self._guardrails_config.get("sl_limit_offset_ratio", 0.001)
+            )
+            if (action or "").upper() == "SELL":
+                sl_order_price = stop_loss_price * (1.0 + sl_limit_offset_ratio)
+            else:
+                sl_order_price = stop_loss_price * (1.0 - sl_limit_offset_ratio)
+            payload["slOrdPx"] = self._format_price(sl_order_price, symbol)
             payload["slTriggerPxType"] = "last"
         self._emit_debug(
             f"Submitting TP/SL algo for {symbol} | sz={payload.get('sz')} tp={payload.get('tpTriggerPx')} sl={payload.get('slTriggerPx')} posSide={pos_side or 'unset'}"

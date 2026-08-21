@@ -499,11 +499,19 @@ class TrendPullbackStrategy:
                 pullback_level = min(_levels) if _levels else None
 
             if side == "long":
-                for sh in swing_highs:
-                    sh_price = helpers.extract_float(sh.get("price")) if isinstance(sh, dict) else None
-                    if sh_price is not None and sh_price > entry_price:
-                        tp_target = sh_price
-                        break
+                # Trend-following geometry: target the FARTHEST swing high above
+                # entry (within the ATR max clamp) so the trend has room to run,
+                # instead of the nearest swing high which produces a razor-thin
+                # TP (the anti-trend-following failure mode: tight TP / wide SL).
+                _tp_cands = [
+                    helpers.extract_float(sh.get("price"))
+                    for sh in swing_highs if isinstance(sh, dict)
+                ]
+                _tp_cands = [p for p in _tp_cands if p is not None and p > entry_price]
+                if _tp_cands:
+                    _max_tp_dist = atr_max_tp_mult * atr_price
+                    _within = [p for p in _tp_cands if p - entry_price <= _max_tp_dist]
+                    tp_target = max(_within if _within else _tp_cands)
                 # Fix 6: anchor SL to structural invalidation — the nearest
                 # swing low below entry, else below the pullback level by a
                 # volatility buffer, else (last resort) the candle wick.
@@ -523,11 +531,17 @@ class TrendPullbackStrategy:
                         f"TrendPullback: {symbol} — structural SL fell back to wick anchor (no swing/level)"
                     )
             else:
-                for sl in swing_lows:
-                    sl_price = helpers.extract_float(sl.get("price")) if isinstance(sl, dict) else None
-                    if sl_price is not None and sl_price < entry_price:
-                        tp_target = sl_price
-                        break
+                # Symmetric short-side fix: target the FARTHEST swing low below
+                # entry (within the ATR max clamp) so the downtrend can run.
+                _tp_cands = [
+                    helpers.extract_float(sl.get("price"))
+                    for sl in swing_lows if isinstance(sl, dict)
+                ]
+                _tp_cands = [p for p in _tp_cands if p is not None and p < entry_price]
+                if _tp_cands:
+                    _max_tp_dist = atr_max_tp_mult * atr_price
+                    _within = [p for p in _tp_cands if entry_price - p <= _max_tp_dist]
+                    tp_target = min(_within if _within else _tp_cands)
                 _above = [
                     helpers.extract_float(sh.get("price"))
                     for sh in swing_highs if isinstance(sh, dict)
