@@ -2965,6 +2965,44 @@ class TestTrendPullbackStrategy:
         assert signal.sl_pct == 4.0
         assert signal.tp_pct / signal.sl_pct >= 1.5
 
+    def test_default_atr_uses_tight_1_5_1_0_multipliers(self) -> None:
+        """Trend-pullback canonical defaults use 1.5/1.0 ATR multipliers (not
+        the old 3.0/2.0, which produced ~20% unreachable TPs on high-ATR alts)."""
+        from app.services.strategies.defaults import DEFAULT_TREND_PULLBACK
+        assert DEFAULT_TREND_PULLBACK["atr_tp_multiplier"] == 1.5
+        assert DEFAULT_TREND_PULLBACK["atr_sl_multiplier"] == 1.0
+        assert DEFAULT_TREND_PULLBACK["min_reward_risk_ratio"] == 1.5
+
+    def test_atr_fallback_clamped_to_max_tp_mult(self) -> None:
+        """A wild ATR TP multiplier must be clamped to atr_max_tp_mult so it
+        cannot inflate the exit into an unreachable width on volatile alts."""
+        from app.services.trade_management import OrderContext, compute_tp_sl_pct
+        ctx = OrderContext(
+            atr_tf_pct=6.66,          # high-ATR alt (e.g. BEAT 15m)
+            atr_htf_pct=6.66,
+            vpoc=None,
+            value_area_width=None,
+            swing_high=None,
+            swing_low=None,
+            last_price=0.1678,
+            atr_max_tp_mult=4.0,
+            atr_max_sl_mult=3.0,
+        )
+        # 8.0× ATR as a TP multiplier would give ~53% TP distance unclamped.
+        tp_pct, sl_pct = compute_tp_sl_pct(
+            entry=0.1678,
+            side="short",
+            ctx=ctx,
+            atr_tp_multiplier=8.0,
+            atr_sl_multiplier=6.0,
+        )
+        # TP must be clamped to atr_max_tp_mult × ATR% = 4.0 × 6.66 = 26.64%.
+        assert tp_pct is not None
+        assert abs(tp_pct - (4.0 * 6.66)) < 0.01
+        # SL clamped to atr_max_sl_mult × ATR% = 3.0 × 6.66 = 19.98%.
+        assert sl_pct is not None
+        assert abs(sl_pct - (3.0 * 6.66)) < 0.01
+
     # ── Fix 2: ATR-normalised proximity ───────────────────────────────
 
     def test_proximity_scales_with_atr(self) -> None:

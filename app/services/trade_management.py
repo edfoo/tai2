@@ -70,6 +70,11 @@ class OrderContext:
     atr_min_sl_mult: float = 0.3
     atr_max_sl_mult: float = 3.0
 
+    # Minimum reward-to-risk the computed geometry must satisfy.  Strategies
+    # may lower this (e.g. trend_pullback = 1.5); the default 1.8 is the
+    # generic structural floor.
+    min_reward_risk_ratio: float = 1.8
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -87,9 +92,9 @@ def _volatility_multiplier(atr_htf: float) -> float:
     return 3.0 if atr_htf > 1.3 else 1.8
 
 
-def _ensure_rr(entry: float, tp: float, sl: float, side: Side) -> bool:
+def _ensure_rr(entry: float, tp: float, sl: float, side: Side, min_rr: float = 1.8) -> bool:
     rr = (abs(tp - entry) / abs(sl - entry)) if abs(sl - entry) > 0 else 0
-    return rr >= 1.8 and ((tp > entry and side == "long") or (tp < entry and side == "short"))
+    return rr >= min_rr and ((tp > entry and side == "long") or (tp < entry and side == "short"))
 
 
 # ---------------------------------------------------------------------------
@@ -149,36 +154,29 @@ def calculate(entry: float, side: Side, ctx: OrderContext) -> Tuple[float, float
         tp = entry + atr_distance if side == "long" else entry - atr_distance
 
     # -------------------------------------------------------------------
-    # 4. Clamp structural distances to sane ATR bounds
+    # 4. Clamp distances to sane ATR bounds
     # -------------------------------------------------------------------
-    if ctx.sl_level is None and ctx.swing_low is None and ctx.swing_high is None:
-        # Pure ATR fallback — no clamping needed (already ATR-scaled).
-        pass
-    else:
-        min_d = ctx.atr_min_sl_mult * atr_price
-        max_d = ctx.atr_max_sl_mult * atr_price
-        dist = abs(sl - entry)
-        if dist < min_d:
-            sl = entry - min_d if side == "long" else entry + min_d
-        elif dist > max_d:
-            sl = entry - max_d if side == "long" else entry + max_d
+    min_d = ctx.atr_min_sl_mult * atr_price
+    max_d = ctx.atr_max_sl_mult * atr_price
+    dist = abs(sl - entry)
+    if dist < min_d:
+        sl = entry - min_d if side == "long" else entry + min_d
+    elif dist > max_d:
+        sl = entry - max_d if side == "long" else entry + max_d
 
-    if ctx.tp_target is None and ctx.vpoc is None:
-        pass
-    else:
-        min_t = ctx.atr_min_tp_mult * atr_price
-        max_t = ctx.atr_max_tp_mult * atr_price
-        tdist = abs(tp - entry)
-        if tdist < min_t:
-            tp = entry + min_t if side == "long" else entry - min_t
-        elif tdist > max_t:
-            tp = entry + max_t if side == "long" else entry - max_t
+    min_t = ctx.atr_min_tp_mult * atr_price
+    max_t = ctx.atr_max_tp_mult * atr_price
+    tdist = abs(tp - entry)
+    if tdist < min_t:
+        tp = entry + min_t if side == "long" else entry - min_t
+    elif tdist > max_t:
+        tp = entry + max_t if side == "long" else entry - max_t
 
     # -------------------------------------------------------------------
     # 5. Reward-to-risk sanity
     # -------------------------------------------------------------------
-    if not _ensure_rr(entry, tp, sl, side):
-        raise ValueError("Unacceptable reward-to-risk < 1.8x")
+    if not _ensure_rr(entry, tp, sl, side, ctx.min_reward_risk_ratio):
+        raise ValueError(f"Unacceptable reward-to-risk < {ctx.min_reward_risk_ratio}x")
 
     return round(tp, 6), round(sl, 6)
 
@@ -254,14 +252,25 @@ def compute_tp_sl_pct(
                 exc,
             )
 
-    # 2. ATR sizing.
+    # 2. ATR sizing — ``mult × ATR%``, defensively clamped to the strategy's
+    # ``atr_max_tp_mult`` / ``atr_max_sl_mult`` so a wide multiplier on a
+    # high-ATR asset cannot inflate the exit beyond intent.  (A raw
+    # ``mult × ATR%`` early-return previously bypassed the clamp, producing
+    # unreachably wide take-profits — e.g. a 3.0× multiplier on a ~6.6% ATR%.
+    # The primary width correction is the tightened trend_pullback defaults;
+    # this clamp is a backstop for any misconfigured/mis-merged multipliers.)
     if atr_tp_multiplier is not None and atr_sl_multiplier is not None and ctx.atr_tf_pct > 0:
+        atr_price = (ctx.atr_tf_pct / 100.0) * entry
+        tp_dist = min(atr_tp_multiplier * atr_price, ctx.atr_max_tp_mult * atr_price)
+        sl_dist = min(atr_sl_multiplier * atr_price, ctx.atr_max_sl_mult * atr_price)
+        tp_pct = tp_dist / entry * 100.0
+        sl_pct = sl_dist / entry * 100.0
         if audit is not None:
             audit(
                 f"sizing=atr tp_mult={atr_tp_multiplier} sl_mult={atr_sl_multiplier} "
-                f"atr_pct={ctx.atr_tf_pct:.2f}"
+                f"atr_pct={ctx.atr_tf_pct:.2f} (clamped)"
             )
-        return atr_tp_multiplier * ctx.atr_tf_pct, atr_sl_multiplier * ctx.atr_tf_pct
+        return tp_pct, sl_pct
 
     # 3. Static fallback (only when neither structural nor ATR is active).
     if static_tp_pct is not None and static_sl_pct is not None:

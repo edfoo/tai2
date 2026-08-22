@@ -11,8 +11,8 @@ Entry conditions (long example):
   3. Entry: bullish candle off the level (close > prev close, lower wick).
 
 Exit:
-  - TP: 3 ATR (recent swing high proxy).
-  - SL: 2 ATR (below structural invalidation).
+  - TP: 1.5 ATR (recent swing high proxy).
+  - SL: 1.0 ATR (below structural invalidation).
 """
 
 from __future__ import annotations
@@ -78,9 +78,11 @@ class TrendPullbackStrategy:
       - ``use_atr_sizing`` (bool, default True): ATR-scaled TP/SL fallback
         when structural levels are unavailable or ``use_structural_sizing``
         is False.
-      - ``atr_tp_multiplier`` (float, default 3.0): TP = multiplier × ATR%.
-      - ``atr_sl_multiplier`` (float, default 2.0): SL = multiplier × ATR%.
+      - ``atr_tp_multiplier`` (float, default 1.5): TP = multiplier × ATR%.
+      - ``atr_sl_multiplier`` (float, default 1.0): SL = multiplier × ATR%.
         Together these yield ≥ 1.5 R:R when ATR sizing is active (Fix 1).
+        (Tightened from 3.0/2.0 to bound absolute TP distance on high-ATR alts
+        — a 3.0× multiplier on a ~6.6% ATR% produced a ~20% unreachable TP.)
       - ``use_adaptive_atr`` (bool, default False): when enabled, scales the
         ATR distance used for SIZING only (never the min_atr_pct gate or the
         proximity/extension checks) by volatility regime (Fix 5).
@@ -180,6 +182,9 @@ class TrendPullbackStrategy:
         min_atr_pct = helpers.extract_float(cfg.get("min_atr_pct"))
         if min_atr_pct is None:
             min_atr_pct = 1.0
+        min_reward_risk_ratio = helpers.extract_float(cfg.get("min_reward_risk_ratio"))
+        if min_reward_risk_ratio is None:
+            min_reward_risk_ratio = DEFAULT_TREND_PULLBACK["min_reward_risk_ratio"]
         # ── Liquidity-aware gate (§3) ────────────────────────────────
         # ``require_poc_proximity`` (default off): the pullback must occur at a
         # POC / value-area node — price within ``poc_proximity_va_width`` × the
@@ -576,6 +581,7 @@ class TrendPullbackStrategy:
                 atr_max_tp_mult=atr_max_tp_mult,
                 atr_min_sl_mult=atr_min_sl_mult,
                 atr_max_sl_mult=atr_max_sl_mult,
+                min_reward_risk_ratio=min_reward_risk_ratio,
             ),
             static_tp_pct=static_tp,
             static_sl_pct=static_sl,

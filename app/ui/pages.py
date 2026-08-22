@@ -4585,12 +4585,12 @@ def register_pages(app: FastAPI) -> None:
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             tp_atr_tp_mult_input = ui.number(
                                 label="ATR TP multiplier",
-                                value=float(_tp_cfg.get("atr_tp_multiplier") or 3.0),
+                                value=float(_tp_cfg.get("atr_tp_multiplier") or 1.5),
                                 min=0.1, max=10.0, step=0.1, format="%.1f",
                             ).classes("w-40").props("dense")
                             tp_atr_sl_mult_input = ui.number(
                                 label="ATR SL multiplier",
-                                value=float(_tp_cfg.get("atr_sl_multiplier") or 2.0),
+                                value=float(_tp_cfg.get("atr_sl_multiplier") or 1.0),
                                 min=0.1, max=10.0, step=0.1, format="%.1f",
                             ).classes("w-40").props("dense")
                             tp_min_atr_pct_input = ui.number(
@@ -5759,8 +5759,8 @@ def register_pages(app: FastAPI) -> None:
                 "atr_min_sl_mult": float(tp_atr_min_sl_input.value or 0.3),
                 "atr_max_sl_mult": float(tp_atr_max_sl_input.value or 3.0),
                 "use_atr_sizing": bool(tp_use_atr_sizing_switch.value),
-                "atr_tp_multiplier": float(tp_atr_tp_mult_input.value or 3.0),
-                "atr_sl_multiplier": float(tp_atr_sl_mult_input.value or 2.0),
+                "atr_tp_multiplier": float(tp_atr_tp_mult_input.value or 1.5),
+                "atr_sl_multiplier": float(tp_atr_sl_mult_input.value or 1.0),
                 "min_atr_pct": float(tp_min_atr_pct_input.value or 1.0),
                 "min_reward_risk_ratio": (
                     float(tp_min_rr_input.value) if tp_min_rr_input.value not in (None, "") else None

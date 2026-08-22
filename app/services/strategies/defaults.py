@@ -245,7 +245,13 @@ DEFAULT_VWAP_REVERSION: dict[str, Any] = {
 # ── Trend Pullback ──────────────────────────────────────────────────────────
 # Single source of truth for the ATR exit multipliers and the R:R floor.  The
 # class docstring and the inline fallbacks in ``trend_pullback.py`` MUST
-# reference these values (3.0 TP / 2.0 SL → ≥ 1.5 R:R) so they cannot drift.
+# reference these values (1.5 TP / 1.0 SL → ≥ 1.5 R:R) so they cannot drift.
+#
+# The multipliers were tightened from 3.0/2.0 to 1.5/1.0 (R:R unchanged at
+# 1.5): on high-ATR volatile alts a fixed 3.0× multiplier on a ~6.6% ATR%
+# produced a ~20% take-profit — unreachable for a pullback-to-value thesis,
+# which is why trades ran to profit and reverted.  1.5/1.0 halves the absolute
+# TP/SL distance (~10% / ~6.7% on the same asset) while preserving the 1.5 R:R.
 DEFAULT_TREND_PULLBACK: dict[str, Any] = {
     "enabled": False,
     # Static fallback floor: 6.0 / 4.0 → 1.5 R:R (matches the ATR floor).
@@ -276,9 +282,10 @@ DEFAULT_TREND_PULLBACK: dict[str, Any] = {
     "atr_max_tp_mult": 4.0,
     "atr_min_sl_mult": 0.3,
     "atr_max_sl_mult": 3.0,
-    # Unified exit model (Fix 1): 3.0 / 2.0 → ≥ 1.5 R:R when ATR sizing active.
-    "atr_tp_multiplier": 3.0,
-    "atr_sl_multiplier": 2.0,
+    # Unified exit model: 1.5 / 1.0 → ≥ 1.5 R:R when ATR sizing active.
+    # (Tightened from 3.0/2.0 to bound absolute TP distance on high-ATR alts.)
+    "atr_tp_multiplier": 1.5,
+    "atr_sl_multiplier": 1.0,
     # Adaptive ATR applies to SIZING only (never the min_atr_pct gate).
     "use_adaptive_atr": False,
     "min_atr_pct": 1.0,
