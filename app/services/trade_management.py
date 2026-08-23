@@ -94,7 +94,10 @@ def _volatility_multiplier(atr_htf: float) -> float:
 
 def _ensure_rr(entry: float, tp: float, sl: float, side: Side, min_rr: float = 1.8) -> bool:
     rr = (abs(tp - entry) / abs(sl - entry)) if abs(sl - entry) > 0 else 0
-    return rr >= min_rr and ((tp > entry and side == "long") or (tp < entry and side == "short"))
+    # Epsilon on the floor so an exact-boundary ratio (e.g. 1.5/1.0 multipliers
+    # → 1.5 vs min_rr 1.5) is not rejected by floating-point round-off
+    # (1.5 == 1.4999999... < 1.5).
+    return rr >= min_rr - 1e-6 and ((tp > entry and side == "long") or (tp < entry and side == "short"))
 
 
 # ---------------------------------------------------------------------------

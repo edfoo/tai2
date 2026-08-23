@@ -10188,8 +10188,14 @@ class MarketService:
                     f"Execution skipped for {symbol}: TP {take_profit_price} wrong side of entry {last_price} for {action}"
                 )
                 return False
-            if sl_dist > 0 and tp_dist / sl_dist < min_rr:
-                rr_actual = tp_dist / sl_dist
+            # Compare with a small relative epsilon so a ratio that lands at the
+            # exact floor (e.g. TP:SL multipliers 1.5/1.0 → 1.5 vs min_rr 1.5) is
+            # NOT rejected by floating-point round-off.  Without this, `1.5` is
+            # computed as `1.4999999...`, which is `< 1.5`, and near-perfect
+            # entries are blocked through no real R:R shortfall.
+            _rr_epsilon = 1e-6
+            rr_actual = tp_dist / sl_dist if sl_dist > 0 else 0.0
+            if sl_dist > 0 and rr_actual < min_rr - _rr_epsilon:
                 self._record_execution_feedback(
                     symbol,
                     f"Blocked: reward-to-risk ratio {rr_actual:.2f} below minimum {min_rr:.2f}",
