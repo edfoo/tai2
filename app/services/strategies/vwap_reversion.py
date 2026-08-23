@@ -163,6 +163,10 @@ class VWAPReversionStrategy:
         min_atr_pct = helpers.extract_float(cfg.get("min_atr_pct"))
         if min_atr_pct is None:
             min_atr_pct = 1.0
+        # R:R floor for structural sizing (mirrors DEFAULT_VWAP_REVERSION).
+        min_reward_risk_ratio = helpers.extract_float(cfg.get("min_reward_risk_ratio"))
+        if min_reward_risk_ratio is None:
+            min_reward_risk_ratio = 1.0
         # ── Regime consolidation (F4) ──────────────────────────────────
         # ``regime_primary_gate`` picks the *single* "not-trending" filter
         # that actually blocks.  Default "adx" keeps the LTF ADX gate as the
@@ -506,6 +510,7 @@ class VWAPReversionStrategy:
                 atr_max_tp_mult=atr_max_tp_mult,
                 atr_min_sl_mult=atr_min_sl_mult,
                 atr_max_sl_mult=atr_max_sl_mult,
+                min_reward_risk_ratio=min_reward_risk_ratio,
             ),
             static_tp_pct=static_tp,
             static_sl_pct=static_sl,

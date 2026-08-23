@@ -179,6 +179,10 @@ class MeanReversionStrategy:
         min_atr_pct = helpers.extract_float(cfg.get("min_atr_pct"))
         if min_atr_pct is None:
             min_atr_pct = 1.0
+        # R:R floor for structural sizing (mirrors DEFAULT_MEAN_REVERSION).
+        min_reward_risk_ratio = helpers.extract_float(cfg.get("min_reward_risk_ratio"))
+        if min_reward_risk_ratio is None:
+            min_reward_risk_ratio = 1.0
         bb_proximity_pct = helpers.extract_float(cfg.get("bb_proximity_pct"))
         if bb_proximity_pct is None:
             bb_proximity_pct = 0.5
@@ -614,6 +618,7 @@ class MeanReversionStrategy:
                         atr_max_tp_mult=atr_max_tp_mult,
                         atr_min_sl_mult=atr_min_sl_mult,
                         atr_max_sl_mult=atr_max_sl_mult,
+                        min_reward_risk_ratio=min_reward_risk_ratio,
                     ),
                     static_tp_pct=static_tp,
                     static_sl_pct=static_sl,

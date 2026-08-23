@@ -208,6 +208,10 @@ class LiquiditySweepStrategy:
         min_atr_pct = helpers.extract_float(cfg.get("min_atr_pct"))
         if min_atr_pct is None:
             min_atr_pct = 0.8
+        # R:R floor for structural sizing (mirrors DEFAULT_LIQUIDITY_SWEEP).
+        min_reward_risk_ratio = helpers.extract_float(cfg.get("min_reward_risk_ratio"))
+        if min_reward_risk_ratio is None:
+            min_reward_risk_ratio = 1.0
         # ── Liquidity-aware gates (§3) ────────────────────────────────
         # ``require_close_in_va`` (default off): the sweep candle must close
         # *back inside* the value area after its wick, confirming the stop-run
@@ -628,6 +632,7 @@ class LiquiditySweepStrategy:
                 atr_max_tp_mult=atr_max_tp_mult,
                 atr_min_sl_mult=atr_min_sl_mult,
                 atr_max_sl_mult=atr_max_sl_mult,
+                min_reward_risk_ratio=min_reward_risk_ratio,
             ),
             static_tp_pct=static_tp,
             static_sl_pct=static_sl,
