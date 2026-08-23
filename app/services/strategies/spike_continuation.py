@@ -543,23 +543,23 @@ class SpikeContinuationStrategy:
         if side is not None:
             entry_price = helpers.get_last_price(symbol)
             if entry_price is not None:
-                market_data: dict[str, Any] = snapshot.get("market_data") or {}
-                sym_data = market_data.get(symbol) or {}
-                inds = sym_data.get("indicators") or {}
-
                 static_tp = helpers.extract_float(config.get("tp_pct"))
                 static_sl = helpers.extract_float(config.get("sl_pct"))
 
+                # Read sizing inputs from the same ``indicators`` block the
+                # entry gates used (via ``resolve_analysis_block``) so a
+                # non-default ``analysis_timeframe`` does not silently mix ATR
+                # from two different bars.
                 tp_pct_val, sl_pct_val = compute_tp_sl_pct(
                     entry=entry_price,
                     side=side,
                     ctx=OrderContext(
-                        atr_tf_pct=helpers.extract_float(inds.get("atr_pct")) or 1.0,
-                        atr_htf_pct=helpers.extract_float(inds.get("atr_pct_htf")) or 1.0,
-                        vpoc=helpers.extract_float(inds.get("vpoc")),
-                        value_area_width=helpers.extract_float(inds.get("value_area_width")),
-                        swing_high=helpers.extract_float(inds.get("swing_high")),
-                        swing_low=helpers.extract_float(inds.get("swing_low")),
+                        atr_tf_pct=helpers.extract_float(indicators.get("atr_pct")) or 1.0,
+                        atr_htf_pct=helpers.extract_float(indicators.get("atr_pct_htf")) or 1.0,
+                        vpoc=helpers.extract_float(indicators.get("vpoc")),
+                        value_area_width=helpers.extract_float(indicators.get("value_area_width")),
+                        swing_high=helpers.extract_float(indicators.get("swing_high")),
+                        swing_low=helpers.extract_float(indicators.get("swing_low")),
                         last_price=entry_price,
                     ),
                     static_tp_pct=static_tp,

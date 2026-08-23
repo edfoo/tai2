@@ -45,7 +45,7 @@ poetry run pytest tests/ -q
 # or directly via the venv
 .venv/bin/python -m pytest tests/ -q
 ```
-All tests must pass (currently 69). Failures beyond the 0 pre-existing ones are regressions.
+All tests must pass. Failures beyond the 0 pre-existing ones are regressions.
 
 ---
 

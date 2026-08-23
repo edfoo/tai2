@@ -3129,3 +3129,30 @@ class TestTrendPullbackStrategy:
         assert abs(signal.tp_pct - 10.8) < 0.01
         assert signal.sl_pct is not None
         assert abs(signal.sl_pct - 7.2) < 0.01
+
+
+class TestDefaultDriftGuard:
+    """Regression guard: the inline fallbacks in each strategy must stay in
+    sync with the canonical values in ``app/services/strategies/defaults.py``.
+    A drift here is misleading (``merged_config`` already applies the defaults,
+    so the inline values are dead) and caused real confusion in the past."""
+
+    def test_vwap_reversion_inline_fallbacks_match_defaults(self) -> None:
+        from app.services.strategies.defaults import DEFAULT_VWAP_REVERSION
+        d = DEFAULT_VWAP_REVERSION
+        assert d["vwap_min_distance_atr"] == 2.5
+        assert d["vwap_max_distance_atr"] == 3.25
+        assert d["atr_min_sl_mult"] == 0.5
+        assert d["regime_primary_gate"] == "bb"
+        assert d["atr_tp_multiplier"] == 1.0
+
+    def test_mean_reversion_price_in_va_default_on(self) -> None:
+        from app.services.strategies.defaults import DEFAULT_MEAN_REVERSION
+        assert DEFAULT_MEAN_REVERSION["require_price_in_va"] is True
+
+    def test_trade_management_atr_fallback_constant_exists(self) -> None:
+        import app.services.trade_management as tm
+        assert hasattr(tm, "ATR_FALLBACK_MULT")
+        assert tm.ATR_FALLBACK_MULT == 1.8
+        # The dead `_volatility_multiplier` must no longer exist.
+        assert not hasattr(tm, "_volatility_multiplier")

@@ -14,16 +14,15 @@ Design Goals
 ------------
 1. **Structure-first**  – If swing levels or volume-profile nodes are
    available, anchor stops beyond those levels; otherwise fall back to ATR.
-2. **Volatility regime scaling** – ATR multipliers widen during expansion
-   phases (`atr_htf` above its rolling median × 1.3) and tighten in chop.
-3. **Reward-to-risk sanity** – Return *None* when the computed RR < 1.8 so
-   the caller can abort the trade.
+2. **Volatility adaptation** – ATR-scaled exits use ``atr_tf_pct`` so they
+   scale with the current volatility regime.
+3. **Reward-to-risk sanity** – Raise when the computed RR falls below the
+   strategy's ``min_reward_risk_ratio`` floor (default 1.8).
 """
 
 from __future__ import annotations
 
 import logging
-import math
 from dataclasses import dataclass
 from typing import Callable, Final, Literal, Optional, Tuple
 
@@ -81,15 +80,14 @@ class OrderContext:
 # ---------------------------------------------------------------------------
 
 
-def _volatility_multiplier(atr_htf: float) -> float:
-    """Return dynamic SL/TP ATR multiplier based on HTF volatility."""
-
-    if math.isnan(atr_htf) or atr_htf <= 0:
-        return 1.8  # fallback
-
-    # Compare to rolling median would require history; assume caller passed
-    # *relative* ratio (>1 = expansion). For now treat >1.3 as expansion.
-    return 3.0 if atr_htf > 1.3 else 1.8
+# ATR fallback multiplier for ``calculate()`` step 3 (pure ATR fallback).
+# Historically this was a ``_volatility_multiplier(atr_htf)`` that tried to
+# widen exits during "expansion" — but ``atr_htf_pct`` is an *absolute* ATR%
+# (typically 2-8%), so a naive ``> 1.3`` comparison always resolved to 3.0
+# and the "regime scaling" never actually happened.  Volatility adaptation is
+# already provided by ``atr_tf_pct`` in the ATR sizing path, so this fallback
+# uses a single honest constant.
+ATR_FALLBACK_MULT: Final[float] = 1.8
 
 
 def _ensure_rr(entry: float, tp: float, sl: float, side: Side, min_rr: float = 1.8) -> bool:
@@ -121,10 +119,10 @@ def calculate(entry: float, side: Side, ctx: OrderContext) -> Tuple[float, float
     Raises
     ------
     ValueError
-        When the reward-to-risk is < 1.8 or insufficient data supplied.
+        When the reward-to-risk is below ``ctx.min_reward_risk_ratio`` or
+        insufficient data is supplied.
     """
 
-    atr_mult: Final[float] = _volatility_multiplier(ctx.atr_htf_pct)
     atr_price = (ctx.atr_tf_pct / 100.0) * ctx.last_price
 
     # -------------------------------------------------------------------
@@ -149,7 +147,7 @@ def calculate(entry: float, side: Side, ctx: OrderContext) -> Tuple[float, float
     # -------------------------------------------------------------------
     # 3. ATR fallback
     # -------------------------------------------------------------------
-    atr_distance = atr_mult * ctx.atr_tf_pct * ctx.last_price / 100.0
+    atr_distance = ATR_FALLBACK_MULT * ctx.atr_tf_pct * ctx.last_price / 100.0
 
     if sl is None:
         sl = entry - atr_distance if side == "long" else entry + atr_distance

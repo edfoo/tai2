@@ -29,9 +29,9 @@ class VWAPReversionStrategy:
 
     Config keys (all live under ``config["strategies"]["vwap_reversion"]``):
       - ``enabled`` (bool): master switch
-      - ``vwap_min_distance_atr`` (float, default 2.0): minimum distance from
+      - ``vwap_min_distance_atr`` (float, default 2.5): minimum distance from
         VWAP in ATR units to qualify as "extended".
-            - ``vwap_max_distance_atr`` (float, default 3.0): maximum distance from
+            - ``vwap_max_distance_atr`` (float, default 3.25): maximum distance from
         VWAP in ATR units.  Beyond this, the extension is likely a genuine
         trend/breakout, not a reversion setup — entering is catching a
         falling knife.  0 = disabled.
@@ -61,14 +61,14 @@ class VWAPReversionStrategy:
         must be at least this × ATR% from entry.
       - ``atr_max_tp_mult`` (float, default 4.0): structural TP distance
         capped at this × ATR% from entry.
-      - ``atr_min_sl_mult`` (float, default 0.3): structural SL distance
+      - ``atr_min_sl_mult`` (float, default 0.5): structural SL distance
         must be at least this × ATR% from entry.
       - ``atr_max_sl_mult`` (float, default 3.0): structural SL distance
         capped at this × ATR% from entry.
       - ``use_atr_sizing`` (bool, default True): ATR-scaled TP/SL fallback
         when structural levels are unavailable or ``use_structural_sizing``
         is False.
-      - ``atr_tp_multiplier`` (float, default 1.8): TP = multiplier × ATR%.
+      - ``atr_tp_multiplier`` (float, default 1.0): TP = multiplier × ATR%.
         Must be >= atr_sl_multiplier so R:R >= 1.0.
       - ``atr_sl_multiplier`` (float, default 1.0): SL = multiplier × ATR%.
         Tighter than TP — the extension is the invalidation; if it continues
@@ -120,10 +120,10 @@ class VWAPReversionStrategy:
         # ── Config ────────────────────────────────────────────────────
         vwap_min_distance_atr = helpers.extract_float(cfg.get("vwap_min_distance_atr"))
         if vwap_min_distance_atr is None:
-            vwap_min_distance_atr = 2.0
+            vwap_min_distance_atr = 2.5
         vwap_max_distance_atr = helpers.extract_float(cfg.get("vwap_max_distance_atr"))
         if vwap_max_distance_atr is None:
-            vwap_max_distance_atr = 3.0
+            vwap_max_distance_atr = 3.25
         max_adx = helpers.extract_float(cfg.get("max_adx"))
         if max_adx is None:
             max_adx = 25.0
@@ -149,14 +149,14 @@ class VWAPReversionStrategy:
             atr_max_tp_mult = 4.0
         atr_min_sl_mult = helpers.extract_float(cfg.get("atr_min_sl_mult"))
         if atr_min_sl_mult is None:
-            atr_min_sl_mult = 0.3
+            atr_min_sl_mult = 0.5
         atr_max_sl_mult = helpers.extract_float(cfg.get("atr_max_sl_mult"))
         if atr_max_sl_mult is None:
             atr_max_sl_mult = 3.0
         use_atr_sizing = bool(cfg.get("use_atr_sizing", True))
         atr_tp_multiplier = helpers.extract_float(cfg.get("atr_tp_multiplier"))
         if atr_tp_multiplier is None:
-            atr_tp_multiplier = 1.8
+            atr_tp_multiplier = 1.0
         atr_sl_multiplier = helpers.extract_float(cfg.get("atr_sl_multiplier"))
         if atr_sl_multiplier is None:
             atr_sl_multiplier = 1.0
@@ -170,7 +170,7 @@ class VWAPReversionStrategy:
         # the BB-bandwidth gate is then treated as soft (logged, not
         # blocking).  Set "bb" to make the BB-bandwidth percentile the
         # primary chop gate and demote ADX to soft.
-        regime_primary_gate = str(cfg.get("regime_primary_gate", "adx")).lower()
+        regime_primary_gate = str(cfg.get("regime_primary_gate", "bb")).lower()
         # ── Liquidity-aware gates (§3) ────────────────────────────────
         # ``require_no_funding_bias`` (default off): block reversion against a
         # strong funding-rate crowding in the trade direction.  Mirrors the

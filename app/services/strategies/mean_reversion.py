@@ -195,13 +195,12 @@ class MeanReversionStrategy:
         if max_adx is None:
             max_adx = 28.0
         # ── Liquidity-aware gates (§3) ────────────────────────────────
-        # All disabled by default so existing live behaviour is unchanged until
-        # individually tuned.  ``require_price_in_va``: only enter when price is
-        # inside the 70 % value area (mean reversion wants price fading toward
-        # the mean, not trending out of value).  ``require_no_extreme_funding``:
-        # block extreme crowdfunding in the trade direction.  ``require_balanced_book``:
-        # block when order-book imbalance is extreme (no liquidity to fade into).
-        require_price_in_va = bool(cfg.get("require_price_in_va", False))
+        # ``require_price_in_va`` is ON by default (in ``defaults.py``): only
+        # enter when price is inside the 70 % value area (mean reversion wants
+        # price fading toward the mean, not trending out of value).
+        # ``require_no_extreme_funding`` and ``require_balanced_book`` are OFF
+        # by default (opt-in).
+        require_price_in_va = bool(cfg.get("require_price_in_va", True))
         require_no_extreme_funding = bool(cfg.get("require_no_extreme_funding", False))
         funding_max_abs_rate = helpers.extract_float(cfg.get("funding_max_abs_rate"))
         if funding_max_abs_rate is None:
