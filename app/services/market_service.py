@@ -2741,13 +2741,30 @@ class MarketService:
     ) -> None:
         """Close a fraction of the position at market (partial TP)."""
         symbol_key = symbol.upper()
+        # Snap the partial-close size to the instrument's lot size (floor).  The
+        # caller passes `contracts * partial_frac`, which for odd contract counts
+        # yields a fractional size (e.g. 37 * 0.5 = 18.5).  OKX rejects
+        # fractional SWAP sizes, causing the close to fail and `partial_done` to
+        # reset, so the bot hammers the exchange every tick and the winner never
+        # banks its partial.  Quantizing here (single choke point) fixes that.
+        quantized = self._quantize_order_size(symbol, contracts)
+        if quantized is None or quantized <= 0:
+            self._emit_debug(
+                f"TradeMgmt partial: {symbol_key} position too small to partially "
+                f"close ({contracts:.4f} → <1 contract)"
+            )
+            state = self._trade_mgmt_state.get(symbol_key)
+            if state is not None:
+                state["partial_done"] = False
+            self._trade_mgmt_partial_closing.discard(symbol_key)
+            return
         coid = self._generate_client_order_id("tm-p")
         try:
             result = await self._submit_order(
                 symbol=symbol,
                 side=close_side,
                 pos_side=pos_side,
-                size=contracts,
+                size=quantized,
                 trade_mode=trade_mode or "isolated",
                 order_type="market",
                 reduce_only=True,
@@ -2763,7 +2780,7 @@ class MarketService:
                 order_result = result[0] if isinstance(result, tuple) else result
                 if order_result:
                     self._emit_debug(
-                        f"TradeMgmt partial: {symbol_key} closed {contracts:.4f} contracts"
+                        f"TradeMgmt partial: {symbol_key} closed {quantized:.4f} contracts"
                     )
                 else:
                     self._emit_debug(f"TradeMgmt partial: {symbol_key} close rejected")
