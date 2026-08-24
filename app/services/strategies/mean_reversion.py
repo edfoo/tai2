@@ -10,7 +10,7 @@ from typing import Any
 
 from . import StrategyHelpers, StrategySignal, compute_bb_bandwidth_percentile, resolve_analysis_block
 from .defaults import merged_config
-from .liquidity_helpers import funding_is_blocked, order_book_imbalance
+from .liquidity_helpers import funding_is_blocked, order_book_imbalance, volume_participation_ok
 
 
 class MeanReversionStrategy:
@@ -134,6 +134,16 @@ class MeanReversionStrategy:
         volume_rsi_max = helpers.extract_float(cfg.get("volume_rsi_max"))
         if volume_rsi_max is None:
             volume_rsi_max = 80.0
+        # ── Volume-participation gate ────────────────────────────────
+        # Block an entry on a candle whose volume has collapsed below
+        # ``min_volume_ratio`` × the recent average — the "price action
+        # halted" failure mode where a tight stop is wick-bait.
+        require_min_volume = bool(cfg.get("require_min_volume", False))
+        min_volume_ratio = helpers.extract_float(cfg.get("min_volume_ratio"))
+        if min_volume_ratio is None:
+            min_volume_ratio = 0.7
+        _vol_lookback = helpers.extract_float(cfg.get("volume_lookback"))
+        volume_lookback = int(_vol_lookback) if _vol_lookback is not None else 20
         # ── Regime gate (BB bandwidth percentile) ──────────────────────
         # MR works best in low-volatility chop.  When require_regime is True,
         # the current BB bandwidth must be below max_bb_bandwidth_percentile
@@ -426,6 +436,14 @@ class MeanReversionStrategy:
             or (volume_rsi_value is not None and volume_rsi_value < volume_rsi_max)
         )
 
+        # ── Volume-participation gate ────────────────────────────────
+        volume_ok = True
+        vol_ratio: float | None = None
+        if require_min_volume:
+            volume_ok, vol_ratio = volume_participation_ok(
+                indicators, min_ratio=min_volume_ratio, lookback=volume_lookback
+            )
+
         # ── Regime gate: BB bandwidth percentile ──────────────────────
         # MR works best in low-volatility chop (low bandwidth percentile).
         ohlcv_compact = indicators.get("ohlcv") or []
@@ -492,6 +510,7 @@ class MeanReversionStrategy:
             and (not require_price_in_va or va_ok)
             and (not require_no_extreme_funding or not funding_blocked_long)
             and imbalance_ok
+            and volume_ok
         )
         sell_signal = (
             rsi > rsi_overbought
@@ -510,6 +529,7 @@ class MeanReversionStrategy:
             and (not require_price_in_va or va_ok)
             and (not require_no_extreme_funding or not funding_blocked_short)
             and imbalance_ok
+            and volume_ok
         )
 
         # ------------------------------------------------------------------
@@ -710,5 +730,9 @@ class MeanReversionStrategy:
                 parts.append("funding=n/a")
         if require_balanced_book:
             parts.append(f"imbalance={imbalance:.3f}" if imbalance is not None else "imbalance=n/a")
+        if require_min_volume:
+            parts.append(
+                f"vol={vol_ratio:.2f}" if vol_ratio is not None else "vol=n/a"
+            )
         helpers.emit_debug(f"MeanReversion: {symbol} — no entry signal ({', '.join(parts)})")
         return None

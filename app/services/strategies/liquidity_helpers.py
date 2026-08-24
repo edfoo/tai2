@@ -189,3 +189,51 @@ def oi_confirms_momentum(
         in_direction = (oi_now > prev) if direction == "long" else (oi_now < prev)
         return (in_direction, info)
     return True, info
+
+
+def volume_participation_ok(
+    indicators: dict,
+    *,
+    min_ratio: float = 0.7,
+    lookback: int = 20,
+) -> tuple[bool, float | None]:
+    """Return ``(ok, ratio)`` for a volume-participation gate.
+
+    Blocks entries that fire on a candle whose volume has collapsed relative to
+    the recent average — i.e. price action has essentially halted.  On thin
+    alt-coin 15m books a tight 1–1.5×ATR stop placed on a dead-volume candle is
+    wick-bait the moment participation returns (the failure mode observed in
+    live logs: entries opening right after candle range AND volume dropped vs
+    the prior 20–24 bars).
+
+    Reads ``indicators["volume"]`` (``{"last", "average", "series"}`` as built
+    by the indicator service).  ``last`` is the current candle's volume; the
+    prior average is the mean of the ``lookback`` candles *before* the current
+    one (excluding the forming bar so it cannot self-confirm).
+
+    Returns ``ok=True`` (neutral) when volume data is missing or degenerate so
+    strategies degrade gracefully on instruments without a volume feed.
+    """
+    if not indicators:
+        return True, None
+    vol_block = indicators.get("volume") or {}
+    if not isinstance(vol_block, dict):
+        return True, None
+    current = _to_float(vol_block.get("last"))
+    if current is None or current <= 0:
+        return True, None
+    series = vol_block.get("series") or []
+    prior_vals = [
+        v for v in (_to_float(x) for x in series[:-1])
+        if v is not None and v > 0
+    ]
+    if not prior_vals:
+        return True, None
+    prior_window = prior_vals[-lookback:] if lookback > 0 else prior_vals
+    if not prior_window:
+        return True, None
+    avg = sum(prior_window) / len(prior_window)
+    if avg <= 0:
+        return True, None
+    ratio = current / avg
+    return ratio >= min_ratio, ratio

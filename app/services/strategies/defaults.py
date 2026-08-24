@@ -51,6 +51,13 @@ DEFAULT_MEAN_REVERSION: dict[str, Any] = {
     "vwap_min_distance_pct": 1.0,
     "require_volume_cooling": False,
     "volume_rsi_max": 80.0,
+    # Volume-participation gate (default OFF): block entries on a candle whose
+    # volume has collapsed below ``min_volume_ratio`` × the recent average —
+    # the "price action halted" failure mode.  Neutral (pass) when volume data
+    # is absent.
+    "require_min_volume": False,
+    "min_volume_ratio": 0.7,
+    "volume_lookback": 20,
     "require_regime": True,
     "max_bb_bandwidth_percentile": 55.0,
     "regime_lookback": 50,
@@ -130,6 +137,11 @@ DEFAULT_SPIKE_CONTINUATION: dict[str, Any] = {
     # Liquidity-aware gates (§3) — OFF by default (opt-in).
     "require_oi_confirmation": False,
     "oi_min_zscore": 1.0,
+    # Volume-participation gate (default OFF): SC already gates on volume RSI,
+    # but this additionally blocks a spike entry on a dead-volume candle.
+    "require_min_volume": False,
+    "min_volume_ratio": 0.7,
+    "volume_lookback": 20,
 }
 
 # ── Liquidity Sweep ─────────────────────────────────────────────────────────
@@ -240,6 +252,11 @@ DEFAULT_VWAP_REVERSION: dict[str, Any] = {
     # Liquidity-aware gates (§3) — OFF by default (opt-in).
     "require_no_funding_bias": False,
     "funding_max_abs_rate": 0.0007,
+    # Volume-participation gate (default OFF): block a VWAP reversion on a
+    # dead-volume candle where the snap-back has no participation behind it.
+    "require_min_volume": False,
+    "min_volume_ratio": 0.7,
+    "volume_lookback": 20,
 }
 
 # ── Trend Pullback ──────────────────────────────────────────────────────────
@@ -304,6 +321,13 @@ DEFAULT_TREND_PULLBACK: dict[str, Any] = {
     # merely noise on thin books (the dominant trend_pullback drag in live logs).
     "require_poc_proximity": True,
     "poc_proximity_va_width": 0.2,
+    # Volume-participation gate (default OFF): block a pullback entry on a
+    # candle whose volume has collapsed below ``min_volume_ratio`` × the recent
+    # average.  This is the "price action halted" failure mode that tight
+    # 1–1.5×ATR stops are especially vulnerable to on thin alt books.
+    "require_min_volume": False,
+    "min_volume_ratio": 0.7,
+    "volume_lookback": 20,
 }
 
 # Registry keyed by strategy name.

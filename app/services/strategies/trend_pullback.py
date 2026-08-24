@@ -21,6 +21,7 @@ from typing import Any
 
 from . import StrategyHelpers, StrategySignal, resolve_analysis_block
 from .defaults import DEFAULT_TREND_PULLBACK, merged_config
+from .liquidity_helpers import volume_participation_ok
 
 
 class TrendPullbackStrategy:
@@ -194,6 +195,16 @@ class TrendPullbackStrategy:
         poc_proximity_va_width = helpers.extract_float(cfg.get("poc_proximity_va_width"))
         if poc_proximity_va_width is None:
             poc_proximity_va_width = 0.2
+        # ── Volume-participation gate ────────────────────────────────
+        # Block a pullback entry on a candle whose volume has collapsed below
+        # ``min_volume_ratio`` × the recent average — the "price action halted"
+        # failure mode where a tight stop is wick-bait.
+        require_min_volume = bool(cfg.get("require_min_volume", False))
+        min_volume_ratio = helpers.extract_float(cfg.get("min_volume_ratio"))
+        if min_volume_ratio is None:
+            min_volume_ratio = 0.7
+        _vol_lookback = helpers.extract_float(cfg.get("volume_lookback"))
+        volume_lookback = int(_vol_lookback) if _vol_lookback is not None else 20
 
         # ── Snapshot data ─────────────────────────────────────────────
         market_data: dict[str, Any] = snapshot.get("market_data") or {}
@@ -222,6 +233,22 @@ class TrendPullbackStrategy:
                 f"TrendPullback: {symbol} — no signal (ATR% unavailable)"
             )
             return None
+
+        # ── Volume-participation gate ────────────────────────────────
+        volume_ok = True
+        vol_ratio: float | None = None
+        if require_min_volume:
+            volume_ok, vol_ratio = volume_participation_ok(
+                indicators, min_ratio=min_volume_ratio, lookback=volume_lookback
+            )
+            if not volume_ok:
+                helpers.emit_debug(
+                    f"TrendPullback: {symbol} — no signal "
+                    f"(volume participation: ratio={vol_ratio:.2f} < min={min_volume_ratio:.2f})"
+                    if vol_ratio is not None else
+                    f"TrendPullback: {symbol} — no signal (volume data unavailable)"
+                )
+                return None
 
         # ── ADX gates ─────────────────────────────────────────────────
         if min_adx > 0 and (adx is None or adx < min_adx):
@@ -393,6 +420,7 @@ class TrendPullbackStrategy:
             and candle_long_ok
             and poc_proximity_ok
             and extension_ok_long
+            and volume_ok
         )
         sell_signal = (
             want_short
@@ -400,6 +428,7 @@ class TrendPullbackStrategy:
             and candle_short_ok
             and poc_proximity_ok
             and extension_ok_short
+            and volume_ok
         )
 
         if not buy_signal and not sell_signal:
@@ -425,6 +454,10 @@ class TrendPullbackStrategy:
                 parts.append(
                     f"ext(long={'ok' if extension_ok_long else 'blocked'}, "
                     f"short={'ok' if extension_ok_short else 'blocked'})"
+                )
+            if require_min_volume:
+                parts.append(
+                    f"vol={vol_ratio:.2f}" if vol_ratio is not None else "vol=n/a"
                 )
             helpers.emit_debug(
                 f"TrendPullback: {symbol} — no signal ({', '.join(parts)})"

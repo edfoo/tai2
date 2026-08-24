@@ -17,7 +17,7 @@ from typing import Any
 
 from . import StrategyHelpers, StrategySignal, compute_bb_bandwidth_percentile, resolve_analysis_block
 from .defaults import merged_config
-from .liquidity_helpers import oi_confirms_momentum
+from .liquidity_helpers import oi_confirms_momentum, volume_participation_ok
 
 
 class SpikeContinuationStrategy:
@@ -205,6 +205,16 @@ class SpikeContinuationStrategy:
         oi_min_zscore = helpers.extract_float(cfg.get("oi_min_zscore"))
         if oi_min_zscore is None:
             oi_min_zscore = 1.0
+        # ── Volume-participation gate ────────────────────────────────
+        # Block a spike entry on a dead-volume candle (no participation behind
+        # the continuation).  SC already gates on volume RSI; this adds a floor
+        # against the raw volume collapse.
+        require_min_volume = bool(cfg.get("require_min_volume", False))
+        min_volume_ratio = helpers.extract_float(cfg.get("min_volume_ratio"))
+        if min_volume_ratio is None:
+            min_volume_ratio = 0.7
+        _vol_lookback = helpers.extract_float(cfg.get("volume_lookback"))
+        volume_lookback = int(_vol_lookback) if _vol_lookback is not None else 20
 
         market_data: dict[str, Any] = snapshot.get("market_data") or {}
         sym_data = market_data.get(symbol) or {}
@@ -509,6 +519,13 @@ class SpikeContinuationStrategy:
             or (atr_pct_value is not None and atr_pct_value >= min_atr_pct)
         )
 
+        # ── Volume-participation gate ────────────────────────────────
+        volume_ok = True
+        if require_min_volume:
+            volume_ok, _ = volume_participation_ok(
+                indicators, min_ratio=min_volume_ratio, lookback=volume_lookback
+            )
+
         buy_signal = (
             rsi_min <= rsi <= rsi_max
             and bb_breakout_buy
@@ -520,6 +537,7 @@ class SpikeContinuationStrategy:
             and regime_ok
             and atr_ok
             and (not require_oi_confirmation or oi_ok_buy)
+            and volume_ok
         )
         # Sell signal: mirror
         sell_signal = (
@@ -533,6 +551,7 @@ class SpikeContinuationStrategy:
             and regime_ok
             and atr_ok
             and (not require_oi_confirmation or oi_ok_sell)
+            and volume_ok
         )
 
         # ── Unified TP/SL via trade_management ─────────────────────────
@@ -614,5 +633,7 @@ class SpikeContinuationStrategy:
                 )
             else:
                 parts.append("oi=skipped(no data)")
+        if require_min_volume:
+            parts.append(f"vol_participation={'ok' if volume_ok else 'blocked'}")
         helpers.emit_debug(f"SpikeContinuation: {symbol} — no signal ({', '.join(parts)})")
         return None

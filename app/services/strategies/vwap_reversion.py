@@ -21,7 +21,7 @@ from typing import Any
 
 from . import StrategyHelpers, StrategySignal, compute_bb_bandwidth_percentile, resolve_analysis_block
 from .defaults import merged_config
-from .liquidity_helpers import funding_is_blocked
+from .liquidity_helpers import funding_is_blocked, volume_participation_ok
 
 
 class VWAPReversionStrategy:
@@ -184,6 +184,15 @@ class VWAPReversionStrategy:
         funding_max_abs_rate = helpers.extract_float(cfg.get("funding_max_abs_rate"))
         if funding_max_abs_rate is None:
             funding_max_abs_rate = 0.0007  # ≈ 0.07 % — mirrors |funding_z| < 0.7
+        # ── Volume-participation gate ────────────────────────────────
+        # Block a reversion entry on a dead-volume candle where the snap-back
+        # has no participation behind it.
+        require_min_volume = bool(cfg.get("require_min_volume", False))
+        min_volume_ratio = helpers.extract_float(cfg.get("min_volume_ratio"))
+        if min_volume_ratio is None:
+            min_volume_ratio = 0.7
+        _vol_lookback = helpers.extract_float(cfg.get("volume_lookback"))
+        volume_lookback = int(_vol_lookback) if _vol_lookback is not None else 20
 
         # ── Snapshot data ─────────────────────────────────────────────
         market_data: dict[str, Any] = snapshot.get("market_data") or {}
@@ -308,6 +317,14 @@ class VWAPReversionStrategy:
             # Short: price above VWAP, closing down toward VWAP.
             closeback_short_ok = distance > 0 and _curr_close < _prev_close
 
+        # ── Volume-participation gate ────────────────────────────────
+        volume_ok = True
+        vol_ratio: float | None = None
+        if require_min_volume:
+            volume_ok, vol_ratio = volume_participation_ok(
+                indicators, min_ratio=min_volume_ratio, lookback=volume_lookback
+            )
+
         # ── HTF trend alignment ───────────────────────────────────────
         htf_indicators: dict[str, Any] = indicators.get("htf_indicators") or {}
         htf_ma = htf_indicators.get("moving_averages") or {}
@@ -384,12 +401,14 @@ class VWAPReversionStrategy:
             and closeback_long_ok
             and (not require_htf_trend or not htf_available or htf_bullish)
             and (not require_no_funding_bias or not funding_blocked_long)
+            and volume_ok
         )
         sell_signal = (
             distance > 0
             and closeback_short_ok
             and (not require_htf_trend or not htf_available or htf_bearish)
             and (not require_no_funding_bias or not funding_blocked_short)
+            and volume_ok
         )
 
         if not buy_signal and not sell_signal:
@@ -424,6 +443,10 @@ class VWAPReversionStrategy:
                     parts.append(f"funding={f_info['rate']:.5g}")
                 else:
                     parts.append("funding=n/a")
+            if require_min_volume:
+                parts.append(
+                    f"vol={vol_ratio:.2f}" if vol_ratio is not None else "vol=n/a"
+                )
             helpers.emit_debug(
                 f"VWAPReversion: {symbol} — no signal ({', '.join(parts)})"
             )
