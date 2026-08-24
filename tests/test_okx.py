@@ -3038,7 +3038,7 @@ def _make_trade_mgmt_service(monkeypatch: pytest.MonkeyPatch, symbol: str, side:
             "time_stop_min_r": 0.3,
             "reentry_cooldown_seconds": 0.0,
             "trailing_enabled": True,
-            "trailing_activate_r": 1.0,
+            "trailing_activate_r": 0.8,
             "trailing_distance_atr": 1.5,
             "trailing_floor_r": 0.5,
             "trailing_step_r": 0.2,

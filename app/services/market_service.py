@@ -2273,7 +2273,7 @@ class MarketService:
           time_stop_min_r          – float, only time-stop if progress < this R (default 0.3)
           reentry_cooldown_seconds – float, block re-entry after close (default 1800)
           trailing_enabled         – bool (default True), trail the remainder after partial TP
-          trailing_activate_r      – float, start trailing after this R (default 1.0)
+          trailing_activate_r      – float, start trailing after this R (default 0.8)
           trailing_distance_atr    – float, trail SL this many ATR% behind price (default 1.5)
           trailing_floor_r         – float, never let trailing SL go below this R (default 0.5)
           trailing_step_r          – float, only re-place SL when improvement exceeds this R (default 0.2)
@@ -2334,7 +2334,7 @@ class MarketService:
         trailing_enabled = bool(tm.get("trailing_enabled", True))
         trailing_activate_r = self._extract_float(tm.get("trailing_activate_r"))
         if trailing_activate_r is None:
-            trailing_activate_r = 1.0
+            trailing_activate_r = 0.8
         trailing_distance_atr = self._extract_float(tm.get("trailing_distance_atr"))
         if trailing_distance_atr is None:
             trailing_distance_atr = 1.5
@@ -9291,15 +9291,35 @@ class MarketService:
             and last_price
             and last_price > 0
         ):
-            _snap_rm = self._last_full_snapshot
-            _risk_metrics = (
-                ((_snap_rm.get("market_data") or {}).get(symbol) or {}).get("risk_metrics") or {}
-                if _snap_rm
-                else {}
-            )
-            _suggested_stop = self._extract_float(_risk_metrics.get("suggested_stop"))
-            if _suggested_stop and _suggested_stop > 0:
-                _stop_fraction = _suggested_stop / last_price
+            # Prefer the ACTUAL stop-loss price carried on this decision so the
+            # risk cap stays calibrated to whichever strategy sized the exit
+            # (each strategy has its own ATR SL multiplier).  Falls back to the
+            # generic suggested_stop (ATR × 1.5) only when the decision has no
+            # explicit stop (e.g. a bare LLM decision without a computed SL).
+            _decision_sl = self._extract_float(decision.get("stop_loss"))
+            _stop_fraction: float | None = None
+            _stop_source = "decision SL"
+            if _decision_sl and _decision_sl > 0:
+                if action == "SELL":
+                    _stop_fraction = (_decision_sl - last_price) / last_price
+                else:
+                    _stop_fraction = (last_price - _decision_sl) / last_price
+                if _stop_fraction <= 0:
+                    # SL on the wrong side of entry (guarded later as invalid
+                    # protection) — do not divide by a non-positive distance.
+                    _stop_fraction = None
+            if _stop_fraction is None:
+                _snap_rm = self._last_full_snapshot
+                _risk_metrics = (
+                    ((_snap_rm.get("market_data") or {}).get(symbol) or {}).get("risk_metrics") or {}
+                    if _snap_rm
+                    else {}
+                )
+                _suggested_stop = self._extract_float(_risk_metrics.get("suggested_stop"))
+                if _suggested_stop and _suggested_stop > 0:
+                    _stop_fraction = _suggested_stop / last_price
+                    _stop_source = "suggested_stop (ATR×1.5)"
+            if _stop_fraction and _stop_fraction > 0:
                 _atr_max_notional = round(
                     (account_equity * _atr_risk_pct_cfg / 100.0) / _stop_fraction, 2
                 )
@@ -9307,7 +9327,7 @@ class MarketService:
                 if guardrail_notional_cap is None or _atr_max_notional < guardrail_notional_cap:
                     guardrail_notional_cap = _atr_max_notional
                     self._emit_debug(
-                        f"{symbol} ATR risk cap: equity={account_equity:.2f} "
+                        f"{symbol} ATR risk cap [{_stop_source}]: equity={account_equity:.2f} "
                         f"× risk={_atr_risk_pct_cfg}% / stop_dist={_stop_fraction:.4f} "
                         f"= {_atr_max_notional:.2f}"
                         + (
@@ -9323,7 +9343,8 @@ class MarketService:
                     )
             else:
                 self._emit_debug(
-                    f"{symbol} ATR risk cap: no ATR data available (suggested_stop missing); skipping"
+                    f"{symbol} ATR risk cap: no stop distance available "
+                    f"(no decision SL and no suggested_stop); skipping"
                 )
 
         confidence_value = self._normalize_confidence(decision.get("confidence"))

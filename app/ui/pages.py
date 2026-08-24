@@ -3272,6 +3272,22 @@ def register_pages(app: FastAPI) -> None:
                                 min=10.0, max=99.0, step=5.0, format="%.0f",
                             ).classes("w-48").props("dense")
                             ui.label("Maximum volume RSI to allow entry (below = volume momentum fading).").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            mr_require_min_vol_switch = ui.switch(
+                                "Require volume participation",
+                                value=bool(_mr_cfg.get("require_min_volume", False)),
+                            ).props("dense color=primary")
+                            mr_min_vol_ratio_input = ui.number(
+                                label="Min volume ratio",
+                                value=float(_mr_cfg.get("min_volume_ratio") if _mr_cfg.get("min_volume_ratio") is not None else 0.7),
+                                min=0.1, max=5.0, step=0.05, format="%.2f",
+                            ).classes("w-40").props("dense")
+                            mr_vol_lookback_input = ui.number(
+                                label="Volume lookback",
+                                value=float(_mr_cfg.get("volume_lookback") if _mr_cfg.get("volume_lookback") is not None else 20),
+                                min=5, max=100, step=1, precision=0,
+                            ).classes("w-40").props("dense")
+                            ui.label("Block entries on dead-volume candles (filters halted price action).").classes("text-xs text-slate-500")
                         # ── Regime gate (BB bandwidth percentile) ──────────────
                         ui.separator().classes("my-2")
                         ui.label("Regime Gate (BB Bandwidth Percentile)").classes("text-xs font-semibold text-slate-600")
@@ -3480,6 +3496,9 @@ def register_pages(app: FastAPI) -> None:
                 mr_vwap_min_dist_input.value = d["vwap_min_distance_pct"]
                 mr_volume_cooling_switch.value = d["require_volume_cooling"]
                 mr_volume_rsi_max_input.value = d["volume_rsi_max"]
+                mr_require_min_vol_switch.value = d["require_min_volume"]
+                mr_min_vol_ratio_input.value = d["min_volume_ratio"]
+                mr_vol_lookback_input.value = d["volume_lookback"]
                 mr_require_regime_switch.value = d["require_regime"]
                 mr_max_bw_pct_input.value = d["max_bb_bandwidth_percentile"]
                 mr_regime_lookback_input.value = d["regime_lookback"]
@@ -3786,6 +3805,22 @@ def register_pages(app: FastAPI) -> None:
                                 min=0.0, max=5.0, step=0.1, format="%.1f",
                             ).classes("w-40").props("dense")
                             ui.label("Momentum entries need fresh leverage (rising open interest z-score beyond threshold).").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            sc_require_min_vol_switch = ui.switch(
+                                "Require volume participation",
+                                value=bool(_sc_cfg.get("require_min_volume", False)),
+                            ).props("dense color=primary")
+                            sc_min_vol_ratio_input = ui.number(
+                                label="Min volume ratio",
+                                value=float(_sc_cfg.get("min_volume_ratio") if _sc_cfg.get("min_volume_ratio") is not None else 0.7),
+                                min=0.1, max=5.0, step=0.05, format="%.2f",
+                            ).classes("w-40").props("dense")
+                            sc_vol_lookback_input = ui.number(
+                                label="Volume lookback",
+                                value=float(_sc_cfg.get("volume_lookback") if _sc_cfg.get("volume_lookback") is not None else 20),
+                                min=5, max=100, step=1, precision=0,
+                            ).classes("w-40").props("dense")
+                            ui.label("Block spike entries on dead-volume candles (no participation behind the continuation).").classes("text-xs text-slate-500")
                     _active_badge_sc = ui.badge("Active", color="positive").bind_visibility_from(
                         sc_enabled_switch, "value"
                     )
@@ -3826,6 +3861,9 @@ def register_pages(app: FastAPI) -> None:
                 sc_flip_select.value = _flip
                 sc_require_oi_switch.value = d["require_oi_confirmation"]
                 sc_oi_min_zscore_input.value = d["oi_min_zscore"]
+                sc_require_min_vol_switch.value = d["require_min_volume"]
+                sc_min_vol_ratio_input.value = d["min_volume_ratio"]
+                sc_vol_lookback_input.value = d["volume_lookback"]
                 ui.notify("Spike Continuation fields set to recommended defaults — click Save to persist", color="info")
 
             # ── Liquidity Sweep ───────────────────────────────────────────────────
@@ -4369,6 +4407,22 @@ def register_pages(app: FastAPI) -> None:
                                 min=0.0001, max=0.01, step=0.0001, format="%.4f",
                             ).classes("w-40").props("dense")
                             ui.label("Block reversion against heavy funding crowding in the trade direction (mirrors |funding_z| < 0.7).").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            vr_require_min_vol_switch = ui.switch(
+                                "Require volume participation",
+                                value=bool(_vr_cfg.get("require_min_volume", False)),
+                            ).props("dense color=primary")
+                            vr_min_vol_ratio_input = ui.number(
+                                label="Min volume ratio",
+                                value=float(_vr_cfg.get("min_volume_ratio") if _vr_cfg.get("min_volume_ratio") is not None else 0.7),
+                                min=0.1, max=5.0, step=0.05, format="%.2f",
+                            ).classes("w-40").props("dense")
+                            vr_vol_lookback_input = ui.number(
+                                label="Volume lookback",
+                                value=float(_vr_cfg.get("volume_lookback") if _vr_cfg.get("volume_lookback") is not None else 20),
+                                min=5, max=100, step=1, precision=0,
+                            ).classes("w-40").props("dense")
+                            ui.label("Block entries on dead-volume candles (filters halted price action).").classes("text-xs text-slate-500")
                     _active_badge_vr = ui.badge("Active", color="positive").bind_visibility_from(
                         vr_enabled_switch, "value"
                     )
@@ -4404,6 +4458,9 @@ def register_pages(app: FastAPI) -> None:
                 vr_flip_select.value = _flip
                 vr_require_no_funding_switch.value = d["require_no_funding_bias"]
                 vr_funding_max_rate_input.value = d["funding_max_abs_rate"]
+                vr_require_min_vol_switch.value = d["require_min_volume"]
+                vr_min_vol_ratio_input.value = d["min_volume_ratio"]
+                vr_vol_lookback_input.value = d["volume_lookback"]
                 ui.notify("VWAP Reversion fields set to recommended defaults — click Save to persist", color="info")
 
             # ── Trend Pullback ────────────────────────────────────────────────────
@@ -4585,12 +4642,12 @@ def register_pages(app: FastAPI) -> None:
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             tp_atr_tp_mult_input = ui.number(
                                 label="ATR TP multiplier",
-                                value=float(_tp_cfg.get("atr_tp_multiplier") or 1.5),
+                                value=float(_tp_cfg.get("atr_tp_multiplier") or 2.25),
                                 min=0.1, max=10.0, step=0.1, format="%.1f",
                             ).classes("w-40").props("dense")
                             tp_atr_sl_mult_input = ui.number(
                                 label="ATR SL multiplier",
-                                value=float(_tp_cfg.get("atr_sl_multiplier") or 1.0),
+                                value=float(_tp_cfg.get("atr_sl_multiplier") or 1.5),
                                 min=0.1, max=10.0, step=0.1, format="%.1f",
                             ).classes("w-40").props("dense")
                             tp_min_atr_pct_input = ui.number(
@@ -4635,6 +4692,22 @@ def register_pages(app: FastAPI) -> None:
                                 min=0.05, max=1.0, step=0.05, format="%.2f",
                             ).classes("w-48").props("dense")
                             ui.label("Pullback must be within this fraction of VA-width of POC / VA-high / VA-low (adds a liquidity node to the 21-EMA touch).").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            tp_require_min_vol_switch = ui.switch(
+                                "Require volume participation",
+                                value=bool(_tp_cfg.get("require_min_volume", False)),
+                            ).props("dense color=primary")
+                            tp_min_vol_ratio_input = ui.number(
+                                label="Min volume ratio",
+                                value=float(_tp_cfg.get("min_volume_ratio") if _tp_cfg.get("min_volume_ratio") is not None else 0.7),
+                                min=0.1, max=5.0, step=0.05, format="%.2f",
+                            ).classes("w-40").props("dense")
+                            tp_vol_lookback_input = ui.number(
+                                label="Volume lookback",
+                                value=float(_tp_cfg.get("volume_lookback") if _tp_cfg.get("volume_lookback") is not None else 20),
+                                min=5, max=100, step=1, precision=0,
+                            ).classes("w-40").props("dense")
+                            ui.label("Block entries on candles whose volume has collapsed below this ratio of the recent average (filters dead-volume / halted-price-action candles).").classes("text-xs text-slate-500")
                     _active_badge_tp = ui.badge("Active", color="positive").bind_visibility_from(
                         tp_enabled_switch, "value"
                     )
@@ -4673,6 +4746,9 @@ def register_pages(app: FastAPI) -> None:
                 tp_flip_select.value = _flip
                 tp_require_poc_prox_switch.value = d["require_poc_proximity"]
                 tp_poc_prox_width_input.value = d["poc_proximity_va_width"]
+                tp_require_min_vol_switch.value = d["require_min_volume"]
+                tp_min_vol_ratio_input.value = d["min_volume_ratio"]
+                tp_vol_lookback_input.value = d["volume_lookback"]
                 ui.notify("Trend Pullback fields set to recommended defaults — click Save to persist", color="info")
 
             with ui.card().classes("w-full rounded-lg border border-slate-200 mb-1"):
@@ -4929,6 +5005,29 @@ def register_pages(app: FastAPI) -> None:
                             "Underwater only: keep stalled-but-profitable positions (don't churn flat); only time-stop negative positions."
                         ).classes("text-xs text-slate-500")
                         ui.separator().classes("my-2")
+                        ui.label("Trailing stop (runner)").classes("text-xs font-semibold text-slate-600")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            tm_trailing_switch = ui.switch(
+                                "Trailing stop",
+                                value=bool(trade_management.get("trailing_enabled", True)),
+                            ).props("dense color=primary")
+                            tm_trailing_activate_input = ui.number(
+                                label="Activate at R",
+                                value=float(trade_management.get("trailing_activate_r") or 0.8),
+                                min=0.1, max=5.0, step=0.1, format="%.1f",
+                            ).classes("w-32").props("dense")
+                            tm_trailing_distance_input = ui.number(
+                                label="Trail distance (ATR)",
+                                value=float(trade_management.get("trailing_distance_atr") or 1.5),
+                                min=0.1, max=10.0, step=0.1, format="%.1f",
+                            ).classes("w-40").props("dense")
+                            tm_trailing_floor_input = ui.number(
+                                label="Floor R",
+                                value=float(trade_management.get("trailing_floor_r") or 0.5),
+                                min=0.0, max=5.0, step=0.1, format="%.1f",
+                            ).classes("w-32").props("dense")
+                        ui.label("After the partial TP, trail the runner's SL behind price (never below the floor R). Activate at 0.8R so the runner is protected the moment the partial fires.").classes("text-xs text-slate-500")
+                        ui.separator().classes("my-2")
                         ui.label("Re-entry cooldown").classes("text-xs font-semibold text-slate-600")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             tm_cooldown_input = ui.number(
@@ -4954,6 +5053,11 @@ def register_pages(app: FastAPI) -> None:
                 tm_time_sec_input.value = d["time_stop_seconds"]
                 tm_time_candles_input.value = d["time_stop_candles"]
                 tm_time_min_r_input.value = d["time_stop_min_r"]
+                tm_time_underwater_switch.value = d["time_stop_underwater_only"]
+                tm_trailing_switch.value = d["trailing_enabled"]
+                tm_trailing_activate_input.value = d["trailing_activate_r"]
+                tm_trailing_distance_input.value = d["trailing_distance_atr"]
+                tm_trailing_floor_input.value = d["trailing_floor_r"]
                 tm_cooldown_input.value = d["reentry_cooldown_seconds"]
                 ui.notify("Trade Management fields set to recommended defaults — click Save to persist", color="info")
 
@@ -5502,6 +5606,11 @@ def register_pages(app: FastAPI) -> None:
                     "time_stop_candles": int(tm_time_candles_input.value or 8),
                     "time_stop_min_r": float(tm_time_min_r_input.value or 0.3),
                     "time_stop_underwater_only": bool(tm_time_underwater_switch.value),
+                    "trailing_enabled": bool(tm_trailing_switch.value),
+                    "trailing_activate_r": float(tm_trailing_activate_input.value or 0.8),
+                    "trailing_distance_atr": float(tm_trailing_distance_input.value or 1.5),
+                    "trailing_floor_r": float(tm_trailing_floor_input.value or 0.5),
+                    "trailing_step_r": float(trade_management.get("trailing_step_r") or 0.2),
                     "reentry_cooldown_seconds": float(tm_cooldown_input.value or 900.0),
                     # Software-stop loss: market-close when pnl_pct <= -sl_pct
                     # (hides the exit level from the book).  No UI toggle — this
@@ -5599,6 +5708,9 @@ def register_pages(app: FastAPI) -> None:
                 "vwap_min_distance_pct": float(mr_vwap_min_dist_input.value or 1.0),
                 "require_volume_cooling": bool(mr_volume_cooling_switch.value),
                 "volume_rsi_max": float(mr_volume_rsi_max_input.value or 70.0),
+                "require_min_volume": bool(mr_require_min_vol_switch.value),
+                "min_volume_ratio": float(mr_min_vol_ratio_input.value or 0.7),
+                "volume_lookback": int(mr_vol_lookback_input.value or 20),
                 "require_regime": bool(mr_require_regime_switch.value),
                 "max_bb_bandwidth_percentile": float(mr_max_bw_pct_input.value or 45.0),
                 "regime_lookback": int(mr_regime_lookback_input.value or 50),
@@ -5659,6 +5771,9 @@ def register_pages(app: FastAPI) -> None:
                 "flip_launcher_direction": str(sc_flip_select.value) if sc_flip_switch.value else None,
                 "require_oi_confirmation": bool(sc_require_oi_switch.value),
                 "oi_min_zscore": float(sc_oi_min_zscore_input.value or 1.0),
+                "require_min_volume": bool(sc_require_min_vol_switch.value),
+                "min_volume_ratio": float(sc_min_vol_ratio_input.value or 0.7),
+                "volume_lookback": int(sc_vol_lookback_input.value or 20),
             }
             _strategies_cfg["liquidity_sweep"] = {
                 "enabled": bool(ls_enabled_switch.value),
@@ -5734,6 +5849,9 @@ def register_pages(app: FastAPI) -> None:
                 "flip_launcher_direction": str(vr_flip_select.value) if vr_flip_switch.value else None,
                 "require_no_funding_bias": bool(vr_require_no_funding_switch.value),
                 "funding_max_abs_rate": float(vr_funding_max_rate_input.value or 0.0007),
+                "require_min_volume": bool(vr_require_min_vol_switch.value),
+                "min_volume_ratio": float(vr_min_vol_ratio_input.value or 0.7),
+                "volume_lookback": int(vr_vol_lookback_input.value or 20),
             }
             _strategies_cfg["trend_pullback"] = {
                 "enabled": bool(tp_enabled_switch.value),
@@ -5759,8 +5877,8 @@ def register_pages(app: FastAPI) -> None:
                 "atr_min_sl_mult": float(tp_atr_min_sl_input.value or 0.3),
                 "atr_max_sl_mult": float(tp_atr_max_sl_input.value or 3.0),
                 "use_atr_sizing": bool(tp_use_atr_sizing_switch.value),
-                "atr_tp_multiplier": float(tp_atr_tp_mult_input.value or 1.5),
-                "atr_sl_multiplier": float(tp_atr_sl_mult_input.value or 1.0),
+                "atr_tp_multiplier": float(tp_atr_tp_mult_input.value or 2.25),
+                "atr_sl_multiplier": float(tp_atr_sl_mult_input.value or 1.5),
                 "min_atr_pct": float(tp_min_atr_pct_input.value or 1.0),
                 "min_reward_risk_ratio": (
                     float(tp_min_rr_input.value) if tp_min_rr_input.value not in (None, "") else None
@@ -5768,6 +5886,9 @@ def register_pages(app: FastAPI) -> None:
                 "flip_launcher_direction": str(tp_flip_select.value) if tp_flip_switch.value else None,
                 "require_poc_proximity": bool(tp_require_poc_prox_switch.value),
                 "poc_proximity_va_width": float(tp_poc_prox_width_input.value or 0.2),
+                "require_min_volume": bool(tp_require_min_vol_switch.value),
+                "min_volume_ratio": float(tp_min_vol_ratio_input.value or 0.7),
+                "volume_lookback": int(tp_vol_lookback_input.value or 20),
             }
             _launcher_cfg["strategies"] = _strategies_cfg
             config["launcher"] = _launcher_cfg

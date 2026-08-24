@@ -264,11 +264,10 @@ DEFAULT_VWAP_REVERSION: dict[str, Any] = {
 # class docstring and the inline fallbacks in ``trend_pullback.py`` MUST
 # reference these values (1.5 TP / 1.0 SL → ≥ 1.5 R:R) so they cannot drift.
 #
-# The multipliers were tightened from 3.0/2.0 to 1.5/1.0 (R:R unchanged at
-# 1.5): on high-ATR volatile alts a fixed 3.0× multiplier on a ~6.6% ATR%
-# produced a ~20% take-profit — unreachable for a pullback-to-value thesis,
-# which is why trades ran to profit and reverted.  1.5/1.0 halves the absolute
-# TP/SL distance (~10% / ~6.7% on the same asset) while preserving the 1.5 R:R.
+# The multipliers were rebalanced to 2.25/1.5 (R:R unchanged at 1.5).  The SL
+# was widened from 1.0→1.5×ATR because a 1.0×ATR stop sat inside single-candle
+# alt-coin noise (wick-bait); the TP was widened 1.5→2.25 proportionally to
+# hold the 1.5 R:R floor.  Both distances grow, keeping the ratio unchanged.
 DEFAULT_TREND_PULLBACK: dict[str, Any] = {
     "enabled": False,
     # Static fallback floor: 6.0 / 4.0 → 1.5 R:R (matches the ATR floor).
@@ -299,10 +298,12 @@ DEFAULT_TREND_PULLBACK: dict[str, Any] = {
     "atr_max_tp_mult": 4.0,
     "atr_min_sl_mult": 0.3,
     "atr_max_sl_mult": 3.0,
-    # Unified exit model: 1.5 / 1.0 → ≥ 1.5 R:R when ATR sizing active.
-    # (Tightened from 3.0/2.0 to bound absolute TP distance on high-ATR alts.)
-    "atr_tp_multiplier": 1.5,
-    "atr_sl_multiplier": 1.0,
+    # Unified exit model: 2.25 / 1.5 → 1.5 R:R when ATR sizing active.
+    # SL widened 1.0→1.5 so the stop sits outside single-candle alt-coin noise
+    # (the 1.0×ATR stop was wick-bait); TP widened 1.5→2.25 to preserve the
+    # 1.5 R:R floor.  Both distances grow together, keeping the ratio unchanged.
+    "atr_tp_multiplier": 2.25,
+    "atr_sl_multiplier": 1.5,
     # Adaptive ATR applies to SIZING only (never the min_atr_pct gate).
     "use_adaptive_atr": False,
     "min_atr_pct": 1.0,
@@ -360,7 +361,10 @@ DEFAULT_TRADE_MANAGEMENT: dict[str, Any] = {
     "time_stop_underwater_only": True,
     "reentry_cooldown_seconds": 1800.0,
     "trailing_enabled": True,
-    "trailing_activate_r": 1.0,
+    # Lowered 1.0→0.8 so the runner is protected the moment the partial TP
+    # fires (partial_tp_at_r=0.8), instead of drifting from 0.8R→1.0R with no
+    # stop and giving its profit back to the time-stop.
+    "trailing_activate_r": 0.8,
     "trailing_distance_atr": 1.5,
     "trailing_floor_r": 0.5,
     "trailing_step_r": 0.2,

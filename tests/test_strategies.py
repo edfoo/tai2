@@ -2966,11 +2966,12 @@ class TestTrendPullbackStrategy:
         assert signal.tp_pct / signal.sl_pct >= 1.5
 
     def test_default_atr_uses_tight_1_5_1_0_multipliers(self) -> None:
-        """Trend-pullback canonical defaults use 1.5/1.0 ATR multipliers (not
-        the old 3.0/2.0, which produced ~20% unreachable TPs on high-ATR alts)."""
+        """Trend-pullback canonical defaults use 2.25/1.5 ATR multipliers (not
+        the old 3.0/2.0, which produced ~20% unreachable TPs on high-ATR alts).
+        SL widened 1.0→1.5 for wick protection; TP widened to preserve 1.5 R:R."""
         from app.services.strategies.defaults import DEFAULT_TREND_PULLBACK
-        assert DEFAULT_TREND_PULLBACK["atr_tp_multiplier"] == 1.5
-        assert DEFAULT_TREND_PULLBACK["atr_sl_multiplier"] == 1.0
+        assert DEFAULT_TREND_PULLBACK["atr_tp_multiplier"] == 2.25
+        assert DEFAULT_TREND_PULLBACK["atr_sl_multiplier"] == 1.5
         assert DEFAULT_TREND_PULLBACK["min_reward_risk_ratio"] == 1.5
 
     def test_atr_fallback_clamped_to_max_tp_mult(self) -> None:
