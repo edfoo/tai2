@@ -4559,6 +4559,12 @@ def register_pages(app: FastAPI) -> None:
                                 value=bool(_tp_cfg.get("require_bullish_candle", True)),
                             ).props("dense color=primary")
                             ui.label("Trigger candle must close in trend direction with a rejection wick off the level.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            tp_require_completed_pullback_switch = ui.switch(
+                                "Require completed pullback",
+                                value=bool(_tp_cfg.get("require_completed_pullback", False)),
+                            ).props("dense color=primary")
+                            ui.label("Level touch alone isn't enough — price must reclaim the EMA/VWAP with a close on the trend side, not just wick into it.").classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-start"):
                             tp_candle_rejection_pct_input = ui.number(
                                 label="Candle rejection %",
@@ -4725,6 +4731,7 @@ def register_pages(app: FastAPI) -> None:
                 tp_htf_regime_select.value = d["htf_regime_preference"]
                 tp_analysis_tf_select.value = d["analysis_timeframe"]
                 tp_require_bullish_switch.value = d["require_bullish_candle"]
+                tp_require_completed_pullback_switch.value = d["require_completed_pullback"]
                 tp_candle_rejection_pct_input.value = d["candle_rejection_pct"]
                 tp_min_adx_input.value = d["min_adx"]
                 tp_max_adx_entry_input.value = d["max_adx_for_entry"]
@@ -5866,6 +5873,7 @@ def register_pages(app: FastAPI) -> None:
                 "analysis_timeframe": (str(tp_analysis_tf_select.value) if str(tp_analysis_tf_select.value) != "·" else None),
                     "use_adaptive_atr": bool(tp_use_adaptive_atr_switch.value),
                 "require_bullish_candle": bool(tp_require_bullish_switch.value),
+                "require_completed_pullback": bool(tp_require_completed_pullback_switch.value),
                 "candle_rejection_pct": float(tp_candle_rejection_pct_input.value or 25.0),
                 "min_adx": float(tp_min_adx_input.value or 18.0),
                 "max_adx_for_entry": float(tp_max_adx_entry_input.value or 30.0),

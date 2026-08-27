@@ -205,6 +205,12 @@ class TrendPullbackStrategy:
             min_volume_ratio = 0.7
         _vol_lookback = helpers.extract_float(cfg.get("volume_lookback"))
         volume_lookback = int(_vol_lookback) if _vol_lookback is not None else 20
+        # ── Completed pullback gate ──────────────────────────────────
+        # A mere level touch (wick) is not enough — price must *close* back
+        # above (longs) or below (shorts) the pullback level to confirm the
+        # pullback is genuinely completed. Rejects pullbacks that only wick-touch
+        # but fail to reclaim, the "fake touch" where a tight stop is wick-bait.
+        require_completed_pullback = bool(cfg.get("require_completed_pullback", False))
 
         # ── Snapshot data ─────────────────────────────────────────────
         market_data: dict[str, Any] = snapshot.get("market_data") or {}
@@ -349,6 +355,34 @@ class TrendPullbackStrategy:
                 f"proximity={effective_proximity_pct:.2f}%)"
             )
             return None
+
+        # ── Completed pullback gate ─────────────────────────────────────
+        # If required, verify that the candle close is actually ABOVE (longs)
+        # or BELOW (shorts) the pullback level, not just a wick touch that
+        # fails to reclaim (the "fake touch" where a tight stop gets wicked).
+        if require_completed_pullback:
+            ohlcv_compact = indicators.get("ohlcv") or []
+            if ohlcv_compact and isinstance(ohlcv_compact[-1], dict):
+                _curr = ohlcv_compact[-1]
+                curr_close = helpers.extract_float(_curr.get("close"))
+                if curr_close is not None:
+                    # For longs: close must be above the pullback level.
+                    # For shorts: close must be below the pullback level.
+                    # Otherwise it's just a wick touch without reclaim.
+                    pullback_levels_for_check = [
+                        l for l in (pullback_ema, vwap_value)
+                        if l is not None and l > 0
+                    ]
+                    long_completed = any(curr_close > level for level in pullback_levels_for_check)
+                    short_completed = any(curr_close < level for level in pullback_levels_for_check)
+                    if (want_long and not long_completed) or (want_short and not short_completed):
+                        helpers.emit_debug(
+                            f"TrendPullback: {symbol} — no signal "
+                            f"(pullback touch not completed: close={curr_close:.6g} "
+                            f"{'above' if want_long else 'below'} "
+                            f"level={pullback_levels_for_check[0]:.6g} required)"
+                        )
+                        return None
 
         # ── Bullish/bearish candle confirmation ─────────────────────
         candle_long_ok = True

@@ -329,6 +329,12 @@ DEFAULT_TREND_PULLBACK: dict[str, Any] = {
     "require_min_volume": False,
     "min_volume_ratio": 0.7,
     "volume_lookback": 20,
+    # Completed pullback gate (default OFF): a mere level touch (via wick) is not
+    # enough — the candle must *close* back above (longs) or below (shorts) the
+    # pullback level to confirm the pullback completion. Rejects pullbacks that
+    # only wick-touch the EMA but fail to reclaim it (the "fake touch" failure
+    # mode where a tight stop is immediately wicked).
+    "require_completed_pullback": False,
 }
 
 # Registry keyed by strategy name.

@@ -2750,6 +2750,29 @@ class TestTrendPullbackStrategy:
         assert signal.direction == "buy"
         assert signal.strategy_name == "trend_pullback"
 
+    def test_no_signal_when_pullback_touch_is_not_completed(self) -> None:
+        """A level touch without a reclaim/higher-low should not count as a completion."""
+        strategy = TrendPullbackStrategy()
+        # Price touches the EMA but the candle closes back below it without a real reclaim.
+        ohlcv = _make_pullback_ohlcv(
+            prev_close=99.5,
+            last_open=99.8,
+            last_high=100.1,
+            last_low=99.6,
+            last_close=99.7,
+        )
+        snapshot = _make_tp_snapshot(
+            ema_21=100.0, htf_ema50=101.0, htf_ema200=99.0,
+            ohlcv=ohlcv, last_price=99.7,
+        )
+        config = _tp_bare(
+            require_htf_trend=True,
+            require_bullish_candle=False,
+            require_completed_pullback=True,
+        )
+        result = strategy.evaluate("BTC-USDT-SWAP", snapshot, config, _make_helpers(last_price=99.7))
+        assert result is None
+
     def test_sell_signal_on_pullback_to_ema_in_downtrend(self) -> None:
         """Price pulls back to EMA21 in HTF downtrend → sell signal."""
         strategy = TrendPullbackStrategy()
