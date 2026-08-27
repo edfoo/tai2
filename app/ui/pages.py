@@ -5096,12 +5096,31 @@ def register_pages(app: FastAPI) -> None:
                                 value=float(trade_management.get("trailing_floor_r") or 0.5),
                                 min=0.0, max=5.0, step=0.1, format="%.1f",
                             ).classes("w-32").props("dense")
+                            tm_trailing_step_input = ui.number(
+                                label="Step R",
+                                value=float(trade_management.get("trailing_step_r") or 0.2),
+                                min=0.0, max=2.0, step=0.05, format="%.2f",
+                            ).classes("w-32").props("dense")
                         ui.label("After the partial TP, trail the runner's SL behind price (never below the floor R). Activate at 0.8R so the runner is protected the moment the partial fires.").classes("text-xs text-slate-500")
+                        ui.separator().classes("my-2")
+                        ui.label("Runner take-profit").classes("text-xs font-semibold text-slate-600")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            tm_trailing_remove_switch = ui.switch(
+                                "Drop fixed TP on runner",
+                                value=bool(trade_management.get("trailing_remove_tp", True)),
+                            ).props("dense color=primary")
+                            _far_tp_raw = trade_management.get("trailing_far_tp_mult")
+                            tm_trailing_far_input = ui.number(
+                                label="Far TP (R)",
+                                value=float(_far_tp_raw) if _far_tp_raw is not None else None,
+                                min=0.1, max=20.0, step=0.5, format="%.1f",
+                            ).classes("w-32").props("dense clearable")
+                        ui.label("After the partial, remove the fixed TP and let the trailing stop take profit (asymmetric exit). Optionally set a far-out safety TP in R multiples.").classes("text-xs text-slate-500")
                         ui.separator().classes("my-2")
                         ui.label("Re-entry cooldown").classes("text-xs font-semibold text-slate-600")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             tm_cooldown_input = ui.number(
-                                label="Cooldownoldown (seconds)",
+                                label="Cooldown (seconds)",
                                 value=float(trade_management.get("reentry_cooldown_seconds") or 1800.0),
                                 min=0, max=86400, step=60, format="%.0f",
                             ).classes("w-40").props("dense")
@@ -5128,6 +5147,9 @@ def register_pages(app: FastAPI) -> None:
                 tm_trailing_activate_input.value = d["trailing_activate_r"]
                 tm_trailing_distance_input.value = d["trailing_distance_atr"]
                 tm_trailing_floor_input.value = d["trailing_floor_r"]
+                tm_trailing_step_input.value = d["trailing_step_r"]
+                tm_trailing_remove_switch.value = d["trailing_remove_tp"]
+                tm_trailing_far_input.value = d["trailing_far_tp_mult"]
                 tm_cooldown_input.value = d["reentry_cooldown_seconds"]
                 ui.notify("Trade Management fields set to recommended defaults — click Save to persist", color="info")
 
@@ -5643,6 +5665,7 @@ def register_pages(app: FastAPI) -> None:
             _sg_tp_usd_val = shotgun_tp_usd.value
             _sg_sl_pct_val = shotgun_sl_pct.value
             _sg_sl_usd_val = shotgun_sl_usd.value
+            _far_tp_val = tm_trailing_far_input.value
             updated_strategy = {
                 "skimming": {
                     "enabled": bool(skimming_switch.value),
@@ -5680,7 +5703,9 @@ def register_pages(app: FastAPI) -> None:
                     "trailing_activate_r": float(tm_trailing_activate_input.value or 0.8),
                     "trailing_distance_atr": float(tm_trailing_distance_input.value or 1.5),
                     "trailing_floor_r": float(tm_trailing_floor_input.value or 0.5),
-                    "trailing_step_r": float(trade_management.get("trailing_step_r") or 0.2),
+                    "trailing_step_r": float(tm_trailing_step_input.value or 0.2),
+                    "trailing_remove_tp": bool(tm_trailing_remove_switch.value),
+                    "trailing_far_tp_mult": float(_far_tp_val) if _far_tp_val not in (None, "") else None,
                     "reentry_cooldown_seconds": float(tm_cooldown_input.value or 900.0),
                     # Software-stop loss: market-close when pnl_pct <= -sl_pct
                     # (hides the exit level from the book).  No UI toggle — this

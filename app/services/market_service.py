@@ -2344,6 +2344,12 @@ class MarketService:
         trailing_step_r = self._extract_float(tm.get("trailing_step_r"))
         if trailing_step_r is None:
             trailing_step_r = 0.2
+        # Drop the fixed TP on the runner after the partial fires (asymmetric exit).
+        trailing_remove_tp = bool(tm.get("trailing_remove_tp", True))
+        # Optional far-out safety TP on the runner (R multiples beyond entry).
+        trailing_far_tp_mult = self._extract_float(tm.get("trailing_far_tp_mult"))
+        if trailing_far_tp_mult is not None and trailing_far_tp_mult <= 0:
+            trailing_far_tp_mult = None
         # Software-stop loss: market-close when pnl_pct <= -sl_pct (hides the SL level).
         software_stop_loss_enabled = bool(tm.get("software_stop_loss_enabled", True))
 
@@ -2633,10 +2639,22 @@ class MarketService:
                     if not is_long and new_sl >= current_sl - step_dist:
                         should_update = False
                 if should_update:
+                    # Asymmetric exit: once the partial has fired, drop the fixed
+                    # TP on the runner (unless a far-out safety TP is configured)
+                    # so the trailing stop is the profit-taker.
+                    _remove_tp = trailing_remove_tp and state.get("partial_done")
+                    _far_tp = None
+                    if not _remove_tp and trailing_far_tp_mult is not None and risk_pct > 0:
+                        _far_tp = (
+                            entry_price * (1.0 + trailing_far_tp_mult * risk_pct / 100.0)
+                            if is_long
+                            else entry_price * (1.0 - trailing_far_tp_mult * risk_pct / 100.0)
+                        )
                     self._emit_debug(
                         f"TradeMgmt trailing: {symbol} R={r_multiple:.2f} ≥ "
                         f"{trailing_activate_r:.2f} → SL {current_sl if current_sl is not None else 'n/a'} "
-                        f"→ {new_sl:.6f} (floor {floor_sl:.6f}, atr_pct={atr_tf_pct:.2f})"
+                        f"→ {new_sl:.6f} (floor {floor_sl:.6f}, atr_pct={atr_tf_pct:.2f}, "
+                        f"remove_tp={_remove_tp})"
                     )
                     state["sl_price"] = new_sl
                     self._trade_mgmt_trailing_updating.add(symbol)
@@ -2647,6 +2665,8 @@ class MarketService:
                             pos_side=resolved_pos_side,
                             trade_mode=trade_mode,
                             action=action,
+                            remove_tp=_remove_tp,
+                            take_profit_price=_far_tp,
                         ),
                         name=f"trade-mgmt-trailing-{symbol}",
                     )
@@ -2693,27 +2713,40 @@ class MarketService:
         pos_side: str | None,
         trade_mode: str,
         action: str,
+        remove_tp: bool = False,
+        take_profit_price: float | None = None,
     ) -> None:
-        """Move stop-loss to breakeven (or better), preserving existing TP."""
+        """Move stop-loss to breakeven (or better), preserving or dropping existing TP.
+
+        When ``remove_tp`` is True, the fixed take-profit is omitted from the
+        re-placed protection so the trailing stop becomes the profit-taker on the
+        runner (asymmetric exit).  ``take_profit_price``, when set, overrides the
+        preserved TP (e.g. a far-out safety TP from ``trailing_far_tp_mult``).
+        """
         symbol_key = symbol.upper()
         try:
             current_protection = self._position_protection.get(symbol_key) or {}
             current_tp = self._extract_float(current_protection.get("take_profit"))
+            if remove_tp:
+                new_tp = take_profit_price
+            else:
+                new_tp = take_profit_price if take_profit_price is not None else current_tp
             await self._cancel_position_protection(symbol)
             await asyncio.sleep(0.5)
             result = await self._place_position_protection(
                 symbol=symbol,
                 trade_mode=trade_mode,
                 action=action,
-                take_profit_price=current_tp,
+                take_profit_price=new_tp,
                 stop_loss_price=new_sl_price,
                 dual_side_mode=bool(pos_side),
                 pos_side=pos_side,
             )
             if result:
+                tp_desc = f"{new_tp}" if new_tp else "removed"
                 self._emit_debug(
                     f"TradeMgmt BE: {symbol_key} SL moved to {new_sl_price:.6f} "
-                    f"(tp preserved={current_tp})"
+                    f"(tp={tp_desc})"
                 )
             else:
                 self._emit_debug(f"TradeMgmt BE: failed to place SL for {symbol_key}")
@@ -2755,7 +2788,9 @@ class MarketService:
             )
             state = self._trade_mgmt_state.get(symbol_key)
             if state is not None:
-                state["partial_done"] = False
+                # Mark done to avoid re-entering every tick for a position that
+                # can never be partially closed (floors below one whole contract).
+                state["partial_done"] = True
             self._trade_mgmt_partial_closing.discard(symbol_key)
             return
         coid = self._generate_client_order_id("tm-p")

@@ -374,6 +374,13 @@ DEFAULT_TRADE_MANAGEMENT: dict[str, Any] = {
     "trailing_distance_atr": 1.5,
     "trailing_floor_r": 0.5,
     "trailing_step_r": 0.2,
+    # Drop the fixed TP on the runner after the partial fires so the trailing
+    # stop is the profit-taker (asymmetric exit).  When False, the original TP
+    # is preserved (legacy capped behaviour).
+    "trailing_remove_tp": True,
+    # Optional far-out safety TP on the runner (in R multiples beyond entry).
+    # When set (float), the runner keeps a wide TP instead of having it removed.
+    "trailing_far_tp_mult": None,
     "software_stop_loss_enabled": True,
 }
 
