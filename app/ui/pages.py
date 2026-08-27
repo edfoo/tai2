@@ -4476,7 +4476,12 @@ def register_pages(app: FastAPI) -> None:
                             "in an established HTF trend, then prints a bullish/bearish candle off "
                             "the level. Fills the gap between SC breakouts (too late) and MR extremes "
                             "(wrong in a trend). Shares the SC (trending) universe."
-                        ).classes("text-xs text-slate-500 mb-3")
+                        ).classes("text-xs text-slate-500 mb-2")
+                        ui.label(
+                            "Evaluation is a funnel of six ordered stages. Each stage vetoes the "
+                            "signal before the next one runs; stage order matters — earlier stages "
+                            "are cheaper filters, later stages refine the specific setup."
+                        ).classes("text-[11px] text-slate-400 mb-3")
                         with ui.row().classes("w-full items-center gap-2 mb-2"):
                             ui.button(
                                 "Set Recommended Defaults",
@@ -4486,55 +4491,21 @@ def register_pages(app: FastAPI) -> None:
                                 "Fill all fields with the recommended Trend Pullback configuration. "
                                 "You still need to click Save to persist."
                             )
-                        with ui.row().classes("w-full flex-wrap gap-4 items-start"):
-                            _tp_tp_raw = _tp_cfg.get("tp_pct")
-                            tp_tp_input = ui.number(
-                                label="Take profit (%)",
-                                value=float(_tp_tp_raw) if _tp_tp_raw is not None else 6.0,
-                                min=0.5, step=0.5, precision=1,
-                            ).classes("w-40").props(
-                                "hint='Exit after this % price move (3 ATR proxy)' persistent-hint clearable"
-                            )
-                            _tp_sl_raw = _tp_cfg.get("sl_pct")
-                            tp_sl_input = ui.number(
-                                label="Stop loss (%)",
-                                value=float(_tp_sl_raw) if _tp_sl_raw is not None else 4.0,
-                                min=0.5, step=0.5, precision=1,
-                            ).classes("w-40").props(
-                                "hint='Exit below structural invalidation (2 ATR)' persistent-hint clearable"
-                            )
-                        with ui.row().classes("w-full flex-wrap gap-4 items-start"):
-                            tp_pullback_ema_input = ui.number(
-                                label="Pullback EMA length",
-                                value=float(_tp_cfg.get("pullback_ema") or 21),
-                                min=5, max=100, step=1, format="%.0f",
-                            ).classes("w-40").props("dense")
-                            ui.label("LTF EMA used as the pullback level (must be computed in indicators).").classes("text-xs text-slate-500")
-                        with ui.row().classes("w-full flex-wrap gap-4 items-start"):
-                            tp_proximity_input = ui.number(
-                                label="Pullback proximity %",
-                                value=float(_tp_cfg.get("pullback_proximity_pct") or 0.3),
-                                min=0.05, max=5.0, step=0.05, format="%.2f",
-                            ).classes("w-40").props("dense")
-                            ui.label("Hard floor (in %) for how close price must be to the EMA/VWAP level to qualify as a pullback.").classes("text-xs text-slate-500")
-                            tp_proximity_atr_input = ui.number(
-                                label="Pullback proximity (×ATR)",
-                                value=float(_tp_cfg.get("pullback_proximity_atr") or 0.5),
-                                min=0.0, max=5.0, step=0.1, format="%.1f",
-                            ).classes("w-48").props("dense")
-                            ui.label("Volatility-normalised proximity: effective band = max(% floor, this × ATR%). Scales with the market on volatile alts.").classes("text-xs text-slate-500")
-                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
-                            tp_use_vwap_switch = ui.switch(
-                                "Use VWAP as level",
-                                value=bool(_tp_cfg.get("use_vwap_as_level", True)),
-                            ).props("dense color=primary")
-                            ui.label("Also accept VWAP as a valid pullback level.").classes("text-xs text-slate-500")
+
+                        # ── Stage 1 · HTF Regime ────────────────────────
+                        ui.separator().classes("my-2")
+                        ui.label("Stage 1 · HTF Regime — runs first, vetoes the signal").classes("text-xs font-bold text-slate-700")
+                        ui.label(
+                            "The strategy only trades an established higher-timeframe trend. This stage "
+                            "decides which timeframe is analyzed and whether the HTF must be trending; "
+                            "neither entry nor exit proceeds without it passing."
+                        ).classes("text-[11px] text-slate-400 mb-2")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             tp_require_htf_switch = ui.switch(
                                 "Require HTF trend",
                                 value=bool(_tp_cfg.get("require_htf_trend", True)),
                             ).props("dense color=primary")
-                            ui.label("HTF EMA50/EMA200 must confirm the trend direction.").classes("text-xs text-slate-500")
+                            ui.label("HTF EMA50/EMA200 must confirm the trend direction (auto-disabled when no HTF data).").classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             tp_htf_regime_select = ui.select(
                                 ["chop", "trend", "off"],
@@ -4553,26 +4524,16 @@ def register_pages(app: FastAPI) -> None:
                             ).classes("w-56").props(
                                 "hint='Indicators computed on this bar. · = use global LTF' persistent-hint dense"
                             )
-                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
-                            tp_require_bullish_switch = ui.switch(
-                                "Require bullish/bearish candle",
-                                value=bool(_tp_cfg.get("require_bullish_candle", True)),
-                            ).props("dense color=primary")
-                            ui.label("Trigger candle must close in trend direction with a rejection wick off the level.").classes("text-xs text-slate-500")
-                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
-                            tp_require_completed_pullback_switch = ui.switch(
-                                "Require completed pullback",
-                                value=bool(_tp_cfg.get("require_completed_pullback", False)),
-                            ).props("dense color=primary")
-                            ui.label("Level touch alone isn't enough — price must reclaim the EMA/VWAP with a close on the trend side, not just wick into it.").classes("text-xs text-slate-500")
-                        with ui.row().classes("w-full flex-wrap gap-4 items-start"):
-                            tp_candle_rejection_pct_input = ui.number(
-                                label="Candle rejection %",
-                                value=float(_tp_cfg.get("candle_rejection_pct") or 25.0),
-                                min=5.0, max=90.0, step=5.0, format="%.0f",
-                            ).classes("w-40").props("dense")
-                            ui.label("Minimum wick size as % of candle range for the rejection confirmation.").classes("text-xs text-slate-500")
-                        with ui.row().classes("w-full flex-wrap gap-4 items-start"):
+
+                        # ── Stage 2 · Trend & Liquidity Readiness ───────
+                        ui.separator().classes("my-2")
+                        ui.label("Stage 2 · Trend & Liquidity Readiness — filters the universe").classes("text-xs font-bold text-slate-700")
+                        ui.label(
+                            "Confirms the name is in a real, tradeable trend with healthy participation. "
+                            "Fails fast on dead coins (low ATR%), chop (low ADX), mature/exhausted trends "
+                            "(high ADX), and halted price action (volume collapse)."
+                        ).classes("text-[11px] text-slate-400 mb-2")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-start mt-1"):
                             tp_min_adx_input = ui.number(
                                 label="Min ADX",
                                 value=float(_tp_cfg.get("min_adx") or 20.0),
@@ -4587,6 +4548,102 @@ def register_pages(app: FastAPI) -> None:
                             ).classes("w-40").props(
                                 "hint='Block when trend already extended (pullback likely reversal)' persistent-hint"
                             )
+                            tp_min_atr_pct_input = ui.number(
+                                label="Min ATR%",
+                                value=float(_tp_cfg.get("min_atr_pct") or 1.0),
+                                min=0.0, max=10.0, step=0.1, format="%.1f",
+                            ).classes("w-32").props("dense")
+                            ui.label("Skip entries when ATR% is below this (0 = disabled). Filters out dead coins.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            tp_require_min_vol_switch = ui.switch(
+                                "Require volume participation",
+                                value=bool(_tp_cfg.get("require_min_volume", False)),
+                            ).props("dense color=primary")
+                            tp_min_vol_ratio_input = ui.number(
+                                label="Min volume ratio",
+                                value=float(_tp_cfg.get("min_volume_ratio") if _tp_cfg.get("min_volume_ratio") is not None else 0.7),
+                                min=0.1, max=5.0, step=0.05, format="%.2f",
+                            ).classes("w-40").props("dense")
+                            tp_vol_lookback_input = ui.number(
+                                label="Volume lookback",
+                                value=float(_tp_cfg.get("volume_lookback") if _tp_cfg.get("volume_lookback") is not None else 20),
+                                min=5, max=100, step=1, precision=0,
+                            ).classes("w-40").props("dense")
+                            ui.label("Block entries on candles whose volume has collapsed below this ratio of the recent average (filters dead-volume / halted-price-action candles).").classes("text-xs text-slate-500")
+
+                        # ── Stage 3 · Pullback Level ────────────────────
+                        ui.separator().classes("my-2")
+                        ui.label("Stage 3 · Pullback Level — where the entry happens").classes("text-xs font-bold text-slate-700")
+                        ui.label(
+                            "Defines the 'value' level price must pull back to and how close it must get "
+                            "to qualify. The proximity band is volatility-normalised, so it scales with the "
+                            "market instead of collapsing on dead coins."
+                        ).classes("text-[11px] text-slate-400 mb-2")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-start"):
+                            tp_pullback_ema_input = ui.number(
+                                label="Pullback EMA length",
+                                value=float(_tp_cfg.get("pullback_ema") or 21),
+                                min=5, max=100, step=1, format="%.0f",
+                            ).classes("w-40").props("dense")
+                            ui.label("LTF EMA used as the pullback level (must be computed in indicators).").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            tp_use_vwap_switch = ui.switch(
+                                "Use VWAP as level",
+                                value=bool(_tp_cfg.get("use_vwap_as_level", True)),
+                            ).props("dense color=primary")
+                            ui.label("Also accept VWAP as a valid pullback level.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-start mt-1"):
+                            tp_proximity_input = ui.number(
+                                label="Pullback proximity %",
+                                value=float(_tp_cfg.get("pullback_proximity_pct") or 0.3),
+                                min=0.05, max=5.0, step=0.05, format="%.2f",
+                            ).classes("w-40").props("dense")
+                            ui.label("Hard floor (in %) for how close price must be to the EMA/VWAP level to qualify as a pullback.").classes("text-xs text-slate-500")
+                            tp_proximity_atr_input = ui.number(
+                                label="Pullback proximity (×ATR)",
+                                value=float(_tp_cfg.get("pullback_proximity_atr") or 0.5),
+                                min=0.0, max=5.0, step=0.1, format="%.1f",
+                            ).classes("w-48").props("dense")
+                            ui.label("Volatility-normalised proximity: effective band = max(% floor, this × ATR%). Scales with the market on volatile alts.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            tp_require_poc_prox_switch = ui.switch(
+                                "Require POC proximity",
+                                value=bool(_tp_cfg.get("require_poc_proximity", False)),
+                            ).props("dense color=primary")
+                            tp_poc_prox_width_input = ui.number(
+                                label="POC proximity (×VA width)",
+                                value=float(_tp_cfg.get("poc_proximity_va_width") or 0.2),
+                                min=0.05, max=1.0, step=0.05, format="%.2f",
+                            ).classes("w-48").props("dense")
+                            ui.label("Pullback must be within this fraction of VA-width of POC / VA-high / VA-low (adds a liquidity node to the EMA/VWAP touch).").classes("text-xs text-slate-500")
+
+                        # ── Stage 4 · Entry Confirmation & Anti-late-entry ─
+                        ui.separator().classes("my-2")
+                        ui.label("Stage 4 · Entry Confirmation & Anti-late-entry — validates the pullback").classes("text-xs font-bold text-slate-700")
+                        ui.label(
+                            "Confirms the pullback is genuine (a rejection candle reclaiming the level, not "
+                            "a knife-catch) and that it has not already run too far past the level."
+                        ).classes("text-[11px] text-slate-400 mb-2")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            tp_require_bullish_switch = ui.switch(
+                                "Require bullish/bearish candle",
+                                value=bool(_tp_cfg.get("require_bullish_candle", True)),
+                            ).props("dense color=primary")
+                            ui.label("Trigger candle must close in trend direction with a rejection wick off the level.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-start mt-1"):
+                            tp_candle_rejection_pct_input = ui.number(
+                                label="Candle rejection %",
+                                value=float(_tp_cfg.get("candle_rejection_pct") or 25.0),
+                                min=5.0, max=90.0, step=5.0, format="%.0f",
+                            ).classes("w-40").props("dense")
+                            ui.label("Minimum wick size as % of candle range for the rejection confirmation.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            tp_require_completed_pullback_switch = ui.switch(
+                                "Require completed pullback",
+                                value=bool(_tp_cfg.get("require_completed_pullback", False)),
+                            ).props("dense color=primary")
+                            ui.label("Level touch alone isn't enough — price must reclaim the EMA/VWAP with a close on the trend side, not just wick into it.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-start mt-1"):
                             tp_max_ext_input = ui.number(
                                 label="Max pullback extension (×ATR)",
                                 value=float(_tp_cfg.get("max_pullback_extension_atr") or 2.0),
@@ -4594,23 +4651,53 @@ def register_pages(app: FastAPI) -> None:
                             ).classes("w-48").props(
                                 "hint='Block when price is more than this × ATR% past the pullback level (0 = disabled)' persistent-hint"
                             )
-                        # ── TP/SL Sizing ────────────────────────────────
+                            ui.label("The primary anti-late-entry filter — blocks entries where the pullback has already run too far.").classes("text-xs text-slate-500")
+
+                        # ── Stage 5 · Exit Sizing (TP/SL) ───────────────
                         ui.separator().classes("my-2")
-                        ui.label("TP/SL Sizing").classes("text-xs font-semibold text-slate-600")
+                        ui.label("Stage 5 · Exit Sizing (TP/SL) — runs once an entry is confirmed").classes("text-xs font-bold text-slate-700")
+                        ui.label(
+                            "Places take-profit and stop-loss. Priority is structural (thesis-specific swing "
+                            "levels), then ATR fallback, then static % — clamped to ATR bounds and gated on a "
+                            "minimum reward-to-risk."
+                        ).classes("text-[11px] text-slate-400 mb-2")
+                        # Static % fallback (last resort — only when structural + ATR are both off)
+                        ui.label("Static % fallback (used only when structural + ATR sizing are both off)").classes("text-xs font-semibold text-slate-500 mt-2")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-start"):
+                            _tp_tp_raw = _tp_cfg.get("tp_pct")
+                            tp_tp_input = ui.number(
+                                label="Take profit (%)",
+                                value=float(_tp_tp_raw) if _tp_tp_raw is not None else 6.0,
+                                min=0.5, step=0.5, precision=1,
+                            ).classes("w-40").props(
+                                "hint='Static fallback TP %' persistent-hint clearable"
+                            )
+                            _tp_sl_raw = _tp_cfg.get("sl_pct")
+                            tp_sl_input = ui.number(
+                                label="Stop loss (%)",
+                                value=float(_tp_sl_raw) if _tp_sl_raw is not None else 4.0,
+                                min=0.5, step=0.5, precision=1,
+                            ).classes("w-40").props(
+                                "hint='Static fallback SL %' persistent-hint clearable"
+                            )
+                        ui.label("These % only apply when both structural and ATR sizing are disabled — they are a last-resort fallback.").classes("w-full text-xs text-slate-500 mt-1")
+
+                        # Structural sizing (priority 1)
+                        ui.label("Structural sizing (priority 1 — used first when enabled)").classes("text-xs font-semibold text-slate-500 mt-2")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             tp_use_structural_switch = ui.switch(
                                 "Use structural sizing",
                                 value=bool(_tp_cfg.get("use_structural_sizing", True)),
                             ).props("dense color=primary")
-                            ui.label("TP at nearest swing high/low, SL beyond pullback candle. ATR clamps both. Falls back to ATR when unavailable.").classes("text-xs text-slate-500")
-                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                        ui.label("TP at farthest swing high/low, SL beyond pullback candle. ATR clamps both. Falls back to ATR sizing when structural levels are unavailable.").classes("w-full text-xs text-slate-500 mt-1")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-start mt-1"):
                             tp_structural_sl_buffer_input = ui.number(
                                 label="SL buffer (ATR)",
                                 value=float(_tp_cfg.get("structural_sl_buffer_atr") or 0.15),
                                 min=0.0, max=2.0, step=0.05, format="%.2f",
-                            ).classes("w-32").props("dense")
-                            ui.label("SL placed this many ATR units beyond the pullback candle low/high.").classes("text-xs text-slate-500")
-                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            ).classes("w-40").props("dense")
+                        ui.label("SL is placed this many ATR units beyond the pullback candle low/high.").classes("w-full text-xs text-slate-500 mt-1")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-start mt-1"):
                             tp_atr_min_tp_input = ui.number(
                                 label="Min TP (×ATR)",
                                 value=float(_tp_cfg.get("atr_min_tp_mult") or 0.5),
@@ -4631,21 +4718,17 @@ def register_pages(app: FastAPI) -> None:
                                 value=float(_tp_cfg.get("atr_max_sl_mult") or 3.0),
                                 min=0.5, max=20.0, step=0.5, format="%.1f",
                             ).classes("w-32").props("dense")
-                        ui.separator().classes("my-2")
-                        ui.label("ATR Fallback TP/SL").classes("text-xs font-semibold text-slate-600")
+                        ui.label("Structural TP/SL distances are clamped to [Min, Max] × ATR.").classes("w-full text-xs text-slate-500 mt-1")
+
+                        # ATR sizing (priority 2)
+                        ui.label("ATR sizing (priority 2 — fallback when structural is unavailable or off)").classes("text-xs font-semibold text-slate-500 mt-2")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             tp_use_atr_sizing_switch = ui.switch(
-                                "Use ATR sizing (fallback)",
+                                "Use ATR sizing",
                                 value=bool(_tp_cfg.get("use_atr_sizing", True)),
                             ).props("dense color=primary")
-                            ui.label("Used when structural levels are unavailable or structural sizing is off.").classes("text-xs text-slate-500")
-                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
-                            tp_use_adaptive_atr_switch = ui.switch(
-                                "Adaptive ATR regime",
-                                value=bool(_tp_cfg.get("use_adaptive_atr", False)),
-                            ).props("dense color=amber")
-                            ui.label("Scales ATR distances by volatility regime.").classes("text-xs text-slate-500")
-                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                        ui.label("TP/SL are computed as a multiplier × ATR%. Used when structural levels are unavailable or structural sizing is off.").classes("w-full text-xs text-slate-500 mt-1")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-start mt-1"):
                             tp_atr_tp_mult_input = ui.number(
                                 label="ATR TP multiplier",
                                 value=float(_tp_cfg.get("atr_tp_multiplier") or 2.25),
@@ -4656,22 +4739,32 @@ def register_pages(app: FastAPI) -> None:
                                 value=float(_tp_cfg.get("atr_sl_multiplier") or 1.5),
                                 min=0.1, max=10.0, step=0.1, format="%.1f",
                             ).classes("w-40").props("dense")
-                            tp_min_atr_pct_input = ui.number(
-                                label="Min ATR%",
-                                value=float(_tp_cfg.get("min_atr_pct") or 1.0),
-                                min=0.0, max=10.0, step=0.1, format="%.1f",
-                            ).classes("w-40").props("dense")
-                            ui.label("Skip entries when ATR% is below this (0 = disabled). Filters out dead coins.").classes("text-xs text-slate-500")
+                        ui.label("TP/SL = multiplier × ATR% (typically ≥ 1.5 R:R with the defaults below).").classes("w-full text-xs text-slate-500 mt-1")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            tp_use_adaptive_atr_switch = ui.switch(
+                                "Adaptive ATR regime",
+                                value=bool(_tp_cfg.get("use_adaptive_atr", False)),
+                            ).props("dense color=amber")
+                            ui.label("Scales ATR distances by volatility regime (sizing only — never the min-ATR gate).").classes("text-xs text-slate-500")
+
+                        # R:R floor
+                        ui.label("Reward-to-Risk floor").classes("text-xs font-semibold text-slate-500 mt-2")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-start mt-1"):
                             _tp_rr_raw = _tp_cfg.get("min_reward_risk_ratio")
                             tp_min_rr_input = ui.number(
                                 label="Min Reward-to-Risk Ratio",
                                 value=float(_tp_rr_raw) if _tp_rr_raw is not None else None,
                                 min=0.1, max=10.0, step=0.1, format="%.1f",
-                            ).classes("w-40").props(
-                                "hint='Minimum TP:SL distance ratio for this strategy (blank = use global guardrail)' persistent-hint clearable"
-                            )
-                            ui.label("Overrides the global R:R guardrail for Trend Pullback entries. Blank inherits the global min_reward_risk_ratio.").classes("text-xs text-slate-500")
+                            ).classes("w-40").props("clearable")
+                        ui.label("Overrides the global R:R guardrail for Trend Pullback entries. Blank inherits the global min_reward_risk_ratio.").classes("w-full text-xs text-slate-500 mt-1")
+
+                        # ── Stage 6 · Direction & Execution ─────────────
+                        ui.separator().classes("my-2")
+                        ui.label("Stage 6 · Direction & Execution — post-signal override").classes("text-xs font-bold text-slate-700")
+                        ui.label(
+                            "Optionally invert the Launcher's trade direction before execution. TP/SL are "
+                            "mirrored so they land on the correct side for the flipped direction."
+                        ).classes("text-[11px] text-slate-400 mb-2")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             _tp_flip_enabled = bool(_tp_cfg.get("flip_launcher_direction"))
                             tp_flip_switch = ui.switch(
@@ -4684,36 +4777,6 @@ def register_pages(app: FastAPI) -> None:
                                 label="Flip direction",
                             ).classes("w-40").props("dense")
                             ui.label("Invert the Launcher's trade direction before execution.").classes("text-xs text-slate-500")
-                        # ── Liquidity-aware gates (§3) ───────────────────
-                        ui.separator().classes("my-2")
-                        ui.label("Liquidity-Aware Gates").classes("text-xs font-semibold text-slate-600")
-                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
-                            tp_require_poc_prox_switch = ui.switch(
-                                "Require POC proximity",
-                                value=bool(_tp_cfg.get("require_poc_proximity", False)),
-                            ).props("dense color=primary")
-                            tp_poc_prox_width_input = ui.number(
-                                label="POC proximity (×VA width)",
-                                value=float(_tp_cfg.get("poc_proximity_va_width") or 0.2),
-                                min=0.05, max=1.0, step=0.05, format="%.2f",
-                            ).classes("w-48").props("dense")
-                            ui.label("Pullback must be within this fraction of VA-width of POC / VA-high / VA-low (adds a liquidity node to the 21-EMA touch).").classes("text-xs text-slate-500")
-                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
-                            tp_require_min_vol_switch = ui.switch(
-                                "Require volume participation",
-                                value=bool(_tp_cfg.get("require_min_volume", False)),
-                            ).props("dense color=primary")
-                            tp_min_vol_ratio_input = ui.number(
-                                label="Min volume ratio",
-                                value=float(_tp_cfg.get("min_volume_ratio") if _tp_cfg.get("min_volume_ratio") is not None else 0.7),
-                                min=0.1, max=5.0, step=0.05, format="%.2f",
-                            ).classes("w-40").props("dense")
-                            tp_vol_lookback_input = ui.number(
-                                label="Volume lookback",
-                                value=float(_tp_cfg.get("volume_lookback") if _tp_cfg.get("volume_lookback") is not None else 20),
-                                min=5, max=100, step=1, precision=0,
-                            ).classes("w-40").props("dense")
-                            ui.label("Block entries on candles whose volume has collapsed below this ratio of the recent average (filters dead-volume / halted-price-action candles).").classes("text-xs text-slate-500")
                     _active_badge_tp = ui.badge("Active", color="positive").bind_visibility_from(
                         tp_enabled_switch, "value"
                     )
