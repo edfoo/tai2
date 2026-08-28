@@ -392,6 +392,16 @@ class MarketService:
         self._trade_mgmt_trailing_updating: set[str] = set()
         self._trade_mgmt_regime_closing: set[str] = set()
         self._reentry_cooldown_until: dict[str, float] = {}
+        # Debounce state: consecutive polls where the whole positions list was
+        # empty (transient OKX API/WS hiccup) — used to avoid wiping all
+        # trade-mgmt state on a single empty snapshot.
+        self._trade_mgmt_empty_polls: int = 0
+        # Per-symbol consecutive polls where a tracked symbol was absent from a
+        # non-empty positions list.  Cleared only after the absence persists.
+        self._trade_mgmt_absent_polls: dict[str, int] = {}
+        # Throttle for exchange-side protection probes (avoids re-querying the
+        # algo-orders endpoint every tick for a genuinely manual position).
+        self._trade_mgmt_exchange_probe_at: dict[str, float] = {}
         # Commutator strategy: when a position's loss hits the configured threshold,
         # close it and open the reversed side.  Tracks flips per position lifecycle
         # (counts are cleared automatically when the symbol leaves open positions).
@@ -2287,20 +2297,43 @@ class MarketService:
             return
         positions: list[dict[str, Any]] = snapshot.get("positions") or []
         if not positions:
-            # No open positions — clear any orphaned state.
+            # No open positions reported.  A single empty snapshot is very
+            # likely a transient OKX API/WS hiccup (a real close delivers a
+            # pos=0 update, not an empty list), so debounce before clearing.
+            self._trade_mgmt_empty_polls += 1
+            # 3 consecutive empty polls (~30s at the 10s refresh cadence)
+            # before we trust it and clear orphaned state.
+            if self._trade_mgmt_empty_polls < 3:
+                self._emit_debug(
+                    f"TradeMgmt: positions list empty "
+                    f"({self._trade_mgmt_empty_polls}/3) — deferring state clear"
+                )
+                return
             for sym in list(self._trade_mgmt_state):
                 self._clear_trade_mgmt_state(sym, reason="flat")
+            self._trade_mgmt_absent_polls.clear()
             return
+        # Positions came back non-empty — reset the empty-snapshot debounce.
+        self._trade_mgmt_empty_polls = 0
 
         active_symbols = {
             str(p.get("instId", "")).upper()
             for p in positions
             if isinstance(p, dict) and self._extract_float(p.get("pos"))
         }
-        # Drop state for symbols that are no longer open.
+        # Drop state for symbols that are no longer open, but only after the
+        # symbol has been absent for a few consecutive polls (debounce against
+        # a transient partial positions list).
         for sym in list(self._trade_mgmt_state):
             if sym not in active_symbols:
+                absent = self._trade_mgmt_absent_polls.get(sym, 0) + 1
+                self._trade_mgmt_absent_polls[sym] = absent
+                if absent < 3:
+                    continue
                 self._clear_trade_mgmt_state(sym, reason="position_closed")
+                self._trade_mgmt_absent_polls.pop(sym, None)
+            else:
+                self._trade_mgmt_absent_polls.pop(sym, None)
 
         be_enabled = bool(tm.get("breakeven_enabled", True))
         be_at_r = self._extract_float(tm.get("breakeven_at_r"))
@@ -2389,6 +2422,14 @@ class MarketService:
                     (self._position_protection.get(symbol) or {}).get("stop_loss")
                     or (self._position_protection.get(symbol) or {}).get("take_profit")
                 )
+                # Fallback: probe the exchange for a live reduce-only TP/SL
+                # algo.  The in-memory ``_position_protection`` cache is lost on
+                # a state wipe (e.g. the transient empty-snapshot bug), so a
+                # still-open, still-protected position would otherwise look
+                # "manual" and be left unmanaged.  A live conditional algo is
+                # definitive evidence the bot opened the position.
+                if not is_launcher and not has_protection:
+                    has_protection = await self._probe_exchange_protection(symbol)
                 if not is_launcher and not has_protection:
                     continue
                 avg_px = self._extract_float(pos.get("avgPx"))
@@ -12933,6 +12974,51 @@ class MarketService:
 
         candidates.sort(key=_updated, reverse=True)
         return candidates[0]
+
+    async def _probe_exchange_protection(self, symbol: str) -> bool:
+        """Return True if the exchange shows a live reduce-only TP/SL algo for *symbol*.
+
+        Used as the last-resort re-seed signal in ``_check_trade_management`` so a
+        still-open, still-protected position whose in-memory state was wiped (e.g.
+        by a transient empty-snapshot bug) is not mistaken for a manual position
+        and left unmanaged.  Throttled so a genuinely manual position (no algo)
+        is not re-queried on every poll.
+        """
+        symbol_key = symbol.upper()
+        now = time.time()
+        last = self._trade_mgmt_exchange_probe_at.get(symbol_key, 0.0)
+        # Throttle: probe at most once per 60s per symbol.
+        if now - last < 60.0:
+            return False
+        self._trade_mgmt_exchange_probe_at[symbol_key] = now
+        if not self._trade_api:
+            return False
+        try:
+            entry = await self._fetch_latest_symbol_protection(symbol)
+        except Exception as exc:  # pragma: no cover - network safety
+            logger.warning("Exchange protection probe failed for %s: %s", symbol_key, exc)
+            return False
+        if entry is None:
+            return False
+        # A live reduce-only conditional/oco algo is definitive evidence the bot
+        # opened the position.  Hydrate the in-memory protection cache so later
+        # SL moves / partial closes have the correct TP/SL to preserve.
+        tp = self._extract_float(entry.get("tpTriggerPx"))
+        sl = self._extract_float(entry.get("slTriggerPx"))
+        if tp or sl:
+            self._position_protection[symbol_key] = {
+                "take_profit": tp,
+                "stop_loss": sl,
+                "algo_id": entry.get("algoId"),
+                "algo_cl_ord_id": entry.get("algoClOrdId"),
+                "synced": True,
+            }
+            self._emit_debug(
+                f"TradeMgmt: {symbol_key} re-seeded from exchange protection "
+                f"(tp={tp} sl={sl})"
+            )
+            return True
+        return False
 
     async def _fetch_algo_order(
         self,
