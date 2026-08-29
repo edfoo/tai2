@@ -60,7 +60,7 @@ class SpikeContinuationStrategy:
       - ``require_volume_rsi_rising`` (bool, default False): volume RSI must be
         rising vs the previous candle (volume momentum still building).  OPT-IN
         and default-off; ``volume_rsi_min`` is the primary volume gate.
-      - ``max_spike_extension_atr`` (float, default 2.0): volatility-normalised
+      - ``max_spike_extension_atr`` (float, default 3.0): volatility-normalised
         anti-late-entry gate.  Block entry if price has already travelled more
         than this multiple of ATR% from the volume-expansion origin.  The
         origin is anchored to the candle where volume expansion began (Fix 3),
@@ -68,11 +68,15 @@ class SpikeContinuationStrategy:
       - ``spike_lookback`` (int, default 5): candles to look back to find the
         volume-expansion candle that anchors the spike origin
       - ``require_regime`` (bool, default True)
-      - ``min_bb_bandwidth_percentile`` (float, default 50)
+      - ``min_bb_bandwidth_percentile`` (float, default 65)
       - ``use_atr_sizing`` (bool, default True)
-      - ``atr_tp_multiplier`` (float, default 3.0)
+      - ``atr_tp_multiplier`` (float, default 4.0)
       - ``atr_sl_multiplier`` (float, default 2.0)
       - ``min_atr_pct`` (float, default 1.0)
+      - ``require_oi_confirmation`` (bool, default True): momentum entries
+        need fresh leverage — rising OI (longs) / falling OI (shorts).
+        Degrades to pass when OI data is unavailable.
+      - ``oi_min_zscore`` (float, default 0.7)
       - ``flip_launcher_direction`` (str, default None): invert the
         Launcher's trade direction before execution. One of "both",
         "from_long" (only BUY→SELL), "from_short" (only SELL→BUY),
@@ -82,11 +86,11 @@ class SpikeContinuationStrategy:
     ATR exit multipliers — SINGLE SOURCE OF TRUTH
     --------------------------------------------
     The canonical values live in ``DEFAULT_SPIKE_CONTINUATION``
-    (``app/services/strategies/defaults.py``): ``atr_tp_multiplier = 3.0`` and
-    ``atr_sl_multiplier = 2.0`` (≥ 1.5 R:R).  The inline fallbacks below and
+    (``app/services/strategies/defaults.py``): ``atr_tp_multiplier = 4.0`` and
+    ``atr_sl_multiplier = 2.0`` (≥ 2.0 R:R).  The inline fallbacks below and
     this docstring MUST stay in sync with that dict.  When ``use_atr_sizing``
     is disabled the static fallbacks (``tp_pct: 6.0``, ``sl_pct: 4.0``) keep
-    the same 1.5 R:R floor.
+    a ≥ 1.5 R:R floor.
     """
 
     name = "spike_continuation"
@@ -157,7 +161,7 @@ class SpikeContinuationStrategy:
         require_regime = bool(cfg.get("require_regime", True))
         min_bb_bandwidth_percentile = helpers.extract_float(cfg.get("min_bb_bandwidth_percentile"))
         if min_bb_bandwidth_percentile is None:
-            min_bb_bandwidth_percentile = 50.0
+            min_bb_bandwidth_percentile = 65.0
         regime_lookback = helpers.extract_float(cfg.get("regime_lookback"))
         if regime_lookback is None:
             regime_lookback = 50
@@ -165,11 +169,11 @@ class SpikeContinuationStrategy:
         # When use_atr_sizing is True, TP/SL are computed as
         # multiplier × ATR% instead of fixed percentages.
         # SC uses a wide SL (2.0 ATR) to avoid being stopped by noise and a
-        # 3.0 ATR TP to keep ≥ 1.5 R:R — matching DEFAULT_SPIKE_CONTINUATION.
+        # 4.0 ATR TP to keep ≥ 2.0 R:R — matching DEFAULT_SPIKE_CONTINUATION.
         use_atr_sizing = bool(cfg.get("use_atr_sizing", True))
         atr_tp_multiplier = helpers.extract_float(cfg.get("atr_tp_multiplier"))
         if atr_tp_multiplier is None:
-            atr_tp_multiplier = 3.0
+            atr_tp_multiplier = 4.0
         atr_sl_multiplier = helpers.extract_float(cfg.get("atr_sl_multiplier"))
         if atr_sl_multiplier is None:
             atr_sl_multiplier = 2.0
@@ -194,17 +198,17 @@ class SpikeContinuationStrategy:
         # Volatility-normalised spike extension (ATR-anchored, 0 = disabled).
         max_spike_extension_atr = helpers.extract_float(cfg.get("max_spike_extension_atr"))
         if max_spike_extension_atr is None:
-            max_spike_extension_atr = 2.0
+            max_spike_extension_atr = 3.0
         _spike_lookback = helpers.extract_float(cfg.get("spike_lookback"))
         spike_lookback = int(_spike_lookback) if _spike_lookback is not None else 5
         # ── Liquidity-aware gates (§3) ────────────────────────────────
-        # ``require_oi_confirmation`` (default off): momentum entries need
-        # fresh leverage — rising open interest (oi_zscore > 1 in direction).
+        # ``require_oi_confirmation`` (default on): momentum entries need
+        # fresh leverage — rising open interest (oi_zscore > min in direction).
         # Degrades to pass when OI data is unavailable.
-        require_oi_confirmation = bool(cfg.get("require_oi_confirmation", False))
+        require_oi_confirmation = bool(cfg.get("require_oi_confirmation", True))
         oi_min_zscore = helpers.extract_float(cfg.get("oi_min_zscore"))
         if oi_min_zscore is None:
-            oi_min_zscore = 1.0
+            oi_min_zscore = 0.7
         # ── Volume-participation gate ────────────────────────────────
         # Block a spike entry on a dead-volume candle (no participation behind
         # the continuation).  SC already gates on volume RSI; this adds a floor

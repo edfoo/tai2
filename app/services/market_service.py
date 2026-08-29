@@ -33,7 +33,8 @@ from app.models.trade import ExecutedTrade
 from app.services.okx_metrics import fetch_funding_history, oi_delta_zscore, zscore_latest
 from app.services.okx_sdk_adapter import OkxAccountAdapter, OkxTradeAdapter
 from app.services.state_service import StateService
-from app.services.strategies import Strategy, StrategyHelpers, StrategySignal
+from app.services.strategies import Strategy, StrategyHelpers, StrategySignal, resolve_analysis_block
+from app.services.strategies.defaults import merged_config
 from app.services.strategies.liquidity_sweep import LiquiditySweepStrategy
 from app.services.strategies.mean_reversion import MeanReversionStrategy
 from app.services.strategies.spike_continuation import SpikeContinuationStrategy
@@ -391,6 +392,7 @@ class MarketService:
         self._trade_mgmt_be_updating: set[str] = set()
         self._trade_mgmt_trailing_updating: set[str] = set()
         self._trade_mgmt_regime_closing: set[str] = set()
+        self._trade_mgmt_rollover_closing: set[str] = set()
         self._reentry_cooldown_until: dict[str, float] = {}
         # Debounce state: consecutive polls where the whole positions list was
         # empty (transient OKX API/WS hiccup) — used to avoid wiping all
@@ -2243,6 +2245,7 @@ class MarketService:
         self._trade_mgmt_be_updating.discard(symbol_key)
         self._trade_mgmt_trailing_updating.discard(symbol_key)
         self._trade_mgmt_regime_closing.discard(symbol_key)
+        self._trade_mgmt_rollover_closing.discard(symbol_key)
         if not had_state:
             return
         tm = self._trade_mgmt_config()
@@ -3043,6 +3046,171 @@ class MarketService:
             logger.warning("TradeMgmt regime-breakdown close error for %s: %s", symbol_key, exc)
         finally:
             self._trade_mgmt_regime_closing.discard(symbol_key)
+
+    async def _check_spike_continuation_rollover_exits(self) -> None:
+        """Flatten open Spike-Continuation positions when momentum rolls over.
+
+        SC rides a fresh volume-driven impulse and is supposed to exit *before*
+        exhaustion signs appear.  The fixed ATR TP/SL are price-based, so they
+        do not encode the strategy's own "momentum is fading" thesis.  When
+        enabled, this flattens an SC position once BOTH momentum signals roll
+        over against the trade direction:
+
+          - volume-RSI falls below the prior bar (volume momentum fading), AND
+          - RSI rolls over against the trade (RSI falls for longs / rises for
+            shorts).
+
+        This exits before the reversion the strategy anticipates, instead of
+        holding to a fixed price and giving the move back.
+
+        Config (per-strategy, under ``launcher.strategies.spike_continuation``):
+          exit_on_momentum_rollover – bool (default False, opt-in)
+
+        Only applies to positions opened by ``spike_continuation`` and only
+        when the position is above breakeven (we do NOT want to exit a loser
+        on a momentum fade — the SL/time-stop already own that).  Runs *after*
+        the breakeven / partial-TP / time-stop / regime-exit logic in the
+        refresh loop, so a position already being closed by them is skipped.
+        """
+        strategies_cfg = (self._launcher_config.get("strategies") or {})
+        sc_cfg = strategies_cfg.get("spike_continuation") or {}
+        if not bool(sc_cfg.get("exit_on_momentum_rollover", False)):
+            return
+        snapshot = self._last_full_snapshot
+        if not snapshot:
+            return
+        positions: list[dict[str, Any]] = snapshot.get("positions") or []
+        if not positions:
+            return
+
+        market_data: dict[str, Any] = snapshot.get("market_data") or {}
+
+        for pos in positions:
+            if not isinstance(pos, dict):
+                continue
+            symbol = str(pos.get("instId", "")).upper()
+            if not symbol:
+                continue
+            pos_val = self._extract_float(pos.get("pos"))
+            if not pos_val or pos_val == 0:
+                continue
+            # Only manage launcher-tracked SC positions.
+            strat_key = f"spike_continuation:{symbol}"
+            tracked = self._launcher_in_position.get(strat_key)
+            if tracked is None:
+                continue
+            # Skip if trade-management is already closing this symbol.
+            if (
+                symbol in self._trade_mgmt_time_closing
+                or symbol in self._trade_mgmt_regime_closing
+                or symbol in self._trade_mgmt_rollover_closing
+            ):
+                continue
+
+            pos_side = str(pos.get("posSide", "")).lower()
+            is_long = pos_side == "long" or (not pos_side and pos_val > 0)
+
+            # Only exit when above breakeven — fading momentum is a profit-
+            # protection signal, not a stop-loss replacement.
+            entry_price = self._extract_float(pos.get("avgPx"))
+            last_price = self.get_last_price(symbol)
+            if last_price is None or last_price <= 0:
+                last_price = self._extract_float(pos.get("markPx") or pos.get("last"))
+            if entry_price is None or entry_price <= 0 or last_price is None or last_price <= 0:
+                continue
+            if is_long and last_price <= entry_price:
+                continue
+            if not is_long and last_price >= entry_price:
+                continue
+
+            # Read volume-RSI and RSI series from the SAME indicator block the
+            # SC entry logic uses (resolve_analysis_block), so a non-default
+            # analysis_timeframe does not mix bars between entry and exit.
+            sym_data = market_data.get(symbol) or {}
+            indicators = resolve_analysis_block(sym_data, merged_config(sc_cfg, "spike_continuation"))
+            vrsi_series = indicators.get("volume_rsi_series") or []
+            rsi_series = indicators.get("rsi_series") or []
+
+            vrsi_cur: float | None = None
+            vrsi_prev: float | None = None
+            if len(vrsi_series) >= 2:
+                vrsi_cur = self._extract_float(vrsi_series[-1])
+                vrsi_prev = self._extract_float(vrsi_series[-2])
+            rsi_cur: float | None = None
+            rsi_prev: float | None = None
+            if len(rsi_series) >= 2:
+                rsi_cur = self._extract_float(rsi_series[-1])
+                rsi_prev = self._extract_float(rsi_series[-2])
+
+            if vrsi_cur is None or vrsi_prev is None or rsi_cur is None or rsi_prev is None:
+                continue
+
+            volume_fading = vrsi_cur < vrsi_prev
+            if is_long:
+                rsi_rolled = rsi_cur < rsi_prev
+            else:
+                rsi_rolled = rsi_cur > rsi_prev
+
+            if not (volume_fading and rsi_rolled):
+                continue
+
+            resolved_pos_side = pos_side if pos_side in ("long", "short") else None
+            trade_mode = str(pos.get("mgnMode") or "").lower() or "isolated"
+            close_side = "sell" if is_long else "buy"
+            self._emit_debug(
+                f"TradeMgmt momentum-rollover: {symbol} {'long' if is_long else 'short'} "
+                f"volume-RSI {vrsi_prev:.1f}→{vrsi_cur:.1f} and RSI "
+                f"{rsi_prev:.1f}→{rsi_cur:.1f} rolled over against the trade — flattening"
+            )
+            self._trade_mgmt_rollover_closing.add(symbol)
+            asyncio.create_task(
+                self._trade_mgmt_rollover_close(
+                    symbol=symbol,
+                    close_side=close_side,
+                    pos_side=resolved_pos_side,
+                    contracts=abs(pos_val),
+                    trade_mode=trade_mode,
+                ),
+                name=f"trade-mgmt-rollover-{symbol}",
+            )
+
+    async def _trade_mgmt_rollover_close(
+        self,
+        *,
+        symbol: str,
+        close_side: str,
+        pos_side: str | None,
+        contracts: float,
+        trade_mode: str,
+    ) -> None:
+        """Fully close an SC position on momentum rollover (reduce-only)."""
+        symbol_key = symbol.upper()
+        coid = self._generate_client_order_id("tm-m")
+        try:
+            result = await self._submit_order(
+                symbol=symbol,
+                side=close_side,
+                pos_side=pos_side,
+                size=contracts,
+                trade_mode=trade_mode or "isolated",
+                order_type="market",
+                reduce_only=True,
+                client_order_id=coid,
+                attach_algo_orders=None,
+            )
+            if result is None:
+                self._emit_debug(f"TradeMgmt momentum-rollover: {symbol_key} — trade API unavailable")
+            else:
+                order_result = result[0] if isinstance(result, tuple) else result
+                if order_result:
+                    self._emit_debug(f"TradeMgmt momentum-rollover: {symbol_key} close accepted")
+                    self._clear_trade_mgmt_state(symbol_key, reason="momentum_rollover")
+                else:
+                    self._emit_debug(f"TradeMgmt momentum-rollover: {symbol_key} close rejected")
+        except Exception as exc:
+            logger.warning("TradeMgmt momentum-rollover close error for %s: %s", symbol_key, exc)
+        finally:
+            self._trade_mgmt_rollover_closing.discard(symbol_key)
 
     # ── Commutator strategy ──────────────────────────────────────────────────
 
@@ -5764,6 +5932,12 @@ class MarketService:
                 raise
             except Exception as exc:  # pragma: no cover - best-effort
                 logger.debug("Strategy regime-exit check error: %s", exc)
+            try:
+                await self._check_spike_continuation_rollover_exits()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # pragma: no cover - best-effort
+                logger.debug("Spike-continuation rollover-exit check error: %s", exc)
             try:
                 await self._check_commutator()
             except asyncio.CancelledError:

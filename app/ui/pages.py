@@ -3589,10 +3589,16 @@ def register_pages(app: FastAPI) -> None:
                     ).props("dense color=primary")
                     with ui.expansion("Spike Continuation").classes("flex-1 text-sm font-medium"):
                         ui.label(
-                            "Momentum scalp: rides volume-driven spikes for 3-5% before they revert. "
-                            "Enters WITH the spike (not against it). Mirror image of Mean Reversion. "
-                            "Launcher mode must also be enabled on the CFG page."
-                        ).classes("text-xs text-slate-500 mb-3")
+                            "Momentum scalp: rides volume-driven spikes for a few % before they revert. "
+                            "Enters WITH the spike (not against it) when volume confirms strong momentum, "
+                            "and exits before exhaustion signs appear. Mirror image of Mean Reversion."
+                        ).classes("text-xs text-slate-500 mb-2")
+                        ui.label(
+                            "Evaluation is a funnel of seven ordered stages. Each stage vetoes the "
+                            "signal before the next one runs; stage order matters — earlier stages are "
+                            "cheaper filters, later stages refine the specific setup. The core design goal "
+                            "is to avoid entering at the TOP of a spike."
+                        ).classes("text-[11px] text-slate-400 mb-3")
                         with ui.row().classes("w-full items-center gap-2 mb-2"):
                             ui.button(
                                 "Set Recommended Defaults",
@@ -3602,169 +3608,15 @@ def register_pages(app: FastAPI) -> None:
                                 "Fill all fields with the recommended Spike Continuation configuration. "
                                 "You still need to click Save to persist."
                             )
-                        with ui.row().classes("w-full flex-wrap gap-4 items-start"):
-                            _sc_tp_raw = _sc_cfg.get("tp_pct")
-                            sc_tp_input = ui.number(
-                                label="Take profit (%)",
-                                value=float(_sc_tp_raw) if _sc_tp_raw is not None else 6.0,
-                                min=0.5, step=0.5, precision=1,
-                            ).classes("w-40").props(
-                                "hint='Exit after this % price move' persistent-hint clearable"
-                            )
-                            _sc_sl_raw = _sc_cfg.get("sl_pct")
-                            sc_sl_input = ui.number(
-                                label="Stop loss (%)",
-                                value=float(_sc_sl_raw) if _sc_sl_raw is not None else 4.0,
-                                min=0.5, step=0.5, precision=1,
-                            ).classes("w-40").props(
-                                "hint='Exit if spike fails and reverses this %' persistent-hint clearable"
-                            )
-                        with ui.row().classes("w-full flex-wrap gap-4 items-start"):
-                            _sc_vrsi_raw = _sc_cfg.get("volume_rsi_min")
-                            sc_volume_rsi_min_input = ui.number(
-                                label="Volume RSI min",
-                                value=float(_sc_vrsi_raw) if _sc_vrsi_raw is not None else 75.0,
-                                min=50, max=99, step=1, precision=0,
-                            ).classes("w-40").props(
-                                "hint='Volume RSI must be above this to confirm spike' persistent-hint"
-                            )
-                            _sc_rsi_min_raw = _sc_cfg.get("rsi_min")
-                            sc_rsi_min_input = ui.number(
-                                label="RSI min (buy zone)",
-                                value=float(_sc_rsi_min_raw) if _sc_rsi_min_raw is not None else 58.0,
-                                min=40, max=70, step=1, precision=0,
-                            ).classes("w-40").props(
-                                "hint='RSI must be above this for buys (momentum confirmed)' persistent-hint"
-                            )
-                            _sc_rsi_max_raw = _sc_cfg.get("rsi_max")
-                            sc_rsi_max_input = ui.number(
-                                label="RSI max (buy zone)",
-                                value=float(_sc_rsi_max_raw) if _sc_rsi_max_raw is not None else 80.0,
-                                min=60, max=95, step=1, precision=0,
-                            ).classes("w-40").props(
-                                "hint='Dont enter if RSI above this (Mean Reversion territory)' persistent-hint"
-                            )
-                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
-                            sc_bb_breakout_switch = ui.switch(
-                                "Require BB breakout",
-                                value=bool(_sc_cfg.get("require_bb_breakout", True)),
-                            ).props("dense color=primary")
-                            ui.label("Price must be beyond the BB band to confirm the spike.").classes("text-xs text-slate-500")
-                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
-                            sc_candle_strength_switch = ui.switch(
-                                "Require candle strength",
-                                value=bool(_sc_cfg.get("require_candle_strength", True)),
-                            ).props("dense color=primary")
-                            ui.label("Candle must close near its high (buy) or low (sell) — strong momentum, no rejection.").classes("text-xs text-slate-500")
-                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
-                            sc_candle_strength_pct_input = ui.number(
-                                label="Candle strength %",
-                                value=float(_sc_cfg.get("candle_strength_pct") or 60.0),
-                                min=50, max=95, step=5, format="%.0f",
-                            ).classes("w-48").props("dense")
-                            ui.label("Close must be in this % of the candle range from the direction (60 = top 40% for buys).").classes("text-xs text-slate-500")
-                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
-                            sc_min_bb_bw_input = ui.number(
-                                label="Min BB Bandwidth %",
-                                value=float(_sc_cfg.get("min_bb_bandwidth") or 3.0),
-                                min=0.0, max=20.0, step=0.5, format="%.1f",
-                            ).classes("w-48").props("dense")
-                            ui.label("Only enter when bands are wide enough to suggest real volatility expansion.").classes("text-xs text-slate-500")
-                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
-                            sc_max_adx_input = ui.number(
-                                label="Max ADX",
-                                value=float(_sc_cfg.get("max_adx") or 0.0),
-                                min=0, max=100, step=5, precision=0,
-                            ).classes("w-32").props(
-                                "hint='Legacy hard ADX ceiling (0 = off)' persistent-hint"
-                            )
-                            sc_max_adx_entry_input = ui.number(
-                                label="Max ADX for entry",
-                                value=float(_sc_cfg.get("max_adx_for_entry") if _sc_cfg.get("max_adx_for_entry") is not None else 32.0),
-                                min=0, max=100, step=1, precision=0,
-                            ).classes("w-40").props(
-                                "hint='Late-entry killer: skip if ADX already this high (0 = off)' persistent-hint"
-                            )
-                        # ── Momentum acceleration filters (prevent entering at the top) ──
+
+                        # ── Stage 1 · HTF Regime ────────────────────────
                         ui.separator().classes("my-2")
-                        ui.label("Momentum acceleration filters").classes("text-xs font-semibold text-slate-600")
+                        ui.label("Stage 1 · HTF Regime — runs first, vetoes the signal").classes("text-xs font-bold text-slate-700")
                         ui.label(
-                            "These filters prevent entering at the TOP of a spike. "
-                            "They verify the spike is still accelerating, not peaking."
-                        ).classes("text-xs text-slate-500 mb-2")
-                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
-                            sc_momentum_accel_switch = ui.switch(
-                                "Require momentum acceleration",
-                                value=bool(_sc_cfg.get("require_momentum_acceleration", False)),
-                            ).props("dense color=primary")
-                            ui.label("Current candle body must be larger than recent average — spike is accelerating, not peaking. OPT-IN: the ATR extension gate below is the primary anti-late-entry filter.").classes("text-xs text-slate-500")
-                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
-                            sc_accel_lookback_input = ui.number(
-                                label="Acceleration lookback",
-                                value=float(_sc_cfg.get("acceleration_lookback") or 3),
-                                min=1, max=10, step=1, format="%.0f",
-                            ).classes("w-40").props("dense")
-                            ui.label("Number of prior candles to average for the acceleration comparison.").classes("text-xs text-slate-500")
-                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
-                            sc_accel_min_ratio_input = ui.number(
-                                label="Acceleration min ratio",
-                                value=float(_sc_cfg.get("acceleration_min_ratio") or 1.5),
-                                min=1.0, max=5.0, step=0.1, format="%.1f",
-                            ).classes("w-40").props("dense")
-                            ui.label("Current body must be at least this multiple of recent average (1.5 = 50% larger).").classes("text-xs text-slate-500")
-                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
-                            sc_rsi_rising_switch = ui.switch(
-                                "Require RSI rising",
-                                value=bool(_sc_cfg.get("require_rsi_rising", True)),
-                            ).props("dense color=primary")
-                            ui.label("RSI must be rising (bullish candle) — momentum still building, not fading.").classes("text-xs text-slate-500")
-                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
-                            sc_vol_rsi_rising_switch = ui.switch(
-                                "Require volume RSI rising",
-                                value=bool(_sc_cfg.get("require_volume_rsi_rising", False)),
-                            ).props("dense color=primary")
-                            ui.label("Volume RSI must be rising vs previous candle — volume momentum still building. OPT-IN; volume_rsi_min is the primary volume gate.").classes("text-xs text-slate-500")
-                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
-                            sc_max_spike_ext_input = ui.number(
-                                label="Max spike extension (ATR)",
-                                value=float(_sc_cfg.get("max_spike_extension_atr") or 2.0),
-                                min=0.0, max=10.0, step=0.1, format="%.1f",
-                            ).classes("w-48").props("dense")
-                            ui.label("Block entry if price already moved more than this multiple of ATR% from the volume-expansion origin (0 = disabled). Volatility-normalised anti-late-entry gate.").classes("text-xs text-slate-500")
-                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
-                            sc_spike_lookback_input = ui.number(
-                                label="Spike lookback",
-                                value=float(_sc_cfg.get("spike_lookback") or 5),
-                                min=2, max=20, step=1, format="%.0f",
-                            ).classes("w-40").props("dense")
-                            ui.label("Candles to look back to find the volume-expansion candle that anchors the spike origin.").classes("text-xs text-slate-500")
-                        # ── Regime gate (BB bandwidth percentile) ──────────────
-                        ui.separator().classes("my-2")
-                        ui.label("Regime Gate (BB Bandwidth Percentile)").classes("text-xs font-semibold text-slate-600")
-                        ui.label(
-                            "SC works best in high-volatility expansion. When enabled, the current BB bandwidth "
-                            "must be above the percentile threshold relative to recent history."
-                        ).classes("text-xs text-slate-500 mb-2")
-                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
-                            sc_require_regime_switch = ui.switch(
-                                "Require regime (expansion)",
-                                value=bool(_sc_cfg.get("require_regime", True)),
-                            ).props("dense color=primary")
-                            ui.label("Only enter when BB bandwidth is in the high percentile (expansion regime).").classes("text-xs text-slate-500")
-                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
-                            sc_min_bw_pct_input = ui.number(
-                                label="Min BB bandwidth percentile",
-                                value=float(_sc_cfg.get("min_bb_bandwidth_percentile") or 50.0),
-                                min=5.0, max=95.0, step=5.0, format="%.0f",
-                            ).classes("w-48").props("dense")
-                            ui.label("Current bandwidth must be above this percentile (e.g. 50 = above 50th percentile).").classes("text-xs text-slate-500")
-                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
-                            sc_regime_lookback_input = ui.number(
-                                label="Regime lookback",
-                                value=float(_sc_cfg.get("regime_lookback") or 50),
-                                min=10, max=200, step=10, format="%.0f",
-                            ).classes("w-40").props("dense")
-                            ui.label("Number of historical candles to compute the percentile over.").classes("text-xs text-slate-500")
+                            "SC rides impulses inside an established higher-timeframe trend. This stage "
+                            "decides which timeframe is analyzed and whether the HTF must be trending; "
+                            "neither entry nor exit proceeds without it passing."
+                        ).classes("text-[11px] text-slate-400 mb-2")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             sc_htf_regime_select = ui.select(
                                 ["chop", "trend", "off"],
@@ -3783,41 +3635,175 @@ def register_pages(app: FastAPI) -> None:
                             ).classes("w-56").props(
                                 "hint='Indicators computed on this bar. · = use global LTF' persistent-hint dense"
                             )
-                        # ── ATR-scaled TP/SL ────────────────────────────────────
+
+                        # ── Stage 2 · Volume & Momentum Confirmation ────
                         ui.separator().classes("my-2")
-                        ui.label("ATR-Scaled TP/SL").classes("text-xs font-semibold text-slate-600")
+                        ui.label("Stage 2 · Volume & Momentum Confirmation — is this a real, volume-driven spike?").classes("text-xs font-bold text-slate-700")
                         ui.label(
-                            "When enabled, TP/SL are computed as multiplier × ATR% instead of fixed %. "
-                            "Adapts to volatility regime."
-                        ).classes("text-xs text-slate-500 mb-2")
+                            "Confirms the move is a genuine impulse (volume expanding) and that momentum is "
+                            "confirmed but not yet extreme. RSI in the momentum zone, not yet in Mean-Reversion "
+                            "territory; the sell band mirrors around 50."
+                        ).classes("text-[11px] text-slate-400 mb-2")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-start mt-1"):
+                            _sc_vrsi_raw = _sc_cfg.get("volume_rsi_min")
+                            sc_volume_rsi_min_input = ui.number(
+                                label="Volume RSI min",
+                                value=float(_sc_vrsi_raw) if _sc_vrsi_raw is not None else 72.0,
+                                min=50, max=99, step=1, precision=0,
+                            ).classes("w-40").props(
+                                "hint='Volume RSI must be above this to confirm the spike is volume-driven' persistent-hint"
+                            )
+                            _sc_rsi_min_raw = _sc_cfg.get("rsi_min")
+                            sc_rsi_min_input = ui.number(
+                                label="RSI min (buy zone)",
+                                value=float(_sc_rsi_min_raw) if _sc_rsi_min_raw is not None else 55.0,
+                                min=40, max=70, step=1, precision=0,
+                            ).classes("w-40").props(
+                                "hint='RSI must be above this for buys (momentum confirmed)' persistent-hint"
+                            )
+                            _sc_rsi_max_raw = _sc_cfg.get("rsi_max")
+                            sc_rsi_max_input = ui.number(
+                                label="RSI max (buy zone)",
+                                value=float(_sc_rsi_max_raw) if _sc_rsi_max_raw is not None else 80.0,
+                                min=60, max=95, step=1, precision=0,
+                            ).classes("w-40").props(
+                                "hint='Do not enter if RSI above this (Mean Reversion territory)' persistent-hint"
+                            )
+
+                        # ── Stage 3 · Breakout & Candle Structure ───────
+                        ui.separator().classes("my-2")
+                        ui.label("Stage 3 · Breakout & Candle Structure — the spike must be visible and strong").classes("text-xs font-bold text-slate-700")
+                        ui.label(
+                            "Price must break beyond the Bollinger Bands on wide enough bands, and the candle "
+                            "must close strong (near its high for buys / low for sells) — no rejection."
+                        ).classes("text-[11px] text-slate-400 mb-2")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
-                            sc_use_adaptive_atr_switch = ui.switch(
-                                "Adaptive ATR regime",
-                                value=bool(_sc_cfg.get("use_adaptive_atr", False)),
-                            ).props("dense color=amber")
-                            ui.label(
-                                "Scales ATR distance by volatility regime (quiet/normal/volatile)."
-                            ).classes("text-xs text-slate-500")
-                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
-                            sc_use_atr_sizing_switch = ui.switch(
-                                "Use ATR sizing",
-                                value=bool(_sc_cfg.get("use_atr_sizing", True)),
+                            sc_bb_breakout_switch = ui.switch(
+                                "Require BB breakout",
+                                value=bool(_sc_cfg.get("require_bb_breakout", True)),
                             ).props("dense color=primary")
-                            ui.label("Override static TP/SL with ATR-scaled values.").classes("text-xs text-slate-500")
+                            ui.label("Price must be beyond the BB band to confirm the spike.").classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
-                            sc_atr_tp_mult_input = ui.number(
-                                label="ATR TP multiplier",
-                                value=float(_sc_cfg.get("atr_tp_multiplier") or 3.0),
-                                min=0.1, max=10.0, step=0.1, format="%.1f",
-                            ).classes("w-40").props("dense")
-                            ui.label("TP = multiplier × ATR% (e.g. 3.0 = 3.0 ATR).").classes("text-xs text-slate-500")
+                            sc_min_bb_bw_input = ui.number(
+                                label="Min BB Bandwidth %",
+                                value=float(_sc_cfg.get("min_bb_bandwidth") or 3.0),
+                                min=0.0, max=20.0, step=0.5, format="%.1f",
+                            ).classes("w-48").props("dense")
+                            ui.label("Only enter when bands are wide enough to suggest real volatility expansion.").classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
-                            sc_atr_sl_mult_input = ui.number(
-                                label="ATR SL multiplier",
-                                value=float(_sc_cfg.get("atr_sl_multiplier") or 2.0),
-                                min=0.1, max=10.0, step=0.1, format="%.1f",
+                            sc_candle_strength_switch = ui.switch(
+                                "Require candle strength",
+                                value=bool(_sc_cfg.get("require_candle_strength", True)),
+                            ).props("dense color=primary")
+                            ui.label("Candle must close near its high (buy) or low (sell) — strong momentum, no rejection.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            sc_candle_strength_pct_input = ui.number(
+                                label="Candle strength %",
+                                value=float(_sc_cfg.get("candle_strength_pct") or 60.0),
+                                min=50, max=95, step=5, format="%.0f",
+                            ).classes("w-48").props("dense")
+                            ui.label("Close must be in this % of the candle range from the direction (60 = top 40% for buys).").classes("text-xs text-slate-500")
+
+                        # ── Stage 4 · Anti-late-entry ───────────────────
+                        ui.separator().classes("my-2")
+                        ui.label("Stage 4 · Anti-late-entry — the core of the strategy: don't buy the top").classes("text-xs font-bold text-slate-700")
+                        ui.label(
+                            "Prevents entering after the move has already run. The ATR-anchored extension gate "
+                            "is the primary filter (blocks if price is already too far from the volume-expansion "
+                            "origin); the ADX cap kills mature trends; the RSI/volume-RSI rising checks confirm "
+                            "momentum is still building, not fading. The body-ratio acceleration check is opt-in "
+                            "and default-off so it does not compound the extension gate."
+                        ).classes("text-[11px] text-slate-400 mb-2")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            sc_max_spike_ext_input = ui.number(
+                                label="Max spike extension (ATR)",
+                                value=float(_sc_cfg.get("max_spike_extension_atr") or 3.0),
+                                min=0.0, max=10.0, step=0.1, format="%.1f",
+                            ).classes("w-48").props("dense")
+                            ui.label("Block entry if price already moved more than this multiple of ATR% from the volume-expansion origin (0 = disabled).").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            sc_spike_lookback_input = ui.number(
+                                label="Spike lookback",
+                                value=float(_sc_cfg.get("spike_lookback") or 5),
+                                min=2, max=20, step=1, format="%.0f",
                             ).classes("w-40").props("dense")
-                            ui.label("SL = multiplier × ATR% (e.g. 2.0 = 2.0 ATR, room to breathe). ≥ 1.5 R:R.").classes("text-xs text-slate-500")
+                            ui.label("Candles to look back to find the volume-expansion candle that anchors the spike origin.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            sc_max_adx_entry_input = ui.number(
+                                label="Max ADX for entry",
+                                value=float(_sc_cfg.get("max_adx_for_entry") if _sc_cfg.get("max_adx_for_entry") is not None else 32.0),
+                                min=0, max=100, step=1, precision=0,
+                            ).classes("w-40").props(
+                                "hint='Late-entry killer: skip if ADX already this high (0 = off)' persistent-hint"
+                            )
+                            sc_max_adx_input = ui.number(
+                                label="Max ADX (legacy)",
+                                value=float(_sc_cfg.get("max_adx") or 0.0),
+                                min=0, max=100, step=5, precision=0,
+                            ).classes("w-32").props(
+                                "hint='Legacy hard ADX ceiling (0 = off)' persistent-hint"
+                            )
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            sc_rsi_rising_switch = ui.switch(
+                                "Require RSI rising",
+                                value=bool(_sc_cfg.get("require_rsi_rising", True)),
+                            ).props("dense color=primary")
+                            ui.label("RSI must be rising vs the previous candle — momentum still building, not fading.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            sc_vol_rsi_rising_switch = ui.switch(
+                                "Require volume RSI rising",
+                                value=bool(_sc_cfg.get("require_volume_rsi_rising", False)),
+                            ).props("dense color=primary")
+                            ui.label("Volume RSI must be rising vs previous candle — volume momentum still building. OPT-IN; volume_rsi_min is the primary volume gate.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            sc_momentum_accel_switch = ui.switch(
+                                "Require momentum acceleration",
+                                value=bool(_sc_cfg.get("require_momentum_acceleration", False)),
+                            ).props("dense color=primary")
+                            ui.label("Current candle body must be larger than recent average — spike is accelerating, not peaking. OPT-IN.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            sc_accel_lookback_input = ui.number(
+                                label="Acceleration lookback",
+                                value=float(_sc_cfg.get("acceleration_lookback") or 3),
+                                min=1, max=10, step=1, format="%.0f",
+                            ).classes("w-40").props("dense")
+                            ui.label("Number of prior candles to average for the acceleration comparison.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            sc_accel_min_ratio_input = ui.number(
+                                label="Acceleration min ratio",
+                                value=float(_sc_cfg.get("acceleration_min_ratio") or 1.3),
+                                min=1.0, max=5.0, step=0.1, format="%.1f",
+                            ).classes("w-40").props("dense")
+                            ui.label("Current body must be at least this multiple of recent average (1.3 = 30% larger).").classes("text-xs text-slate-500")
+
+                        # ── Stage 5 · Regime & Liquidity Gates ──────────
+                        ui.separator().classes("my-2")
+                        ui.label("Stage 5 · Regime & Liquidity Gates — only trade real expansion with real participation").classes("text-xs font-bold text-slate-700")
+                        ui.label(
+                            "Fails fast on quiet coins (low ATR%), chop (BB bandwidth below the percentile), "
+                            "and halted price action (volume collapse). OI confirmation ensures the impulse is "
+                            "backed by fresh leverage rather than a thin-book vacuum."
+                        ).classes("text-[11px] text-slate-400 mb-2")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            sc_require_regime_switch = ui.switch(
+                                "Require regime (expansion)",
+                                value=bool(_sc_cfg.get("require_regime", True)),
+                            ).props("dense color=primary")
+                            ui.label("Only enter when BB bandwidth is in the high percentile (expansion regime).").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            sc_min_bw_pct_input = ui.number(
+                                label="Min BB bandwidth percentile",
+                                value=float(_sc_cfg.get("min_bb_bandwidth_percentile") or 65.0),
+                                min=5.0, max=95.0, step=5.0, format="%.0f",
+                            ).classes("w-48").props("dense")
+                            ui.label("Current bandwidth must be above this percentile (e.g. 65 = above the 65th percentile).").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            sc_regime_lookback_input = ui.number(
+                                label="Regime lookback",
+                                value=float(_sc_cfg.get("regime_lookback") or 50),
+                                min=10, max=200, step=10, format="%.0f",
+                            ).classes("w-40").props("dense")
+                            ui.label("Number of historical candles to compute the percentile over.").classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             sc_min_atr_pct_input = ui.number(
                                 label="Min ATR%",
@@ -3826,41 +3812,16 @@ def register_pages(app: FastAPI) -> None:
                             ).classes("w-40").props("dense")
                             ui.label("Skip entries when ATR% is below this (0 = disabled). Filters out dead coins.").classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
-                            _sc_rr_raw = _sc_cfg.get("min_reward_risk_ratio")
-                            sc_min_rr_input = ui.number(
-                                label="Min Reward-to-Risk Ratio",
-                                value=float(_sc_rr_raw) if _sc_rr_raw is not None else None,
-                                min=0.1, max=10.0, step=0.1, format="%.1f",
-                            ).classes("w-40").props(
-                                "hint='Minimum TP:SL distance ratio for this strategy (blank = use global guardrail)' persistent-hint clearable"
-                            )
-                            ui.label("Overrides the global R:R guardrail for Spike Continuation entries. Blank inherits the global min_reward_risk_ratio.").classes("text-xs text-slate-500")
-                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
-                            _sc_flip_enabled = bool(_sc_cfg.get("flip_launcher_direction"))
-                            sc_flip_switch = ui.switch(
-                                "Flip Launcher Decision",
-                                value=_sc_flip_enabled,
-                            ).props("dense color=primary")
-                            sc_flip_select = ui.select(
-                                options={"both": "Both", "from_long": "From LONG only", "from_short": "From SHORT only"},
-                                value=_sc_cfg.get("flip_launcher_direction") or "both",
-                                label="Flip direction",
-                            ).classes("w-40").props("dense")
-                            ui.label("Invert the Launcher's trade direction before execution.").classes("text-xs text-slate-500")
-                        # ── Liquidity-aware gates (§3) ───────────────────
-                        ui.separator().classes("my-2")
-                        ui.label("Liquidity-Aware Gates").classes("text-xs font-semibold text-slate-600")
-                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             sc_require_oi_switch = ui.switch(
                                 "Require OI confirmation",
-                                value=bool(_sc_cfg.get("require_oi_confirmation", False)),
+                                value=bool(_sc_cfg.get("require_oi_confirmation", True)),
                             ).props("dense color=primary")
                             sc_oi_min_zscore_input = ui.number(
                                 label="Min OI z-score",
-                                value=float(_sc_cfg.get("oi_min_zscore") or 1.0),
+                                value=float(_sc_cfg.get("oi_min_zscore") or 0.7),
                                 min=0.0, max=5.0, step=0.1, format="%.1f",
                             ).classes("w-40").props("dense")
-                            ui.label("Momentum entries need fresh leverage (rising open interest z-score beyond threshold).").classes("text-xs text-slate-500")
+                            ui.label("Momentum entries need fresh leverage (rising OI z-score beyond threshold). Degrades to pass when OI data is unavailable.").classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             sc_require_min_vol_switch = ui.switch(
                                 "Require volume participation",
@@ -3877,6 +3838,94 @@ def register_pages(app: FastAPI) -> None:
                                 min=5, max=100, step=1, precision=0,
                             ).classes("w-40").props("dense")
                             ui.label("Block spike entries on dead-volume candles (no participation behind the continuation).").classes("text-xs text-slate-500")
+
+                        # ── Stage 6 · Exit Sizing (TP/SL) ───────────────
+                        ui.separator().classes("my-2")
+                        ui.label("Stage 6 · Exit Sizing (TP/SL) — runs once an entry is confirmed").classes("text-xs font-bold text-slate-700")
+                        ui.label(
+                            "Places take-profit and stop-loss. Priority is ATR-scaled (volatility-adaptive), "
+                            "then static % as a fallback — gated on a minimum reward-to-risk."
+                        ).classes("text-[11px] text-slate-400 mb-2")
+                        ui.label("ATR sizing (priority 1 — used when enabled)").classes("text-xs font-semibold text-slate-500 mt-2")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            sc_use_atr_sizing_switch = ui.switch(
+                                "Use ATR sizing",
+                                value=bool(_sc_cfg.get("use_atr_sizing", True)),
+                            ).props("dense color=primary")
+                            ui.label("Override static TP/SL with ATR-scaled values.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-start mt-1"):
+                            sc_atr_tp_mult_input = ui.number(
+                                label="ATR TP multiplier",
+                                value=float(_sc_cfg.get("atr_tp_multiplier") or 4.0),
+                                min=0.1, max=10.0, step=0.1, format="%.1f",
+                            ).classes("w-40").props("dense")
+                            sc_atr_sl_mult_input = ui.number(
+                                label="ATR SL multiplier",
+                                value=float(_sc_cfg.get("atr_sl_multiplier") or 2.0),
+                                min=0.1, max=10.0, step=0.1, format="%.1f",
+                            ).classes("w-40").props("dense")
+                            ui.label("TP = multiplier × ATR%, SL = multiplier × ATR% (defaults → ≥ 2.0 R:R).").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            sc_use_adaptive_atr_switch = ui.switch(
+                                "Adaptive ATR regime",
+                                value=bool(_sc_cfg.get("use_adaptive_atr", False)),
+                            ).props("dense color=amber")
+                            ui.label("Scales ATR distance by volatility regime (quiet/normal/volatile).").classes("text-xs text-slate-500")
+                        ui.label("Static % fallback (used only when ATR sizing is off)").classes("text-xs font-semibold text-slate-500 mt-2")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-start"):
+                            _sc_tp_raw = _sc_cfg.get("tp_pct")
+                            sc_tp_input = ui.number(
+                                label="Take profit (%)",
+                                value=float(_sc_tp_raw) if _sc_tp_raw is not None else 6.0,
+                                min=0.5, step=0.5, precision=1,
+                            ).classes("w-40").props(
+                                "hint='Static fallback TP %' persistent-hint clearable"
+                            )
+                            _sc_sl_raw = _sc_cfg.get("sl_pct")
+                            sc_sl_input = ui.number(
+                                label="Stop loss (%)",
+                                value=float(_sc_sl_raw) if _sc_sl_raw is not None else 4.0,
+                                min=0.5, step=0.5, precision=1,
+                            ).classes("w-40").props(
+                                "hint='Static fallback SL %' persistent-hint clearable"
+                            )
+                        with ui.row().classes("w-full flex-wrap gap-4 items-start mt-1"):
+                            _sc_rr_raw = _sc_cfg.get("min_reward_risk_ratio")
+                            sc_min_rr_input = ui.number(
+                                label="Min Reward-to-Risk Ratio",
+                                value=float(_sc_rr_raw) if _sc_rr_raw is not None else None,
+                                min=0.1, max=10.0, step=0.1, format="%.1f",
+                            ).classes("w-40").props(
+                                "hint='Minimum TP:SL distance ratio for this strategy (blank = use global guardrail)' persistent-hint clearable"
+                            )
+                            ui.label("Overrides the global R:R guardrail for Spike Continuation entries. Blank inherits the global min_reward_risk_ratio.").classes("text-xs text-slate-500")
+
+                        # ── Stage 7 · Exit & Direction ──────────────────
+                        ui.separator().classes("my-2")
+                        ui.label("Stage 7 · Exit & Direction — post-signal overrides").classes("text-xs font-bold text-slate-700")
+                        ui.label(
+                            "Optional momentum-rollover exit flattens an open position when both volume-RSI and "
+                            "RSI roll over against the trade (exiting before exhaustion, above breakeven only). "
+                            "Optionally invert the Launcher's trade direction before execution; TP/SL are mirrored."
+                        ).classes("text-[11px] text-slate-400 mb-2")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            sc_rollover_exit_switch = ui.switch(
+                                "Exit on momentum rollover",
+                                value=bool(_sc_cfg.get("exit_on_momentum_rollover", False)),
+                            ).props("dense color=primary")
+                            ui.label("Flatten an open SC position when volume-RSI AND RSI roll over against the trade (exit before exhaustion, above breakeven only).").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            _sc_flip_enabled = bool(_sc_cfg.get("flip_launcher_direction"))
+                            sc_flip_switch = ui.switch(
+                                "Flip Launcher Decision",
+                                value=_sc_flip_enabled,
+                            ).props("dense color=primary")
+                            sc_flip_select = ui.select(
+                                options={"both": "Both", "from_long": "From LONG only", "from_short": "From SHORT only"},
+                                value=_sc_cfg.get("flip_launcher_direction") or "both",
+                                label="Flip direction",
+                            ).classes("w-40").props("dense")
+                            ui.label("Invert the Launcher's trade direction before execution.").classes("text-xs text-slate-500")
                     _active_badge_sc = ui.badge("Active", color="positive").bind_visibility_from(
                         sc_enabled_switch, "value"
                     )
@@ -3920,6 +3969,7 @@ def register_pages(app: FastAPI) -> None:
                 sc_require_min_vol_switch.value = d["require_min_volume"]
                 sc_min_vol_ratio_input.value = d["min_volume_ratio"]
                 sc_vol_lookback_input.value = d["volume_lookback"]
+                sc_rollover_exit_switch.value = d["exit_on_momentum_rollover"]
                 ui.notify("Spike Continuation fields set to recommended defaults — click Save to persist", color="info")
 
             # ── Liquidity Sweep ───────────────────────────────────────────────────
@@ -5890,30 +5940,30 @@ def register_pages(app: FastAPI) -> None:
                 "enabled": bool(sc_enabled_switch.value),
                 "tp_pct": float(sc_tp_input.value) if sc_tp_input.value not in (None, "") else None,
                 "sl_pct": float(sc_sl_input.value) if sc_sl_input.value not in (None, "") else None,
-                "volume_rsi_min": float(sc_volume_rsi_min_input.value or 70.0),
+                "volume_rsi_min": float(sc_volume_rsi_min_input.value or 72.0),
                 "rsi_min": float(sc_rsi_min_input.value or 55.0),
-                "rsi_max": float(sc_rsi_max_input.value or 75.0),
+                "rsi_max": float(sc_rsi_max_input.value or 80.0),
                 "require_bb_breakout": bool(sc_bb_breakout_switch.value),
                 "require_candle_strength": bool(sc_candle_strength_switch.value),
-                "candle_strength_pct": float(sc_candle_strength_pct_input.value or 70.0),
+                "candle_strength_pct": float(sc_candle_strength_pct_input.value or 60.0),
                 "min_bb_bandwidth": float(sc_min_bb_bw_input.value or 3.0),
                 "max_adx": float(sc_max_adx_input.value or 0.0),
-                "max_adx_for_entry": float(sc_max_adx_entry_input.value or 0.0),
+                "max_adx_for_entry": float(sc_max_adx_entry_input.value or 32.0),
                 "require_momentum_acceleration": bool(sc_momentum_accel_switch.value),
                 "acceleration_lookback": int(sc_accel_lookback_input.value or 3),
-                "acceleration_min_ratio": float(sc_accel_min_ratio_input.value or 1.1),
+                "acceleration_min_ratio": float(sc_accel_min_ratio_input.value or 1.3),
                 "require_rsi_rising": bool(sc_rsi_rising_switch.value),
                 "require_volume_rsi_rising": bool(sc_vol_rsi_rising_switch.value),
-                "max_spike_extension_atr": float(sc_max_spike_ext_input.value or 2.0),
+                "max_spike_extension_atr": float(sc_max_spike_ext_input.value or 3.0),
                 "spike_lookback": int(sc_spike_lookback_input.value or 5),
                     "use_adaptive_atr": bool(sc_use_adaptive_atr_switch.value),
                 "require_regime": bool(sc_require_regime_switch.value),
-                "min_bb_bandwidth_percentile": float(sc_min_bw_pct_input.value or 55.0),
+                "min_bb_bandwidth_percentile": float(sc_min_bw_pct_input.value or 65.0),
                 "regime_lookback": int(sc_regime_lookback_input.value or 50),
                 "htf_regime_preference": str(sc_htf_regime_select.value or "trend"),
                 "analysis_timeframe": (str(sc_analysis_tf_select.value) if str(sc_analysis_tf_select.value) != "·" else None),
                 "use_atr_sizing": bool(sc_use_atr_sizing_switch.value),
-                "atr_tp_multiplier": float(sc_atr_tp_mult_input.value or 2.2),
+                "atr_tp_multiplier": float(sc_atr_tp_mult_input.value or 4.0),
                 "atr_sl_multiplier": float(sc_atr_sl_mult_input.value or 2.0),
                 "min_atr_pct": float(sc_min_atr_pct_input.value or 1.0),
                 "min_reward_risk_ratio": (
@@ -5921,10 +5971,11 @@ def register_pages(app: FastAPI) -> None:
                 ),
                 "flip_launcher_direction": str(sc_flip_select.value) if sc_flip_switch.value else None,
                 "require_oi_confirmation": bool(sc_require_oi_switch.value),
-                "oi_min_zscore": float(sc_oi_min_zscore_input.value or 1.0),
+                "oi_min_zscore": float(sc_oi_min_zscore_input.value or 0.7),
                 "require_min_volume": bool(sc_require_min_vol_switch.value),
                 "min_volume_ratio": float(sc_min_vol_ratio_input.value or 0.7),
                 "volume_lookback": int(sc_vol_lookback_input.value or 20),
+                "exit_on_momentum_rollover": bool(sc_rollover_exit_switch.value),
             }
             _strategies_cfg["liquidity_sweep"] = {
                 "enabled": bool(ls_enabled_switch.value),

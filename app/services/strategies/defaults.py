@@ -97,7 +97,7 @@ DEFAULT_MEAN_REVERSION: dict[str, Any] = {
 # ── Spike Continuation ──────────────────────────────────────────────────────
 # Single source of truth for the ATR exit multipliers.  The class docstring
 # and the inline fallbacks in ``spike_continuation.py`` MUST reference these
-# values (3.0 TP / 2.0 SL → ≥ 1.5 R:R) so they cannot drift again.
+# values (4.0 TP / 2.0 SL → ≥ 2.0 R:R) so they cannot drift again.
 DEFAULT_SPIKE_CONTINUATION: dict[str, Any] = {
     "enabled": False,
     "tp_pct": 6.0,
@@ -119,31 +119,41 @@ DEFAULT_SPIKE_CONTINUATION: dict[str, Any] = {
     "acceleration_min_ratio": 1.3,
     "require_rsi_rising": True,
     "require_volume_rsi_rising": False,
-    # Volatility-normalised spike extension: price may be at most
-    # max_spike_extension_atr × ATR% from the volume-expansion origin.
-    "max_spike_extension_atr": 2.0,
-    "spike_lookback": 5,
     "require_regime": True,
-    "min_bb_bandwidth_percentile": 50.0,
+    "min_bb_bandwidth_percentile": 65.0,
     "regime_lookback": 50,
     "use_atr_sizing": True,
-    "atr_tp_multiplier": 3.0,
+    "atr_tp_multiplier": 4.0,
     "atr_sl_multiplier": 2.0,
     "min_atr_pct": 1.0,
-    "min_reward_risk_ratio": 1.5,
+    "min_reward_risk_ratio": 2.0,
     "flip_launcher_direction": None,
     # Per-strategy analysis timeframe. SC rides 15m impulses → analysis on 15m.
     "analysis_timeframe": "15m",
     # HTF regime gate preference: SC wants a trending HTF → default "trend".
     "htf_regime_preference": "trend",
-    # Liquidity-aware gates (§3) — OFF by default (opt-in).
-    "require_oi_confirmation": False,
-    "oi_min_zscore": 1.0,
+    # Anti-late-entry filter: entry is capped at this many ATR% from the
+    # volume-expansion origin.  Loosened 2.0→3.0 so the entry window is not so
+    # deep into the move; TP widened to 4.0 ATR keeps the exit reachable and
+    # raises R:R to 2.0 (breakeven win rate ~33% vs ~40%).
+    "max_spike_extension_atr": 3.0,
+    "spike_lookback": 5,
+    # Liquidity-aware gates (§3).  OI confirmation is ON by default for SC:
+    # momentum continuation specifically benefits from fresh leverage (rising
+    # OI for longs / falling for shorts) separating a real impulse from a
+    # thin-book vacuum.  Degrades to pass on instruments without OI data.
+    "require_oi_confirmation": True,
+    "oi_min_zscore": 0.7,
     # Volume-participation gate (default OFF): SC already gates on volume RSI,
     # but this additionally blocks a spike entry on a dead-volume candle.
     "require_min_volume": False,
     "min_volume_ratio": 0.7,
     "volume_lookback": 20,
+    # Momentum-rollover exit (opt-in): flatten an open SC position when both
+    # volume-RSI and RSI roll over against the trade (exhaustion), instead of
+    # holding to the fixed TP/SL.  Encodes the strategy's "exit before
+    # exhaustion signs appear" thesis as an exit rather than a fixed price.
+    "exit_on_momentum_rollover": False,
 }
 
 # ── Liquidity Sweep ─────────────────────────────────────────────────────────
