@@ -239,10 +239,15 @@ DEFAULT_VWAP_REVERSION: dict[str, Any] = {
     "require_regime": True,
     "max_bb_bandwidth_percentile": 55.0,
     "regime_lookback": 50,
-    # F4: ONE primary "not-trending" filter. "bb" makes the LTF BB-bandwidth
-    # percentile the blocking chop gate (reads the analysis TF); ADX then
-    # reports soft/secondary only. "adx" swaps them.
-    "regime_primary_gate": "bb",
+    # F4: ONE primary "not-trending" filter. "adx" makes the LTF ADX the
+    # blocking trend veto (a strong trend means the VWAP deviation is a real
+    # directional move, not noise that will revert — entering is catching a
+    # falling knife); BB-bandwidth then reports soft/secondary only. "bb"
+    # swaps them (BB-bandwidth becomes the blocking chop gate). ADX is the
+    # safer primary for reversion: a low-volatility grinding trend produces
+    # tight bands (low bandwidth percentile) and would otherwise pass a "bb"
+    # primary gate, re-opening the knife-catch failure mode.
+    "regime_primary_gate": "adx",
     "use_atr_sizing": True,
     "use_structural_sizing": True,
     "structural_sl_buffer_atr": 0.15,

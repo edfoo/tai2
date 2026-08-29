@@ -174,7 +174,7 @@ class VWAPReversionStrategy:
         # the BB-bandwidth gate is then treated as soft (logged, not
         # blocking).  Set "bb" to make the BB-bandwidth percentile the
         # primary chop gate and demote ADX to soft.
-        regime_primary_gate = str(cfg.get("regime_primary_gate", "bb")).lower()
+        regime_primary_gate = str(cfg.get("regime_primary_gate", "adx")).lower()
         # ── Liquidity-aware gates (§3) ────────────────────────────────
         # ``require_no_funding_bias`` (default off): block reversion against a
         # strong funding-rate crowding in the trade direction.  Mirrors the

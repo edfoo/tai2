@@ -3167,7 +3167,7 @@ class TestDefaultDriftGuard:
         assert d["vwap_min_distance_atr"] == 2.5
         assert d["vwap_max_distance_atr"] == 3.25
         assert d["atr_min_sl_mult"] == 0.5
-        assert d["regime_primary_gate"] == "bb"
+        assert d["regime_primary_gate"] == "adx"
         assert d["atr_tp_multiplier"] == 1.0
 
     def test_mean_reversion_price_in_va_default_on(self) -> None:

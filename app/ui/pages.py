@@ -4375,9 +4375,13 @@ def register_pages(app: FastAPI) -> None:
                             "VWAP-distance mean reversion: enters when price is extended "
                             "&gt;N ATR from VWAP and the current candle closes back toward it. "
                             "VWAP is a magnet on alts; intraday deviations mean-revert hard. "
-                            "Catches setups RSI misses. "
-                            "Shares the MR (chop) universe."
-                        ).classes("text-xs text-slate-500 mb-3")
+                            "Catches setups RSI misses. Shares the MR (chop) universe."
+                        ).classes("text-xs text-slate-500 mb-2")
+                        ui.label(
+                            "Evaluation is a funnel of ordered stages. Each stage vetoes the "
+                            "signal before the next one runs; stage order matters — earlier "
+                            "stages are cheaper filters, later stages refine the specific setup."
+                        ).classes("text-[11px] text-slate-400 mb-3")
                         with ui.row().classes("w-full items-center gap-2 mb-2"):
                             ui.button(
                                 "Set Recommended Defaults",
@@ -4387,54 +4391,22 @@ def register_pages(app: FastAPI) -> None:
                                 "Fill all fields with the recommended VWAP Reversion configuration. "
                                 "You still need to click Save to persist."
                             )
-                        with ui.row().classes("w-full flex-wrap gap-4 items-start"):
-                            _vr_tp_raw = _vr_cfg.get("tp_pct")
-                            vr_tp_input = ui.number(
-                                label="Take profit (%)",
-                                value=float(_vr_tp_raw) if _vr_tp_raw is not None else 2.0,
-                                min=0.5, step=0.5, precision=1,
-                            ).classes("w-40").props(
-                                "hint='Exit after this % price move (reach VWAP)' persistent-hint clearable"
-                            )
-                            _vr_sl_raw = _vr_cfg.get("sl_pct")
-                            vr_sl_input = ui.number(
-                                label="Stop loss (%)",
-                                value=float(_vr_sl_raw) if _vr_sl_raw is not None else 3.0,
-                                min=0.5, step=0.5, precision=1,
-                            ).classes("w-40").props(
-                                "hint='Exit if extension extends further (beyond entry)' persistent-hint clearable"
-                            )
-                        with ui.row().classes("w-full flex-wrap gap-4 items-start"):
-                            vr_min_dist_atr_input = ui.number(
-                                label="Min VWAP distance (ATR)",
-                                value=float(_vr_cfg.get("vwap_min_distance_atr") or 2.0),
-                                min=0.5, max=10.0, step=0.25, format="%.2f",
-                            ).classes("w-40").props("dense")
-                            vr_max_dist_atr_input = ui.number(
-                                label="Max VWAP distance (ATR)",
-                                value=float(_vr_cfg.get("vwap_max_distance_atr") or 3.25),
-                                min=0.0, max=20.0, step=0.25, format="%.2f",
-                            ).classes("w-40").props("dense")
-                            ui.label("Min/max distance from VWAP in ATR units. Max prevents catching falling knives in breakouts (0=disabled).").classes("text-xs text-slate-500")
-                        with ui.row().classes("w-full flex-wrap gap-4 items-start"):
-                            vr_max_adx_input = ui.number(
-                                label="Max ADX",
-                                value=float(_vr_cfg.get("max_adx") or 25.0),
-                                min=0.0, max=80.0, step=1.0, format="%.0f",
-                            ).classes("w-40").props("dense")
-                            ui.label("Block entry when ADX is above this (strong trend = reversion unlikely). 0 = disabled.").classes("text-xs text-slate-500")
-                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
-                            vr_require_closeback_switch = ui.switch(
-                                "Require closeback",
-                                value=bool(_vr_cfg.get("require_closeback", True)),
-                            ).props("dense color=primary")
-                            ui.label("Current candle must close back toward VWAP (reversion started).").classes("text-xs text-slate-500")
+
+                        # ── Stage 1 · HTF Regime ────────────────────────
+                        ui.separator().classes("my-2")
+                        ui.label("Stage 1 · HTF Regime — runs first, vetoes the signal").classes("text-xs font-bold text-slate-700")
+                        ui.label(
+                            "VWAP reversion wants a ranging (chop) higher-timeframe, not a strong "
+                            "trend — a VWAP deviation in a trend is a real move, not noise that will "
+                            "revert. This stage decides which timeframe is analyzed and whether the "
+                            "HTF must be ranging."
+                        ).classes("text-[11px] text-slate-400 mb-2")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             vr_require_htf_switch = ui.switch(
                                 "Require HTF trend alignment",
                                 value=bool(_vr_cfg.get("require_htf_trend", True)),
                             ).props("dense color=primary")
-                            ui.label("Only longs in HTF uptrends, shorts in downtrends.").classes("text-xs text-slate-500")
+                            ui.label("Longs only in HTF uptrends, shorts only in downtrends (auto-disabled when no HTF data).").classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             vr_htf_regime_select = ui.select(
                                 ["chop", "trend", "off"],
@@ -4453,16 +4425,80 @@ def register_pages(app: FastAPI) -> None:
                             ).classes("w-56").props(
                                 "hint='Indicators computed on this bar. · = use global LTF' persistent-hint dense"
                             )
-                        # ── Regime gate ──────────────────────────────────
+
+                        # ── Stage 2 · VWAP Extension ────────────────────
                         ui.separator().classes("my-2")
-                        ui.label("Regime Gate (BB Bandwidth Percentile)").classes("text-xs font-semibold text-slate-600")
+                        ui.label("Stage 2 · VWAP Extension — the core entry trigger").classes("text-xs font-bold text-slate-700")
+                        ui.label(
+                            "The setup requires price stretched away from VWAP. The distance is "
+                            "measured in ATR units so it scales with volatility. The upper cap is the "
+                            "anti-knife-catch bound: beyond it the extension is a genuine breakout, "
+                            "not a reversion."
+                        ).classes("text-[11px] text-slate-400 mb-2")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-start mt-1"):
+                            vr_min_dist_atr_input = ui.number(
+                                label="Min VWAP distance (ATR)",
+                                value=float(_vr_cfg.get("vwap_min_distance_atr") or 2.0),
+                                min=0.5, max=10.0, step=0.25, format="%.2f",
+                            ).classes("w-44").props(
+                                "hint='Minimum extension below/above VWAP to qualify' persistent-hint dense"
+                            )
+                            vr_max_dist_atr_input = ui.number(
+                                label="Max VWAP distance (ATR)",
+                                value=float(_vr_cfg.get("vwap_max_distance_atr") or 3.25),
+                                min=0.0, max=20.0, step=0.25, format="%.2f",
+                            ).classes("w-44").props(
+                                "hint='Maximum extension — beyond this it is a breakout (0 = disabled)' persistent-hint dense"
+                            )
+                        ui.label("A bigger min distance means a bigger hop back to VWAP (TP), which improves the structural R:R when the SL is widened.").classes("w-full text-xs text-slate-500 mt-1")
+
+                        # ── Stage 3 · Reversion Confirmation ────────────
+                        ui.separator().classes("my-2")
+                        ui.label("Stage 3 · Reversion Confirmation — the snap-back must have started").classes("text-xs font-bold text-slate-700")
+                        ui.label(
+                            "A stretch from VWAP alone is not enough — price must have begun moving "
+                            "back toward it. This distinguishes a controlled reversion from a falling "
+                            "knife / squeeze that keeps extending."
+                        ).classes("text-[11px] text-slate-400 mb-2")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            vr_require_closeback_switch = ui.switch(
+                                "Require closeback",
+                                value=bool(_vr_cfg.get("require_closeback", True)),
+                            ).props("dense color=primary")
+                            ui.label("Current candle must close back toward VWAP (long: close > prev close when below VWAP; short: the mirror).").classes("text-xs text-slate-500")
+
+                        # ── Stage 4 · Trend Veto (Chop Filter) ──────────
+                        ui.separator().classes("my-2")
+                        ui.label("Stage 4 · Trend Veto — blocks reversion in a real trend").classes("text-xs font-bold text-slate-700")
+                        ui.label(
+                            "The most important protection: a VWAP deviation in a strong trend is a "
+                            "directional move, not noise. Exactly one 'not-trending' filter is primary "
+                            "(hard-blocking); the other reports soft/secondary. ADX is the safer primary "
+                            "for reversion — a low-volatility grinding trend produces tight Bollinger "
+                            "bands and would otherwise slip through a bandwidth-only gate."
+                        ).classes("text-[11px] text-slate-400 mb-2")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-start mt-1"):
+                            vr_regime_primary_select = ui.select(
+                                ["adx", "bb"],
+                                label="Primary trend veto",
+                                value=str(_vr_cfg.get("regime_primary_gate", "adx")),
+                            ).classes("w-48").props(
+                                "hint='adx=ADX is the hard-blocking trend filter (recommended), bb=BB-bandwidth percentile is the hard blocker' persistent-hint dense"
+                            )
+                            vr_max_adx_input = ui.number(
+                                label="Max ADX",
+                                value=float(_vr_cfg.get("max_adx") or 25.0),
+                                min=0.0, max=80.0, step=1.0, format="%.0f",
+                            ).classes("w-40").props(
+                                "hint='Block when ADX is above this (strong trend = reversion unlikely). 0 = disabled. Hard block only when primary veto = adx.' persistent-hint dense"
+                            )
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             vr_require_regime_switch = ui.switch(
                                 "Require regime (chop)",
                                 value=bool(_vr_cfg.get("require_regime", True)),
                             ).props("dense color=primary")
-                            ui.label("Only enter when BB bandwidth is in the low percentile (chop regime).").classes("text-xs text-slate-500")
-                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            ui.label("Only enter when BB bandwidth is in the low percentile (chop regime). Hard block only when primary veto = bb.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-start mt-1"):
                             vr_max_bw_pct_input = ui.number(
                                 label="Max BB bandwidth percentile",
                                 value=float(_vr_cfg.get("max_bb_bandwidth_percentile") or 55.0),
@@ -4473,23 +4509,51 @@ def register_pages(app: FastAPI) -> None:
                                 value=float(_vr_cfg.get("regime_lookback") or 50),
                                 min=10, max=200, step=10, format="%.0f",
                             ).classes("w-40").props("dense")
-                        # ── TP/SL Sizing ────────────────────────────────
+
+                        # ── Stage 5 · Exit Sizing (TP/SL) ───────────────
                         ui.separator().classes("my-2")
-                        ui.label("TP/SL Sizing").classes("text-xs font-semibold text-slate-600")
+                        ui.label("Stage 5 · Exit Sizing (TP/SL) — runs once an entry is confirmed").classes("text-xs font-bold text-slate-700")
+                        ui.label(
+                            "Places take-profit and stop-loss. Priority is structural (TP at VWAP, SL "
+                            "beyond the extension candle), then ATR fallback, then static % — clamped "
+                            "to ATR bounds and gated on a minimum reward-to-risk."
+                        ).classes("text-[11px] text-slate-400 mb-2")
+                        # Static % fallback (last resort — only when structural + ATR are both off)
+                        ui.label("Static % fallback (used only when structural + ATR sizing are both off)").classes("text-xs font-semibold text-slate-500 mt-2")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-start"):
+                            _vr_tp_raw = _vr_cfg.get("tp_pct")
+                            vr_tp_input = ui.number(
+                                label="Take profit (%)",
+                                value=float(_vr_tp_raw) if _vr_tp_raw is not None else 2.0,
+                                min=0.5, step=0.5, precision=1,
+                            ).classes("w-40").props(
+                                "hint='Static fallback TP %' persistent-hint clearable"
+                            )
+                            _vr_sl_raw = _vr_cfg.get("sl_pct")
+                            vr_sl_input = ui.number(
+                                label="Stop loss (%)",
+                                value=float(_vr_sl_raw) if _vr_sl_raw is not None else 3.0,
+                                min=0.5, step=0.5, precision=1,
+                            ).classes("w-40").props(
+                                "hint='Static fallback SL %' persistent-hint clearable"
+                            )
+                        ui.label("These % only apply when both structural and ATR sizing are disabled — they are a last-resort fallback.").classes("w-full text-xs text-slate-500 mt-1")
+                        # Structural sizing (priority 1)
+                        ui.label("Structural sizing (priority 1 — used first when enabled)").classes("text-xs font-semibold text-slate-500 mt-2")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             vr_use_structural_switch = ui.switch(
                                 "Use structural sizing",
                                 value=bool(_vr_cfg.get("use_structural_sizing", True)),
                             ).props("dense color=primary")
-                            ui.label("TP at VWAP (the magnet), SL beyond extension candle. ATR clamps both. Falls back to ATR when unavailable.").classes("text-xs text-slate-500")
-                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                        ui.label("TP at VWAP (the magnet price reverts to), SL beyond the extension candle's extreme. ATR clamps both. Falls back to ATR when structural levels are unavailable.").classes("w-full text-xs text-slate-500 mt-1")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-start mt-1"):
                             vr_structural_sl_buffer_input = ui.number(
                                 label="SL buffer (ATR)",
                                 value=float(_vr_cfg.get("structural_sl_buffer_atr") or 0.15),
                                 min=0.0, max=2.0, step=0.05, format="%.2f",
-                            ).classes("w-32").props("dense")
-                            ui.label("SL placed this many ATR units beyond the extension candle low/high.").classes("text-xs text-slate-500")
-                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            ).classes("w-40").props("dense")
+                        ui.label("SL is placed this many ATR units beyond the extension candle's low/high (the invalidation).").classes("w-full text-xs text-slate-500 mt-1")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-start mt-1"):
                             vr_atr_min_tp_input = ui.number(
                                 label="Min TP (×ATR)",
                                 value=float(_vr_cfg.get("atr_min_tp_mult") or 0.5),
@@ -4510,21 +4574,20 @@ def register_pages(app: FastAPI) -> None:
                                 value=float(_vr_cfg.get("atr_max_sl_mult") or 3.0),
                                 min=0.5, max=20.0, step=0.5, format="%.1f",
                             ).classes("w-32").props("dense")
-                        ui.separator().classes("my-2")
-                        ui.label("ATR Fallback TP/SL").classes("text-xs font-semibold text-slate-600")
+                        ui.label("Structural TP/SL distances are clamped to [Min, Max] × ATR. Widening the SL lowers R:R — compensate by raising the Stage 2 min distance so the TP-hop stays meaningful.").classes("w-full text-xs text-slate-500 mt-1")
+                        # ATR sizing (priority 2)
+                        ui.label("ATR sizing (priority 2 — fallback when structural is unavailable or off)").classes("text-xs font-semibold text-slate-500 mt-2")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             vr_use_atr_sizing_switch = ui.switch(
-                                "Use ATR sizing (fallback)",
+                                "Use ATR sizing",
                                 value=bool(_vr_cfg.get("use_atr_sizing", True)),
                             ).props("dense color=primary")
-                            ui.label("Used when structural levels are unavailable or structural sizing is off.").classes("text-xs text-slate-500")
-                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             vr_use_adaptive_atr_switch = ui.switch(
                                 "Adaptive ATR regime",
                                 value=bool(_vr_cfg.get("use_adaptive_atr", False)),
                             ).props("dense color=amber")
-                            ui.label("Scales ATR distances by volatility regime.").classes("text-xs text-slate-500")
-                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                        ui.label("TP/SL = multiplier × ATR%. Adaptive scales ATR distances by volatility regime (sizing only — never the min-ATR gate).").classes("w-full text-xs text-slate-500 mt-1")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-start mt-1"):
                             vr_atr_tp_mult_input = ui.number(
                                 label="ATR TP multiplier",
                                 value=float(_vr_cfg.get("atr_tp_multiplier") or 1.8),
@@ -4541,16 +4604,24 @@ def register_pages(app: FastAPI) -> None:
                                 min=0.0, max=10.0, step=0.1, format="%.1f",
                             ).classes("w-40").props("dense")
                             ui.label("Skip entries when ATR% is below this (0 = disabled). Filters out dead coins.").classes("text-xs text-slate-500")
-                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                        # R:R floor
+                        ui.label("Reward-to-Risk floor").classes("text-xs font-semibold text-slate-500 mt-2")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-start mt-1"):
                             _vr_rr_raw = _vr_cfg.get("min_reward_risk_ratio")
                             vr_min_rr_input = ui.number(
                                 label="Min Reward-to-Risk Ratio",
                                 value=float(_vr_rr_raw) if _vr_rr_raw is not None else None,
                                 min=0.1, max=10.0, step=0.1, format="%.1f",
-                            ).classes("w-40").props(
-                                "hint='Minimum TP:SL distance ratio for this strategy (blank = use global guardrail)' persistent-hint clearable"
-                            )
-                            ui.label("Overrides the global R:R guardrail for VWAP Reversion entries. Blank inherits the global min_reward_risk_ratio.").classes("text-xs text-slate-500")
+                            ).classes("w-40").props("clearable")
+                        ui.label("Overrides the global R:R guardrail for VWAP Reversion entries. Blank inherits the global min_reward_risk_ratio.").classes("w-full text-xs text-slate-500 mt-1")
+
+                        # ── Stage 6 · Direction & Execution ─────────────
+                        ui.separator().classes("my-2")
+                        ui.label("Stage 6 · Direction & Execution — post-signal override").classes("text-xs font-bold text-slate-700")
+                        ui.label(
+                            "Optionally invert the Launcher's trade direction before execution. TP/SL are "
+                            "mirrored so they land on the correct side for the flipped direction."
+                        ).classes("text-[11px] text-slate-400 mb-2")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             _vr_flip_enabled = bool(_vr_cfg.get("flip_launcher_direction"))
                             vr_flip_switch = ui.switch(
@@ -4563,9 +4634,15 @@ def register_pages(app: FastAPI) -> None:
                                 label="Flip direction",
                             ).classes("w-40").props("dense")
                             ui.label("Invert the Launcher's trade direction before execution.").classes("text-xs text-slate-500")
+
                         # ── Liquidity-aware gates (§3) ───────────────────
                         ui.separator().classes("my-2")
-                        ui.label("Liquidity-Aware Gates").classes("text-xs font-semibold text-slate-600")
+                        ui.label("Liquidity-Aware Gates (§3) — opt-in, refine entry quality").classes("text-xs font-bold text-slate-700")
+                        ui.label(
+                            "Optional filters that block reversion entries on thin/crowded books. Both "
+                            "default OFF; they are pure frequency reducers (they only drop signals, never "
+                            "create them)."
+                        ).classes("text-[11px] text-slate-400 mb-2")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             vr_require_no_funding_switch = ui.switch(
                                 "No funding bias",
@@ -4610,6 +4687,7 @@ def register_pages(app: FastAPI) -> None:
                 vr_htf_regime_select.value = d["htf_regime_preference"]
                 vr_analysis_tf_select.value = d["analysis_timeframe"]
                 vr_require_regime_switch.value = d["require_regime"]
+                vr_regime_primary_select.value = d["regime_primary_gate"]
                 vr_max_bw_pct_input.value = d["max_bb_bandwidth_percentile"]
                 vr_regime_lookback_input.value = d["regime_lookback"]
                 vr_use_atr_sizing_switch.value = d["use_atr_sizing"]
@@ -6097,6 +6175,7 @@ def register_pages(app: FastAPI) -> None:
                 "analysis_timeframe": (str(vr_analysis_tf_select.value) if str(vr_analysis_tf_select.value) != "·" else None),
                     "use_adaptive_atr": bool(vr_use_adaptive_atr_switch.value),
                 "require_regime": bool(vr_require_regime_switch.value),
+                "regime_primary_gate": str(vr_regime_primary_select.value or "adx"),
                 "max_bb_bandwidth_percentile": float(vr_max_bw_pct_input.value or 55.0),
                 "regime_lookback": int(vr_regime_lookback_input.value or 50),
                 "use_structural_sizing": bool(vr_use_structural_switch.value),
