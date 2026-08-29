@@ -3069,8 +3069,15 @@ def register_pages(app: FastAPI) -> None:
                     with ui.expansion("Mean Reversion Scalping").classes("flex-1 text-sm font-medium"):
                         ui.label(
                             "Rule-based RSI mean-reversion entries run by the Launcher. "
-                            "Launcher mode must also be enabled on the CFG page."
-                        ).classes("text-xs text-slate-500 mb-3")
+                            "Launcher mode must also be enabled on the CFG page. "
+                            "Fades overextension back toward the mean — only viable in a ranging (chop) "
+                            "regime, never in a trend."
+                        ).classes("text-xs text-slate-500 mb-2")
+                        ui.label(
+                            "Evaluation is a funnel of six ordered stages. Each stage vetoes the signal "
+                            "before the next one runs: regime gate → extension trigger → confirmation "
+                            "filters → chop/liquidity gates → exit sizing → execution override."
+                        ).classes("text-[11px] text-slate-400 mb-3")
                         with ui.row().classes("w-full items-center gap-2 mb-2"):
                             ui.button(
                                 "Set Recommended Defaults",
@@ -3080,47 +3087,49 @@ def register_pages(app: FastAPI) -> None:
                                 "Fill all fields with the recommended Mean Reversion configuration. "
                                 "You still need to click Save to persist."
                             )
-                        ui.label("Static TP / SL (% price)").classes("text-xs font-semibold text-slate-600 mt-1")
-                        with ui.row().classes("w-full flex-wrap gap-4 items-start"):
-                            _mr_tp_raw = _mr_cfg.get("tp_pct")
-                            mr_tp_input = ui.number(
-                                label="Take profit (%)",
-                                value=float(_mr_tp_raw) if _mr_tp_raw is not None else None,
-                                min=0.01, step=0.1, precision=2,
-                            ).classes("w-40").props(
-                                "hint='Close when uplRatio ≥ this % (blank = none)' persistent-hint clearable"
+
+                        # ── Stage 1 · HTF Regime ────────────────────────
+                        ui.separator().classes("my-2")
+                        ui.label("Stage 1 · HTF Regime — decides the timeframe & chop requirement").classes("text-xs font-bold text-slate-700")
+                        ui.label(
+                            "Mean reversion only trades a ranging higher-timeframe. This stage selects the "
+                            "analysis bar, whether the HTF must be non-trending (chop), and whether the "
+                            "HTF EMA must still align with the trade direction — the net effect is a "
+                            "trend-aligned fade, not a symmetric one."
+                        ).classes("text-[11px] text-slate-400 mb-2")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            mr_htf_regime_select = ui.select(
+                                ["chop", "trend", "off"],
+                                label="HTF regime preference",
+                                value=str(_mr_cfg.get("htf_regime_preference", "chop")),
+                            ).classes("w-56").props(
+                                "hint='chop=block when HTF trending, trend=block when HTF ranging, off=disable gate' persistent-hint dense"
                             )
-                            _mr_sl_raw = _mr_cfg.get("sl_pct")
-                            mr_sl_input = ui.number(
-                                label="Stop loss (%)",
-                                value=float(_mr_sl_raw) if _mr_sl_raw is not None else None,
-                                min=0.01, step=0.1, precision=2,
-                            ).classes("w-40").props(
-                                "hint='Close when uplRatio ≤ -X% (blank = none)' persistent-hint clearable"
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            mr_require_htf_switch = ui.switch(
+                                "Require HTF trend alignment",
+                                value=bool(_mr_cfg.get("require_htf_trend", True)),
+                            ).props("dense color=primary")
+                            ui.label("HTF EMA50 > EMA200 for BUY / EMA50 < EMA200 for SELL (auto-disabled when no HTF data).").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            _mr_analysis_tf = _mr_cfg.get("analysis_timeframe") or "·"
+                            mr_analysis_tf_select = ui.select(
+                                ["·", "15m", "1H", "4H", "1D"],
+                                label="Analysis timeframe",
+                                value=str(_mr_analysis_tf),
+                                with_input=True,
+                            ).classes("w-56").props(
+                                "hint='Indicators computed on this bar. · = use global LTF' persistent-hint dense"
                             )
-                        with ui.row().classes("gap-4 items-center mt-2"):
-                            mr_dynamic_tp_switch = ui.switch(
-                                "Dynamic TP (BB Bandwidth)",
-                                value=bool(_mr_cfg.get("dynamic_tp", False)),
-                            ).props("dense color=amber")
-                            ui.label(
-                                "Adjusts TP target based on current BB bandwidth at entry: "
-                                "effective TP = min(static TP, bandwidth÷2 × fraction). "
-                                "Static TP acts as a ceiling."
-                            ).classes("text-xs text-slate-500")
-                        with ui.row().classes("gap-4 items-center mt-1"):
-                            _mr_dtp_frac_raw = _mr_cfg.get("dynamic_tp_fraction")
-                            mr_dynamic_tp_fraction_input = ui.number(
-                                label="Reversion Fraction",
-                                value=float(_mr_dtp_frac_raw) if _mr_dtp_frac_raw is not None else 0.7,
-                                min=0.1,
-                                max=1.0,
-                                step=0.05,
-                                format="%.2f",
-                            ).classes("w-40").props("dense")
-                            ui.label(
-                                "Fraction of the half-bandwidth to use as TP (0.7 = 70% reversion toward midline)."
-                            ).classes("text-xs text-slate-500")
+
+                        # ── Stage 2 · Extension Trigger (RSI + ADX) ─────
+                        ui.separator().classes("my-2")
+                        ui.label("Stage 2 · Extension Trigger (RSI + ADX) — the core entry condition").classes("text-xs font-bold text-slate-700")
+                        ui.label(
+                            "The primary signal: RSI must be oversold (for BUY) or overbought (for SELL), "
+                            "and ADX must sit inside the chop band (no established trend — else the move "
+                            "is likely continuation, not reversion)."
+                        ).classes("text-[11px] text-slate-400 mb-2")
                         with ui.row().classes("w-full flex-wrap gap-4 items-start"):
                             _mr_rsi_os_raw = _mr_cfg.get("rsi_oversold", 30.0)
                             mr_rsi_oversold_input = ui.number(
@@ -3154,60 +3163,15 @@ def register_pages(app: FastAPI) -> None:
                             ).classes("w-32").props(
                                 "hint='Skip if ADX above this (0 = off)' persistent-hint"
                             )
-                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
-                            mr_require_htf_switch = ui.switch(
-                                "Require HTF trend alignment",
-                                value=bool(_mr_cfg.get("require_htf_trend", True)),
-                            ).props("dense color=primary")
-                            ui.label("HTF EMA50 > EMA200 for BUY / EMA50 < EMA200 for SELL.").classes("text-xs text-slate-500")
-                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
-                            mr_htf_regime_select = ui.select(
-                                ["chop", "trend", "off"],
-                                label="HTF regime preference",
-                                value=str(_mr_cfg.get("htf_regime_preference", "chop")),
-                            ).classes("w-56").props(
-                                "hint='chop=block when HTF trending, trend=block when HTF ranging, off=disable gate' persistent-hint dense"
-                            )
-                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
-                            _mr_analysis_tf = _mr_cfg.get("analysis_timeframe") or "·"
-                            mr_analysis_tf_select = ui.select(
-                                ["·", "15m", "1H", "4H", "1D"],
-                                label="Analysis timeframe",
-                                value=str(_mr_analysis_tf),
-                                with_input=True,
-                            ).classes("w-56").props(
-                                "hint='Indicators computed on this bar. · = use global LTF' persistent-hint dense"
-                            )
-                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
-                            mr_require_cmf_switch = ui.switch(
-                                "Require CMF confirmation",
-                                value=bool(_mr_cfg.get("require_cmf", True)),
-                            ).props("dense color=primary")
-                            ui.label("LTF CMF (14-period) must be positive for BUY and negative for SELL.").classes("text-xs text-slate-500")
-                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
-                            mr_require_htf_cmf_switch = ui.switch(
-                                "Require HTF CMF confirmation",
-                                value=bool(_mr_cfg.get("require_htf_cmf", False)),
-                            ).props("dense color=primary")
-                            ui.label("HTF CMF (20-period) governor: must be positive for BUY and negative for SELL.").classes("text-xs text-slate-500")
-                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
-                            mr_require_cmf_cross_switch = ui.switch(
-                                "Require CMF zero-line cross",
-                                value=bool(_mr_cfg.get("require_cmf_cross", True)),
-                            ).props("dense color=primary")
-                            ui.label("LTF CMF must have just crossed zero this bar.").classes("text-xs text-slate-500")
-                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
-                            mr_require_cmf_no_div_switch = ui.switch(
-                                "Block on CMF divergence",
-                                value=bool(_mr_cfg.get("require_cmf_no_divergence", False)),
-                            ).props("dense color=primary")
-                            ui.label("Block BUY on bearish CMF divergence, and vice versa for SELL.").classes("text-xs text-slate-500")
-                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
-                            mr_require_fp_delta_switch = ui.switch(
-                                "Require footprint net delta",
-                                value=bool(_mr_cfg.get("require_footprint_delta", False)),
-                            ).props("dense color=primary")
-                            ui.label("15-min tape net delta must be positive for BUY and negative for SELL.").classes("text-xs text-slate-500")
+
+                        # ── Stage 3 · Confirmation Filters ──────────────
+                        ui.separator().classes("my-2")
+                        ui.label("Stage 3 · Confirmation Filters — exhaustion & mean evidence").classes("text-xs font-bold text-slate-700")
+                        ui.label(
+                            "Optional confirmers that price is genuinely exhausted and turning. Most are off "
+                            "by default because BB position + candle rejection already encode "
+                            "'extended and snapping back'; enable them only to tighten further."
+                        ).classes("text-[11px] text-slate-400 mb-2")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             mr_require_bb_switch = ui.switch(
                                 "Require Bollinger Band position",
@@ -3247,6 +3211,36 @@ def register_pages(app: FastAPI) -> None:
                             ).classes("w-48").props("dense")
                             ui.label("Minimum wick size as % of candle range (30 = wick is 30%+ of the candle).").classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            mr_require_cmf_switch = ui.switch(
+                                "Require CMF confirmation",
+                                value=bool(_mr_cfg.get("require_cmf", True)),
+                            ).props("dense color=primary")
+                            ui.label("LTF CMF (14-period) must be positive for BUY and negative for SELL.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            mr_require_htf_cmf_switch = ui.switch(
+                                "Require HTF CMF confirmation",
+                                value=bool(_mr_cfg.get("require_htf_cmf", False)),
+                            ).props("dense color=primary")
+                            ui.label("HTF CMF (20-period) governor: must be positive for BUY and negative for SELL.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            mr_require_cmf_cross_switch = ui.switch(
+                                "Require CMF zero-line cross",
+                                value=bool(_mr_cfg.get("require_cmf_cross", True)),
+                            ).props("dense color=primary")
+                            ui.label("LTF CMF must have just crossed zero this bar.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            mr_require_cmf_no_div_switch = ui.switch(
+                                "Block on CMF divergence",
+                                value=bool(_mr_cfg.get("require_cmf_no_divergence", False)),
+                            ).props("dense color=primary")
+                            ui.label("Block BUY on bearish CMF divergence, and vice versa for SELL.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            mr_require_fp_delta_switch = ui.switch(
+                                "Require footprint net delta",
+                                value=bool(_mr_cfg.get("require_footprint_delta", False)),
+                            ).props("dense color=primary")
+                            ui.label("15-min tape net delta must be positive for BUY and negative for SELL.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             mr_vwap_reversion_switch = ui.switch(
                                 "Require VWAP reversion",
                                 value=bool(_mr_cfg.get("require_vwap_reversion", True)),
@@ -3272,29 +3266,15 @@ def register_pages(app: FastAPI) -> None:
                                 min=10.0, max=99.0, step=5.0, format="%.0f",
                             ).classes("w-48").props("dense")
                             ui.label("Maximum volume RSI to allow entry (below = volume momentum fading).").classes("text-xs text-slate-500")
-                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
-                            mr_require_min_vol_switch = ui.switch(
-                                "Require volume participation",
-                                value=bool(_mr_cfg.get("require_min_volume", False)),
-                            ).props("dense color=primary")
-                            mr_min_vol_ratio_input = ui.number(
-                                label="Min volume ratio",
-                                value=float(_mr_cfg.get("min_volume_ratio") if _mr_cfg.get("min_volume_ratio") is not None else 0.7),
-                                min=0.1, max=5.0, step=0.05, format="%.2f",
-                            ).classes("w-40").props("dense")
-                            mr_vol_lookback_input = ui.number(
-                                label="Volume lookback",
-                                value=float(_mr_cfg.get("volume_lookback") if _mr_cfg.get("volume_lookback") is not None else 20),
-                                min=5, max=100, step=1, precision=0,
-                            ).classes("w-40").props("dense")
-                            ui.label("Block entries on dead-volume candles (filters halted price action).").classes("text-xs text-slate-500")
-                        # ── Regime gate (BB bandwidth percentile) ──────────────
+
+                        # ── Stage 4 · Regime & Liquidity Gates ──────────
                         ui.separator().classes("my-2")
-                        ui.label("Regime Gate (BB Bandwidth Percentile)").classes("text-xs font-semibold text-slate-600")
+                        ui.label("Stage 4 · Regime & Liquidity Gates — chop filter & fade-into-liquidity").classes("text-xs font-bold text-slate-700")
                         ui.label(
-                            "MR works best in low-volatility chop. When enabled, the current BB bandwidth "
-                            "must be below the percentile threshold relative to recent history."
-                        ).classes("text-xs text-slate-500 mb-2")
+                            "Blocks entries when the market is not in low-volatility chop, or when there is "
+                            "no liquidity to fade into (falling knives on thin books, crowded funding, "
+                            "one-sided order books)."
+                        ).classes("text-[11px] text-slate-400 mb-2")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             mr_require_regime_switch = ui.switch(
                                 "Require regime (chop)",
@@ -3315,51 +3295,113 @@ def register_pages(app: FastAPI) -> None:
                                 min=10, max=200, step=10, format="%.0f",
                             ).classes("w-40").props("dense")
                             ui.label("Number of historical candles to compute the percentile over.").classes("text-xs text-slate-500")
-                        # ── ATR-scaled TP/SL ────────────────────────────────────
-                        ui.separator().classes("my-2")
-                        ui.label("ATR-Scaled TP/SL").classes("text-xs font-semibold text-slate-600")
-                        ui.label(
-                            "When enabled, TP/SL are computed as multiplier × ATR% instead of fixed %. "
-                            "Adapts to volatility regime (tighter in low-vol, wider in high-vol)."
-                        ).classes("text-xs text-slate-500 mb-2")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
-                            mr_use_adaptive_atr_switch = ui.switch(
-                                "Adaptive ATR regime",
-                                value=bool(_mr_cfg.get("use_adaptive_atr", False)),
+                            mr_require_min_vol_switch = ui.switch(
+                                "Require volume participation",
+                                value=bool(_mr_cfg.get("require_min_volume", False)),
+                            ).props("dense color=primary")
+                            mr_min_vol_ratio_input = ui.number(
+                                label="Min volume ratio",
+                                value=float(_mr_cfg.get("min_volume_ratio") if _mr_cfg.get("min_volume_ratio") is not None else 0.7),
+                                min=0.1, max=5.0, step=0.05, format="%.2f",
+                            ).classes("w-40").props("dense")
+                            mr_vol_lookback_input = ui.number(
+                                label="Volume lookback",
+                                value=float(_mr_cfg.get("volume_lookback") if _mr_cfg.get("volume_lookback") is not None else 20),
+                                min=5, max=100, step=1, precision=0,
+                            ).classes("w-40").props("dense")
+                            ui.label("Block entries on dead-volume candles (filters halted price action).").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            mr_require_in_va_switch = ui.switch(
+                                "Require price inside value area",
+                                value=bool(_mr_cfg.get("require_price_in_va", False)),
+                            ).props("dense color=primary")
+                            ui.label("Only enter when price is inside the 70% value area (mean reversion fades toward the mean).").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            mr_require_funding_switch = ui.switch(
+                                "No extreme funding",
+                                value=bool(_mr_cfg.get("require_no_extreme_funding", False)),
+                            ).props("dense color=primary")
+                            mr_funding_max_rate_input = ui.number(
+                                label="Max |funding| rate",
+                                value=float(_mr_cfg.get("funding_max_abs_rate") or 0.001),
+                                min=0.0001, max=0.01, step=0.0001, format="%.4f",
+                            ).classes("w-40").props("dense")
+                            ui.label("Block entries when funding is crowded in the trade direction beyond this rate.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            mr_require_balanced_switch = ui.switch(
+                                "Require balanced order book",
+                                value=bool(_mr_cfg.get("require_balanced_book", False)),
+                            ).props("dense color=primary")
+                            mr_imbalance_min_input = ui.number(
+                                label="Imbalance min",
+                                value=float(_mr_cfg.get("imbalance_min") or 0.6),
+                                min=0.1, max=3.0, step=0.05, format="%.2f",
+                            ).classes("w-32").props("dense")
+                            mr_imbalance_max_input = ui.number(
+                                label="Imbalance max",
+                                value=float(_mr_cfg.get("imbalance_max") or 1.4),
+                                min=0.1, max=3.0, step=0.05, format="%.2f",
+                            ).classes("w-32").props("dense")
+                            ui.label("Block when bid_qty/ask_qty is outside this range (no liquidity to fade into).").classes("text-xs text-slate-500")
+
+                        # ── Stage 5 · Exit Sizing (TP/SL) ───────────────
+                        ui.separator().classes("my-2")
+                        ui.label("Stage 5 · Exit Sizing (TP/SL) — runs once an entry is confirmed").classes("text-xs font-bold text-slate-700")
+                        ui.label(
+                            "Places take-profit and stop-loss. Priority is structural (TP at the BB mean, SL "
+                            "beyond structure), then ATR fallback, then static % — clamped to ATR bounds and "
+                            "gated on a minimum reward-to-risk."
+                        ).classes("text-[11px] text-slate-400 mb-2")
+                        # Static % fallback (last resort)
+                        ui.label("Static % fallback (used only when structural + ATR sizing are both off)").classes("text-xs font-semibold text-slate-500 mt-2")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-start"):
+                            _mr_tp_raw = _mr_cfg.get("tp_pct")
+                            mr_tp_input = ui.number(
+                                label="Take profit (%)",
+                                value=float(_mr_tp_raw) if _mr_tp_raw is not None else None,
+                                min=0.01, step=0.1, precision=2,
+                            ).classes("w-40").props(
+                                "hint='Close when uplRatio ≥ this % (blank = none)' persistent-hint clearable"
+                            )
+                            _mr_sl_raw = _mr_cfg.get("sl_pct")
+                            mr_sl_input = ui.number(
+                                label="Stop loss (%)",
+                                value=float(_mr_sl_raw) if _mr_sl_raw is not None else None,
+                                min=0.01, step=0.1, precision=2,
+                            ).classes("w-40").props(
+                                "hint='Close when uplRatio ≤ -X% (blank = none)' persistent-hint clearable"
+                            )
+                        ui.label("These % only apply when both structural and ATR sizing are disabled — they are a last-resort fallback.").classes("w-full text-xs text-slate-500 mt-1")
+
+                        # Dynamic TP (BB bandwidth)
+                        ui.label("Dynamic TP (BB Bandwidth) — adjusts TP to the reversion distance").classes("text-xs font-semibold text-slate-500 mt-2")
+                        with ui.row().classes("gap-4 items-center mt-1"):
+                            mr_dynamic_tp_switch = ui.switch(
+                                "Dynamic TP (BB Bandwidth)",
+                                value=bool(_mr_cfg.get("dynamic_tp", False)),
                             ).props("dense color=amber")
                             ui.label(
-                                "Scales ATR distance by volatility regime (quiet/normal/volatile)."
+                                "Adjusts TP target based on current BB bandwidth at entry: "
+                                "effective TP = min(static TP, bandwidth÷2 × fraction). "
+                                "Static TP acts as a ceiling."
                             ).classes("text-xs text-slate-500")
-                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
-                            mr_use_atr_sizing_switch = ui.switch(
-                                "Use ATR sizing (fallback)",
-                                value=bool(_mr_cfg.get("use_atr_sizing", True)),
-                            ).props("dense color=primary")
-                            ui.label("Used when structural levels are unavailable or structural sizing is off.").classes("text-xs text-slate-500")
-                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
-                            mr_atr_tp_mult_input = ui.number(
-                                label="ATR TP multiplier",
-                                value=float(_mr_cfg.get("atr_tp_multiplier") or 1.8),
-                                min=0.1, max=10.0, step=0.1, format="%.1f",
+                        with ui.row().classes("gap-4 items-center mt-1"):
+                            _mr_dtp_frac_raw = _mr_cfg.get("dynamic_tp_fraction")
+                            mr_dynamic_tp_fraction_input = ui.number(
+                                label="Reversion Fraction",
+                                value=float(_mr_dtp_frac_raw) if _mr_dtp_frac_raw is not None else 0.7,
+                                min=0.1,
+                                max=1.0,
+                                step=0.05,
+                                format="%.2f",
                             ).classes("w-40").props("dense")
-                            ui.label("TP = multiplier × ATR% (must be >= SL multiplier for R:R >= 1.0).").classes("text-xs text-slate-500")
-                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
-                            mr_atr_sl_mult_input = ui.number(
-                                label="ATR SL multiplier",
-                                value=float(_mr_cfg.get("atr_sl_multiplier") or 1.0),
-                                min=0.1, max=10.0, step=0.1, format="%.1f",
-                            ).classes("w-40").props("dense")
-                            ui.label("SL = multiplier × ATR% (must be <= TP multiplier for R:R >= 1.0).").classes("text-xs text-slate-500")
-                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
-                            mr_min_atr_pct_input = ui.number(
-                                label="Min ATR%",
-                                value=float(_mr_cfg.get("min_atr_pct") or 1.3),
-                                min=0.0, max=10.0, step=0.1, format="%.1f",
-                            ).classes("w-40").props("dense")
-                            ui.label("Skip entries when ATR% is below this (0 = disabled). Filters out dead coins.").classes("text-xs text-slate-500")
-                        # ── Structural TP/SL ──────────────────────────────
-                        ui.separator().classes("my-2")
-                        ui.label("Structural TP/SL").classes("text-xs font-semibold text-slate-600")
+                            ui.label(
+                                "Fraction of the half-bandwidth to use as TP (0.7 = 70% reversion toward midline)."
+                            ).classes("text-xs text-slate-500")
+
+                        # Structural sizing (priority 1)
+                        ui.label("Structural sizing (priority 1 — used first when enabled)").classes("text-xs font-semibold text-slate-500 mt-2")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             mr_use_structural_switch = ui.switch(
                                 "Use structural sizing",
@@ -3395,6 +3437,47 @@ def register_pages(app: FastAPI) -> None:
                                 min=0.5, max=20.0, step=0.5, format="%.1f",
                             ).classes("w-32").props("dense")
                             ui.label("ATR clamps applied to structural TP/SL distances.").classes("text-xs text-slate-500")
+
+                        # ATR sizing (priority 2)
+                        ui.label("ATR sizing (priority 2 — fallback when structural is unavailable or off)").classes("text-xs font-semibold text-slate-500 mt-2")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            mr_use_atr_sizing_switch = ui.switch(
+                                "Use ATR sizing (fallback)",
+                                value=bool(_mr_cfg.get("use_atr_sizing", True)),
+                            ).props("dense color=primary")
+                            ui.label("Used when structural levels are unavailable or structural sizing is off.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            mr_use_adaptive_atr_switch = ui.switch(
+                                "Adaptive ATR regime",
+                                value=bool(_mr_cfg.get("use_adaptive_atr", False)),
+                            ).props("dense color=amber")
+                            ui.label(
+                                "Scales ATR distance by volatility regime (quiet/normal/volatile)."
+                            ).classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            mr_atr_tp_mult_input = ui.number(
+                                label="ATR TP multiplier",
+                                value=float(_mr_cfg.get("atr_tp_multiplier") or 1.8),
+                                min=0.1, max=10.0, step=0.1, format="%.1f",
+                            ).classes("w-40").props("dense")
+                            ui.label("TP = multiplier × ATR% (must be >= SL multiplier for R:R >= 1.0).").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            mr_atr_sl_mult_input = ui.number(
+                                label="ATR SL multiplier",
+                                value=float(_mr_cfg.get("atr_sl_multiplier") or 1.0),
+                                min=0.1, max=10.0, step=0.1, format="%.1f",
+                            ).classes("w-40").props("dense")
+                            ui.label("SL = multiplier × ATR% (must be <= TP multiplier for R:R >= 1.0).").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            mr_min_atr_pct_input = ui.number(
+                                label="Min ATR%",
+                                value=float(_mr_cfg.get("min_atr_pct") or 1.3),
+                                min=0.0, max=10.0, step=0.1, format="%.1f",
+                            ).classes("w-40").props("dense")
+                            ui.label("Skip entries when ATR% is below this (0 = disabled). Filters out dead coins.").classes("text-xs text-slate-500")
+
+                        # R:R floor
+                        ui.label("Reward-to-Risk floor").classes("text-xs font-semibold text-slate-500 mt-2")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             _mr_rr_raw = _mr_cfg.get("min_reward_risk_ratio")
                             mr_min_rr_input = ui.number(
@@ -3405,6 +3488,15 @@ def register_pages(app: FastAPI) -> None:
                                 "hint='Minimum TP:SL distance ratio for this strategy (blank = use global guardrail)' persistent-hint clearable"
                             )
                             ui.label("Overrides the global R:R guardrail for Mean Reversion entries. Blank inherits the global min_reward_risk_ratio.").classes("text-xs text-slate-500")
+
+                        # ── Stage 6 · Direction & Execution ─────────────
+                        ui.separator().classes("my-2")
+                        ui.label("Stage 6 · Direction & Execution — post-signal overrides").classes("text-xs font-bold text-slate-700")
+                        ui.label(
+                            "Optional post-signal behaviour: invert the Launcher's direction before "
+                            "execution, or flatten an open position when the HTF regime flips from chop "
+                            "to trend while underwater."
+                        ).classes("text-[11px] text-slate-400 mb-2")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             _mr_flip_enabled = bool(_mr_cfg.get("flip_launcher_direction"))
                             mr_flip_switch = ui.switch(
@@ -3426,42 +3518,6 @@ def register_pages(app: FastAPI) -> None:
                                 "Flatten an open MR position when the HTF regime flips from chop to trend "
                                 "while the position is underwater (reversion thesis invalidated)."
                             ).classes("text-xs text-slate-500")
-                        # ── Liquidity-aware gates (§3) ───────────────────
-                        ui.separator().classes("my-2")
-                        ui.label("Liquidity-Aware Gates").classes("text-xs font-semibold text-slate-600")
-                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
-                            mr_require_in_va_switch = ui.switch(
-                                "Require price inside value area",
-                                value=bool(_mr_cfg.get("require_price_in_va", False)),
-                            ).props("dense color=primary")
-                            ui.label("Only enter when price is inside the 70% value area (mean reversion fades toward the mean).").classes("text-xs text-slate-500")
-                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
-                            mr_require_funding_switch = ui.switch(
-                                "No extreme funding",
-                                value=bool(_mr_cfg.get("require_no_extreme_funding", False)),
-                            ).props("dense color=primary")
-                            mr_funding_max_rate_input = ui.number(
-                                label="Max |funding| rate",
-                                value=float(_mr_cfg.get("funding_max_abs_rate") or 0.001),
-                                min=0.0001, max=0.01, step=0.0001, format="%.4f",
-                            ).classes("w-40").props("dense")
-                            ui.label("Block entries when funding is crowded in the trade direction beyond this rate.").classes("text-xs text-slate-500")
-                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
-                            mr_require_balanced_switch = ui.switch(
-                                "Require balanced order book",
-                                value=bool(_mr_cfg.get("require_balanced_book", False)),
-                            ).props("dense color=primary")
-                            mr_imbalance_min_input = ui.number(
-                                label="Imbalance min",
-                                value=float(_mr_cfg.get("imbalance_min") or 0.6),
-                                min=0.1, max=3.0, step=0.05, format="%.2f",
-                            ).classes("w-32").props("dense")
-                            mr_imbalance_max_input = ui.number(
-                                label="Imbalance max",
-                                value=float(_mr_cfg.get("imbalance_max") or 1.4),
-                                min=0.1, max=3.0, step=0.05, format="%.2f",
-                            ).classes("w-32").props("dense")
-                            ui.label("Block when bid_qty/ask_qty is outside this range (no liquidity to fade into).").classes("text-xs text-slate-500")
                     _active_badge_mr = ui.badge("Active", color="positive").bind_visibility_from(
                         mr_enabled_switch, "value"
                     )

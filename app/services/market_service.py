@@ -3590,7 +3590,20 @@ class MarketService:
         new_indicators["htf_indicators"] = indicators.get("htf_indicators")
         new_indicators["ohlcv_htf"] = indicators.get("ohlcv_htf")
         new_indicators["ohlcv_htf_bar"] = indicators.get("ohlcv_htf_bar")
-        new_indicators["structure"] = indicators.get("structure")
+        # Recompute structure on closed candles (symmetric with the timeframes
+        # branch below) so swing_high/swing_low scalars are closed-bar data and
+        # not silently missing.  ``_compute_indicators`` does not flatten swing
+        # scalars, so we do it here exactly as ``_build_snapshot`` does.
+        new_indicators["structure"] = self._compute_structure(closed_rows)
+        _new_structure = new_indicators.get("structure") or {}
+        _new_sw_highs = _new_structure.get("swing_highs") or []
+        _new_sw_lows = _new_structure.get("swing_lows") or []
+        new_indicators["swing_high"] = (
+            _new_sw_highs[-1].get("price") if _new_sw_highs and isinstance(_new_sw_highs[-1], dict) else None
+        )
+        new_indicators["swing_low"] = (
+            _new_sw_lows[-1].get("price") if _new_sw_lows and isinstance(_new_sw_lows[-1], dict) else None
+        )
 
         # ── Recompute per-strategy analysis timeframe blocks on closed candles ──
         # Each ``timeframes[<tf>]`` block is built from that bar's candles

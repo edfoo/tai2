@@ -16,27 +16,33 @@ from .liquidity_helpers import funding_is_blocked, order_book_imbalance, volume_
 class MeanReversionStrategy:
     """Rule-based RSI mean-reversion strategy.
 
-    Config keys (all live under ``config["strategies"]["mean_reversion"]``):
+    Config keys (all live under ``config["strategies"]["mean_reversion"]``);
+    the authoritative defaults are ``defaults.py`` ``DEFAULT_MEAN_REVERSION``.
       - ``enabled`` (bool): master switch
-      - ``rsi_oversold`` (float, default 28): BUY when RSI < this
-      - ``rsi_overbought`` (float, default 72): SELL when RSI > this
+      - ``rsi_oversold`` (float, default 30): BUY when RSI < this
+      - ``rsi_overbought`` (float, default 70): SELL when RSI > this
       - ``require_htf_trend`` (bool, default True): auto-disabled when no
         HTF data is available (e.g. 1D LTF has no higher timeframe).
-      - ``require_cmf`` (bool, default True): requires CMF already positive
+        NOTE: combined with ``htf_regime_preference="chop"`` (blocks trending
+        HTF), the net effect for a long is "buy dips in a *quiet* uptrend"
+        (EMA50 > EMA200 yet ADX low) — a trend-aligned MR overlay, not a
+        symmetric fade.  Shorts therefore fire less often than longs.
+      - ``require_cmf`` (bool, default False): requires CMF already positive
         for BUY / negative for SELL — enters AFTER the turn. For catching
         the bottom, prefer ``require_cmf_cross`` instead.
       - ``require_htf_cmf`` (bool, default False)
-      - ``require_cmf_cross`` (bool, default True): CMF must have just
+      - ``require_cmf_cross`` (bool, default False): CMF must have just
         crossed zero this bar — catches the turn earlier than require_cmf.
+        Default off (rare event; redundant with BB position + candle rejection).
       - ``require_cmf_no_divergence`` (bool, default False)
       - ``require_footprint_delta`` (bool, default False)
       - ``require_bb_position`` (bool, default True)
-      - ``bb_proximity_pct`` (float, default 0.25)
+      - ``bb_proximity_pct`` (float, default 0.5)
       - ``min_bb_bandwidth`` (float, default 2.0)
       - ``max_bb_bandwidth`` (float, default 0.0)
       - ``min_adx`` (float, default 0.0)
-      - ``max_adx`` (float, default 25.0): chop-only gate; lower = stricter
-        no-trend filter (recommended ~22-25).
+      - ``max_adx`` (float, default 28.0): chop-only gate; lower = stricter
+        no-trend filter (recommended ~24-28).
       - ``tp_pct`` (float, default None): strategy-level TP %. Mean reversion
         typically wants a tight TP (reversion to midline). Falls back to
         launcher-level if None.
@@ -46,15 +52,15 @@ class MeanReversionStrategy:
         for shorts, lower wick for longs (exhaustion confirmation)
       - ``candle_rejection_pct`` (float, default 30): minimum wick size as %
         of candle range (30 = wick is 30%+ of the candle)
-      - ``require_vwap_reversion`` (bool, default True): require price extended
+      - ``require_vwap_reversion`` (bool, default False): require price extended
         from VWAP AND closing back toward it
       - ``vwap_min_distance_pct`` (float, default 1.0): minimum % distance from
         VWAP to qualify as "extended"
-      - ``require_volume_cooling`` (bool, default True): require volume RSI
+      - ``require_volume_cooling`` (bool, default False): require volume RSI
         below threshold (volume momentum fading)
-      - ``volume_rsi_max`` (float, default 70.0): maximum volume RSI to allow entry
+      - ``volume_rsi_max`` (float, default 80.0): maximum volume RSI to allow entry
       - ``require_regime`` (bool, default True)
-      - ``max_bb_bandwidth_percentile`` (float, default 40)
+      - ``max_bb_bandwidth_percentile`` (float, default 55)
       - ``use_structural_sizing`` (bool, default True): use structural TP/SL
         based on Bollinger Bands and the entry candle instead of (or
         clamped by) ATR.  TP targets the BB middle band (the mean price
@@ -78,7 +84,7 @@ class MeanReversionStrategy:
         because MR win rates are naturally < 50%.
       - ``atr_sl_multiplier`` (float, default 1.0): SL = multiplier × ATR%.
         Must be <= atr_tp_multiplier (see above).
-      - ``min_atr_pct`` (float, default 1.3)
+      - ``min_atr_pct`` (float, default 1.0)
       - ``exit_on_regime_breakdown`` (bool, default False): when True, an
         open MR position is flattened (reduce-only) if the HTF regime flips
         from chop to trend while the position is below breakeven.  Opt-in.
@@ -384,12 +390,18 @@ class MeanReversionStrategy:
                 _high = helpers.extract_float(_c.get("high"))
                 _low = helpers.extract_float(_c.get("low"))
                 _close = helpers.extract_float(_c.get("close"))
+                _open = helpers.extract_float(_c.get("open"))
                 if _high is not None and _low is not None and _close is not None:
                     _range = _high - _low
                     if _range > 0:
-                        # Upper wick = high - max(close, open); we use close for simplicity.
-                        _upper_wick = _high - _close
-                        _lower_wick = _close - _low
+                        # True wick: upper = high - max(close, open),
+                        # lower = min(close, open) - low.  Using close alone
+                        # overstates the upper wick on a bearish rejection
+                        # candle (close < open), weakening the exhaustion test.
+                        _body_high = max(_close, _open) if _open is not None else _close
+                        _body_low = min(_close, _open) if _open is not None else _close
+                        _upper_wick = _high - _body_high
+                        _lower_wick = _body_low - _low
                         _upper_wick_pct = (_upper_wick / _range) * 100.0
                         _lower_wick_pct = (_lower_wick / _range) * 100.0
                         candle_rejection_long_ok = _lower_wick_pct >= candle_rejection_pct
@@ -450,10 +462,18 @@ class MeanReversionStrategy:
         bw_percentile = compute_bb_bandwidth_percentile(
             ohlcv_compact, bb_bandwidth, lookback=int(regime_lookback)
         )
-        regime_ok = (
-            not require_regime
-            or (bw_percentile is not None and bw_percentile <= max_bb_bandwidth_percentile)
-        )
+        # Neutral-on-missing-data (consistent with every other gate): when the
+        # percentile cannot be ranked (insufficient history or no BB bandwidth)
+        # we degrade to pass rather than silently blocking every signal.
+        regime_ok = True
+        if require_regime:
+            if bw_percentile is None:
+                helpers.emit_debug(
+                    f"MeanReversion: {symbol} — regime gate skipped "
+                    "(insufficient history / BB bandwidth unavailable)"
+                )
+            else:
+                regime_ok = bw_percentile <= max_bb_bandwidth_percentile
 
         # ── Minimum ATR% filter ──────────────────────────────────────
         # Skip entries on coins too quiet for a meaningful reversion.
@@ -645,6 +665,22 @@ class MeanReversionStrategy:
                     atr_tp_multiplier=atr_tp_multiplier if use_atr_sizing else None,
                     atr_sl_multiplier=atr_sl_multiplier if use_atr_sizing else None,
                 )
+
+                # Defensive audit: a degraded structural exit (R:R < 1.0) that
+                # fell back to ATR/static should be visible in /debug rather than
+                # silently shipped.  The launcher R:R guardrail still owns the
+                # final go/no-go, but this surfaces the fallback path.
+                if (
+                    tp_pct_final is not None
+                    and sl_pct_final is not None
+                    and sl_pct_final > 0
+                    and (tp_pct_final / sl_pct_final) < 1.0
+                ):
+                    helpers.emit_debug(
+                        f"MeanReversion: {symbol} — low R:R {tp_pct_final/sl_pct_final:.2f} "
+                        f"(tp={tp_pct_final:.3f}% / sl={sl_pct_final:.3f}%) — "
+                        "structural exit likely degraded to ATR/static fallback"
+                    )
 
             return StrategySignal(
                 direction="buy" if side == "long" else "sell",
