@@ -3995,77 +3995,14 @@ def register_pages(app: FastAPI) -> None:
                                 "Fill all fields with the recommended Liquidity Sweep configuration. "
                                 "You still need to click Save to persist."
                             )
-                        with ui.row().classes("w-full flex-wrap gap-4 items-start"):
-                            _ls_tp_raw = _ls_cfg.get("tp_pct")
-                            ls_tp_input = ui.number(
-                                label="Take profit (%)",
-                                value=float(_ls_tp_raw) if _ls_tp_raw is not None else 3.0,
-                                min=0.5, step=0.5, precision=1,
-                            ).classes("w-40").props(
-                                "hint='Exit after this % price move' persistent-hint clearable"
-                            )
-                            _ls_sl_raw = _ls_cfg.get("sl_pct")
-                            ls_sl_input = ui.number(
-                                label="Stop loss (%)",
-                                value=float(_ls_sl_raw) if _ls_sl_raw is not None else 2.0,
-                                min=0.5, step=0.5, precision=1,
-                            ).classes("w-40").props(
-                                "hint='Exit if sweep fails (beyond wick)' persistent-hint clearable"
-                            )
-                        with ui.row().classes("w-full flex-wrap gap-4 items-start"):
-                            ls_lookback_input = ui.number(
-                                label="Swing lookback",
-                                value=float(_ls_cfg.get("lookback") or 20),
-                                min=5, max=100, step=1, format="%.0f",
-                            ).classes("w-40").props("dense")
-                            ui.label("Bars to identify the swing high/low that gets swept.").classes("text-xs text-slate-500")
-                            ls_pivot_bars_input = ui.number(
-                                label="Pivot bars",
-                                value=float(_ls_cfg.get("pivot_bars") or 3),
-                                min=1, max=10, step=1, format="%.0f",
-                            ).classes("w-32").props("dense")
-                            ui.label("Swing comes from fractal pivots (±N bars). Falls back to min/max when unavailable.").classes("text-xs text-slate-500")
-                        with ui.row().classes("w-full flex-wrap gap-4 items-start"):
-                            ls_sweep_pen_mode_select = ui.select(
-                                ["atr", "pct"],
-                                label="Sweep penetration mode",
-                                value=str(_ls_cfg.get("sweep_penetration_mode", "atr")),
-                            ).classes("w-40").props(
-                                "hint='atr=volatility-scaled, pct=legacy flat %' persistent-hint dense"
-                            )
-                            ls_sweep_buffer_atr_input = ui.number(
-                                label="Sweep buffer (ATR)",
-                                value=float(_ls_cfg.get("sweep_buffer_atr") or 0.25),
-                                min=0.0, max=2.0, step=0.05, format="%.2f",
-                            ).classes("w-40").props("dense")
-                            ui.label("Penetration threshold in ATR units (atr mode).").classes("text-xs text-slate-500")
-                        with ui.row().classes("w-full flex-wrap gap-4 items-start"):
-                            ls_sweep_buffer_input = ui.number(
-                                label="Sweep buffer %",
-                                value=float(_ls_cfg.get("sweep_buffer_pct") or 0.1),
-                                min=0.0, max=5.0, step=0.05, format="%.2f",
-                            ).classes("w-40").props("dense")
-                            ui.label("Min % beyond swing level the wick must penetrate (pct mode, 0.1 = 0.1%).").classes("text-xs text-slate-500")
-                        with ui.row().classes("w-full flex-wrap gap-4 items-start"):
-                            ls_reclaim_buffer_input = ui.number(
-                                label="Reclaim buffer %",
-                                value=float(_ls_cfg.get("reclaim_buffer_pct") or 0.1),
-                                min=0.0, max=5.0, step=0.05, format="%.2f",
-                            ).classes("w-40").props("dense")
-                            ui.label("Close must reclaim the swept level by this % margin — a close still below/above the level is a breakdown, not a stop-run.").classes("text-xs text-slate-500")
-                        with ui.row().classes("w-full flex-wrap gap-4 items-start"):
-                            ls_reclaim_ratio_input = ui.number(
-                                label="Reclaim ratio",
-                                value=float(_ls_cfg.get("reclaim_ratio") or 0.5),
-                                min=0.1, max=0.9, step=0.05, format="%.2f",
-                            ).classes("w-40").props("dense")
-                            ui.label("Close must reclaim this fraction of candle range back inside (0.5 = upper 50% for longs).").classes("text-xs text-slate-500")
-                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
-                            ls_require_htf_switch = ui.switch(
-                                "Require HTF trend alignment",
-                                value=bool(_ls_cfg.get("require_htf_trend", True)),
-                            ).props("dense color=primary")
-                            ui.label("Only longs in HTF uptrends, shorts in downtrends.").classes("text-xs text-slate-500")
+                        # ── Stage 1 · HTF Regime ────────────────────────
+                        ui.separator().classes("my-2")
+                        ui.label("Stage 1 · HTF Regime — decides the timeframe & chop requirement").classes("text-xs font-bold text-slate-700")
+                        ui.label(
+                            "Sweeps are a ranging-market pattern, so this stage selects the analysis bar, "
+                            "whether the HTF must be non-trending (chop), and whether the HTF EMA must still "
+                            "align with the trade direction — the net effect is a trend-aligned fade."
+                        ).classes("text-[11px] text-slate-400 mb-2")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             ls_htf_regime_select = ui.select(
                                 ["chop", "trend", "off"],
@@ -4085,19 +4022,107 @@ def register_pages(app: FastAPI) -> None:
                                 "hint='Indicators computed on this bar. · = use global LTF' persistent-hint dense"
                             )
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            ls_require_htf_switch = ui.switch(
+                                "Require HTF trend alignment",
+                                value=bool(_ls_cfg.get("require_htf_trend", True)),
+                            ).props("dense color=primary")
+                            ui.label("HTF EMA50 > EMA200 for BUY / EMA50 < EMA200 for SELL (auto-disabled when no HTF data).").classes("text-xs text-slate-500")
+
+                        # ── Stage 2 · Swing Detection ───────────────────
+                        ui.separator().classes("my-2")
+                        ui.label("Stage 2 · Swing Detection — finds the level that gets swept").classes("text-xs font-bold text-slate-700")
+                        ui.label(
+                            "The swing high/low comes from fractal pivots — real, freshly-respected levels "
+                            "that stop-hunters cluster at — falling back to a trailing min/max when pivot "
+                            "structure is unavailable."
+                        ).classes("text-[11px] text-slate-400 mb-2")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-start mt-1"):
+                            ls_lookback_input = ui.number(
+                                label="Swing lookback",
+                                value=float(_ls_cfg.get("lookback") or 20),
+                                min=5, max=100, step=1, format="%.0f",
+                            ).classes("w-40").props("dense")
+                            ui.label("Bars to identify the swing high/low that gets swept.").classes("text-xs text-slate-500")
+                            ls_pivot_bars_input = ui.number(
+                                label="Pivot bars",
+                                value=float(_ls_cfg.get("pivot_bars") or 3),
+                                min=1, max=10, step=1, format="%.0f",
+                            ).classes("w-32").props("dense")
+                            ui.label("Swing comes from fractal pivots (±N bars). Falls back to min/max when unavailable.").classes("text-xs text-slate-500")
+
+                        # ── Stage 3 · Sweep Trigger ─────────────────────
+                        ui.separator().classes("my-2")
+                        ui.label("Stage 3 · Sweep Trigger — the wick must pierce the swing").classes("text-xs font-bold text-slate-700")
+                        ui.label(
+                            "The current candle's wick must break beyond the swing level by a margin to "
+                            "qualify as a stop-run. ATR-scaled penetration (default) adapts to volatility; "
+                            "the legacy flat-% mode is kept for backtest comparison."
+                        ).classes("text-[11px] text-slate-400 mb-2")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-start mt-1"):
+                            ls_sweep_pen_mode_select = ui.select(
+                                ["atr", "pct"],
+                                label="Sweep penetration mode",
+                                value=str(_ls_cfg.get("sweep_penetration_mode", "atr")),
+                            ).classes("w-40").props(
+                                "hint='atr=volatility-scaled, pct=legacy flat %' persistent-hint dense"
+                            )
+                            ls_sweep_buffer_atr_input = ui.number(
+                                label="Sweep buffer (ATR)",
+                                value=float(_ls_cfg.get("sweep_buffer_atr") or 0.25),
+                                min=0.0, max=2.0, step=0.05, format="%.2f",
+                            ).classes("w-40").props("dense")
+                            ui.label("Penetration threshold in ATR units (atr mode).").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-start mt-1"):
+                            ls_sweep_buffer_input = ui.number(
+                                label="Sweep buffer %",
+                                value=float(_ls_cfg.get("sweep_buffer_pct") or 0.1),
+                                min=0.0, max=5.0, step=0.05, format="%.2f",
+                            ).classes("w-40").props("dense")
+                            ui.label("Min % beyond swing level the wick must penetrate (pct mode, 0.1 = 0.1%).").classes("text-xs text-slate-500")
+
+                        # ── Stage 4 · Reclaim Confirmation ──────────────
+                        ui.separator().classes("my-2")
+                        ui.label("Stage 4 · Reclaim Confirmation — the close must take back the level").classes("text-xs font-bold text-slate-700")
+                        ui.label(
+                            "The close must reclaim the swept level by a margin AND land in the right part of "
+                            "the candle (a rejection wick). A close that stays past the level is a real "
+                            "breakdown, not a stop-run."
+                        ).classes("text-[11px] text-slate-400 mb-2")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-start mt-1"):
+                            ls_reclaim_buffer_input = ui.number(
+                                label="Reclaim buffer %",
+                                value=float(_ls_cfg.get("reclaim_buffer_pct") or 0.1),
+                                min=0.0, max=5.0, step=0.05, format="%.2f",
+                            ).classes("w-40").props("dense")
+                            ui.label("Close must reclaim the swept level by this % margin — a close still below/above the level is a breakdown, not a stop-run.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-start mt-1"):
+                            ls_reclaim_ratio_input = ui.number(
+                                label="Reclaim ratio",
+                                value=float(_ls_cfg.get("reclaim_ratio") or 0.5),
+                                min=0.1, max=0.9, step=0.05, format="%.2f",
+                            ).classes("w-40").props("dense")
+                            ui.label("Close must reclaim this fraction of candle range back inside (0.5 = upper 50% for longs).").classes("text-xs text-slate-500")
+
+                        # ── Stage 5 · Confirmation Filters ──────────────
+                        ui.separator().classes("my-2")
+                        ui.label("Stage 5 · Confirmation Filters — is this a real stop-run?").classes("text-xs font-bold text-slate-700")
+                        ui.label(
+                            "Confirms participation and rules out strong trends. A sweep on heavy volume is a "
+                            "genuine stop-run; a sweep in a strong trend is more likely a real breakout."
+                        ).classes("text-[11px] text-slate-400 mb-2")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             ls_require_vol_switch = ui.switch(
                                 "Require volume spike",
                                 value=bool(_ls_cfg.get("require_volume_spike", True)),
                             ).props("dense color=primary")
                             ui.label("Swept candle volume must exceed recent average.").classes("text-xs text-slate-500")
-                        with ui.row().classes("w-full flex-wrap gap-4 items-start"):
+                        with ui.row().classes("w-full flex-wrap gap-4 items-start mt-1"):
                             ls_vol_ratio_input = ui.number(
                                 label="Volume spike ratio",
                                 value=float(_ls_cfg.get("volume_spike_ratio") or 1.5),
                                 min=1.0, max=5.0, step=0.1, format="%.1f",
                             ).classes("w-40").props("dense")
                             ui.label("Current volume / avg recent volume must exceed this.").classes("text-xs text-slate-500")
-                        with ui.row().classes("w-full flex-wrap gap-4 items-start"):
                             ls_max_adx_input = ui.number(
                                 label="Max ADX",
                                 value=float(_ls_cfg.get("max_adx") or 28.0),
@@ -4105,9 +4130,14 @@ def register_pages(app: FastAPI) -> None:
                             ).classes("w-32").props(
                                 "hint='Skip strong trends (sweep likely real breakout)' persistent-hint"
                             )
-                        # ── Regime gate ──────────────────────────────────
+
+                        # ── Stage 6 · Regime & Liquidity Gates ──────────
                         ui.separator().classes("my-2")
-                        ui.label("Regime Gate (BB Bandwidth Percentile)").classes("text-xs font-semibold text-slate-600")
+                        ui.label("Stage 6 · Regime & Liquidity Gates — only trade real chop").classes("text-xs font-bold text-slate-700")
+                        ui.label(
+                            "Fails fast on dead coins (low ATR%) and volatility expansion (BB bandwidth above "
+                            "the percentile) — sweeps are only reliable in a low-volatility range."
+                        ).classes("text-[11px] text-slate-400 mb-2")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             ls_require_regime_switch = ui.switch(
                                 "Require regime (chop)",
@@ -4125,9 +4155,42 @@ def register_pages(app: FastAPI) -> None:
                                 value=float(_ls_cfg.get("regime_lookback") or 50),
                                 min=10, max=200, step=10, format="%.0f",
                             ).classes("w-40").props("dense")
-                        # ── ATR-scaled TP/SL ────────────────────────────────
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            ls_min_atr_pct_input = ui.number(
+                                label="Min ATR%",
+                                value=float(_ls_cfg.get("min_atr_pct") or 0.8),
+                                min=0.0, max=10.0, step=0.1, format="%.1f",
+                            ).classes("w-40").props("dense")
+                            ui.label("Skip entries when ATR% is below this (0 = disabled). Filters out dead coins.").classes("text-xs text-slate-500")
+
+                        # ── Stage 7 · Exit Sizing (TP/SL) ───────────────
                         ui.separator().classes("my-2")
-                        ui.label("TP/SL Sizing").classes("text-xs font-semibold text-slate-600")
+                        ui.label("Stage 7 · Exit Sizing (TP/SL) — runs once an entry is confirmed").classes("text-xs font-bold text-slate-700")
+                        ui.label(
+                            "Places take-profit and stop-loss. Priority is structural (TP at the opposite "
+                            "swing, SL beyond the sweep wick), then ATR fallback, then static % — clamped to "
+                            "ATR bounds and gated on a minimum reward-to-risk."
+                        ).classes("text-[11px] text-slate-400 mb-2")
+                        ui.label("Static % fallback (used only when structural + ATR sizing are both off)").classes("text-xs font-semibold text-slate-500 mt-2")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-start mt-1"):
+                            _ls_tp_raw = _ls_cfg.get("tp_pct")
+                            ls_tp_input = ui.number(
+                                label="Take profit (%)",
+                                value=float(_ls_tp_raw) if _ls_tp_raw is not None else 3.0,
+                                min=0.5, step=0.5, precision=1,
+                            ).classes("w-40").props(
+                                "hint='Static fallback TP %' persistent-hint clearable"
+                            )
+                            _ls_sl_raw = _ls_cfg.get("sl_pct")
+                            ls_sl_input = ui.number(
+                                label="Stop loss (%)",
+                                value=float(_ls_sl_raw) if _ls_sl_raw is not None else 2.0,
+                                min=0.5, step=0.5, precision=1,
+                            ).classes("w-40").props(
+                                "hint='Static fallback SL %' persistent-hint clearable"
+                            )
+                        ui.label("These % only apply when both structural and ATR sizing are disabled — they are a last-resort fallback.").classes("w-full text-xs text-slate-500 mt-1")
+                        ui.label("Structural sizing (priority 1 — used first when enabled)").classes("text-xs font-semibold text-slate-500 mt-2")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             ls_use_structural_switch = ui.switch(
                                 "Use structural sizing",
@@ -4141,6 +4204,17 @@ def register_pages(app: FastAPI) -> None:
                                 min=0.0, max=2.0, step=0.05, format="%.2f",
                             ).classes("w-32").props("dense")
                             ui.label("SL placed this many ATR units beyond the sweep wick.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            ls_require_macro_sl_switch = ui.switch(
+                                "Macro swing SL",
+                                value=bool(_ls_cfg.get("require_macro_sl", False)),
+                            ).props("dense color=primary")
+                            ls_macro_sl_lookback_input = ui.number(
+                                label="Macro SL lookback",
+                                value=float(_ls_cfg.get("macro_sl_lookback") or 50),
+                                min=10, max=200, step=5, format="%.0f",
+                            ).classes("w-40").props("dense")
+                            ui.label("Instead of the immediate wick, anchor SL at the macro swing (look-back N candles), giving the reversal room to breathe.").classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             ls_atr_min_tp_input = ui.number(
                                 label="Min TP (×ATR)",
@@ -4162,8 +4236,7 @@ def register_pages(app: FastAPI) -> None:
                                 value=float(_ls_cfg.get("atr_max_sl_mult") or 3.0),
                                 min=0.5, max=20.0, step=0.5, format="%.1f",
                             ).classes("w-32").props("dense")
-                        ui.separator().classes("my-2")
-                        ui.label("ATR Fallback TP/SL").classes("text-xs font-semibold text-slate-600")
+                        ui.label("ATR sizing (priority 2 — fallback when structural is unavailable or off)").classes("text-xs font-semibold text-slate-500 mt-2")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             ls_use_atr_sizing_switch = ui.switch(
                                 "Use ATR sizing (fallback)",
@@ -4179,20 +4252,15 @@ def register_pages(app: FastAPI) -> None:
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             ls_atr_tp_mult_input = ui.number(
                                 label="ATR TP multiplier",
-                                value=float(_ls_cfg.get("atr_tp_multiplier") or 1.5),
+                                value=float(_ls_cfg.get("atr_tp_multiplier") or 1.2),
                                 min=0.1, max=10.0, step=0.1, format="%.1f",
                             ).classes("w-40").props("dense")
                             ls_atr_sl_mult_input = ui.number(
                                 label="ATR SL multiplier",
-                                value=float(_ls_cfg.get("atr_sl_multiplier") or 1.2),
+                                value=float(_ls_cfg.get("atr_sl_multiplier") or 1.0),
                                 min=0.1, max=10.0, step=0.1, format="%.1f",
                             ).classes("w-40").props("dense")
-                            ls_min_atr_pct_input = ui.number(
-                                label="Min ATR%",
-                                value=float(_ls_cfg.get("min_atr_pct") or 0.8),
-                                min=0.0, max=10.0, step=0.1, format="%.1f",
-                            ).classes("w-40").props("dense")
-                            ui.label("Skip entries when ATR% is below this (0 = disabled). Filters out dead coins.").classes("text-xs text-slate-500")
+                        ui.label("Reward-to-Risk floor").classes("text-xs font-semibold text-slate-500 mt-2")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             _ls_rr_raw = _ls_cfg.get("min_reward_risk_ratio")
                             ls_min_rr_input = ui.number(
@@ -4203,6 +4271,15 @@ def register_pages(app: FastAPI) -> None:
                                 "hint='Minimum TP:SL distance ratio for this strategy (blank = use global guardrail)' persistent-hint clearable"
                             )
                             ui.label("Overrides the global R:R guardrail for Liquidity Sweep entries. Blank inherits the global min_reward_risk_ratio.").classes("text-xs text-slate-500")
+
+                        # ── Stage 8 · Direction & Liquidity Gates ───────
+                        ui.separator().classes("my-2")
+                        ui.label("Stage 8 · Direction & Liquidity Gates — post-signal refinements").classes("text-xs font-bold text-slate-700")
+                        ui.label(
+                            "Optional post-signal behaviour: invert the trade direction, or apply liquidity-"
+                            "aware filters that confirm the stop-run was absorbed within value rather than "
+                            "breaking through it."
+                        ).classes("text-[11px] text-slate-400 mb-2")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             _ls_flip_enabled = bool(_ls_cfg.get("flip_launcher_direction"))
                             ls_flip_switch = ui.switch(
@@ -4215,33 +4292,20 @@ def register_pages(app: FastAPI) -> None:
                                 label="Flip direction",
                             ).classes("w-40").props("dense")
                             ui.label("Invert the Launcher's trade direction before execution.").classes("text-xs text-slate-500")
-                        # ── Liquidity-aware gates (§3) ───────────────────
-                        ui.separator().classes("my-2")
-                        ui.label("Liquidity-Aware Gates").classes("text-xs font-semibold text-slate-600")
+                        ui.label("Liquidity-aware gates (§3)").classes("text-xs font-semibold text-slate-500 mt-2")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             ls_require_close_in_va_switch = ui.switch(
                                 "Require close inside value area",
-                                value=bool(_ls_cfg.get("require_close_in_va", False)),
+                                value=bool(_ls_cfg.get("require_close_in_va", True)),
                             ).props("dense color=primary")
                             ui.label("Sweep candle must close back inside the value area (a close outside VA is a real break, not a stop-run).").classes("text-xs text-slate-500")
-                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
-                            ls_require_macro_sl_switch = ui.switch(
-                                "Macro swing SL",
-                                value=bool(_ls_cfg.get("require_macro_sl", False)),
-                            ).props("dense color=primary")
-                            ls_macro_sl_lookback_input = ui.number(
-                                label="Macro SL lookback",
-                                value=float(_ls_cfg.get("macro_sl_lookback") or 50),
-                                min=10, max=200, step=5, format="%.0f",
-                            ).classes("w-40").props("dense")
-                            ui.label("Place SL at the macro swing (look-back N candles) instead of the immediate wick, giving room to breathe.").classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             ls_require_book_imbalance_switch = ui.switch(
                                 "Require supportive book imbalance",
                                 value=bool(_ls_cfg.get("require_book_imbalance", False)),
                             ).props("dense color=primary")
                             ui.label("Long sweep needs bid-supported book (imbalance ≥ min), short sweep needs ask-heavy (imbalance ≤ max). Fade into supportive flow.").classes("text-xs text-slate-500")
-                        with ui.row().classes("w-full flex-wrap gap-4 items-start"):
+                        with ui.row().classes("w-full flex-wrap gap-4 items-start mt-1"):
                             ls_imbalance_min_for_long_input = ui.number(
                                 label="Min imbalance (long)",
                                 value=float(_ls_cfg.get("imbalance_min_for_long") or 1.0),
@@ -5994,7 +6058,7 @@ def register_pages(app: FastAPI) -> None:
                 "require_volume_spike": bool(ls_require_vol_switch.value),
                 "volume_spike_ratio": float(ls_vol_ratio_input.value or 1.5),
                 "volume_lookback": 10,
-                "max_adx": float(ls_max_adx_input.value or 35.0),
+                "max_adx": float(ls_max_adx_input.value or 28.0),
                 "require_regime": bool(ls_require_regime_switch.value),
                 "max_bb_bandwidth_percentile": float(ls_max_bw_pct_input.value or 60.0),
                 "regime_lookback": int(ls_regime_lookback_input.value or 50),
@@ -6006,8 +6070,8 @@ def register_pages(app: FastAPI) -> None:
                 "atr_min_sl_mult": float(ls_atr_min_sl_input.value or 0.3),
                 "atr_max_sl_mult": float(ls_atr_max_sl_input.value or 3.0),
                 "use_atr_sizing": bool(ls_use_atr_sizing_switch.value),
-                "atr_tp_multiplier": float(ls_atr_tp_mult_input.value or 1.5),
-                "atr_sl_multiplier": float(ls_atr_sl_mult_input.value or 1.2),
+                "atr_tp_multiplier": float(ls_atr_tp_mult_input.value or 1.2),
+                "atr_sl_multiplier": float(ls_atr_sl_mult_input.value or 1.0),
                 "min_atr_pct": float(ls_min_atr_pct_input.value or 0.8),
                 "min_reward_risk_ratio": (
                     float(ls_min_rr_input.value) if ls_min_rr_input.value not in (None, "") else None

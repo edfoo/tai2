@@ -98,8 +98,8 @@ class LiquiditySweepStrategy:
       - ``use_atr_sizing`` (bool, default True): use ATR-scaled TP/SL.
         Used as fallback when structural levels are unavailable or when
         ``use_structural_sizing`` is False.
-      - ``atr_tp_multiplier`` (float, default 1.5): TP = multiplier × ATR%.
-      - ``atr_sl_multiplier`` (float, default 1.2): SL = multiplier × ATR%.
+      - ``atr_tp_multiplier`` (float, default 1.2): TP = multiplier × ATR%.
+      - ``atr_sl_multiplier`` (float, default 1.0): SL = multiplier × ATR%.
         Tighter than MR/SC because the sweep wick is the invalidation.
       - ``min_atr_pct`` (float, default 0.8): skip dead coins.
       - ``tp_pct`` (float, default None): static TP % fallback.
@@ -201,10 +201,10 @@ class LiquiditySweepStrategy:
         use_atr_sizing = bool(cfg.get("use_atr_sizing", True))
         atr_tp_multiplier = helpers.extract_float(cfg.get("atr_tp_multiplier"))
         if atr_tp_multiplier is None:
-            atr_tp_multiplier = 1.5
+            atr_tp_multiplier = 1.2
         atr_sl_multiplier = helpers.extract_float(cfg.get("atr_sl_multiplier"))
         if atr_sl_multiplier is None:
-            atr_sl_multiplier = 1.2
+            atr_sl_multiplier = 1.0
         min_atr_pct = helpers.extract_float(cfg.get("min_atr_pct"))
         if min_atr_pct is None:
             min_atr_pct = 0.8
@@ -213,13 +213,13 @@ class LiquiditySweepStrategy:
         if min_reward_risk_ratio is None:
             min_reward_risk_ratio = 1.0
         # ── Liquidity-aware gates (§3) ────────────────────────────────
-        # ``require_close_in_va`` (default off): the sweep candle must close
+        # ``require_close_in_va`` (default on): the sweep candle must close
         # *back inside* the value area after its wick, confirming the stop-run
         # was absorbed within value rather than a true break of value.
         # ``require_macro_sl`` (default off): place SL at the macro swing
         # (look-back ``macro_sl_lookback`` candles) instead of the immediate
         # wick, giving the reversal room to breathe.
-        require_close_in_va = bool(cfg.get("require_close_in_va", False))
+        require_close_in_va = bool(cfg.get("require_close_in_va", True))
         require_macro_sl = bool(cfg.get("require_macro_sl", False))
         _macro_lookback = helpers.extract_float(cfg.get("macro_sl_lookback"))
         macro_sl_lookback = int(_macro_lookback) if _macro_lookback is not None else 50
