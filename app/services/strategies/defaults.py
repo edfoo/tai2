@@ -63,6 +63,8 @@ DEFAULT_MEAN_REVERSION: dict[str, Any] = {
     "regime_lookback": 50,
     "use_atr_sizing": True,
     "use_structural_sizing": True,
+    # Adaptive ATR applies to SIZING only (never the min_atr_pct gate).
+    "use_adaptive_atr": False,
     "structural_sl_buffer_atr": 1.0,
     "atr_min_tp_mult": 0.5,
     "atr_max_tp_mult": 4.0,

@@ -3155,10 +3155,10 @@ def register_pages(app: FastAPI) -> None:
                             ).classes("w-32").props(
                                 "hint='Skip if ADX below this (0 = off)' persistent-hint"
                             )
-                            _mr_max_adx_raw = _mr_cfg.get("max_adx", 25.0)
+                            _mr_max_adx_raw = _mr_cfg.get("max_adx", 28.0)
                             mr_max_adx_input = ui.number(
                                 label="Max ADX",
-                                value=float(_mr_max_adx_raw) if _mr_max_adx_raw is not None else 25.0,
+                                value=float(_mr_max_adx_raw) if _mr_max_adx_raw is not None else 28.0,
                                 min=0, max=100, step=5, precision=0,
                             ).classes("w-32").props(
                                 "hint='Skip if ADX above this (0 = off)' persistent-hint"
@@ -3175,13 +3175,13 @@ def register_pages(app: FastAPI) -> None:
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             mr_require_bb_switch = ui.switch(
                                 "Require Bollinger Band position",
-                                value=bool(_mr_cfg.get("require_bb_position", False)),
+                                value=bool(_mr_cfg.get("require_bb_position", True)),
                             ).props("dense color=primary")
                             ui.label("BUY only at/below lower band; SELL only at/above upper band.").classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             mr_bb_proximity_input = ui.number(
                                 label="BB Proximity %",
-                                value=float(_mr_cfg.get("bb_proximity_pct") if _mr_cfg.get("bb_proximity_pct") is not None else 0.25),
+                                value=float(_mr_cfg.get("bb_proximity_pct") if _mr_cfg.get("bb_proximity_pct") is not None else 0.5),
                                 min=0.0, max=5.0, step=0.1, format="%.1f",
                             ).classes("w-48").props("dense")
                             ui.label("How far inside the band price may still qualify (0 = must be at/beyond band).").classes("text-xs text-slate-500")
@@ -3213,7 +3213,7 @@ def register_pages(app: FastAPI) -> None:
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             mr_require_cmf_switch = ui.switch(
                                 "Require CMF confirmation",
-                                value=bool(_mr_cfg.get("require_cmf", True)),
+                                value=bool(_mr_cfg.get("require_cmf", False)),
                             ).props("dense color=primary")
                             ui.label("LTF CMF (14-period) must be positive for BUY and negative for SELL.").classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
@@ -3225,7 +3225,7 @@ def register_pages(app: FastAPI) -> None:
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             mr_require_cmf_cross_switch = ui.switch(
                                 "Require CMF zero-line cross",
-                                value=bool(_mr_cfg.get("require_cmf_cross", True)),
+                                value=bool(_mr_cfg.get("require_cmf_cross", False)),
                             ).props("dense color=primary")
                             ui.label("LTF CMF must have just crossed zero this bar.").classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
@@ -3243,7 +3243,7 @@ def register_pages(app: FastAPI) -> None:
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             mr_vwap_reversion_switch = ui.switch(
                                 "Require VWAP reversion",
-                                value=bool(_mr_cfg.get("require_vwap_reversion", True)),
+                                value=bool(_mr_cfg.get("require_vwap_reversion", False)),
                             ).props("dense color=primary")
                             ui.label("Require price extended from VWAP AND closing back toward it.").classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
@@ -3256,13 +3256,13 @@ def register_pages(app: FastAPI) -> None:
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             mr_volume_cooling_switch = ui.switch(
                                 "Require volume cooling",
-                                value=bool(_mr_cfg.get("require_volume_cooling", True)),
+                                value=bool(_mr_cfg.get("require_volume_cooling", False)),
                             ).props("dense color=primary")
                             ui.label("Block when volume RSI is still high (spike still being driven by heavy volume).").classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             mr_volume_rsi_max_input = ui.number(
                                 label="Volume RSI max",
-                                value=float(_mr_cfg.get("volume_rsi_max") or 70.0),
+                                value=float(_mr_cfg.get("volume_rsi_max") or 80.0),
                                 min=10.0, max=99.0, step=5.0, format="%.0f",
                             ).classes("w-48").props("dense")
                             ui.label("Maximum volume RSI to allow entry (below = volume momentum fading).").classes("text-xs text-slate-500")
@@ -3284,10 +3284,10 @@ def register_pages(app: FastAPI) -> None:
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             mr_max_bw_pct_input = ui.number(
                                 label="Max BB bandwidth percentile",
-                                value=float(_mr_cfg.get("max_bb_bandwidth_percentile") or 40.0),
+                                value=float(_mr_cfg.get("max_bb_bandwidth_percentile") or 55.0),
                                 min=5.0, max=95.0, step=5.0, format="%.0f",
                             ).classes("w-48").props("dense")
-                            ui.label("Current bandwidth must be below this percentile (e.g. 40 = below 40th percentile).").classes("text-xs text-slate-500")
+                            ui.label("Current bandwidth must be below this percentile (e.g. 55 = below 55th percentile).").classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             mr_regime_lookback_input = ui.number(
                                 label="Regime lookback",
@@ -3314,7 +3314,7 @@ def register_pages(app: FastAPI) -> None:
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             mr_require_in_va_switch = ui.switch(
                                 "Require price inside value area",
-                                value=bool(_mr_cfg.get("require_price_in_va", False)),
+                                value=bool(_mr_cfg.get("require_price_in_va", True)),
                             ).props("dense color=primary")
                             ui.label("Only enter when price is inside the 70% value area (mean reversion fades toward the mean).").classes("text-xs text-slate-500")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
@@ -3471,7 +3471,7 @@ def register_pages(app: FastAPI) -> None:
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
                             mr_min_atr_pct_input = ui.number(
                                 label="Min ATR%",
-                                value=float(_mr_cfg.get("min_atr_pct") or 1.3),
+                                value=float(_mr_cfg.get("min_atr_pct") or 1.0),
                                 min=0.0, max=10.0, step=0.1, format="%.1f",
                             ).classes("w-40").props("dense")
                             ui.label("Skip entries when ATR% is below this (0 = disabled). Filters out dead coins.").classes("text-xs text-slate-500")
@@ -5858,23 +5858,23 @@ def register_pages(app: FastAPI) -> None:
                 "require_vwap_reversion": bool(mr_vwap_reversion_switch.value),
                 "vwap_min_distance_pct": float(mr_vwap_min_dist_input.value or 1.0),
                 "require_volume_cooling": bool(mr_volume_cooling_switch.value),
-                "volume_rsi_max": float(mr_volume_rsi_max_input.value or 70.0),
+                "volume_rsi_max": float(mr_volume_rsi_max_input.value or 80.0),
                 "require_min_volume": bool(mr_require_min_vol_switch.value),
                 "min_volume_ratio": float(mr_min_vol_ratio_input.value or 0.7),
                 "volume_lookback": int(mr_vol_lookback_input.value or 20),
                 "require_regime": bool(mr_require_regime_switch.value),
-                "max_bb_bandwidth_percentile": float(mr_max_bw_pct_input.value or 45.0),
+                "max_bb_bandwidth_percentile": float(mr_max_bw_pct_input.value or 55.0),
                 "regime_lookback": int(mr_regime_lookback_input.value or 50),
                 "use_adaptive_atr": bool(mr_use_adaptive_atr_switch.value),
                 "use_structural_sizing": bool(mr_use_structural_switch.value),
-                "structural_sl_buffer_atr": float(mr_structural_sl_buffer_input.value or 0.15),
+                "structural_sl_buffer_atr": float(mr_structural_sl_buffer_input.value or 1.0),
                 "atr_min_tp_mult": float(mr_atr_min_tp_input.value or 0.5),
                 "atr_max_tp_mult": float(mr_atr_max_tp_input.value or 4.0),
                 "atr_min_sl_mult": float(mr_atr_min_sl_input.value or 0.3),
                 "atr_max_sl_mult": float(mr_atr_max_sl_input.value or 3.0),
                 "use_atr_sizing": bool(mr_use_atr_sizing_switch.value),
-                "atr_tp_multiplier": float(mr_atr_tp_mult_input.value or 2.0),
-                "atr_sl_multiplier": float(mr_atr_sl_mult_input.value or 1.5),
+                "atr_tp_multiplier": float(mr_atr_tp_mult_input.value or 1.8),
+                "atr_sl_multiplier": float(mr_atr_sl_mult_input.value or 1.0),
                 "min_atr_pct": float(mr_min_atr_pct_input.value or 1.0),
                 "min_reward_risk_ratio": (
                     float(mr_min_rr_input.value) if mr_min_rr_input.value not in (None, "") else None
