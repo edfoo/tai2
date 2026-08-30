@@ -5,14 +5,22 @@ from pathlib import Path
 from scripts.performance_summary import build_summary, parse_logs, summary_to_dict
 
 
-def test_performance_summary_parses_peak_excursion_for_stop_out(tmp_path: Path) -> None:
+def test_performance_summary_ignores_alternator_excursion(tmp_path: Path) -> None:
+    """Alternator trailing-profit/close lines must NOT feed TradeMgmt excursion.
+
+    The Alternator strategy uses a separate peak tracker (no trough fields) and
+    its lines should not be attributed to stop-out/take-profit excursion
+    tracking, which is driven exclusively by the TradeMgmt supervision loop.
+    """
     log_file = tmp_path / "app.log"
     log_file.write_text(
         "\n".join(
             [
                 "2026-08-02 10:00:00,000 UTC · DEBUG:app.services.market_service:Launcher signal: XYZ-USDT-SWAP BUY [trend_pullback] last=10.0 notional=100.0 tp=11.0 sl=9.5",
+                "2026-08-02 10:00:01,000 UTC · DEBUG:app.services.market_service:TradeMgmt: seeded XYZ-USDT-SWAP side=long entry=10.0 tp=11.0 sl=9.5 risk_pct=5.0",
                 "2026-08-02 10:05:00,000 UTC · DEBUG:app.services.market_service:Alternator: XYZ-USDT-SWAP trailing profit — peak_pct=4.2 current_pct=3.8 peak_usd=4.2 current_usd=3.8 pullback_needed=10% — waiting",
-                "2026-08-02 10:10:00,000 UTC · DEBUG:app.services.market_service:Reconciled PnL for XYZ-USDT-SWAP: -1.0000 USDT (fill 1, trade abc)",
+                "2026-08-02 10:10:00,000 UTC · DEBUG:app.services.market_service:TradeMgmt: XYZ-USDT-SWAP cleared (position_closed); re-entry cooldown 1800s",
+                "2026-08-02 10:10:01,000 UTC · DEBUG:app.services.market_service:Reconciled PnL for XYZ-USDT-SWAP: -1.0000 USDT (fill 1, trade abc)",
             ]
         ),
         encoding="utf-8",
@@ -21,21 +29,13 @@ def test_performance_summary_parses_peak_excursion_for_stop_out(tmp_path: Path) 
     pnl_trades, signals, seeded, cleared, summary = parse_logs([log_file])
     summary = build_summary(pnl_trades, signals, seeded, cleared, summary)
 
+    # The trade is parsed, but the Alternator peak must be ignored.
     assert len(pnl_trades) == 1
-    assert pnl_trades[0].mfe_peak_pct == 4.2
-    assert summary.stopout_peak_trades == [
-        {
-            "ts": "2026-08-02 10:10:00",
-            "symbol": "XYZ-USDT-SWAP",
-            "strategy": "trend_pullback",
-            "pnl_usdt": -1.0,
-            "mfe_pct": 4.2,
-            "mfe_usd": 4.2,
-        }
-    ]
+    assert pnl_trades[0].mfe_peak_pct is None
+    assert summary.stopout_peak_trades == []
 
     payload = summary_to_dict(summary)
-    assert payload["stopout_peak_trades"][0]["mfe_pct"] == 4.2
+    assert payload["stopout_peak_trades"] == []
 
 
 def test_performance_summary_deduplicates_fills_by_fill_id(tmp_path: Path) -> None:
@@ -81,8 +81,10 @@ def test_performance_summary_parses_trademgmt_peak_excursion(tmp_path: Path) -> 
         "\n".join(
             [
                 "2026-08-02 10:00:00,000 UTC · DEBUG:app.services.market_service:Launcher signal: XYZ-USDT-SWAP BUY [trend_pullback] last=10.0 notional=100.0 tp=11.0 sl=9.5",
+                "2026-08-02 10:00:01,000 UTC · DEBUG:app.services.market_service:TradeMgmt: seeded XYZ-USDT-SWAP side=long entry=10.0 tp=11.0 sl=9.5 risk_pct=5.0",
                 "2026-08-02 10:05:00,000 UTC · DEBUG:app.services.market_service:TradeMgmt: XYZ-USDT-SWAP peak_pct=4.2 current_pct=3.8 peak_usd=4.2 current_usd=3.8",
-                "2026-08-02 10:10:00,000 UTC · DEBUG:app.services.market_service:Reconciled PnL for XYZ-USDT-SWAP: -1.0000 USDT (fill 1, trade abc)",
+                "2026-08-02 10:10:00,000 UTC · DEBUG:app.services.market_service:TradeMgmt: XYZ-USDT-SWAP cleared (position_closed); re-entry cooldown 1800s",
+                "2026-08-02 10:10:01,000 UTC · DEBUG:app.services.market_service:Reconciled PnL for XYZ-USDT-SWAP: -1.0000 USDT (fill 1, trade abc)",
             ]
         ),
         encoding="utf-8",
@@ -95,7 +97,7 @@ def test_performance_summary_parses_trademgmt_peak_excursion(tmp_path: Path) -> 
     assert pnl_trades[0].mfe_peak_pct == 4.2
     assert summary.stopout_peak_trades == [
         {
-            "ts": "2026-08-02 10:10:00",
+            "ts": "2026-08-02 10:10:01",
             "symbol": "XYZ-USDT-SWAP",
             "strategy": "trend_pullback",
             "pnl_usdt": -1.0,
@@ -118,9 +120,11 @@ def test_performance_summary_parses_trademgmt_trough_excursion(tmp_path: Path) -
         "\n".join(
             [
                 "2026-08-02 10:00:00,000 UTC · DEBUG:app.services.market_service:Launcher signal: XYZ-USDT-SWAP BUY [trend_pullback] last=10.0 notional=100.0 tp=11.0 sl=9.5",
+                "2026-08-02 10:00:01,000 UTC · DEBUG:app.services.market_service:TradeMgmt: seeded XYZ-USDT-SWAP side=long entry=10.0 tp=11.0 sl=9.5 risk_pct=5.0",
                 # current_usd=-0.0936 must NOT be mistaken for trough_pct.
                 "2026-08-02 10:05:00,000 UTC · DEBUG:app.services.market_service:TradeMgmt: XYZ-USDT-SWAP peak_pct=4.2 current_pct=-1.86 peak_usd=4.2 current_usd=-0.0936 trough_pct=-1.86 trough_usd=-0.0936",
-                "2026-08-02 10:10:00,000 UTC · DEBUG:app.services.market_service:Reconciled PnL for XYZ-USDT-SWAP: +1.0000 USDT (fill 1, trade abc)",
+                "2026-08-02 10:10:00,000 UTC · DEBUG:app.services.market_service:TradeMgmt: XYZ-USDT-SWAP cleared (position_closed); re-entry cooldown 1800s",
+                "2026-08-02 10:10:01,000 UTC · DEBUG:app.services.market_service:Reconciled PnL for XYZ-USDT-SWAP: +1.0000 USDT (fill 1, trade abc)",
             ]
         ),
         encoding="utf-8",
@@ -135,7 +139,7 @@ def test_performance_summary_parses_trademgmt_trough_excursion(tmp_path: Path) -
     assert pnl_trades[0].mae_trough_usd == -0.0936
     assert summary.tp_trough_trades == [
         {
-            "ts": "2026-08-02 10:10:00",
+            "ts": "2026-08-02 10:10:01",
             "symbol": "XYZ-USDT-SWAP",
             "strategy": "trend_pullback",
             "pnl_usdt": 1.0,
