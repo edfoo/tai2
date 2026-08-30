@@ -237,3 +237,85 @@ def volume_participation_ok(
         return True, None
     ratio = current / avg
     return ratio >= min_ratio, ratio
+
+
+def volume_deceleration_ok(
+    indicators: dict,
+    *,
+    min_ratio: float = 0.7,
+    recent_bars: int = 4,
+    prior_bars: int = 16,
+) -> tuple[bool, float | None]:
+    """Return ``(ok, ratio)`` for a volume-deceleration gate.
+
+    Blocks entries when volume has been trending *down* into the pullback:
+    ``ratio = mean(last ``recent_bars`` bars) / mean(``prior_bars`` bars before
+    them)``.  A ratio < 1.0 means activity was already decaying; below
+    ``min_ratio`` the entry is vetoed.
+
+    This complements :func:`volume_participation_ok`: that one is a
+    point-in-time single-candle veto, while this one detects the multi-bar
+    "activity is over" regime that leaves a wide TP unreachable once the coin
+    goes quiet.
+
+    Reads ``indicators["volume"]["series"]``.  Returns ``ok=True`` (neutral)
+    when volume data is missing or the series is shorter than
+    ``recent_bars + prior_bars``.
+    """
+    if not indicators:
+        return True, None
+    vol_block = indicators.get("volume") or {}
+    if not isinstance(vol_block, dict):
+        return True, None
+    series = vol_block.get("series") or []
+    vals = [v for v in (_to_float(x) for x in series) if v is not None and v > 0]
+    need = recent_bars + prior_bars
+    if len(vals) < need:
+        return True, None
+    recent = vals[-recent_bars:]
+    prior = vals[-(recent_bars + prior_bars):-recent_bars]
+    prior_avg = sum(prior) / len(prior)
+    recent_avg = sum(recent) / len(recent)
+    if prior_avg <= 0:
+        return True, None
+    ratio = recent_avg / prior_avg
+    return ratio >= min_ratio, ratio
+
+
+def fast_atr_pct(ohlcv: list, length: int = 4) -> float | None:
+    """Compute a short-lookback ATR% from compact OHLCV dicts.
+
+    Used by trend_pullback's fast-ATR sizing: caps the exit-distance ATR so it
+    tracks the *current* realized range instead of a lagging 14-bar ATR that
+    stays elevated for ~3.5h after a coin goes quiet.  True range uses the
+    close of the bar before the window, matching the standard ATR definition.
+
+    ``ohlcv`` is the compact list of dicts (``ts/open/high/low/close/volume``)
+    emitted by the indicator service.  Returns None when the window is too
+    short or prices are degenerate.
+    """
+    if not ohlcv or length < 1:
+        return None
+    window = ohlcv[-(length + 1):]
+    closes = [
+        _to_float(c.get("close")) if isinstance(c, dict) else None
+        for c in window
+    ]
+    trs: list[float] = []
+    for i in range(1, len(window)):
+        c = window[i]
+        if not isinstance(c, dict):
+            continue
+        h = _to_float(c.get("high"))
+        l = _to_float(c.get("low"))
+        pc = closes[i - 1]
+        if h is None or l is None or pc is None:
+            continue
+        trs.append(max(h - l, abs(h - pc), abs(l - pc)))
+    if not trs:
+        return None
+    atr = sum(trs) / len(trs)
+    last_close = closes[-1]
+    if last_close is None or last_close <= 0:
+        return None
+    return atr / last_close * 100.0

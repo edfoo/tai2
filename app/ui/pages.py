@@ -4818,6 +4818,27 @@ def register_pages(app: FastAPI) -> None:
                                 min=5, max=100, step=1, precision=0,
                             ).classes("w-40").props("dense")
                             ui.label("Block entries on candles whose volume has collapsed below this ratio of the recent average (filters dead-volume / halted-price-action candles).").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            tp_require_vol_decel_switch = ui.switch(
+                                "Require volume deceleration",
+                                value=bool(_tp_cfg.get("require_volume_deceleration", False)),
+                            ).props("dense color=amber")
+                            tp_min_vol_decel_ratio_input = ui.number(
+                                label="Min decel ratio",
+                                value=float(_tp_cfg.get("min_volume_decel_ratio") if _tp_cfg.get("min_volume_decel_ratio") is not None else 0.7),
+                                min=0.1, max=2.0, step=0.05, format="%.2f",
+                            ).classes("w-40").props("dense")
+                            tp_vol_decel_recent_input = ui.number(
+                                label="Recent bars",
+                                value=float(_tp_cfg.get("volume_decel_recent_bars") if _tp_cfg.get("volume_decel_recent_bars") is not None else 4),
+                                min=1, max=20, step=1, precision=0,
+                            ).classes("w-32").props("dense")
+                            tp_vol_decel_prior_input = ui.number(
+                                label="Prior bars",
+                                value=float(_tp_cfg.get("volume_decel_prior_bars") if _tp_cfg.get("volume_decel_prior_bars") is not None else 16),
+                                min=2, max=60, step=1, precision=0,
+                            ).classes("w-32").props("dense")
+                            ui.label("Block when volume is trending down into the pullback (mean recent bars ÷ mean prior bars < min ratio). Catches the 'coin was hot, now quiet' regime that leaves a wide TP unreachable.").classes("text-xs text-slate-500")
 
                         # ── Stage 3 · Pullback Level ────────────────────
                         ui.separator().classes("my-2")
@@ -4994,6 +5015,17 @@ def register_pages(app: FastAPI) -> None:
                                 value=bool(_tp_cfg.get("use_adaptive_atr", False)),
                             ).props("dense color=amber")
                             ui.label("Scales ATR distances by volatility regime (sizing only — never the min-ATR gate).").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            tp_use_fast_atr_switch = ui.switch(
+                                "Fast-ATR sizing",
+                                value=bool(_tp_cfg.get("use_fast_atr", False)),
+                            ).props("dense color=amber")
+                            tp_fast_atr_length_input = ui.number(
+                                label="Fast ATR length",
+                                value=float(_tp_cfg.get("fast_atr_length") if _tp_cfg.get("fast_atr_length") is not None else 4),
+                                min=2, max=14, step=1, precision=0,
+                            ).classes("w-40").props("dense")
+                            ui.label("Caps TP/SL sizing by a short-lookback ATR so exits track the current realized range (not a lagging 14-bar ATR that stays wide ~3.5h after a coin goes quiet). Only tightens, never widens.").classes("text-xs text-slate-500")
 
                         # R:R floor
                         ui.label("Reward-to-Risk floor").classes("text-xs font-semibold text-slate-500 mt-2")
@@ -5067,6 +5099,12 @@ def register_pages(app: FastAPI) -> None:
                 tp_require_min_vol_switch.value = d["require_min_volume"]
                 tp_min_vol_ratio_input.value = d["min_volume_ratio"]
                 tp_vol_lookback_input.value = d["volume_lookback"]
+                tp_require_vol_decel_switch.value = d["require_volume_deceleration"]
+                tp_min_vol_decel_ratio_input.value = d["min_volume_decel_ratio"]
+                tp_vol_decel_recent_input.value = d["volume_decel_recent_bars"]
+                tp_vol_decel_prior_input.value = d["volume_decel_prior_bars"]
+                tp_use_fast_atr_switch.value = d["use_fast_atr"]
+                tp_fast_atr_length_input.value = d["fast_atr_length"]
                 ui.notify("Trend Pullback fields set to recommended defaults — click Save to persist", color="info")
 
             with ui.card().classes("w-full rounded-lg border border-slate-200 mb-1"):
@@ -6235,6 +6273,12 @@ def register_pages(app: FastAPI) -> None:
                 "require_min_volume": bool(tp_require_min_vol_switch.value),
                 "min_volume_ratio": float(tp_min_vol_ratio_input.value or 0.7),
                 "volume_lookback": int(tp_vol_lookback_input.value or 20),
+                "require_volume_deceleration": bool(tp_require_vol_decel_switch.value),
+                "min_volume_decel_ratio": float(tp_min_vol_decel_ratio_input.value or 0.7),
+                "volume_decel_recent_bars": int(tp_vol_decel_recent_input.value or 4),
+                "volume_decel_prior_bars": int(tp_vol_decel_prior_input.value or 16),
+                "use_fast_atr": bool(tp_use_fast_atr_switch.value),
+                "fast_atr_length": int(tp_fast_atr_length_input.value or 4),
             }
             _launcher_cfg["strategies"] = _strategies_cfg
             config["launcher"] = _launcher_cfg

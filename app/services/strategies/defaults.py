@@ -323,6 +323,13 @@ DEFAULT_TREND_PULLBACK: dict[str, Any] = {
     "atr_sl_multiplier": 1.5,
     # Adaptive ATR applies to SIZING only (never the min_atr_pct gate).
     "use_adaptive_atr": False,
+    # Fast-ATR sizing (default OFF): cap the SIZING ATR by a short-lookback ATR%
+    # so TP/SL track the *current* realized range instead of a lagging 14-bar ATR
+    # that stays elevated for ~3.5h after a coin goes quiet.  Only ever tightens
+    # (min(slow, fast)) — never widens.  Applied to sizing only, never the
+    # min_atr_pct gate or the proximity/extension checks.
+    "use_fast_atr": False,
+    "fast_atr_length": 4,
     "min_atr_pct": 1.0,
     # R:R floor raised to 1.5 so structurally sub-1.5 exits are rejected, not
     # silently degraded.
@@ -346,6 +353,17 @@ DEFAULT_TREND_PULLBACK: dict[str, Any] = {
     "require_min_volume": False,
     "min_volume_ratio": 0.7,
     "volume_lookback": 20,
+    # Volume-deceleration gate (default OFF): blocks entries when volume has
+    # been *trending down* into the pullback — mean(recent N bars) / mean(prior
+    # M bars) < min_volume_decel_ratio.  Unlike ``require_min_volume`` (a
+    # point-in-time single-candle veto), this detects the "activity is over"
+    # regime: a coin hot a few hours ago, now quiet — the dominant cause of
+    # wide-TP / unreachable-target stop-outs (Step-0 diagnostic: stop-out cohort
+    # volDecel=0.64 vs TP cohort 0.90).
+    "require_volume_deceleration": False,
+    "min_volume_decel_ratio": 0.7,
+    "volume_decel_recent_bars": 4,
+    "volume_decel_prior_bars": 16,
     # Completed pullback gate (default OFF): a mere level touch (via wick) is not
     # enough — the candle must *close* back above (longs) or below (shorts) the
     # pullback level to confirm the pullback completion. Rejects pullbacks that

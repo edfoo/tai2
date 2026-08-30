@@ -21,7 +21,11 @@ from typing import Any
 
 from . import StrategyHelpers, StrategySignal, resolve_analysis_block
 from .defaults import DEFAULT_TREND_PULLBACK, merged_config
-from .liquidity_helpers import volume_participation_ok
+from .liquidity_helpers import (
+    fast_atr_pct,
+    volume_deceleration_ok,
+    volume_participation_ok,
+)
 
 
 class TrendPullbackStrategy:
@@ -205,6 +209,20 @@ class TrendPullbackStrategy:
             min_volume_ratio = 0.7
         _vol_lookback = helpers.extract_float(cfg.get("volume_lookback"))
         volume_lookback = int(_vol_lookback) if _vol_lookback is not None else 20
+        # ── Volume-deceleration gate ─────────────────────────────────
+        # Blocks entries when volume has been trending DOWN into the pullback
+        # (mean recent bars / mean prior bars < min_volume_decel_ratio).  This is
+        # the multi-bar "activity is over" discriminator — the dominant cause of
+        # wide-TP / unreachable-target stop-outs on coins that were hot a few
+        # hours ago and have since gone quiet.
+        require_volume_deceleration = bool(cfg.get("require_volume_deceleration", False))
+        min_volume_decel_ratio = helpers.extract_float(cfg.get("min_volume_decel_ratio"))
+        if min_volume_decel_ratio is None:
+            min_volume_decel_ratio = 0.7
+        _decel_recent = helpers.extract_float(cfg.get("volume_decel_recent_bars"))
+        volume_decel_recent = int(_decel_recent) if _decel_recent is not None else 4
+        _decel_prior = helpers.extract_float(cfg.get("volume_decel_prior_bars"))
+        volume_decel_prior = int(_decel_prior) if _decel_prior is not None else 16
         # ── Completed pullback gate ──────────────────────────────────
         # A mere level touch (wick) is not enough — price must *close* back
         # above (longs) or below (shorts) the pullback level to confirm the
@@ -253,6 +271,23 @@ class TrendPullbackStrategy:
                     f"(volume participation: ratio={vol_ratio:.2f} < min={min_volume_ratio:.2f})"
                     if vol_ratio is not None else
                     f"TrendPullback: {symbol} — no signal (volume data unavailable)"
+                )
+                return None
+
+        # ── Volume-deceleration gate ────────────────────────────────
+        if require_volume_deceleration:
+            decel_ok, decel_ratio = volume_deceleration_ok(
+                indicators,
+                min_ratio=min_volume_decel_ratio,
+                recent_bars=volume_decel_recent,
+                prior_bars=volume_decel_prior,
+            )
+            if not decel_ok:
+                helpers.emit_debug(
+                    f"TrendPullback: {symbol} — no signal "
+                    f"(volume deceleration: ratio={decel_ratio:.2f} < min={min_volume_decel_ratio:.2f})"
+                    if decel_ratio is not None else
+                    f"TrendPullback: {symbol} — no signal (volume series too short)"
                 )
                 return None
 
@@ -547,6 +582,17 @@ class TrendPullbackStrategy:
                 sizing_atr_pct *= 1.80
             else:
                 sizing_atr_pct *= 2.50
+
+        # Fast-ATR sizing: cap the SIZING ATR by a short-lookback ATR% so TP/SL
+        # track the *current* realized range instead of a lagging 14-bar ATR that
+        # stays elevated for ~3.5h after a coin goes quiet.  min(slow, fast) —
+        # only ever tightens, never widens.  Sizing only.
+        if cfg.get("use_fast_atr", False):
+            _fast_len = helpers.extract_float(cfg.get("fast_atr_length"))
+            fast_len = int(_fast_len) if _fast_len is not None else 4
+            _fast = fast_atr_pct(indicators.get("ohlcv") or [], length=fast_len)
+            if _fast is not None and _fast > 0:
+                sizing_atr_pct = min(sizing_atr_pct, _fast)
 
         # Thesis-specific structural levels: TP at the nearest swing high/low
         # beyond price, SL anchored to structural invalidation (Fix 6).
