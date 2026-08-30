@@ -18,9 +18,11 @@ from app.services.market_service import MarketService
 from app.services.indicator_service import htf_regime_allows, is_trending
 from app.services.strategies import StrategyHelpers
 from app.services.strategies.liquidity_helpers import (
+    fast_atr_pct,
     funding_is_blocked,
     oi_confirms_momentum,
     order_book_imbalance,
+    volume_deceleration_ok,
 )
 from app.services.strategies.liquidity_sweep import LiquiditySweepStrategy
 from app.services.strategies.mean_reversion import MeanReversionStrategy
@@ -213,6 +215,133 @@ class TestLiquidityHelpers:
         )
         assert ok is True
         assert info["method"] == "zscore"
+
+
+# ── Volume-deceleration gate + fast-ATR helpers (Step 0/1) ──────────────────
+
+
+class TestVolumeDeceleration:
+    """Unit tests for the multi-bar volume-deceleration gate.
+
+    ``volume_deceleration_ok`` vetoes entries when volume has been trending
+    *down* into the pullback — ``mean(recent bars) / mean(prior bars)`` below
+    ``min_ratio``.  This detects the "coin was hot, now quiet" regime that
+    leaves a wide TP unreachable, complementing the point-in-time
+    ``volume_participation_ok`` veto.
+    """
+
+    @staticmethod
+    def _series(volumes: list[float]) -> dict[str, Any]:
+        return {"volume": {"series": volumes}}
+
+    def test_neutral_when_missing(self) -> None:
+        ok, ratio = volume_deceleration_ok({})
+        assert ok is True
+        assert ratio is None
+
+    def test_neutral_when_series_too_short(self) -> None:
+        # Needs recent_bars + prior_bars = 4 + 16 = 20 values.
+        ok, ratio = volume_deceleration_ok(self._series([1.0] * 19))
+        assert ok is True
+        assert ratio is None
+
+    def test_neutral_when_prior_average_zero(self) -> None:
+        # 16 zero prior bars → degenerate, must pass (not divide by zero).
+        vols = [0.0] * 16 + [1.0] * 4
+        ok, ratio = volume_deceleration_ok(self._series(vols))
+        assert ok is True
+
+    def test_blocks_decaying_volume(self) -> None:
+        # Prior 16 bars avg ~100, recent 4 avg ~50 → ratio 0.5 < min 0.7.
+        vols = [100.0] * 16 + [50.0] * 4
+        ok, ratio = volume_deceleration_ok(self._series(vols), min_ratio=0.7)
+        assert ok is False
+        assert ratio is not None and ratio == 0.5
+
+    def test_allows_rising_volume(self) -> None:
+        # Recent 4 avg 200 vs prior 16 avg 100 → ratio 2.0 ≥ min 0.7.
+        vols = [100.0] * 16 + [200.0] * 4
+        ok, ratio = volume_deceleration_ok(self._series(vols), min_ratio=0.7)
+        assert ok is True
+        assert ratio is not None and ratio == 2.0
+
+    def test_skips_non_positive_values(self) -> None:
+        # Zero/negative values are filtered out before averaging.
+        vols = [100.0] * 14 + [0.0, -1.0] + [100.0] * 2 + [50.0] * 4
+        # 14 valid prior + 2 valid prior (the 0/-1 filtered) = 16 prior @ 100;
+        # recent 4 @ 50 → ratio 0.5.
+        ok, ratio = volume_deceleration_ok(self._series(vols), min_ratio=0.7)
+        assert ok is False
+        assert ratio == 0.5
+
+    def test_custom_window_sizes(self) -> None:
+        # recent_bars=2, prior_bars=4 → need 6 values.
+        vols = [100.0] * 4 + [30.0] * 2  # prior avg 100, recent avg 30 → 0.3
+        ok, ratio = volume_deceleration_ok(
+            self._series(vols), min_ratio=0.7, recent_bars=2, prior_bars=4
+        )
+        assert ok is False
+        assert ratio == 0.3
+
+
+class TestFastAtrPct:
+    """Unit tests for the short-lookback ATR% helper used by fast-ATR sizing."""
+
+    @staticmethod
+    def _candle(ts: int, open_: float, high: float, low: float, close: float) -> dict[str, Any]:
+        return {"ts": ts, "open": open_, "high": high, "low": low, "close": close, "volume": 1.0}
+
+    def test_neutral_when_empty(self) -> None:
+        assert fast_atr_pct([]) is None
+        assert fast_atr_pct([], length=4) is None
+
+    def test_single_candle_is_neutral(self) -> None:
+        # One candle gives no prior close → no true-range bars → None.
+        candles = [self._candle(0, 100.0, 101.0, 99.0, 100.0)]
+        assert fast_atr_pct(candles, length=4) is None
+
+    def test_degrades_with_fewer_than_window(self) -> None:
+        # Fewer candles than length + 1 still yields a value (uses what's there).
+        candles = [self._candle(i, 100.0, 101.0, 99.0, 100.0) for i in range(3)]
+        atr = fast_atr_pct(candles, length=4)
+        assert atr is not None
+        assert atr > 0
+
+    def test_constant_range_atr(self) -> None:
+        # Every candle: high-low = 2.0, and closes match highs/lows so the
+        # gap terms never dominate → true range = 2.0 each bar.
+        candles = []
+        prev_close = 100.0
+        for i in range(5):
+            candles.append(self._candle(i, prev_close, prev_close + 2.0, prev_close, prev_close + 1.0))
+            prev_close = prev_close + 1.0
+        # 5 candles, closes 101..105 → high-low=2.0 each bar, gaps 0. ATR=2.0,
+        # last close=105 → ATR% = 2/105*100 ≈ 1.9048%.
+        atr = fast_atr_pct(candles, length=4)
+        assert atr is not None
+        assert abs(atr - (2.0 / 105.0 * 100.0)) < 1e-6
+
+    def test_gap_dominates_true_range(self) -> None:
+        # A single gap up should be captured by the |high - prev_close| term.
+        candles = [
+            self._candle(0, 100.0, 100.0, 100.0, 100.0),
+            self._candle(1, 100.0, 110.0, 100.0, 110.0),  # gap + big range
+        ]
+        # length=1 → window = last 2 candles; one TR from candle 1.
+        atr = fast_atr_pct(candles, length=1)
+        assert atr is not None
+        # TR = max(high-low=10, |high-prev_close|=10, |low-prev_close|=0) = 10.
+        assert abs(atr - (10.0 / 110.0 * 100.0)) < 1e-6
+
+    def test_returns_percent_scale(self) -> None:
+        # Sanity: a 1% ATR on a 100-price series is ~1.0, not 100.0.
+        candles = [
+            self._candle(i, 100.0, 101.0, 99.0, 100.0) for i in range(6)
+        ]
+        atr = fast_atr_pct(candles, length=4)
+        assert atr is not None
+        # TR ≈ 2.0 (range) vs prev close ~100 → ~2%.
+        assert 1.5 < atr < 2.5
 
 
 # ── HTF regime preference helper ───────────────────────────────────────────
