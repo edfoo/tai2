@@ -99,6 +99,10 @@ class TrendPullbackStrategy:
         "from_long" (only BUY→SELL), "from_short" (only SELL→BUY),
         or None to disable. TP/SL are mirrored around last_price so
         they land on the correct side for the flipped direction.
+      - ``flip_tp_sl`` (bool, default False): when the direction is
+        flipped, swap the TP and SL distances from entry (the old TP
+        distance becomes the new SL distance and vice versa) instead
+        of mirroring them symmetrically around entry.
     """
 
     name = "trend_pullback"

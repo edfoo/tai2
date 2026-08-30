@@ -5057,6 +5057,17 @@ def register_pages(app: FastAPI) -> None:
                                 label="Flip direction",
                             ).classes("w-40").props("dense")
                             ui.label("Invert the Launcher's trade direction before execution.").classes("text-xs text-slate-500")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            tp_flip_tp_sl_switch = ui.switch(
+                                "Flip TP/SL distances on flip",
+                                value=bool(_tp_cfg.get("flip_tp_sl", False)),
+                            ).props("dense color=amber")
+                            ui.label(
+                                "When the Launcher decision is flipped, swap the TP and SL distances "
+                                "from entry (old TP distance becomes the new SL distance and vice versa) "
+                                "instead of mirroring them symmetrically. Inverts the R:R geometry of the "
+                                "flipped trade."
+                            ).classes("text-xs text-slate-500")
                     _active_badge_tp = ui.badge("Active", color="positive").bind_visibility_from(
                         tp_enabled_switch, "value"
                     )
@@ -5094,6 +5105,7 @@ def register_pages(app: FastAPI) -> None:
                 _flip = d["flip_launcher_direction"]
                 tp_flip_switch.value = _flip is not None
                 tp_flip_select.value = _flip
+                tp_flip_tp_sl_switch.value = d["flip_tp_sl"]
                 tp_require_poc_prox_switch.value = d["require_poc_proximity"]
                 tp_poc_prox_width_input.value = d["poc_proximity_va_width"]
                 tp_require_min_vol_switch.value = d["require_min_volume"]
@@ -6268,6 +6280,7 @@ def register_pages(app: FastAPI) -> None:
                     float(tp_min_rr_input.value) if tp_min_rr_input.value not in (None, "") else None
                 ),
                 "flip_launcher_direction": str(tp_flip_select.value) if tp_flip_switch.value else None,
+                "flip_tp_sl": bool(tp_flip_tp_sl_switch.value),
                 "require_poc_proximity": bool(tp_require_poc_prox_switch.value),
                 "poc_proximity_va_width": float(tp_poc_prox_width_input.value or 0.2),
                 "require_min_volume": bool(tp_require_min_vol_switch.value),

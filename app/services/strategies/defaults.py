@@ -335,6 +335,11 @@ DEFAULT_TREND_PULLBACK: dict[str, Any] = {
     # silently degraded.
     "min_reward_risk_ratio": 1.5,
     "flip_launcher_direction": None,
+    # When the Launcher direction is flipped, swap the TP and SL distances from
+    # entry (old TP distance becomes the new SL distance and vice versa) instead
+    # of mirroring them symmetrically around entry.  This inverts the R:R
+    # geometry of the flipped trade rather than preserving it.
+    "flip_tp_sl": False,
     # Per-strategy analysis timeframe. Trend pullbacks execute at 15m, so the
     # pullback level, candle confirmation, and ATR% are all 15m values (Fix 3).
     "analysis_timeframe": "15m",

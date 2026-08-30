@@ -4135,8 +4135,22 @@ class MarketService:
                         orig_action = action
                         action = "SELL" if action == "BUY" else "BUY"
                         if last_price and last_price > 0:
-                            tp_price = round(2 * last_price - tp_price, 10) if tp_price else None
-                            sl_price = round(2 * last_price - sl_price, 10) if sl_price else None
+                            if bool(_flip_cfg.get("flip_tp_sl", False)):
+                                # Swap TP/SL distances instead of mirroring:
+                                # the old TP distance becomes the new SL distance
+                                # and vice versa.  This inverts the R:R geometry of
+                                # the flipped trade rather than preserving it.
+                                tp_dist = abs(tp_price - last_price) if tp_price else None
+                                sl_dist = abs(sl_price - last_price) if sl_price else None
+                                if action == "BUY":
+                                    tp_price = round(last_price + sl_dist, 10) if sl_dist is not None else None
+                                    sl_price = round(last_price - tp_dist, 10) if tp_dist is not None else None
+                                else:
+                                    tp_price = round(last_price - sl_dist, 10) if sl_dist is not None else None
+                                    sl_price = round(last_price + tp_dist, 10) if tp_dist is not None else None
+                            else:
+                                tp_price = round(2 * last_price - tp_price, 10) if tp_price else None
+                                sl_price = round(2 * last_price - sl_price, 10) if sl_price else None
                         self._emit_debug(
                             f"Launcher flip ({flip_dir}): {symbol} {orig_action} → {action} "
                             f"tp={tp_price} sl={sl_price}"
