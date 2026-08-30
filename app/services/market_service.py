@@ -4123,6 +4123,11 @@ class MarketService:
                 _flip_cfg = (gov.get("strategies") or {}).get("trend_pullback") or {}
             elif signal.strategy_name == "spike_continuation":
                 _flip_cfg = (gov.get("strategies") or {}).get("spike_continuation") or {}
+            # When flip_tp_sl is active, the TP/SL distances are swapped and the
+            # resulting trade is deliberately inverted-R:R (taking the small
+            # profit where it would normally stop out).  We flag that trade so the
+            # execution R:R guardrail is bypassed for it and it only.
+            _flip_tp_sl_active = False
             if _flip_cfg:
                 flip_dir = str(_flip_cfg.get("flip_launcher_direction") or "").strip().lower()
                 if flip_dir in ("both", "from_long", "from_short"):
@@ -4136,6 +4141,7 @@ class MarketService:
                         action = "SELL" if action == "BUY" else "BUY"
                         if last_price and last_price > 0:
                             if bool(_flip_cfg.get("flip_tp_sl", False)):
+                                _flip_tp_sl_active = True
                                 # Swap TP/SL distances instead of mirroring:
                                 # the old TP distance becomes the new SL distance
                                 # and vice versa.  This inverts the R:R geometry of
@@ -4173,6 +4179,7 @@ class MarketService:
                 "_decision_origin": "launcher",
                 "_strategy_name": signal.strategy_name,
                 "_disable_protection": _disable_protection,
+                "_skip_rr_guard": _flip_tp_sl_active,
             })
 
         return decisions
@@ -10453,8 +10460,17 @@ class MarketService:
         _require_rr = bool(guardrails.get("require_reward_risk_ratio", True))
         if _is_launcher_decision:
             _require_rr = True
+        # A launcher trade flagged with _skip_rr_guard (flip_tp_sl swap active)
+        # is deliberately inverted-R:R: the user is taking the small profit where
+        # it would normally stop out.  Bypass the R:R guardrail for it and it only.
+        _skip_rr = bool(decision.get("_skip_rr_guard"))
+        if _skip_rr:
+            self._emit_debug(
+                f"{symbol}: flip_tp_sl active — bypassing R:R guardrail for this trade"
+            )
         if (
             _require_rr
+            and not _skip_rr
             and not reduce_only
             and take_profit_price
             and isinstance(take_profit_price, (int, float))
