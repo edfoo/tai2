@@ -64,12 +64,12 @@ _SIGNAL_RE = re.compile(
     r"tp=([0-9.eE+-]+) sl=([0-9.eE+-]+)"
 )
 
-# Peak-favorable-excursion line from profit-trailing supervision.
-# Emitted by the Alternator strategy (trailing profit/close) and by the
-# TradeMgmt supervision loop (peak PnL tracking).  The TradeMgmt line also
-# carries trough (worst unfavorable) excursion values.
+# Peak/trough excursion line emitted by the TradeMgmt supervision loop.
+# Only the TradeMgmt lines carry trough (worst unfavorable) values; the
+# Alternator trailing-close/profit lines use a *separate* peak tracker and
+# have no trough fields, so we deliberately do NOT match those here.
 _PEAK_EXCURSION_RE = re.compile(
-    r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}).*(?:Alternator|TradeMgmt): "
+    r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}).*TradeMgmt: "
     r"([A-Z0-9-]+-USDT-SWAP).*peak_pct=([0-9.eE+-]+|None) current_pct=([0-9.eE+-]+|None) "
     r"peak_usd=([0-9.eE+-]+|None) current_usd=([0-9.eE+-]+|None)"
     r"(?: trough_pct=([0-9.eE+-]+|None) trough_usd=([0-9.eE+-]+|None))?"
@@ -82,12 +82,12 @@ _CLEARED_RE = re.compile(
     r"([A-Z0-9-]+-USDT-SWAP) cleared \((\w+)\)"
 )
 
-# TradeMgmt seeded line:
+# TradeMgmt seeded line (tp/sl/risk_pct may be None on auto-seeded entries):
 #   ...TradeMgmt: seeded SATS-USDT-SWAP side=long entry=... tp=... sl=... risk_pct=...
 _SEEDED_RE = re.compile(
     r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}).*TradeMgmt: seeded "
     r"([A-Z0-9-]+-USDT-SWAP) side=(\w+) entry=([0-9.eE+-]+) "
-    r"tp=([0-9.eE+-]+) sl=([0-9.eE+-]+) risk_pct=([0-9.]+)"
+    r"tp=([0-9.eE+-]+|None) sl=([0-9.eE+-]+|None) risk_pct=([0-9.]+|None)"
 )
 
 # R:R guardrail block:
@@ -153,9 +153,9 @@ class SeededEntry:
     symbol: str
     side: str
     entry: float
-    tp: float
-    sl: float
-    risk_pct: float
+    tp: Optional[float]
+    sl: Optional[float]
+    risk_pct: Optional[float]
 
 
 @dataclass
@@ -247,10 +247,20 @@ def parse_logs(files: list[Path]) -> tuple[list[PnLTrade], list[Signal], list[Se
     seeded: list[SeededEntry] = []
     cleared: list[ClearedEntry] = []
     summary = Summary()
-    active_peak_pct_by_symbol: dict[str, float] = {}
-    active_peak_usd_by_symbol: dict[str, float] = {}
-    active_trough_pct_by_symbol: dict[str, float] = {}
-    active_trough_usd_by_symbol: dict[str, float] = {}
+    # Per-symbol peak/trough excursion for the CURRENT trade window.  Reset on
+    # each ``TradeMgmt: seeded`` event (a fresh trade = a fresh window), NOT on
+    # the Launcher signal — a symbol can run several trades
+    # (seed → clear → seed → clear) with no intervening signal, so resetting on
+    # signal would leak one trade's excursion into the next.
+    excursion: dict[str, dict[str, Optional[float]]] = {}
+    # A reconciled PnL trade whose ``cleared`` event hasn't been seen yet.
+    # The reconcile can arrive just before cleared, so we hold it and back-fill
+    # the final excursion when cleared fires.
+    open_trade_by_symbol: dict[str, PnLTrade] = {}
+    # Final excursion of a just-cleared trade whose reconcile hasn't arrived
+    # yet (cleared can precede reconcile by ~1s).  Consumed by the next
+    # reconcile for that symbol.
+    closed_excursion_by_symbol: dict[str, dict[str, Optional[float]]] = {}
     # Deduplicate realized PnL by OKX fill id: the same closing fill is often
     # reconciled against multiple unreconciled trades, so only the FIRST
     # occurrence of each fill id should count as a real trade.
@@ -263,6 +273,13 @@ def parse_logs(files: list[Path]) -> tuple[list[PnLTrade], list[Signal], list[Se
             return float(raw)
         except ValueError:
             return None
+
+    def _apply_excursion(trade: PnLTrade, exc: dict[str, Optional[float]]) -> None:
+        """Back-fill a PnL trade with the final peak/trough excursion values."""
+        trade.mfe_peak_pct = exc.get("peak_pct")
+        trade.mfe_peak_usd = exc.get("peak_usd")
+        trade.mae_trough_pct = exc.get("trough_pct")
+        trade.mae_trough_usd = exc.get("trough_usd")
 
     def _track_period(ts: str) -> None:
         """Expand the covered time window to include ``ts``."""
@@ -288,18 +305,22 @@ def parse_logs(files: list[Path]) -> tuple[list[PnLTrade], list[Signal], list[Se
                     continue
                 seen_fills.add(fill_id)
                 _track_period(m.group(1))
-                pnl_trades.append(
-                    PnLTrade(
-                        ts=m.group(1),
-                        symbol=symbol,
-                        pnl=float(m.group(3)),
-                        fill_id=fill_id,
-                        mfe_peak_pct=active_peak_pct_by_symbol.pop(symbol, None),
-                        mfe_peak_usd=active_peak_usd_by_symbol.pop(symbol, None),
-                        mae_trough_pct=active_trough_pct_by_symbol.pop(symbol, None),
-                        mae_trough_usd=active_trough_usd_by_symbol.pop(symbol, None),
-                    )
+                trade = PnLTrade(
+                    ts=m.group(1),
+                    symbol=symbol,
+                    pnl=float(m.group(3)),
+                    fill_id=fill_id,
                 )
+                # If the trade already closed (cleared fired first), its final
+                # excursion is buffered — back-fill it now.
+                closed = closed_excursion_by_symbol.pop(symbol, None)
+                if closed is not None:
+                    _apply_excursion(trade, closed)
+                else:
+                    # Reconcile arrived before cleared: hold it and back-fill
+                    # the final excursion when cleared fires.
+                    open_trade_by_symbol[symbol] = trade
+                pnl_trades.append(trade)
                 continue
             # Signal
             m = _SIGNAL_RE.search(line)
@@ -317,10 +338,6 @@ def parse_logs(files: list[Path]) -> tuple[list[PnLTrade], list[Signal], list[Se
                 signals.append(sig)
                 _track_period(sig.ts)
                 summary.strat_signals[sig.strategy] += 1
-                active_peak_pct_by_symbol.pop(sig.symbol, None)
-                active_peak_usd_by_symbol.pop(sig.symbol, None)
-                active_trough_pct_by_symbol.pop(sig.symbol, None)
-                active_trough_usd_by_symbol.pop(sig.symbol, None)
                 continue
             # Peak favorable excursion (and trough unfavorable excursion)
             m = _PEAK_EXCURSION_RE.search(line)
@@ -331,47 +348,69 @@ def parse_logs(files: list[Path]) -> tuple[list[PnLTrade], list[Signal], list[Se
                 peak_usd = _parse_optional_float(m.group(5))
                 trough_pct = _parse_optional_float(m.group(7))
                 trough_usd = _parse_optional_float(m.group(8))
+                exc = excursion.setdefault(
+                    symbol,
+                    {
+                        "peak_pct": None,
+                        "peak_usd": None,
+                        "trough_pct": None,
+                        "trough_usd": None,
+                    },
+                )
                 if peak_pct is not None:
-                    active_peak_pct_by_symbol[symbol] = max(
-                        active_peak_pct_by_symbol.get(symbol, peak_pct), peak_pct
-                    )
+                    cur = exc["peak_pct"]
+                    exc["peak_pct"] = peak_pct if cur is None else max(cur, peak_pct)
                 if peak_usd is not None:
-                    active_peak_usd_by_symbol[symbol] = max(
-                        active_peak_usd_by_symbol.get(symbol, peak_usd), peak_usd
-                    )
+                    cur = exc["peak_usd"]
+                    exc["peak_usd"] = peak_usd if cur is None else max(cur, peak_usd)
                 if trough_pct is not None:
-                    active_trough_pct_by_symbol[symbol] = min(
-                        active_trough_pct_by_symbol.get(symbol, trough_pct), trough_pct
-                    )
+                    cur = exc["trough_pct"]
+                    exc["trough_pct"] = trough_pct if cur is None else min(cur, trough_pct)
                 if trough_usd is not None:
-                    active_trough_usd_by_symbol[symbol] = min(
-                        active_trough_usd_by_symbol.get(symbol, trough_usd), trough_usd
-                    )
+                    cur = exc["trough_usd"]
+                    exc["trough_usd"] = trough_usd if cur is None else min(cur, trough_usd)
                 continue
             # Seeded
             m = _SEEDED_RE.search(line)
             if m:
+                symbol = m.group(2)
                 seeded.append(
                     SeededEntry(
                         ts=m.group(1),
-                        symbol=m.group(2),
+                        symbol=symbol,
                         side=m.group(3),
                         entry=float(m.group(4)),
-                        tp=float(m.group(5)),
-                        sl=float(m.group(6)),
-                        risk_pct=float(m.group(7)),
+                        tp=_parse_optional_float(m.group(5)),
+                        sl=_parse_optional_float(m.group(6)),
+                        risk_pct=_parse_optional_float(m.group(7)),
                     )
                 )
                 _track_period(m.group(1))
                 summary.seeded_count += 1
+                # A new trade begins: reset the excursion window and drop any
+                # pending open/closed trade state for this symbol.
+                excursion.pop(symbol, None)
+                open_trade_by_symbol.pop(symbol, None)
+                closed_excursion_by_symbol.pop(symbol, None)
                 continue
             # Cleared
             m = _CLEARED_RE.search(line)
             if m:
                 reason = m.group(3)
-                cleared.append(ClearedEntry(ts=m.group(1), symbol=m.group(2), reason=reason))
+                symbol = m.group(2)
+                cleared.append(ClearedEntry(ts=m.group(1), symbol=symbol, reason=reason))
                 _track_period(m.group(1))
                 summary.cleared_reasons[reason] += 1
+                # The trade closes here: freeze the final excursion and either
+                # back-fill an already-reconciled PnL or buffer it for the
+                # reconcile that is about to arrive.
+                exc = excursion.get(symbol)
+                final_exc = dict(exc) if exc is not None else None
+                open_trade = open_trade_by_symbol.pop(symbol, None)
+                if open_trade is not None and final_exc is not None:
+                    _apply_excursion(open_trade, final_exc)
+                elif final_exc is not None:
+                    closed_excursion_by_symbol[symbol] = final_exc
                 continue
             # R:R block
             if _RR_BLOCK_RE.search(line):
@@ -446,7 +485,7 @@ def _compute_slippage(
                 if best_sig is None or s.ts > best_sig.ts:
                     best_sig = s
 
-        if best_seed is not None and best_seed.entry > 0:
+        if best_seed is not None and best_seed.entry > 0 and best_seed.sl is not None:
             entry = best_seed.entry
             sl = best_seed.sl
             tp = best_seed.tp
