@@ -4128,6 +4128,7 @@ class MarketService:
             # profit where it would normally stop out).  We flag that trade so the
             # execution R:R guardrail is bypassed for it and it only.
             _flip_tp_sl_active = False
+            _flipped = False
             if _flip_cfg:
                 flip_dir = str(_flip_cfg.get("flip_launcher_direction") or "").strip().lower()
                 if flip_dir in ("both", "from_long", "from_short"):
@@ -4137,6 +4138,7 @@ class MarketService:
                         or (flip_dir == "from_short" and action == "SELL")
                     )
                     if should_flip:
+                        _flipped = True
                         orig_action = action
                         action = "SELL" if action == "BUY" else "BUY"
                         if last_price and last_price > 0:
@@ -4164,7 +4166,8 @@ class MarketService:
 
             self._emit_debug(
                 f"Launcher signal: {symbol} {action} [{signal.strategy_name}] "
-                f"last={last_price} notional={notional_usd} tp={tp_price} sl={sl_price} [{dynamic_tp_source}]"
+                f"last={last_price} notional={notional_usd} tp={tp_price} sl={sl_price} "
+                f"flipped={_flipped} flip_tp_sl={_flip_tp_sl_active} [{dynamic_tp_source}]"
             )
 
             decisions.append({

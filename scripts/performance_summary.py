@@ -62,6 +62,7 @@ _SIGNAL_RE = re.compile(
     r"([A-Z0-9-]+-USDT-SWAP) (BUY|SELL) \[(\w+)\] "
     r"last=([0-9.eE+-]+) notional=([0-9.]+) "
     r"tp=([0-9.eE+-]+) sl=([0-9.eE+-]+)"
+    r"(?: flipped=(True|False))?(?: flip_tp_sl=(True|False))?"
 )
 
 # Peak/trough excursion line emitted by the TradeMgmt supervision loop.
@@ -145,6 +146,8 @@ class Signal:
     notional: float
     tp: float
     sl: float
+    flipped: bool = False
+    flip_tp_sl: bool = False
 
 
 @dataclass
@@ -198,6 +201,14 @@ class Summary:
     # Guardrails
     rr_blocks: int = 0
     align_blocks: int = 0
+    # Flipped-direction trades (experimental flip_launcher_direction)
+    flipped_signals: int = 0
+    flipped_trades: int = 0
+    flipped_wins: int = 0
+    flipped_losses: int = 0
+    flipped_pnl: float = 0.0
+    flip_tp_sl_trades: int = 0
+    flip_tp_sl_pnl: float = 0.0
     # SL slippage
     slippage_trades: list[dict] = field(default_factory=list)
     # Losing trades with observed peak favorable excursion
@@ -334,10 +345,14 @@ def parse_logs(files: list[Path]) -> tuple[list[PnLTrade], list[Signal], list[Se
                     notional=float(m.group(6)),
                     tp=float(m.group(7)),
                     sl=float(m.group(8)),
+                    flipped=m.group(9) == "True",
+                    flip_tp_sl=m.group(10) == "True",
                 )
                 signals.append(sig)
                 _track_period(sig.ts)
                 summary.strat_signals[sig.strategy] += 1
+                if sig.flipped:
+                    summary.flipped_signals += 1
                 continue
             # Peak favorable excursion (and trough unfavorable excursion)
             m = _PEAK_EXCURSION_RE.search(line)
@@ -565,6 +580,16 @@ def build_summary(
         summary.strat_trades[strat] += 1
         summary.strat_pnl[strat] += trade.pnl
         best_sig = _most_recent_signal(trade.symbol, trade.ts, signals)
+        if best_sig is not None and best_sig.flipped:
+            summary.flipped_trades += 1
+            summary.flipped_pnl += trade.pnl
+            if trade.pnl > 0:
+                summary.flipped_wins += 1
+            else:
+                summary.flipped_losses += 1
+            if best_sig.flip_tp_sl:
+                summary.flip_tp_sl_trades += 1
+                summary.flip_tp_sl_pnl += trade.pnl
         if trade.pnl > 0:
             summary.strat_wins[strat] += 1
             # Take-profits with trough unfavorable excursion: flag winning
@@ -710,6 +735,21 @@ def print_report(summary: Summary) -> None:
     print(f"  Position-alignment blocks: {summary.align_blocks}")
     print()
 
+    # ── Flipped trades ──
+    print("── Flipped-direction trades (experimental) ─────────────────────")
+    print(f"  Flipped signals: {summary.flipped_signals}")
+    print(
+        f"  Flipped trades: {summary.flipped_trades}   "
+        f"Wins: {summary.flipped_wins}   Losses: {summary.flipped_losses}   "
+        f"Win rate: {_fmt_pct(summary.flipped_wins, summary.flipped_trades)}   "
+        f"Net PnL: {summary.flipped_pnl:+.4f} USDT"
+    )
+    print(
+        f"  flip_tp_sl trades: {summary.flip_tp_sl_trades}   "
+        f"Net PnL: {summary.flip_tp_sl_pnl:+.4f} USDT"
+    )
+    print()
+
     # ── SL slippage ──
     print("── SL slippage (loss > 1.5x SL distance) ─────────────────────────")
     if summary.slippage_trades:
@@ -837,6 +877,18 @@ def summary_to_dict(summary: Summary) -> dict:
         "guardrails": {
             "rr_blocks": summary.rr_blocks,
             "align_blocks": summary.align_blocks,
+        },
+        "flipped": {
+            "signals": summary.flipped_signals,
+            "trades": summary.flipped_trades,
+            "wins": summary.flipped_wins,
+            "losses": summary.flipped_losses,
+            "win_rate_pct": round(summary.flipped_wins / summary.flipped_trades * 100, 2)
+            if summary.flipped_trades
+            else None,
+            "net_pnl_usdt": round(summary.flipped_pnl, 4),
+            "flip_tp_sl_trades": summary.flip_tp_sl_trades,
+            "flip_tp_sl_net_pnl_usdt": round(summary.flip_tp_sl_pnl, 4),
         },
         "sl_slippage": summary.slippage_trades,
         "stopout_peak_trades": summary.stopout_peak_trades,
