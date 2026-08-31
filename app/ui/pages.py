@@ -9267,21 +9267,11 @@ def register_pages(app: FastAPI) -> None:
                         "The grid is the Cartesian product of all rows."
                     ).classes("text-xs text-slate-500 mb-2")
 
-                    # Predefined parameter presets for quick selection.
-                    _SWEEP_PRESETS = {
-                        "MR RSI oversold": ("strategies.mean_reversion.rsi_oversold", "25, 30, 35, 40"),
-                        "MR max ADX": ("strategies.mean_reversion.max_adx", "20, 25, 30, 0"),
-                        # TP/SL are now optional – leave blank for dynamic sizing.
-                        "MR TP % (optional)": ("strategies.mean_reversion.tp_pct", ""),
-                        "MR SL % (optional)": ("strategies.mean_reversion.sl_pct", ""),
-                        "SC volume RSI min": ("strategies.spike_continuation.volume_rsi_min", "70, 75, 80, 85"),
-                        "SC max spike ext (ATR)": ("strategies.spike_continuation.max_spike_extension_atr", "1.0, 1.5, 2.0, 3.0"),
-                        "SC accel min ratio": ("strategies.spike_continuation.acceleration_min_ratio", "1.0, 1.2, 1.5, 2.0"),
-                        "SC TP %": ("strategies.spike_continuation.tp_pct", "3.0, 5.0, 7.0, 10.0"),
-                        "SC SL %": ("strategies.spike_continuation.sl_pct", "2.0, 3.0, 4.0, 5.0"),
-                        "Launcher TP %": ("tp_pct", "1.0, 2.0, 3.0, 5.0"),
-                        "Launcher SL %": ("sl_pct", "1.0, 2.0, 3.0, 4.0"),
-                    }
+                    # Predefined parameter presets for quick selection —
+                    # sourced from the shared sweep catalogue so the UI, CLI
+                    # scripts, and tests agree on a single set of options.
+                    from app.services.backtest.sweep_catalog import build_sweep_presets
+                    _SWEEP_PRESETS = build_sweep_presets()
 
                     # Dynamic list of sweep rows (key input + values input).
                     # Each row stores its NiceGUI container element so it can
@@ -9705,22 +9695,14 @@ def register_pages(app: FastAPI) -> None:
                 return
 
             # ── Parse sweep rows ────────────────────────────────────────
+            from app.services.backtest.sweep_catalog import parse_values_text
             params: list[GridParamDef] = []
             for row in sweep_rows:
                 key = (row["key_input"].value or "").strip()
                 values_str = (row["values_input"].value or "").strip()
                 if not key or not values_str:
                     continue
-                # Parse comma-separated values — try float, fall back to string.
-                parsed: list[Any] = []
-                for v in values_str.split(","):
-                    v = v.strip()
-                    if not v:
-                        continue
-                    try:
-                        parsed.append(float(v))
-                    except ValueError:
-                        parsed.append(v)
+                parsed = parse_values_text(values_str)
                 if parsed:
                     params.append(GridParamDef(key=key, values=parsed))
 

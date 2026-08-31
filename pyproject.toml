@@ -18,11 +18,12 @@ dependencies = [
     "httpx>=0.28.1",
     "pandas",
     "pytest",
+    "pytest-xdist",
     "openrouter",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest"]
+dev = ["pytest", "pytest-xdist"]
 
 [build-system]
 requires = ["hatchling"]
@@ -30,6 +31,15 @@ build-backend = "hatchling.build"
 
 [tool.uv]
 managed = true
+
+[tool.pytest.ini_options]
+# Run the test suite across all CPU cores by default. Tests are written
+# against isolated, dependency-free fixtures (no shared mutable state,
+# no module-level monkeypatching), so they are safe to distribute.
+addopts = "-n auto"
+markers = [
+    "network: tests that hit live external services (skipped by default)",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["app"]
