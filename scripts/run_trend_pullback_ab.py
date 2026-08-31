@@ -42,7 +42,13 @@ Run from the repo root with the project venv::
 
 Options mirror ``run_gate_ab_sweep.py`` plus:
 
-  --levers  fast_atr,vol_decel,both   (which variants to run; default all three)
+  --levers   fast_atr,vol_decel,both  (which variants to run; default all three)
+  --workers  N                        (parallel worker processes; default all cores)
+
+Runs are dispatched across ``--workers`` CPU processes (``ProcessPoolExecutor``),
+so a multi-symbol/multi-variant sweep finishes in a fraction of the single-core
+time.  Each worker spins up its own event loop and ``BacktestEngine``; OHLCV
+fetches are served from the shared on-disk cache so network work isn't repeated.
 
 Exit code 0 on success, 1 on error.
 """
@@ -52,8 +58,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
 import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -65,7 +73,7 @@ from app.services.backtest.engine import BacktestEngine  # noqa: E402
 from app.services.backtest.models import BacktestConfig, BacktestResult  # noqa: E402
 from app.services.backtest.persistence import (  # noqa: E402
     result_summary_row,
-    save_result,
+    result_to_dict,
     write_comparison_csv,
 )
 from app.services.strategies.defaults import strategy_defaults  # noqa: E402
@@ -157,36 +165,51 @@ async def run_one(
     return await engine.run()
 
 
-async def _run_and_record(
-    *,
-    summaries: list[dict[str, Any]],
-    OC: Path,
-    symbol: str,
-    ltf: str,
-    variant: str,
-    overrides: dict[str, Any],
-    start_ts: int,
-    end_ts: int,
-    capital: float,
-    warmup: int,
-    tag: str,
-) -> BacktestResult | None:
+def _save_result_json(result: BacktestResult, *, run_id: str, output_dir: Path) -> None:
+    """Persist the full result JSON + per-strategy breakdown.
+
+    Deliberately skips ``save_result``'s comparison.csv append: across N
+    worker processes that append is a read-modify-write race, so the parent
+    re-assembles the CSV once from the collected summaries.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / f"{run_id}_results.json").write_text(
+        json.dumps(result_to_dict(result), indent=2, default=str))
+    (output_dir / f"{run_id}_per_strategy.json").write_text(
+        json.dumps({"per_strategy": result.per_strategy, "metrics": result.metrics},
+                   indent=2, default=str))
+
+
+def _worker_job(job: dict[str, Any]) -> dict[str, Any]:
+    """Run one variant in a worker process and return its summary row.
+
+    Module-level (and thus picklable by reference) so it can be dispatched to
+    a ``ProcessPoolExecutor`` on another CPU core.
+    """
+    symbol = job["symbol"]
+    ltf = job["ltf"]
+    variant = job["variant"]
+    tag = job["tag"]
     try:
-        result = await run_one(
-            symbol=symbol, ltf=ltf, overrides=overrides,
-            start_ts=start_ts, end_ts=end_ts,
-            capital=capital, warmup=warmup,
-        )
+        result = asyncio.run(run_one(
+            symbol=symbol, ltf=ltf, overrides=job["overrides"],
+            start_ts=job["start_ts"], end_ts=job["end_ts"],
+            capital=job["capital"], warmup=job["warmup"],
+        ))
     except Exception as exc:  # noqa: BLE001
-        print(f"  ✗ errored: {exc}")
-        summaries.append({
+        print(f"  ✗ [{symbol} {ltf} {variant}] errored: {exc}")
+        return {
             "run_id": tag, "symbol": symbol, "ltf": ltf,
             "strategy": STRATEGY, "variant": variant, "error": str(exc),
-        })
-        return None
+        }
 
     if result.error:
-        print(f"  ⚠ engine error: {result.error}")
+        print(f"  ⚠ [{symbol} {ltf} {variant}] engine error: {result.error}")
+
+    try:
+        _save_result_json(result, run_id=tag, output_dir=Path(job["oc"]))
+    except Exception as exc:  # noqa: BLE001
+        print(f"  ⚠ [{symbol} {ltf} {variant}] persist failed: {exc}")
 
     htf = _htf_for(ltf)
     stop_out = _count_stop_out(result)
@@ -200,21 +223,13 @@ async def _run_and_record(
         "stop_out_count": stop_out,
         "timeout_count": timeout,
     })
-    summaries.append(summary)
-
-    try:
-        save_result(result, run_id=tag, output_dir=OC)
-    except Exception as exc:  # noqa: BLE001
-        print(f"  ⚠ persist failed: {exc}")
-
-    print(f"  ✓ trades={metrics.get('total_trades')} "
-          f"win={metrics.get('win_rate')} "
-          f"net={metrics.get('net_profit')} "
+    print(f"  ✓ [{symbol} {ltf} {variant}] trades={metrics.get('total_trades')} "
+          f"win={metrics.get('win_rate')} net={metrics.get('net_profit')} "
           f"stop_out={stop_out} timeout={timeout}")
-    return result
+    return summary
 
 
-async def _amain(args: argparse.Namespace) -> int:
+def _amain(args: argparse.Namespace) -> int:
     now = datetime.now(timezone.utc)
     run_tag = now.strftime("%Y%m%d_%H%M%S")
     OC = OUTPUT_DIR / run_tag
@@ -226,42 +241,51 @@ async def _amain(args: argparse.Namespace) -> int:
     summaries: list[dict[str, Any]] = []
     exit_code = 0
 
+    def job(tag: str, symbol: str, ltf: str, variant: str, overrides: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "tag": tag, "oc": str(OC), "symbol": symbol, "ltf": ltf,
+            "variant": variant, "overrides": overrides,
+            "start_ts": start_ts, "end_ts": end_ts,
+            "capital": args.capital, "warmup": args.warmup,
+        }
+
+    # ── Phase 0: baseline (both OFF) per symbol × timeframe, in parallel ──
+    baseline_jobs = [
+        (symbol, ltf, job(f"{run_tag}_{symbol}_{ltf}_baseline", symbol, ltf, "baseline", {}))
+        for symbol in args.symbols
+        for ltf in args.timeframes
+    ]
+    print(f"▶ Running {len(baseline_jobs)} baseline(s) across {args.workers} worker(s)...")
+    baseline: dict[tuple[str, str], dict[str, Any]] = {}
+    with ProcessPoolExecutor(max_workers=args.workers) as ex:
+        futures = {ex.submit(_worker_job, j): (s, l) for (s, l, j) in baseline_jobs}
+        for fut in as_completed(futures):
+            s, l = futures[fut]
+            row = fut.result()
+            summaries.append(row)
+            baseline[(s, l)] = row
+            if row.get("error"):
+                exit_code = 1
+
+    # ── Phases 1-3: variant jobs, only for combos passing min_trades ──
+    variant_jobs: list[dict[str, Any]] = []
     for symbol in args.symbols:
         for ltf in args.timeframes:
-            # ── 0. Baseline (both OFF) ────────────────────────────────
-            base_tag = f"{run_tag}_{symbol}_{ltf}_baseline"
-            print(f"▶ [baseline] [{symbol} {ltf}] both toggles OFF")
-            base = await _run_and_record(
-                summaries=summaries, OC=OC, symbol=symbol, ltf=ltf,
-                variant="baseline", overrides={},
-                start_ts=start_ts, end_ts=end_ts,
-                capital=args.capital, warmup=args.warmup, tag=base_tag,
-            )
-            if base is None:
-                exit_code = 1
+            base = baseline.get((symbol, ltf))
+            if base is None or base.get("error"):
                 continue
-            base_trades = (base.metrics or {}).get("total_trades", 0) or 0
+            base_trades = base.get("m_total_trades") or 0
             if base_trades < args.min_trades:
-                print(f"  ⏭  baseline has {base_trades} trade(s) < min_trades={args.min_trades}; "
-                      f"skipping variants for [{symbol} {ltf}]")
+                print(f"  ⏭  [{symbol} {ltf}] baseline has {base_trades} trade(s) "
+                      f"< min_trades={args.min_trades}; skipping variants")
                 continue
 
-            # ── 1. Fast-ATR sizing only ───────────────────────────────
             if "fast_atr" in args.levers:
                 for fast_len in args.fast_atr_lengths:
                     overrides = {"use_fast_atr": True, "fast_atr_length": fast_len}
                     tag = f"{run_tag}_{symbol}_{ltf}_fastatr{fast_len}"
-                    print(f"▶ [fast_atr] [{symbol} {ltf}] length={fast_len}")
-                    r = await _run_and_record(
-                        summaries=summaries, OC=OC, symbol=symbol, ltf=ltf,
-                        variant=f"fast_atr@{fast_len}", overrides=overrides,
-                        start_ts=start_ts, end_ts=end_ts,
-                        capital=args.capital, warmup=args.warmup, tag=tag,
-                    )
-                    if r is None:
-                        exit_code = 1
+                    variant_jobs.append(job(tag, symbol, ltf, f"fast_atr@{fast_len}", overrides))
 
-            # ── 2. Volume-deceleration filter only ────────────────────
             if "vol_decel" in args.levers:
                 for min_ratio in args.decel_ratios:
                     overrides = {
@@ -269,17 +293,8 @@ async def _amain(args: argparse.Namespace) -> int:
                         "min_volume_decel_ratio": min_ratio,
                     }
                     tag = f"{run_tag}_{symbol}_{ltf}_voldecel{min_ratio}"
-                    print(f"▶ [vol_decel] [{symbol} {ltf}] min_ratio={min_ratio}")
-                    r = await _run_and_record(
-                        summaries=summaries, OC=OC, symbol=symbol, ltf=ltf,
-                        variant=f"vol_decel@{min_ratio}", overrides=overrides,
-                        start_ts=start_ts, end_ts=end_ts,
-                        capital=args.capital, warmup=args.warmup, tag=tag,
-                    )
-                    if r is None:
-                        exit_code = 1
+                    variant_jobs.append(job(tag, symbol, ltf, f"vol_decel@{min_ratio}", overrides))
 
-            # ── 3. Both levers ────────────────────────────────────────
             if "both" in args.levers:
                 for min_ratio in args.decel_ratios:
                     for fast_len in args.fast_atr_lengths:
@@ -290,15 +305,16 @@ async def _amain(args: argparse.Namespace) -> int:
                             "fast_atr_length": fast_len,
                         }
                         tag = f"{run_tag}_{symbol}_{ltf}_both{min_ratio}_{fast_len}"
-                        print(f"▶ [both] [{symbol} {ltf}] decel={min_ratio} fast_atr={fast_len}")
-                        r = await _run_and_record(
-                            summaries=summaries, OC=OC, symbol=symbol, ltf=ltf,
-                            variant=f"both@{min_ratio}@{fast_len}", overrides=overrides,
-                            start_ts=start_ts, end_ts=end_ts,
-                            capital=args.capital, warmup=args.warmup, tag=tag,
-                        )
-                        if r is None:
-                            exit_code = 1
+                        variant_jobs.append(job(tag, symbol, ltf, f"both@{min_ratio}@{fast_len}", overrides))
+
+    if variant_jobs:
+        print(f"▶ Running {len(variant_jobs)} variant(s) across {args.workers} worker(s)...")
+        with ProcessPoolExecutor(max_workers=args.workers) as ex:
+            for fut in as_completed([ex.submit(_worker_job, j) for j in variant_jobs]):
+                row = fut.result()
+                summaries.append(row)
+                if row.get("error"):
+                    exit_code = 1
 
     csv_path = write_comparison_csv(summaries, output_dir=OUTPUT_DIR, append=False)
     overview_path = OUTPUT_DIR / OVERVIEW_FILENAME
@@ -313,12 +329,13 @@ async def _amain(args: argparse.Namespace) -> int:
     rank_key = args.rank_by
     for (symbol, ltf), runs in sorted(groups.items()):
         print(f"\n{symbol} {ltf}")
-        base = next((r for r in runs if r.get("variant") == "baseline"), None)
+        ordered = sorted(runs, key=lambda r: (r.get("variant") != "baseline", str(r.get("variant") or "")))
+        base = next((r for r in ordered if r.get("variant") == "baseline"), None)
         if base:
             print(f"  baseline        : trades={base.get('m_total_trades')} "
                   f"win={base.get('m_win_rate')} net={base.get('m_net_profit')} "
                   f"stop={base.get('stop_out_count')} timeout={base.get('timeout_count')}")
-        for r in runs:
+        for r in ordered:
             if r.get("variant") == "baseline":
                 continue
             delta = ""
@@ -345,6 +362,8 @@ def main() -> int:
     parser.add_argument("--days", type=int, default=60, help="Trailing window in days (default 60).")
     parser.add_argument("--capital", type=float, default=1000.0, help="Initial capital / notional.")
     parser.add_argument("--warmup", type=int, default=200, help="Warmup candles before start.")
+    parser.add_argument("--workers", type=int, default=os.cpu_count() or 1,
+                        help="Number of parallel worker processes (default: all CPU cores).")
     parser.add_argument("--min-trades", type=int, default=1,
                         help="Skip variants when baseline yields fewer than this many trades.")
     parser.add_argument("--fast-atr-lengths", default="3,4,5", help="Comma-separated fast ATR lengths to sweep.")
@@ -361,7 +380,7 @@ def main() -> int:
     if not set(args.levers) <= valid_levers:
         print(f"Levers must be a subset of {valid_levers}")
         return 2
-    return asyncio.run(_amain(args))
+    return _amain(args)
 
 
 if __name__ == "__main__":
