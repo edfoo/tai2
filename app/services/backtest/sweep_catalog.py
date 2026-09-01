@@ -20,7 +20,8 @@ what :class:`~app.services.backtest.models.GridParamDef` expects.
 
 from __future__ import annotations
 
-from typing import Any
+from itertools import product
+from typing import Any, Iterable
 
 # Human-readable short prefixes for the preset dropdown labels.
 STRATEGY_DISPLAY_NAMES: dict[str, str] = {
@@ -172,3 +173,63 @@ def build_sweep_presets() -> dict[tuple[str, str], str]:
 def sweep_strategy_names() -> list[str]:
     """Return the strategy names present in the sweep catalogue."""
     return list(STRATEGY_SWEEP_PARAMS.keys())
+
+
+def grid_param_defs(
+    strategy_names: Iterable[str] | None = None,
+    *,
+    include_launcher: bool = True,
+) -> list[Any]:
+    """Return the catalogue as an ordered list of ``GridParamDef``.
+
+    This is the CLI analogue of :func:`build_sweep_presets`: the UI renders
+    presets from the catalogue, and headless sweep scripts build their
+    Cartesian product from these same ``GridParamDef`` objects, so both paths
+    always sweep the identical set of options.
+
+    Parameters
+    ----------
+    strategy_names:
+        Which strategies to include (any order).  ``None`` → every strategy
+        in the catalogue, in catalogue order.
+    include_launcher:
+        Include the launcher-level sweep params (``tp_pct`` / ``sl_pct`` /
+        ``notional_usd``).  Default ``True``.
+
+    Returns
+    -------
+    A list of :class:`~app.services.backtest.models.GridParamDef`, one per
+    parameter, with values parsed by :func:`parse_values_text` (booleans
+    become real ``bool``, numerics become ``float``).
+    """
+    from app.services.backtest.models import GridParamDef
+
+    names = list(strategy_names) if strategy_names is not None else sweep_strategy_names()
+    defs: list[Any] = []
+    for name in names:
+        params = STRATEGY_SWEEP_PARAMS.get(name)
+        if not params:
+            continue
+        for param, values in params.items():
+            defs.append(GridParamDef(
+                key=f"strategies.{name}.{param}",
+                values=parse_values_text(values),
+            ))
+    if include_launcher:
+        for param, values in LAUNCHER_SWEEP_PARAMS.items():
+            defs.append(GridParamDef(key=param, values=parse_values_text(values)))
+    return defs
+
+
+def cartesian_combinations(param_defs: Iterable[Any]) -> list[dict[str, Any]]:
+    """Return the Cartesian product of ``param_defs`` as ``{key: value}`` dicts.
+
+    Each element is one full parameter assignment (one row of the sweep grid).
+    The order is deterministic: the left-most parameter varies slowest.
+    """
+    defs = list(param_defs)
+    if not defs:
+        return []
+    keys = [p.key for p in defs]
+    value_lists = [list(p.values) for p in defs]
+    return [dict(zip(keys, combo)) for combo in product(*value_lists)]
