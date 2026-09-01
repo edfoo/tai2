@@ -9270,8 +9270,11 @@ def register_pages(app: FastAPI) -> None:
                     # Predefined parameter presets for quick selection —
                     # sourced from the shared sweep catalogue so the UI, CLI
                     # scripts, and tests agree on a single set of options.
-                    from app.services.backtest.sweep_catalog import build_sweep_presets
-                    _SWEEP_PRESETS = build_sweep_presets()
+                    # Only the strategies the user has toggled ON are listed;
+                    # each strategy is a top-level group whose parameters are
+                    # shown as a nested sub-menu (rebuilt on every open so it
+                    # always reflects the current strategy-toggles).
+                    from app.services.backtest.sweep_catalog import sweep_groups
 
                     # Dynamic list of sweep rows (key input + values input).
                     # Each row stores its NiceGUI container element so it can
@@ -9280,16 +9283,50 @@ def register_pages(app: FastAPI) -> None:
 
                     sweep_params_container = ui.column().classes("w-full gap-1")
 
+                    def _fill_preset(key: str, values: str, key_input, values_input) -> None:
+                        """Copy a selected preset into a row's key/value inputs."""
+                        key_input.value = key
+                        values_input.value = values
+
+                    def _populate_preset_menu(menu, key_input, values_input) -> None:
+                        """(Re)build the preset sub-menus from enabled strategies.
+
+                        Called whenever the menu opens, so it always lists only
+                        the strategies currently toggled ON (plus Launcher).
+                        """
+                        menu.clear()
+                        enabled = [n for n, t in strategy_toggles.items() if t.value]
+                        groups = sweep_groups(enabled)
+                        with menu:
+                            if not groups:
+                                ui.menu_item("No strategies selected", on_click=None)
+                                return
+                            for group_label, items in groups:
+                                with ui.menu_item(group_label, auto_close=False):
+                                    with ui.item_section().props("side"):
+                                        ui.icon("keyboard_arrow_right")
+                                    with ui.menu().props('anchor="top end" self="top start" auto-close'):
+                                        for key, values, leaf in items:
+                                            ui.menu_item(
+                                                leaf,
+                                                lambda _k=key, _v=values: _fill_preset(
+                                                    _k, _v, key_input, values_input),
+                                            )
+
                     def _add_sweep_row(key: str = "", values: str = "") -> None:
                         """Add a sweep parameter row with key + values inputs."""
                         with sweep_params_container:
                             row_container = ui.row().classes("w-full gap-2 items-center")
                             with row_container:
-                                _preset_select = ui.select(
-                                    options=_SWEEP_PRESETS,
-                                    value=None,
-                                    label="Preset",
-                                ).classes("w-56").props("dense")
+                                with ui.button("Preset", icon="keyboard_arrow_down").props(
+                                    "dense flat color=primary size=sm"
+                                ):
+                                    _preset_menu = ui.menu()
+                                    _preset_menu.on_value_change(
+                                        lambda e: _populate_preset_menu(
+                                            _preset_menu, _key_input, _values_input,
+                                        ) if e.value else None
+                                    )
                                 _key_input = ui.input(
                                     label="Parameter key",
                                     value=key,
@@ -9302,17 +9339,9 @@ def register_pages(app: FastAPI) -> None:
                         row: dict[str, Any] = {
                             "key_input": _key_input,
                             "values_input": _values_input,
-                            "preset_select": _preset_select,
+                            "preset_menu": _preset_menu,
                             "container": row_container,
                         }
-
-                        def _on_preset_change(e: Any, _ki=_key_input, _vi=_values_input) -> None:
-                            val = e.value if hasattr(e, "value") else e
-                            if val and isinstance(val, tuple) and len(val) == 2:
-                                _ki.value = val[0]
-                                _vi.value = val[1]
-
-                        _preset_select.on("update:model-value", lambda e: _on_preset_change(e))
 
                         # Remove button — created after `row` so the closure
                         # captures the actual dict, not an undefined name.

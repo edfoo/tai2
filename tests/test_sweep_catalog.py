@@ -19,7 +19,21 @@ from app.services.backtest.sweep_catalog import (
     cartesian_combinations,
     grid_param_defs,
     parse_values_text,
+    sweep_groups,
 )
+from app.services.strategies.defaults import strategy_defaults
+
+# Keys that are intentionally NOT sweepable in a grid backtest:
+#   * ``enabled`` — the strategy toggle (sweeping it off produces identical
+#     empty results and duplicates the UI's own strategy on/off switches).
+#   * ``flip_launcher_direction`` — applied only by the LIVE guardrail
+#     (``market_service.py``); the backtest engine has no such inversion
+#     step, so sweeping it would silently run identical results for every
+#     candidate value (a dead knob).
+_NON_SWEEP_KEYS = {
+    "enabled",
+    "flip_launcher_direction",
+}
 
 
 class TestSweepCatalogCoverage:
@@ -40,6 +54,37 @@ class TestSweepCatalogCoverage:
             assert params, f"strategy {name!r} has no sweep parameters"
             assert "enabled" not in params, (
                 "do not sweep 'enabled' — it is controlled by the strategy toggle"
+            )
+
+    def test_catalog_has_no_stale_keys(self) -> None:
+        """Every catalogued key must exist in the strategy's defaults.
+
+        A key present in the catalogue but absent from ``strategy_defaults`` is
+        a stale reference that ``_set_nested`` would write into
+        ``launcher_config`` where the strategy never reads it — silently dead.
+        """
+        for name, params in STRATEGY_SWEEP_PARAMS.items():
+            defaults = strategy_defaults(name)
+            stale = [k for k in params if k not in defaults]
+            assert not stale, f"strategy {name!r} catalogues unknown keys {stale}"
+
+    def test_catalog_covers_every_sweepable_default(self) -> None:
+        """Every sweepable default must be exposed in the catalogue.
+
+        This is the regression test for the "volume participation" /
+        "volume deceleration" gap: those gates live in ``strategy_defaults``
+        (and are read by the strategy code) but were missing from the
+        catalogue, so the UI's Parameter Sweep dropdown never offered them.
+        Any default that is not in ``_NON_SWEEP_KEYS`` MUST be sweepable,
+        otherwise a newly-added gate is invisible to the grid backtest.
+        """
+        for name, params in STRATEGY_SWEEP_PARAMS.items():
+            defaults = strategy_defaults(name)
+            sweepable = set(defaults) - _NON_SWEEP_KEYS
+            missing = sorted(sweepable - set(params))
+            assert not missing, (
+                f"strategy {name!r} is missing sweep params {missing} — add them "
+                f"to STRATEGY_SWEEP_PARAMS so the UI grid exposes them"
             )
 
 
@@ -81,8 +126,40 @@ class TestPresetShape:
         assert "sl_pct" in keys
 
 
-class TestParseValuesText:
-    """Boolean-aware parsing of the comma-separated candidate strings."""
+class TestSweepGroups:
+    """The nested-menu grouping drives the UI's strategy-scoped preset menu."""
+
+    def test_groups_have_strategy_labels_and_items(self) -> None:
+        groups = sweep_groups()
+        labels = [g for (g, _items) in groups]
+        # One group per catalogued strategy (by display prefix), plus Launcher.
+        from app.services.backtest.sweep_catalog import STRATEGY_DISPLAY_NAMES
+        expected = [STRATEGY_DISPLAY_NAMES.get(n, n) for n in STRATEGY_SWEEP_PARAMS] + ["Launcher"]
+        assert labels == expected
+        # Every strategy group has at least one leaf.
+        for group, items in groups:
+            assert items, f"group {group!r} has no items"
+
+    def test_groups_respect_strategy_subset(self) -> None:
+        groups = sweep_groups(["trend_pullback"])
+        labels = [g for (g, _items) in groups]
+        # Only the requested strategy + Launcher.
+        assert labels == ["TP", "Launcher"]
+        strategy_items = groups[0][1]
+        # Every leaf key is prefixed with the strategy's dotted path.
+        assert all(k.startswith("strategies.trend_pullback.") for (k, _v, _leaf) in strategy_items)
+
+    def test_group_items_carry_dotted_key_and_values(self) -> None:
+        groups = sweep_groups(["mean_reversion"])
+        _, items = groups[0]
+        # Find the volume-participation gate leaf (previously missing entirely).
+        by_key = {k: (v, leaf) for (k, v, leaf) in items}
+        assert "strategies.mean_reversion.require_min_volume" in by_key
+        assert by_key["strategies.mean_reversion.require_min_volume"][0] == "true, false"
+
+    def test_empty_subset_yields_only_launcher(self) -> None:
+        groups = sweep_groups([])
+        assert [g for (g, _items) in groups] == ["Launcher"]
 
     def test_floats(self) -> None:
         assert parse_values_text("25, 30, 35, 40") == [25.0, 30.0, 35.0, 40.0]
