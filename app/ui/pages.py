@@ -8725,12 +8725,17 @@ def register_pages(app: FastAPI) -> None:
             # Mirror into the local `config` dict so the current page reflects the
             # imported values until the next full reload.
             config.update(imported_config)
+            # Reload the page so every rendered control (leverage, conviction
+            # floor, guardrails, timeframes, strategy settings, etc.) is rebuilt
+            # from the freshly imported runtime_config. Hand-syncing individual
+            # widgets is fragile — Save rebuilds the whole config from these
+            # controls and would silently restore stale destination values.
             ui.notify(
-                "Config imported into runtime. Click Save to persist to the database, "
-                "or reload the page to review the applied values.",
+                "Config imported. Reloading the page to apply the imported values.",
                 color="positive",
                 timeout=8000,
             )
+            ui.navigate.reload()
 
         import_upload.on_upload(_handle_import)
 
