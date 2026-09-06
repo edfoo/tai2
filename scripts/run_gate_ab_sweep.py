@@ -60,9 +60,13 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from app.services.backtest.engine import BacktestEngine  # noqa: E402
-from app.services.backtest.models import BacktestConfig, BacktestResult  # noqa: E402
+from app.services.backtest.models import BacktestResult  # noqa: E402
 from app.services.backtest.persistence import result_summary_row, write_comparison_csv  # noqa: E402
-from app.services.strategies.defaults import strategy_defaults  # noqa: E402
+from app.services.backtest.runner import (  # noqa: E402
+    build_single_strategy_config,
+    count_stop_outs as _count_stop_out,
+    htf_for as _htf_for,
+)
 
 OUTPUT_DIR = ROOT / "backtest_cache" / "cli" / "ab"
 OVERVIEW_FILENAME = "overview.json"
@@ -96,41 +100,6 @@ GATE_CATALOGUE: dict[str, dict[str, dict[str, Any]]] = {
 }
 
 
-def parse_timeframe(tf: str, ctx: str) -> str:
-    """Normalise a timeframe string to engine form ('15m' / '1H' / '4H')."""
-    t = tf.strip().upper()
-    mapping = {
-        "1M": "1m", "1MIN": "1m", "5M": "5m", "5MIN": "5m",
-        "15M": "15m", "15MIN": "15m",
-        "1H": "1H", "1HOUR": "1H", "1HR": "1H",
-        "4H": "4H", "4HOUR": "4H", "4HR": "4H",
-        "1D": "1D", "1DAY": "1D",
-    }
-    if t not in mapping:
-        raise SystemExit(f"Unsupported timeframe '{tf}' for {ctx}. Use 1m/5m/15m/1H/4H/1D.")
-    return mapping[t]
-
-
-def _htf_for(tf: str) -> str:
-    return {"1m": "5m", "5m": "15m", "15m": "1H", "1H": "4H", "4H": "1D", "1D": "1W"}.get(tf, "")
-
-
-def _strategy_cfg(name: str, enabled: bool = True) -> dict[str, Any]:
-    cfg = dict(strategy_defaults(name))
-    cfg["enabled"] = enabled
-    return cfg
-
-
-def _count_stop_out(result: BacktestResult) -> int:
-    """Count trades closed by stop-loss (close_reason)."""
-    n = 0
-    for t in result.trades:
-        reason = (t.close_reason or "").lower()
-        if "stop" in reason or "sl" in reason:
-            n += 1
-    return n
-
-
 async def run_one(
     *,
     symbol: str,
@@ -143,38 +112,24 @@ async def run_one(
     end_ts: int,
     capital: float,
     warmup: int,
-) -> tuple[dict[str, Any], BacktestResult]:
-    """Run one gate configuration and return (tag, result)."""
-    strategies_cfg: dict[str, Any] = {strategy_name: _strategy_cfg(strategy_name, enabled=True)}
-    gate_overrides = dict(strategies_cfg[strategy_name])
-    switch_key = gate_cfg["switch"]
-    gate_overrides[switch_key] = bool(switch_on)
+) -> BacktestResult:
+    """Run one gate configuration and return its result."""
+    overrides: dict[str, Any] = {gate_cfg["switch"]: bool(switch_on)}
     if switch_on and gate_cfg["threshold_key"] and threshold is not None:
-        gate_overrides[gate_cfg["threshold_key"]] = threshold
-    strategies_cfg[strategy_name] = gate_overrides
+        overrides[gate_cfg["threshold_key"]] = threshold
 
-    launcher_config: dict[str, Any] = {
-        "mode": "launcher_only",
-        "notional_usd": float(capital),
-        "strategies": strategies_cfg,
-    }
-    config = BacktestConfig(
-        symbols=[symbol],
+    config = build_single_strategy_config(
+        symbol=symbol,
         timeframe=ltf,
+        strategy_name=strategy_name,
         start_ts=start_ts,
         end_ts=end_ts,
-        initial_capital=capital,
-        strategy_names=[strategy_name],
-        launcher_config=launcher_config,
-        strategy_config={},
-        warmup_candles=warmup,
-        disable_live_execution=True,
-        evaluation_mode="finer_ltf",
-        evaluation_timeframe="1m",
+        capital=capital,
+        warmup=warmup,
+        overrides=overrides,
     )
     engine = BacktestEngine(config)
-    result = await engine.run()
-    return launcher_config, result
+    return await engine.run()
 
 
 async def _run_and_record(
@@ -201,7 +156,7 @@ async def _run_and_record(
     """
     thr_str = "None" if threshold is None else str(threshold)
     try:
-        _, result = await run_one(
+        result = await run_one(
             symbol=symbol,
             ltf=ltf,
             strategy_name=strategy,

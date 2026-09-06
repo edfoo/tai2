@@ -9152,7 +9152,7 @@ def register_pages(app: FastAPI) -> None:
         equity curve, trade table, and summary metrics.
         """
         from app.services.backtest.engine import BacktestEngine, available_strategy_names
-        from app.services.backtest.models import BacktestConfig
+        from app.services.backtest.runner import build_backtest_config, resolve_evaluation
 
         navigation("BACKTEST")
         wrapper = page_container()
@@ -9599,30 +9599,21 @@ def register_pages(app: FastAPI) -> None:
             now_ms = int(time.time() * 1000)
             start_ms = now_ms - days_back * 86_400_000
 
-            # Resolve evaluation mode + timeframe.
-            # "closed" → legacy closed-candle mode (step on LTF candles).
-            # "1m" / "5m" → finer-LTF mode (step on eval candles, indicators
-            #                on LTF with the last candle incomplete).
-            if eval_step == "closed":
-                evaluation_mode = "closed"
-                evaluation_timeframe = timeframe
-            else:
-                evaluation_mode = "finer_ltf"
-                evaluation_timeframe = eval_step
+            # Resolve evaluation mode + timeframe (shared with the CLI).
+            evaluation_mode, evaluation_timeframe = resolve_evaluation(eval_step, timeframe)
 
-            bt_config = BacktestConfig(
+            bt_config = build_backtest_config(
                 symbols=symbols,
                 timeframe=timeframe,
+                strategy_names=selected_strategies,
                 start_ts=start_ms,
                 end_ts=now_ms,
-                initial_capital=capital,
-                strategy_names=selected_strategies,
-                launcher_config=dict(launcher_config),
-                strategy_config=dict(strategy_config),
-                warmup_candles=200,
-                disable_live_execution=True,
+                capital=capital,
+                warmup=200,
                 evaluation_mode=evaluation_mode,
                 evaluation_timeframe=evaluation_timeframe,
+                launcher_config=dict(launcher_config),
+                strategy_config=dict(strategy_config),
             )
 
             app.state.backtest_running["flag"] = True
@@ -9744,7 +9735,7 @@ def register_pages(app: FastAPI) -> None:
                 ui.notify("Add at least one parameter to sweep", color="negative")
                 return
 
-            # ── Build the base config (same as main backtest) ───────────
+            # ── Build the base config (shared with the CLI) ───────────
             timeframe = timeframe_select.value or "4H"
             capital = float(capital_input.value or 1000.0)
             days_back = int(days_back_input.value or 30)
@@ -9753,26 +9744,20 @@ def register_pages(app: FastAPI) -> None:
             now_ms = int(time.time() * 1000)
             start_ms = now_ms - days_back * 86_400_000
 
-            if eval_step == "closed":
-                evaluation_mode = "closed"
-                evaluation_timeframe = timeframe
-            else:
-                evaluation_mode = "finer_ltf"
-                evaluation_timeframe = eval_step
+            evaluation_mode, evaluation_timeframe = resolve_evaluation(eval_step, timeframe)
 
-            base_config = BacktestConfig(
+            base_config = build_backtest_config(
                 symbols=symbols,
                 timeframe=timeframe,
+                strategy_names=selected_strategies,
                 start_ts=start_ms,
                 end_ts=now_ms,
-                initial_capital=capital,
-                strategy_names=selected_strategies,
-                launcher_config=copy.deepcopy(launcher_config),
-                strategy_config=dict(strategy_config),
-                warmup_candles=200,
-                disable_live_execution=True,
+                capital=capital,
+                warmup=200,
                 evaluation_mode=evaluation_mode,
                 evaluation_timeframe=evaluation_timeframe,
+                launcher_config=copy.deepcopy(launcher_config),
+                strategy_config=dict(strategy_config),
             )
 
             grid_cfg = GridConfig(
@@ -9851,6 +9836,15 @@ def register_pages(app: FastAPI) -> None:
                                 "align": "left",
                                 "sortable": True,
                             })
+                        _rank_labels = {
+                            "sharpe_per_candle": "Sharpe/candle",
+                            "profit_factor": "Profit factor",
+                            "net_profit": "Net PnL",
+                            "net_profit_pct": "Net PnL %",
+                            "win_rate": "Win %",
+                            "total_trades": "Trades",
+                            "expectancy": "Expectancy",
+                        }
                         columns.extend([
                             {"name": "trades", "label": "Trades", "field": "trades", "align": "right", "sortable": True},
                             {"name": "win_rate", "label": "Win %", "field": "win_rate", "align": "right", "sortable": True},
@@ -9858,7 +9852,7 @@ def register_pages(app: FastAPI) -> None:
                             {"name": "profit_factor", "label": "PF", "field": "profit_factor", "align": "right", "sortable": True},
                             {"name": "sharpe", "label": "Sharpe", "field": "sharpe", "align": "right", "sortable": True},
                             {"name": "max_dd", "label": "Max DD %", "field": "max_dd", "align": "right", "sortable": True},
-                            {"name": "rank_score", "label": rank_by, "field": "rank_score", "align": "right", "sortable": True},
+                            {"name": "rank_score", "label": _rank_labels.get(rank_by, rank_by), "field": "rank_score", "align": "right", "sortable": True},
                         ])
 
                         rows = []
@@ -9892,6 +9886,98 @@ def register_pages(app: FastAPI) -> None:
                         ui.label("* = below min trades (not ranked)").classes("text-xs text-slate-400 mt-1")
                     else:
                         ui.label("No valid results to rank.").classes("text-sm text-slate-500")
+
+                # ── Best combination + per-parameter sensitivity ───────
+                _render_sweep_analysis(result)
+
+        def _render_sweep_analysis(result: Any) -> None:
+            """Render 'best combination' + per-parameter sensitivity analysis.
+
+            Turns the flat ranked list into the answer the user actually wants:
+            which *parameter settings* are most profitable, and how robust the
+            winner is.  Shares ``analyze_sweep`` with the headless CLI so both
+            paths report identically.
+            """
+            try:
+                from app.services.backtest.sweep_analysis import analyze_sweep
+            except Exception:  # noqa: BLE001
+                return
+
+            # Build entries in the CLI-compatible shape {params, metrics}.
+            entries: list[dict[str, Any]] = []
+            for run in result.runs:
+                if run.result is None or run.result.is_error:
+                    continue
+                entries.append({
+                    "params": dict(run.params),
+                    "metrics": dict(run.result.metrics or {}),
+                })
+            if not entries:
+                return
+
+            # Rank sensitivity on a profitability metric by default, unless
+            # the user explicitly ranked on a profitability metric already.
+            rank_by = getattr(result.config, "rank_by", "sharpe_per_candle")
+            profit_keys = {"net_profit_pct", "net_profit", "profit_factor",
+                           "expectancy", "win_rate"}
+            sens_rank = rank_by if rank_by in profit_keys else "net_profit_pct"
+
+            analysis = analyze_sweep(
+                entries,
+                rank_by=sens_rank,
+                min_trades=int(getattr(result.config, "min_trades", 0) or 0),
+            )
+            best = analysis.get("best") or {}
+            robustness = analysis.get("robustness") or {}
+
+            if best:
+                with ui.card().classes("w-full rounded-lg border border-emerald-200 bg-emerald-50 mb-2"):
+                    ui.label("Best Combination (most profitable)").classes("text-base font-semibold text-emerald-800 mb-1")
+                    bp = {k.split(".")[-1]: v for k, v in best["params"].items()}
+                    bm = best["metrics"] or {}
+                    ui.label(", ".join(f"{k}={v}" for k, v in bp.items())).classes("text-sm font-mono mb-1")
+                    with ui.row().classes("w-full flex-wrap gap-3"):
+                        ui.label(f"Trades: {bm.get('total_trades', 0)}").classes("text-xs")
+                        ui.label(f"Win %: {bm.get('win_rate', 0):.1f}%").classes("text-xs")
+                        ui.label(f"PF: {bm.get('profit_factor', 0):.2f}").classes("text-xs")
+                        ui.label(f"Net %: {bm.get('net_profit_pct', 0):.1f}%").classes("text-xs")
+                        ui.label(f"Expectancy: {bm.get('expectancy', 0):.3f}").classes("text-xs")
+                        ui.label(f"MaxDD %: {bm.get('max_drawdown_pct', 0):.1f}%").classes("text-xs")
+                    ui.label(robustness.get("note", "")).classes(
+                        "text-xs text-amber-700 mt-1" if robustness.get("single_point_optimum")
+                        else "text-xs text-emerald-700 mt-1")
+
+            sens = analysis.get("sensitivity") or []
+            if sens:
+                with ui.card().classes("w-full rounded-lg border border-slate-200 mb-2"):
+                    ui.label(
+                        f"Most Profitable Setting Per Parameter (avg {sens_rank})"
+                    ).classes("text-base font-semibold mb-2")
+                    sens_columns = [
+                        {"name": "param", "label": "Parameter", "field": "param", "align": "left", "sortable": True},
+                        {"name": "best", "label": "Best Value", "field": "best", "align": "right", "sortable": True},
+                        {"name": "best_avg", "label": f"Avg {sens_rank}", "field": "best_avg", "align": "right", "sortable": True},
+                        {"name": "best_pf", "label": "Avg PF", "field": "best_pf", "align": "right", "sortable": True},
+                        {"name": "best_wr", "label": "Avg Win%", "field": "best_wr", "align": "right", "sortable": True},
+                        {"name": "n", "label": "Runs", "field": "n", "align": "right", "sortable": True},
+                        {"name": "all", "label": "All values (value → avg)", "field": "all", "align": "left"},
+                    ]
+                    sens_rows = []
+                    for s in sens:
+                        bv = next((v for v in s["values"] if v["value"] == s["best_value"]), {})
+                        sens_rows.append({
+                            "param": s["key"].split(".")[-1],
+                            "best": s["best_value"],
+                            "best_avg": f"{bv.get('avg_rank', 0):.4f}",
+                            "best_pf": f"{bv.get('avg_profit_factor', 0):.3f}",
+                            "best_wr": f"{bv.get('avg_win_rate', 0):.1f}",
+                            "n": bv.get("n", 0),
+                            "all": "  ".join(
+                                f"{v['value']}→{v['avg_rank']:.4f}"
+                                for v in s["values"]),
+                        })
+                    with ui.table(columns=sens_columns, rows=sens_rows).classes("w-full"):
+                        pass
 
         def _render_results(result: Any, container: ui.column) -> None:
             """Render the backtest results into the results container."""

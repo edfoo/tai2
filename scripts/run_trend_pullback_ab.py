@@ -70,62 +70,24 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from app.services.backtest.engine import BacktestEngine  # noqa: E402
-from app.services.backtest.models import BacktestConfig, BacktestResult  # noqa: E402
+from app.services.backtest.models import BacktestResult  # noqa: E402
 from app.services.backtest.persistence import (  # noqa: E402
     result_summary_row,
     result_to_dict,
     write_comparison_csv,
 )
-from app.services.strategies.defaults import strategy_defaults  # noqa: E402
+from app.services.backtest.runner import (  # noqa: E402
+    build_single_strategy_config,
+    count_stop_outs as _count_stop_out,
+    count_timeouts as _count_timeout,
+    htf_for as _htf_for,
+)
 
 OUTPUT_DIR = ROOT / "backtest_cache" / "cli" / "tp_ab"
 OVERVIEW_FILENAME = "overview.json"
 _MS = 1_000
 
 STRATEGY = "trend_pullback"
-
-
-def parse_timeframe(tf: str, ctx: str) -> str:
-    t = tf.strip().upper()
-    mapping = {
-        "1M": "1m", "1MIN": "1m", "5M": "5m", "5MIN": "5m",
-        "15M": "15m", "15MIN": "15m",
-        "1H": "1H", "1HOUR": "1H", "1HR": "1H",
-        "4H": "4H", "4HOUR": "4H", "4HR": "4H",
-        "1D": "1D", "1DAY": "1D",
-    }
-    if t not in mapping:
-        raise SystemExit(f"Unsupported timeframe '{tf}' for {ctx}. Use 1m/5m/15m/1H/4H/1D.")
-    return mapping[t]
-
-
-def _htf_for(tf: str) -> str:
-    return {"1m": "5m", "5m": "15m", "15m": "1H", "1H": "4H", "4H": "1D", "1D": "1W"}.get(tf, "")
-
-
-def _strategy_cfg() -> dict[str, Any]:
-    cfg = dict(strategy_defaults(STRATEGY))
-    cfg["enabled"] = True
-    return cfg
-
-
-def _count_by_reason(result: BacktestResult, *needles: str) -> int:
-    """Count trades whose close_reason contains any of ``needles``."""
-    n = 0
-    for t in result.trades:
-        reason = (t.close_reason or "").lower()
-        if any(ndl in reason for ndl in needles):
-            n += 1
-    return n
-
-
-def _count_stop_out(result: BacktestResult) -> int:
-    return _count_by_reason(result, "stop", "sl")
-
-
-def _count_timeout(result: BacktestResult) -> int:
-    # "timeout" (max-hold) and "end_of_data" both mean the TP was never reached.
-    return _count_by_reason(result, "timeout", "end_of_data")
 
 
 async def run_one(
@@ -139,27 +101,15 @@ async def run_one(
     warmup: int,
 ) -> BacktestResult:
     """Run one variant (a full strategy-config override) and return its result."""
-    strat_cfg = _strategy_cfg()
-    strat_cfg.update(overrides)
-    strategies_cfg = {STRATEGY: strat_cfg}
-    launcher_config: dict[str, Any] = {
-        "mode": "launcher_only",
-        "notional_usd": float(capital),
-        "strategies": strategies_cfg,
-    }
-    config = BacktestConfig(
-        symbols=[symbol],
+    config = build_single_strategy_config(
+        symbol=symbol,
         timeframe=ltf,
+        strategy_name=STRATEGY,
         start_ts=start_ts,
         end_ts=end_ts,
-        initial_capital=capital,
-        strategy_names=[STRATEGY],
-        launcher_config=launcher_config,
-        strategy_config={},
-        warmup_candles=warmup,
-        disable_live_execution=True,
-        evaluation_mode="finer_ltf",
-        evaluation_timeframe="1m",
+        capital=capital,
+        warmup=warmup,
+        overrides=overrides,
     )
     engine = BacktestEngine(config)
     return await engine.run()

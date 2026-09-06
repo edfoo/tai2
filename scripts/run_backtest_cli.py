@@ -49,7 +49,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from app.services.backtest.engine import BacktestEngine, available_strategy_names  # noqa: E402
-from app.services.backtest.models import BacktestConfig, BacktestResult  # noqa: E402
+from app.services.backtest.models import BacktestResult  # noqa: E402
 from app.services.backtest.persistence import (  # noqa: E402
     DEFAULT_OUTPUT_DIR,
     OVERVIEW_FILENAME,
@@ -57,44 +57,14 @@ from app.services.backtest.persistence import (  # noqa: E402
     save_result,
     write_comparison_csv,
 )
-from app.services.strategies.defaults import strategy_defaults  # noqa: E402
+from app.services.backtest.runner import (  # noqa: E402
+    build_backtest_config,
+    htf_for,
+    parse_timeframe,
+)
 
 OUTPUT_DIR = DEFAULT_OUTPUT_DIR
 _MS = 1_000
-
-
-def parse_timeframe(tf: str, error_ctx: str) -> str:
-    """Normalise a timeframe string to the form used by the backtest engine
-    (e.g. '15m' -> '15m', '1h' -> '1H', '4h' -> '4H').
-
-    The engine's ``htf_for`` expects the LTF in its own casing (15M, 1H,
-    4H, 1D).  We normalise to a canonical set of supported values.
-    """
-    t = tf.strip().upper()
-    mapping = {
-        "1M": "1m", "1MIN": "1m",
-        "5M": "5m", "5MIN": "5m",
-        "15M": "15m", "15MIN": "15m",
-        "1H": "1H", "1HOUR": "1H", "1HR": "1H",
-        "4H": "4H", "4HOUR": "4H", "4HR": "4H",
-        "1D": "1D", "1DAY": "1D",
-    }
-    if t not in mapping:
-        raise SystemExit(f"Unsupported timeframe '{tf}' for {error_ctx}. "
-                         f"Use one of: 1m, 5m, 15m, 1H, 4H, 1D.")
-    return mapping[t]
-
-
-def _winning_strategy_cfg(name: str, enabled: bool = True) -> dict[str, Any]:
-    """Return a strategy config with a useful default enabling one strategy.
-
-    The engine uses ``launcher_config["strategies"][<name>]`` and only runs
-    strategies whose ``enabled`` is truthy.  We seed from the canonical
-    defaults so every required key has a sane value.
-    """
-    cfg = dict(strategy_defaults(name))
-    cfg["enabled"] = enabled
-    return cfg
 
 
 def summarize(result: BacktestResult, run_id: str, ltf: str, htf: str) -> dict[str, Any]:
@@ -113,35 +83,14 @@ async def run_one(
     warmup: int,
 ) -> tuple[str, BacktestResult]:
     """Run the backtest engine once for a given LTF and return its result."""
-    # Build a launcher config that enables exactly the requested strategies,
-    # each seeded from canonical defaults.  ``strategy_config`` is left
-    # minimal; ``merged_config`` fills any gaps at evaluation time.
-    strategies_cfg: dict[str, Any] = {}
-    for name in strategy_names:
-        strategies_cfg[name] = _winning_strategy_cfg(name, enabled=True)
-
-    launcher_config: dict[str, Any] = {
-        "mode": "launcher_only",
-        "notional_usd": float(capital),  # singular notional; per-trade size
-        "strategies": strategies_cfg,
-    }
-
-    config = BacktestConfig(
+    config = build_backtest_config(
         symbols=symbols,
         timeframe=ltf,
+        strategy_names=strategy_names,
         start_ts=start_ts,
         end_ts=end_ts,
-        initial_capital=capital,
-        strategy_names=strategy_names,
-        launcher_config=launcher_config,
-        strategy_config={},
-        warmup_candles=warmup,
-        disable_live_execution=True,
-        # finer_ltf with eval on the finest TF recreates live intra-candle
-        # RSI dips.  For a headless comparison over 60 days this is the
-        # most faithful to live behaviour.
-        evaluation_mode="finer_ltf",
-        evaluation_timeframe="1m",
+        capital=capital,
+        warmup=warmup,
     )
     engine = BacktestEngine(config)
     result = await engine.run()
@@ -234,9 +183,8 @@ def enabled_or_all(summaries: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _htf_for(tf: str) -> str:
-    """Mirror the engine's LTF→HTF map for display purposes only."""
-    mapping = {"1m": "5m", "5m": "15m", "15m": "1H", "1H": "4H", "4H": "1D", "1D": "1W"}
-    return mapping.get(tf, "")
+    """Alias to the shared runner's LTF→HTF map."""
+    return htf_for(tf)
 
 
 def main() -> int:

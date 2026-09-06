@@ -68,44 +68,20 @@ from app.services.backtest.persistence import (  # noqa: E402
     result_to_dict,
     write_comparison_csv,
 )
+from app.services.backtest.runner import (  # noqa: E402
+    build_backtest_config,
+    htf_for as _htf_for,
+    parse_timeframe,
+)
 from app.services.backtest.sweep_catalog import (  # noqa: E402
     cartesian_combinations,
     grid_param_defs,
 )
-from app.services.strategies.defaults import strategy_defaults  # noqa: E402
+from app.services.backtest.sweep_analysis import analyze_sweep  # noqa: E402
 
 OUTPUT_DIR = ROOT / "backtest_cache" / "cli" / "grid"
 OVERVIEW_FILENAME = "overview.json"
 _MS = 1_000
-
-
-def parse_timeframe(tf: str, ctx: str) -> str:
-    """Normalise a timeframe string to engine form ('15m' / '1H' / '4H')."""
-    t = tf.strip().upper()
-    mapping = {
-        "1M": "1m", "1MIN": "1m", "5M": "5m", "5MIN": "5m",
-        "15M": "15m", "15MIN": "15m",
-        "1H": "1H", "1HOUR": "1H", "1HR": "1H",
-        "4H": "4H", "4HOUR": "4H", "4HR": "4H",
-        "1D": "1D", "1DAY": "1D",
-    }
-    if t not in mapping:
-        raise SystemExit(f"Unsupported timeframe '{tf}' for {ctx}. Use 1m/5m/15m/1H/4H/1D.")
-    return mapping[t]
-
-
-def _htf_for(tf: str) -> str:
-    return {"1m": "5m", "5m": "15m", "15m": "1H", "1H": "4H", "4H": "1D", "1D": "1W"}.get(tf, "")
-
-
-def _strategies_cfg(strategy_names: list[str]) -> dict[str, Any]:
-    """Seed every requested strategy from its canonical defaults (enabled)."""
-    cfg: dict[str, Any] = {}
-    for name in strategy_names:
-        s = dict(strategy_defaults(name))
-        s["enabled"] = True
-        cfg[name] = s
-    return cfg
 
 
 def _build_config(
@@ -120,24 +96,14 @@ def _build_config(
     warmup: int,
 ) -> BacktestConfig:
     """Build a BacktestConfig for one combination, applying swept params."""
-    launcher_config: dict[str, Any] = {
-        "mode": "launcher_only",
-        "notional_usd": float(capital),
-        "strategies": _strategies_cfg(strategy_names),
-    }
-    config = BacktestConfig(
+    config = build_backtest_config(
         symbols=[symbol],
         timeframe=ltf,
+        strategy_names=strategy_names,
         start_ts=start_ts,
         end_ts=end_ts,
-        initial_capital=capital,
-        strategy_names=strategy_names,
-        launcher_config=launcher_config,
-        strategy_config={},
-        warmup_candles=warmup,
-        disable_live_execution=True,
-        evaluation_mode="finer_ltf",
-        evaluation_timeframe="1m",
+        capital=capital,
+        warmup=warmup,
     )
     # Apply the swept parameter values (dotted keys, e.g.
     # "strategies.mean_reversion.rsi_oversold" → launcher_config).
@@ -299,6 +265,42 @@ def _amain(args: argparse.Namespace) -> int:
               f"{rank_key}={s.get(rank_key)} trades={s.get('m_total_trades')} "
               f"win={s.get('m_win_rate')} net={s.get('m_net_profit')}")
 
+    # ── Per-parameter sensitivity (which settings are most profitable) ─
+    # Feed raw (unprefixed) metric names by stripping the leading m_.
+    entries = [
+        {"params": s.get("params", {}),
+         "metrics": {k[2:]: v for k, v in s.items() if k.startswith("m_")}}
+        for s in summaries
+        if not s.get("error")
+    ]
+    if entries:
+        # Rank sensitivity on a profitability metric regardless of the
+        # user's rank-by (which may be Sharpe or total trades).
+        sens_rank = ("net_profit_pct" if rank_key.startswith("m_") and
+                     rank_key[2:] in {"sharpe_per_candle", "total_trades", "win_rate"}
+                     else (rank_key[2:] if rank_key.startswith("m_") else rank_key))
+        analysis = analyze_sweep(entries, rank_by=sens_rank)
+        best = analysis.get("best") or {}
+        print(f"\n── Most profitable parameter settings (ranked by {analysis.get('rank_by')}) ──")
+        if best:
+            bp = {k.split('.')[-1]: v for k, v in best["params"].items()}
+            bm = best["metrics"]
+            print(f"  ★ Best: {bp}")
+            print(f"      trades={bm.get('total_trades')} win={bm.get('win_rate')}% "
+                  f"PF={bm.get('profit_factor')} net%={bm.get('net_profit_pct')}% "
+                  f"expectancy={bm.get('expectancy')}")
+            rb = analysis.get("robustness", {})
+            print(f"      robustness: {rb.get('note', '')}")
+        for s in analysis.get("sensitivity", []):
+            leaf = s["key"].split(".")[-1]
+            best_v = s["best_value"]
+            summary_parts = []
+            for vr in s["values"]:
+                summary_parts.append(
+                    f"{vr['value']}→{vr['avg_rank']} (PF {vr['avg_profit_factor']}, "
+                    f"n={vr['n']})")
+            print(f"  • {leaf}: best={best_v}   " + "  ".join(summary_parts))
+
     print(f"\nFull results:   {OC}")
     print(f"Comparison CSV: {csv_path}")
     print(f"Overview:       {overview_path}")
@@ -330,8 +332,9 @@ def main() -> int:
                         help="Safety cap on total runs (default 10000).")
     parser.add_argument("--top", type=int, default=10,
                         help="How many top combinations to print (default 10).")
-    parser.add_argument("--rank-by", default="m_sharpe_per_candle",
-                        help="Metric to rank by (CSV columns are m_*).")
+    parser.add_argument("--rank-by", default="m_net_profit_pct",
+                        help="Metric to rank by (CSV columns are m_*). "
+                             "Default net-profit-pct (size-normalised).")
     args = parser.parse_args()
 
     args.symbols = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]

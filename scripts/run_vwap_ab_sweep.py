@@ -44,9 +44,14 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from app.services.backtest.engine import BacktestEngine  # noqa: E402
-from app.services.backtest.models import BacktestConfig, BacktestResult  # noqa: E402
+from app.services.backtest.models import BacktestResult  # noqa: E402
 from app.services.backtest.persistence import result_summary_row, write_comparison_csv  # noqa: E402
-from app.services.strategies.defaults import strategy_defaults  # noqa: E402
+from app.services.backtest.runner import (  # noqa: E402
+    build_single_strategy_config,
+    count_close_reasons,
+    count_stop_outs as _count_stop_out,
+    htf_for as _htf_for,
+)
 
 OUTPUT_DIR = ROOT / "backtest_cache" / "cli" / "vwap"
 _MS = 1_000
@@ -54,34 +59,9 @@ _MS = 1_000
 STRATEGY = "vwap_reversion"
 
 
-def _htf_for(tf: str) -> str:
-    return {"1m": "5m", "5m": "15m", "15m": "1H", "1H": "4H", "4H": "1D", "1D": "1W"}.get(tf, "")
-
-
-def _strategy_cfg(overrides: dict[str, Any] | None = None) -> dict[str, Any]:
-    cfg = dict(strategy_defaults(STRATEGY))
-    cfg["enabled"] = True
-    if overrides:
-        cfg.update(overrides)
-    return cfg
-
-
-def _count_stop_out(result: BacktestResult) -> int:
-    n = 0
-    for t in result.trades:
-        reason = (t.close_reason or "").lower()
-        if "stop" in reason or "sl" in reason:
-            n += 1
-    return n
-
-
 def _count_tp(result: BacktestResult) -> int:
-    n = 0
-    for t in result.trades:
-        reason = (t.close_reason or "").lower()
-        if reason in ("tp", "take_profit") or reason.startswith("tp"):
-            n += 1
-    return n
+    """Count trades closed at take-profit (close_reason == 'tp'/...)."""
+    return count_close_reasons(result, "tp")
 
 
 async def run_one(
@@ -94,25 +74,15 @@ async def run_one(
     capital: float,
     warmup: int,
 ) -> BacktestResult:
-    strategies_cfg = {STRATEGY: _strategy_cfg(overrides)}
-    launcher_config = {
-        "mode": "launcher_only",
-        "notional_usd": float(capital),
-        "strategies": strategies_cfg,
-    }
-    config = BacktestConfig(
-        symbols=[symbol],
+    config = build_single_strategy_config(
+        symbol=symbol,
         timeframe=ltf,
+        strategy_name=STRATEGY,
         start_ts=start_ts,
         end_ts=end_ts,
-        initial_capital=capital,
-        strategy_names=[STRATEGY],
-        launcher_config=launcher_config,
-        strategy_config={},
-        warmup_candles=warmup,
-        disable_live_execution=True,
-        evaluation_mode="finer_ltf",
-        evaluation_timeframe="1m",
+        capital=capital,
+        warmup=warmup,
+        overrides=overrides,
     )
     engine = BacktestEngine(config)
     return await engine.run()
