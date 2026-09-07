@@ -33,9 +33,19 @@
 ## Running the App
 
 ```bash
-uv run uvicorn app.main:app --reload
+uv run uvicorn app.main:app
 ```
 Visit http://localhost:8000/ to see the NiceGUI landing page.
+
+> **Do not run with `--reload` in production.** Uvicorn's `--reload`
+> restarts the *entire* worker on every `.py` file save. Each restart wipes the
+> in-memory trade-management and launcher-tracking state
+> (`_trade_mgmt_state`, `_launcher_in_position`), which then has to be
+> re-hydrated from the DB/exchange. A still-open position caught mid-restart is
+> re-seeded with `tp=None sl=None` and left **unmanaged** (no breakeven /
+> partial TP / trailing / time-stop) until the next real entry. Use
+> `--reload` only for local development; restart the process explicitly after
+> changes in production.
 
 ## Testing
 

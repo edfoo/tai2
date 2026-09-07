@@ -1606,6 +1606,19 @@ class MarketService:
                 f"Re-hydrated launcher tracking for open position {symbol} "
                 f"({side}, entry={avg_px}, tp={_tp}, sl={_sl})"
             )
+            # If neither TP nor SL could be recovered from OKX or the cached
+            # protection block, the revived position is UNMANAGED: breakeven /
+            # partial / trailing / time-stop all require tp/sl to compute R and
+            # will silently skip it.  Surface this loudly so it is not mistaken
+            # for normal tracking (a `--reload` restart loop made this spam).
+            if (_tp is None or _tp <= 0) and (_sl is None or _sl <= 0):
+                self._record_execution_feedback(
+                    symbol,
+                    "WARNING: re-hydrated open position with no recoverable TP/SL — "
+                    "unmanaged (no breakeven/partial/trailing). Avoid --reload restarts.",
+                    level="warning",
+                    meta={"side": side, "entry": avg_px},
+                )
 
         if rehydrated:
             logger.info("Position re-hydration: re-seeded %d open position(s)", rehydrated)
@@ -1614,6 +1627,25 @@ class MarketService:
         """Apply an updated strategy configuration (e.g. skimming settings)."""
         self._strategy_config = config or {}
         self._emit_debug(f"Strategy config updated: {self._strategy_config}")
+        # Guard against a known silent config drift: ``breakeven_buffer_pct`` is
+        # a *percentage* buffer used to move the SL just beyond entry once the
+        # breakeven rung is reached.  A value ≥ 1.0 (e.g. the drifted 2.0) puts
+        # the "breakeven" stop at a TP-like distance (entry ± buffer%), so the
+        # exit can never fire at a realistic level and winners give back their
+        # whole move.  Warn loudly instead of silently breaking profitability.
+        tm = (self._strategy_config.get("trade_management") or {}) if self._strategy_config else {}
+        if tm:
+            be_buffer = self._extract_float(tm.get("breakeven_buffer_pct"))
+            if be_buffer is not None and be_buffer >= 1.0:
+                self._record_execution_feedback(
+                    "*",
+                    f"Config drift: trade_management.breakeven_buffer_pct={be_buffer} "
+                    f"(should be ~0.05). The breakeven stop is placed "
+                    f"{be_buffer}% beyond entry, so winners give back their profit. "
+                    f"Reset to recommended defaults on the STRATEGY page.",
+                    level="warning",
+                    meta={"breakeven_buffer_pct": be_buffer},
+                )
 
     def set_footprint_config(self, config: dict[str, Any]) -> None:
         """Apply updated footprint guardrail config (e.g. bucket_pct)."""
@@ -12902,20 +12934,47 @@ class MarketService:
         if not self._trade_api:
             return
         sub_acct = self._sub_account if self._sub_account_use_master else None
-        try:
-            response = await self._guarded_to_thread(
-                self._trade_api_sem,
-                self._trade_api.get_fills_history,
-                inst_type="SWAP",
-                after="",
-                limit=100,
-                sub_acct=sub_acct,
-            )
-        except Exception as exc:  # pragma: no cover - network variance
-            logger.warning("fills-history fetch failed: %s", exc)
-            return
 
-        fills = self._safe_data(response)
+        # ── Fetch fills with bounded backward paging ──────────────────────
+        # The default single fetch of 100 fills is too small: on an active
+        # account more than 100 fills can land between reconcile runs, so a
+        # closing fill older than the newest-100 would be permanently missed
+        # (its realized PnL never recorded).  Walk backward through up to
+        # MAX_PAGES pages *within this single call* — crucially we do NOT
+        # persist the cursor across calls (a persisted ``after`` cursor is what
+        # previously made the reconciler drift into the past and miss NEW
+        # closing fills).  Idempotency is guaranteed by the ``okx_fill_id
+        # IS NULL`` guard in the DB query, not by cursor bookkeeping.
+        MAX_PAGES = 5
+        fills: list[Any] = []
+        cursor = ""
+        for _page in range(MAX_PAGES):
+            try:
+                response = await self._guarded_to_thread(
+                    self._trade_api_sem,
+                    self._trade_api.get_fills_history,
+                    inst_type="SWAP",
+                    after=cursor,
+                    limit=100,
+                    sub_acct=sub_acct,
+                )
+            except Exception as exc:  # pragma: no cover - network variance
+                logger.warning("fills-history fetch failed: %s", exc)
+                break
+            page = self._safe_data(response)
+            if not page:
+                break
+            fills.extend(page)
+            # Page backward using the oldest fill's billId (OKX fills-history
+            # pagination key), falling back to fillId.  Stop if absent.
+            oldest = page[-1] if isinstance(page[-1], dict) else {}
+            next_cursor = str(
+                oldest.get("billId") or oldest.get("fillId") or oldest.get("tradeId") or ""
+            )
+            if not next_cursor or len(page) < 100:
+                break
+            cursor = next_cursor
+
         if not fills:
             return
 
