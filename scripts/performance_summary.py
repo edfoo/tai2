@@ -33,6 +33,7 @@ import re
 import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -112,6 +113,31 @@ _COOLDOWN_SKIP_RE = re.compile(
 _SCREENER_RE = re.compile(
     r"Screener: (\d+) base candidates from (\d+) tickers "
     r"\(vol>=(\d+) USD(?:, spread<=([0-9.]+)%)?(?:, dual=(\w+))?\)"
+)
+
+# Entry (taker) fee line, back-filled by the fill reconciler:
+#   ...Stored entry fee for USELESS-USDT-SWAP: 0.0092 USDT (fill 103262024, trade 00fe...)
+# NOTE: the same trade id can emit this line on multiple reconcile passes, so
+# we deduplicate on trade id (not fill id) when summing fees.
+_ENTRY_FEE_RE = re.compile(
+    r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}).*Stored entry fee for "
+    r"([A-Z0-9-]+-USDT-SWAP): ([0-9.]+) USDT "
+    r"\(fill (\d+), trade ([0-9a-f-]+)\)"
+)
+
+# Flat-account equity mark (Shotgun baseline, only set when no positions open):
+#   ...Shotgun: baseline equity set to 100.7295 USDT
+_EQUITY_FLAT_RE = re.compile(
+    r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}).*Shotgun: baseline equity set to ([0-9.]+) USDT"
+)
+
+# Mark-to-market equity captured in the 51008 bootstrap diagnostics.
+# Use ``account_equity_before_cap`` (the TOTAL USDT equity, before the per-symbol
+# isolated seed cap is applied).  The plain ``account_equity=`` field in the
+# "bootstrap path" line is a reduced/per-symbol value and must NOT be used.
+#   ..."account_equity_before_cap": 100.72752204765146, ...
+_EQUITY_MARK_RE = re.compile(
+    r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}).*account_equity_before_cap\": ([0-9.]+)"
 )
 
 STRATEGIES = (
@@ -222,6 +248,35 @@ class Summary:
     screener_last_vol: int = 0
     screener_last_spread: Optional[float] = None
     screener_last_dual: Optional[str] = None
+    # Edge / exit-quality metrics
+    profit_factor: Optional[float] = None
+    payoff_ratio: Optional[float] = None
+    avg_mfe_pct: float = 0.0
+    avg_mae_pct: float = 0.0
+    winners_avg_giveback_pct: Optional[float] = None
+    # Reconciliation gaps (seeds ↔ clears ↔ reconciled PnL)
+    open_positions: list[dict] = field(default_factory=list)
+    missing_pnl: list[dict] = field(default_factory=list)
+    # Fees
+    total_entry_fees: float = 0.0
+    entry_fee_count: int = 0
+    avg_entry_fee: float = 0.0
+    # Equity & drawdown
+    equity_marks: list[dict] = field(default_factory=list)
+    daily_pnl: dict[str, float] = field(default_factory=lambda: defaultdict(float))
+    realized_max_drawdown_usdt: float = 0.0
+    marked_peak_equity: Optional[float] = None
+    marked_trough_equity: Optional[float] = None
+    marked_max_drawdown_usdt: Optional[float] = None
+    marked_max_drawdown_pct: Optional[float] = None
+    # Attribution confidence / signal→trade funnel
+    no_signal_trades: int = 0
+    strat_signals_no_trade: dict[str, int] = field(default_factory=lambda: defaultdict(int))
+    # Hold duration (seed→clear, minutes)
+    hold_durations_min: list[float] = field(default_factory=list)
+    # Exit-type PnL attribution
+    exit_pnl_by_reason: dict[str, float] = field(default_factory=lambda: defaultdict(float))
+    exit_trades_by_reason: dict[str, int] = field(default_factory=lambda: defaultdict(int))
     # Files parsed
     files_parsed: list[str] = field(default_factory=list)
 
@@ -276,6 +331,9 @@ def parse_logs(files: list[Path]) -> tuple[list[PnLTrade], list[Signal], list[Se
     # reconciled against multiple unreconciled trades, so only the FIRST
     # occurrence of each fill id should count as a real trade.
     seen_fills: set[str] = set()
+    # Deduplicate entry fees by trade id (a single entry can emit the
+    # "Stored entry fee" line on multiple reconcile passes).
+    seen_fee_trades: set[str] = set()
 
     def _parse_optional_float(raw: Optional[str]) -> Optional[float]:
         if raw is None or raw == "None":
@@ -453,6 +511,33 @@ def parse_logs(files: list[Path]) -> tuple[list[PnLTrade], list[Signal], list[Se
                     summary.screener_last_spread = float(m.group(4))
                 if m.group(5):
                     summary.screener_last_dual = m.group(5)
+                continue
+            # Entry (taker) fee
+            m = _ENTRY_FEE_RE.search(line)
+            if m:
+                trade_id = m.group(5)
+                if trade_id in seen_fee_trades:
+                    continue
+                seen_fee_trades.add(trade_id)
+                fee = float(m.group(3))
+                summary.total_entry_fees += fee
+                summary.entry_fee_count += 1
+                _track_period(m.group(1))
+                continue
+            # Flat-account equity mark (Shotgun baseline, only when flat)
+            m = _EQUITY_FLAT_RE.search(line)
+            if m:
+                summary.equity_marks.append(
+                    {"ts": m.group(1), "equity": float(m.group(2)), "kind": "flat"}
+                )
+                continue
+            # Mark-to-market equity from bootstrap diagnostics (also during positions)
+            m = _EQUITY_MARK_RE.search(line)
+            if m:
+                summary.equity_marks.append(
+                    {"ts": m.group(1), "equity": float(m.group(2)), "kind": "mark"}
+                )
+                continue
 
     return pnl_trades, signals, seeded, cleared, summary
 
@@ -551,6 +636,168 @@ def _compute_slippage(
     return slippage
 
 
+def _compute_reconciliation_gaps(
+    seeded: list[SeededEntry],
+    cleared: list[ClearedEntry],
+    pnl_trades: list[PnLTrade],
+) -> tuple[list[dict], list[dict]]:
+    """Reconcile seed→clear→PnL counts per symbol.
+
+    Returns two lists:
+
+    * ``open_positions`` — seeds with no subsequent clear event.  These are
+      still open at the end of the parsed period (or a seed fired just past
+      the last clear captured in the logs).
+
+    * ``missing_pnl`` — the *count* of non-``flat`` closes with no matching
+      ``Reconciled PnL``.  Reported per-symbol as ``{symbol, cleared, pnl,
+      shortfall}`` rather than per-event, because the OKX fill reconciler runs
+      on its own poll cadence and can record a ``Reconciled PnL`` line long
+      after the ``TradeMgmt: cleared`` event (and even into a later log
+      rotation), so timestamp pairing is unreliable.
+
+    ``flat`` closes legitimately produce no PnL fill and are excluded.
+    """
+    seeds_by_symbol: dict[str, list[str]] = defaultdict(list)
+    for s in seeded:
+        seeds_by_symbol[s.symbol].append(s.ts)
+    clears_by_symbol: dict[str, list[tuple[str, str]]] = defaultdict(list)
+    for c in cleared:
+        clears_by_symbol[c.symbol].append((c.ts, c.reason))
+    pnls_by_symbol: dict[str, list[str]] = defaultdict(list)
+    for p in pnl_trades:
+        pnls_by_symbol[p.symbol].append(p.ts)
+
+    symbols = set(seeds_by_symbol) | set(clears_by_symbol) | set(pnls_by_symbol)
+    open_positions: list[dict] = []
+    missing_pnl: list[dict] = []
+
+    for sym in sorted(symbols):
+        seeds = sorted(seeds_by_symbol[sym])
+        clears = sorted(clears_by_symbol[sym])
+        pnls = sorted(pnls_by_symbol[sym])
+
+        # 1. Open positions: a seed that no clear follows.  Since seeds and
+        #    clears interleave chronologically per symbol, every clear consumes
+        #    one *earlier* seed; any trailing un-consumed seed is still open.
+        if len(seeds) > len(clears):
+            # The ``len(seeds) - len(clears)`` most recent seeds are still open.
+            for sts in seeds[len(clears):]:
+                open_positions.append({"symbol": sym, "seeded": sts})
+
+        # 2. Closes that never produced a reconciled PnL.  ``flat`` closes are
+        #    excluded (position netted to zero, no PnL fill is emitted).
+        non_flat_clears = sum(1 for _, r in clears if r != "flat")
+        shortfall = non_flat_clears - len(pnls)
+        if shortfall > 0:
+            missing_pnl.append(
+                {
+                    "symbol": sym,
+                    "cleared": non_flat_clears,
+                    "pnl": len(pnls),
+                    "shortfall": shortfall,
+                }
+            )
+
+    return open_positions, missing_pnl
+
+
+_TS_FMT = "%Y-%m-%d %H:%M:%S"
+
+
+def _ts_dt(ts: str) -> datetime:
+    """Parse a log timestamp ("YYYY-MM-DD HH:MM:SS") into a datetime."""
+    return datetime.strptime(ts, _TS_FMT)
+
+
+def _compute_lifecycle(
+    seeded: list[SeededEntry],
+    cleared: list[ClearedEntry],
+    pnl_trades: list[PnLTrade],
+    summary: Summary,
+) -> None:
+    """Populate hold durations and exit-type PnL attribution.
+
+    * Hold duration = minutes from the earliest prior seed to each clear.
+    * Exit-type PnL = attribute each reconciled PnL to the most recent prior
+      cleared reason for the same symbol (consistent with strategy attribution).
+    """
+    seed_ts_by_symbol: dict[str, list[datetime]] = defaultdict(list)
+    for s in seeded:
+        seed_ts_by_symbol[s.symbol].append(_ts_dt(s.ts))
+    clear_by_symbol: dict[str, list[ClearedEntry]] = defaultdict(list)
+    for c in cleared:
+        clear_by_symbol[c.symbol].append(c)
+
+    # Hold durations: greedy seed→clear pairing (earliest clear at/after seed).
+    for sym, seed_dts in seed_ts_by_symbol.items():
+        clears = sorted(clear_by_symbol.get(sym, []), key=lambda c: c.ts)
+        ci = 0
+        for sdt in sorted(seed_dts):
+            while ci < len(clears) and _ts_dt(clears[ci].ts) < sdt:
+                ci += 1
+            if ci < len(clears):
+                dur_min = (_ts_dt(clears[ci].ts) - sdt).total_seconds() / 60.0
+                if 0.0 <= dur_min <= 7 * 24 * 60:  # sanity: < 7 days
+                    summary.hold_durations_min.append(dur_min)
+                ci += 1
+
+    # Exit-type PnL: most recent prior clear reason per symbol.
+    for trade in pnl_trades:
+        reason = "unattributed"
+        tdt = _ts_dt(trade.ts)
+        best: Optional[ClearedEntry] = None
+        for c in clear_by_symbol.get(trade.symbol, []):
+            if _ts_dt(c.ts) <= tdt and (best is None or c.ts > best.ts):
+                best = c
+        if best is not None:
+            reason = best.reason
+        summary.exit_pnl_by_reason[reason] += trade.pnl
+        summary.exit_trades_by_reason[reason] += 1
+
+
+def _compute_equity_stats(
+    equity_marks: list[dict], summary: Summary
+) -> None:
+    """Compute marked-peak/trough and max drawdown from the equity series.
+
+    Drawdown is measured on the full mark series (flat + mark-to-market) in
+    chronological order; a run of flat-only marks would give a flat-to-flat
+    curve.  Missing-mark gaps (positions open) simply contribute no points, so
+    drawdown is a lower bound on the true intra-trade excursion.
+    """
+    if not equity_marks:
+        return
+    marks = sorted(equity_marks, key=lambda e: e["ts"])
+    peak = marks[0]["equity"]
+    summary.marked_peak_equity = peak
+    summary.marked_trough_equity = peak
+    max_dd_usd = 0.0
+    for e in marks:
+        eq = e["equity"]
+        if eq > summary.marked_peak_equity:
+            summary.marked_peak_equity = eq
+        if eq < summary.marked_trough_equity:
+            summary.marked_trough_equity = eq
+        dd = summary.marked_peak_equity - eq
+        if dd > max_dd_usd:
+            max_dd_usd = dd
+    summary.marked_max_drawdown_usdt = max_dd_usd
+    if summary.marked_peak_equity > 0:
+        summary.marked_max_drawdown_pct = (
+            max_dd_usd / summary.marked_peak_equity * 100.0
+        )
+
+
+def _compute_daily_pnl(
+    pnl_trades: list[PnLTrade], summary: Summary
+) -> None:
+    """Group realized PnL by calendar date."""
+    for trade in pnl_trades:
+        day = trade.ts[:10]
+        summary.daily_pnl[day] += trade.pnl
+
+
 def build_summary(
     pnl_trades: list[PnLTrade],
     signals: list[Signal],
@@ -561,6 +808,9 @@ def build_summary(
     """Populate aggregate, per-strategy, per-symbol, and slippage stats."""
     win_pnls: list[float] = []
     loss_pnls: list[float] = []
+    all_mfe_pct: list[float] = []
+    all_mae_pct: list[float] = []
+    winner_giveback: list[float] = []
 
     for trade in pnl_trades:
         summary.total_trades += 1
@@ -580,6 +830,8 @@ def build_summary(
         summary.strat_trades[strat] += 1
         summary.strat_pnl[strat] += trade.pnl
         best_sig = _most_recent_signal(trade.symbol, trade.ts, signals)
+        if best_sig is None:
+            summary.no_signal_trades += 1
         if best_sig is not None and best_sig.flipped:
             summary.flipped_trades += 1
             summary.flipped_pnl += trade.pnl
@@ -590,15 +842,24 @@ def build_summary(
             if best_sig.flip_tp_sl:
                 summary.flip_tp_sl_trades += 1
                 summary.flip_tp_sl_pnl += trade.pnl
+        # Precompute normalized MFE/MAE once per trade (in % of notional) and
+        # accumulate for the aggregate exit-quality section.
+        notional = best_sig.notional if best_sig is not None else 0.0
+        mfe_pct = trade.mfe_peak_pct
+        if mfe_pct is None and trade.mfe_peak_usd is not None and notional > 0:
+            mfe_pct = trade.mfe_peak_usd / notional * 100.0
+        mae_pct = trade.mae_trough_pct
+        if mae_pct is None and trade.mae_trough_usd is not None and notional > 0:
+            mae_pct = trade.mae_trough_usd / notional * 100.0
+        if mfe_pct is not None:
+            all_mfe_pct.append(mfe_pct)
+        if mae_pct is not None:
+            all_mae_pct.append(mae_pct)
         if trade.pnl > 0:
             summary.strat_wins[strat] += 1
             # Take-profits with trough unfavorable excursion: flag winning
             # trades that were once deep underwater (nearly stopped out before
             # recovering to TP).  Mirrors the stop-out peak tracking below.
-            mae_pct = trade.mae_trough_pct
-            if mae_pct is None and trade.mae_trough_usd is not None and best_sig is not None:
-                if best_sig.notional > 0:
-                    mae_pct = trade.mae_trough_usd / best_sig.notional * 100.0
             if mae_pct is not None and mae_pct < 0:
                 summary.tp_trough_trades.append(
                     {
@@ -612,12 +873,15 @@ def build_summary(
                         else None,
                     }
                 )
+            # Winners give-back: share of their peak profit returned before
+            # closing.  High give-back = TP set too far above where price
+            # reverses, so the trade banks only a fraction of its move.
+            if mfe_pct is not None and notional > 0:
+                realized_pct = trade.pnl / notional * 100.0
+                if mfe_pct > realized_pct:
+                    winner_giveback.append((mfe_pct - realized_pct) / mfe_pct * 100.0)
         else:
             summary.strat_losses[strat] += 1
-            mfe_pct = trade.mfe_peak_pct
-            if mfe_pct is None and trade.mfe_peak_usd is not None and best_sig is not None:
-                if best_sig.notional > 0:
-                    mfe_pct = trade.mfe_peak_usd / best_sig.notional * 100.0
             if mfe_pct is not None and mfe_pct > 0:
                 summary.stopout_peak_trades.append(
                     {
@@ -635,12 +899,56 @@ def build_summary(
     summary.avg_win = sum(win_pnls) / len(win_pnls) if win_pnls else 0.0
     summary.avg_loss = sum(loss_pnls) / len(loss_pnls) if loss_pnls else 0.0
     summary.slippage_trades = _compute_slippage(pnl_trades, signals, seeded)
+    if summary.entry_fee_count:
+        summary.avg_entry_fee = summary.total_entry_fees / summary.entry_fee_count
+
+    # Signal → trade funnel: signals that never produced an attributed trade.
+    for strat, sig_count in summary.strat_signals.items():
+        summary.strat_signals_no_trade[strat] = max(
+            0, sig_count - summary.strat_trades.get(strat, 0)
+        )
+
+    # Hold duration + exit-type PnL.
+    _compute_lifecycle(seeded, cleared, pnl_trades, summary)
+    # Equity curve & drawdown.
+    _compute_equity_stats(summary.equity_marks, summary)
+    summary.equity_marks.sort(key=lambda e: e["ts"])
+    # Daily PnL.
+    _compute_daily_pnl(pnl_trades, summary)
+
+    # Edge / exit-quality metrics.
+    gross_profit = sum(win_pnls)
+    gross_loss = abs(sum(loss_pnls))
+    if gross_loss > 0:
+        summary.profit_factor = gross_profit / gross_loss
+    if summary.avg_loss < 0:
+        summary.payoff_ratio = summary.avg_win / abs(summary.avg_loss)
+    summary.avg_mfe_pct = sum(all_mfe_pct) / len(all_mfe_pct) if all_mfe_pct else 0.0
+    summary.avg_mae_pct = sum(all_mae_pct) / len(all_mae_pct) if all_mae_pct else 0.0
+    if winner_giveback:
+        summary.winners_avg_giveback_pct = sum(winner_giveback) / len(winner_giveback)
+
+    # Reconciliation gaps (seeds ↔ clears ↔ reconciled PnL).
+    summary.open_positions, summary.missing_pnl = _compute_reconciliation_gaps(
+        seeded, cleared, pnl_trades
+    )
     return summary
 
 
 # ── Reporting ────────────────────────────────────────────────────────────────
 def _fmt_pct(val: float, total: int) -> str:
     return f"{val / total * 100:.1f}%" if total else "n/a"
+
+
+def _median(values: list[float]) -> Optional[float]:
+    """Return the median of a list, or None if empty."""
+    if not values:
+        return None
+    s = sorted(values)
+    n = len(s)
+    if n % 2:
+        return s[n // 2]
+    return (s[n // 2 - 1] + s[n // 2]) / 2.0
 
 
 def print_report(summary: Summary) -> None:
@@ -676,13 +984,50 @@ def print_report(summary: Summary) -> None:
     )
     print()
 
+    # ── Fees ──
+    print("── Fees & net PnL ──────────────────────────────────────────────")
+    net_pnl = summary.total_pnl - summary.total_entry_fees
+    print(
+        f"  Realized PnL (net of close fee): {summary.total_pnl:+.4f} USDT"
+    )
+    print(
+        f"  Entry (taker) fees: {summary.total_entry_fees:.4f} USDT "
+        f"({summary.entry_fee_count} legs, avg {summary.avg_entry_fee:.4f})"
+    )
+    print(f"  PnL after entry fees: {net_pnl:+.4f} USDT")
+    print()
+
+    # ── Edge & exit quality ──
+    print("── Edge & exit quality ────────────────────────────────────────")
+    pf = "n/a" if summary.profit_factor is None else f"{summary.profit_factor:.2f}"
+    pay = "n/a" if summary.payoff_ratio is None else f"{summary.payoff_ratio:.2f}"
+    print(
+        f"  Profit factor (gross profit / gross loss): {pf}    "
+        f"Payoff ratio (avg win / |avg loss|): {pay}"
+    )
+    print(
+        f"  Avg MFE (peak favorable excursion): {summary.avg_mfe_pct:+.2f}%   "
+        f"Avg MAE (worst adverse excursion): {summary.avg_mae_pct:+.2f}%"
+    )
+    if summary.winners_avg_giveback_pct is not None:
+        print(
+            f"  Winners avg give-back of peak profit: "
+            f"{summary.winners_avg_giveback_pct:.1f}%"
+        )
+    else:
+        print("  Winners avg give-back of peak profit: n/a")
+    print()
+
     # ── Per-strategy ──
     print("── By strategy (heuristic attribution) ───────────────────────────")
     print(
-        f"  {'strategy':<20}{'signals':>9}{'trades':>8}{'W':>5}{'L':>5}"
-        f"{'win%':>7}{'net PnL':>11}{'avg':>9}"
+        f"  {'strategy':<20}{'signals':>9}{'trades':>8}{'conv%':>7}{'W':>5}"
+        f"{'L':>5}{'win%':>7}{'net PnL':>11}{'avg':>9}"
     )
-    print(f"  {'-' * 20}{'-' * 9}{'-' * 8}{'-' * 5}{'-' * 5}{'-' * 7}{'-' * 11}{'-' * 9}")
+    print(
+        f"  {'-' * 20}{'-' * 9}{'-' * 8}{'-' * 7}{'-' * 5}{'-' * 5}"
+        f"{'-' * 7}{'-' * 11}{'-' * 9}"
+    )
     for strat in sorted(
         summary.strat_trades.keys(), key=lambda s: summary.strat_pnl[s]
     ):
@@ -693,10 +1038,64 @@ def print_report(summary: Summary) -> None:
         sig = summary.strat_signals.get(strat, 0)
         wr = w / n * 100 if n else 0
         avg = pnl / n if n else 0
+        conv = n / sig * 100 if sig else 0.0
         print(
-            f"  {strat:<20}{sig:>9}{n:>8}{w:>5}{l:>5}{wr:>6.1f}%"
+            f"  {strat:<20}{sig:>9}{n:>8}{conv:>6.1f}%{w:>5}{l:>5}{wr:>6.1f}%"
             f"{pnl:>+11.4f}{avg:>+9.4f}"
         )
+    print()
+
+    # ── Funnel & attribution ──
+    print("── Signal → trade funnel ─────────────────────────────────────────")
+    print(
+        f"  Signals without an attributed trade (blocked/skipped/no-fill), by strategy:"
+    )
+    for strat, cnt in sorted(
+        summary.strat_signals_no_trade.items(), key=lambda x: -x[1]
+    ):
+        sig = summary.strat_signals.get(strat, 0)
+        if sig:
+            print(
+                f"    {strat:<20} {cnt:>4} of {sig:>4} signals unconverted "
+                f"({cnt / sig * 100:>4.1f}%)"
+            )
+    print(
+        f"  Trades with no prior signal (auto-seeded / non-launcher): "
+        f"{summary.no_signal_trades}"
+    )
+    print()
+
+    # ── Hold duration ──
+    print("── Hold duration (seed → clear) ────────────────────────────────")
+    if summary.hold_durations_min:
+        mean = sum(summary.hold_durations_min) / len(summary.hold_durations_min)
+        med = _median(summary.hold_durations_min)
+        mx = max(summary.hold_durations_min)
+        med_str = f"{med:.1f}" if med is not None else "n/a"
+        print(
+            f"  n={len(summary.hold_durations_min)}   mean={mean:.1f}m   "
+            f"median={med_str}m   max={mx:.1f}m"
+        )
+        print(
+            f"  (trend_pullback analyses on 1H candles — mean hold < 60m suggests "
+            f"the SL cuts the thesis short)"
+        )
+    else:
+        print("  No paired seed→clear events found.")
+    print()
+
+    # ── Exit-type PnL ──
+    print("── PnL by exit reason ───────────────────────────────────────────")
+    if summary.exit_pnl_by_reason:
+        print(f"  {'reason':<20}{'trades':>8}{'net PnL':>11}")
+        print(f"  {'-' * 20}{'-' * 8}{'-' * 11}")
+        for reason, pnl in sorted(
+            summary.exit_pnl_by_reason.items(), key=lambda x: x[1]
+        ):
+            n = summary.exit_trades_by_reason[reason]
+            print(f"  {reason:<20}{n:>8}{pnl:>+11.4f}")
+    else:
+        print("  No exit attribution available.")
     print()
 
     # ── Per-symbol ──
@@ -727,6 +1126,25 @@ def print_report(summary: Summary) -> None:
             summary.cooldown_skips_by_strategy.items(), key=lambda x: -x[1]
         ):
             print(f"    {strat}: {count}")
+    print()
+
+    # ── Reconciliation & data integrity ──
+    print("── Reconciliation & data integrity ───────────────────────────")
+    cleared_total = sum(summary.cleared_reasons.values())
+    print(
+        f"  Seeded: {summary.seeded_count}   Cleared: {cleared_total}   "
+        f"Reconciled PnL: {summary.total_trades}   "
+        f"Flat closes (no PnL expected): {summary.cleared_reasons.get('flat', 0)}"
+    )
+    print(f"  Positions still open (seed without clear): {len(summary.open_positions)}")
+    for p in summary.open_positions:
+        print(f"    {p['symbol']}  seeded {p['seeded']}")
+    print(f"  Symbols with closes missing reconciled PnL: {len(summary.missing_pnl)}")
+    for p in summary.missing_pnl:
+        print(
+            f"    {p['symbol']}  cleared {p['cleared']}  PnL {p['pnl']}  "
+            f"shortfall {p['shortfall']}"
+        )
     print()
 
     # ── Guardrails ──
@@ -807,6 +1225,37 @@ def print_report(summary: Summary) -> None:
         print("  None detected in the parsed logs.")
     print()
 
+    # ── Equity & drawdown ──
+    print("── Equity & drawdown (marked) ──────────────────────────────────")
+    if summary.equity_marks:
+        first = summary.equity_marks[0]["equity"]
+        last = summary.equity_marks[-1]["equity"]
+        print(
+            f"  Marks: {len(summary.equity_marks)}   first={first:.4f}   "
+            f"last={last:.4f}   Δ={last - first:+.4f} USDT"
+        )
+        if summary.marked_peak_equity is not None:
+            print(f"  Peak equity: {summary.marked_peak_equity:.4f} USDT")
+        if summary.marked_trough_equity is not None:
+            print(f"  Trough equity: {summary.marked_trough_equity:.4f} USDT")
+        if summary.marked_max_drawdown_usdt is not None:
+            dd = summary.marked_max_drawdown_usdt
+            ddp = summary.marked_max_drawdown_pct
+            ddp_s = f" ({ddp:.2f}%)" if ddp is not None else ""
+            print(f"  Max drawdown (marked): {dd:.4f} USDT{ddp_s}")
+    else:
+        print("  No equity marks found in logs (Shotgun disabled / no trades).")
+    print()
+
+    # ── Daily PnL ──
+    print("── Daily realized PnL ───────────────────────────────────────────")
+    if summary.daily_pnl:
+        for day, pnl in sorted(summary.daily_pnl.items()):
+            print(f"  {day}: {pnl:+.4f} USDT")
+    else:
+        print("  No realized PnL to bucket.")
+    print()
+
     # ── Screener ──
     if summary.screener_runs:
         print("── Screener (last run) ──────────────────────────────────────────")
@@ -844,10 +1293,25 @@ def summary_to_dict(summary: Summary) -> dict:
             if summary.total_trades
             else None,
         },
+        "fees": {
+            "realized_pnl_net_close_fee": round(summary.total_pnl, 4),
+            "entry_fees": round(summary.total_entry_fees, 4),
+            "entry_fee_legs": summary.entry_fee_count,
+            "avg_entry_fee": round(summary.avg_entry_fee, 4),
+            "net_pnl_after_entry_fees": round(
+                summary.total_pnl - summary.total_entry_fees, 4
+            ),
+        },
         "by_strategy": {
             strat: {
                 "signals": summary.strat_signals.get(strat, 0),
                 "trades": summary.strat_trades[strat],
+                "signals_no_trade": summary.strat_signals_no_trade.get(strat, 0),
+                "conversion_pct": round(
+                    summary.strat_trades[strat] / summary.strat_signals[strat] * 100, 2
+                )
+                if summary.strat_signals.get(strat, 0)
+                else None,
                 "wins": summary.strat_wins[strat],
                 "losses": summary.strat_losses[strat],
                 "win_rate_pct": round(
@@ -858,6 +1322,54 @@ def summary_to_dict(summary: Summary) -> dict:
                 "net_pnl_usdt": round(summary.strat_pnl[strat], 4),
             }
             for strat in sorted(summary.strat_trades.keys())
+        },
+        "attribution": {
+            "no_signal_trades": summary.no_signal_trades,
+        },
+        "hold_duration": {
+            "count": len(summary.hold_durations_min),
+            "mean_min": round(
+                sum(summary.hold_durations_min) / len(summary.hold_durations_min), 2
+            )
+            if summary.hold_durations_min
+            else None,
+            "median_min": round(_median(summary.hold_durations_min), 2)
+            if summary.hold_durations_min
+            else None,
+            "max_min": round(max(summary.hold_durations_min), 2)
+            if summary.hold_durations_min
+            else None,
+        },
+        "exit_pnl_by_reason": {
+            reason: {
+                "trades": summary.exit_trades_by_reason[reason],
+                "net_pnl_usdt": round(pnl, 4),
+            }
+            for reason, pnl in sorted(summary.exit_pnl_by_reason.items())
+        },
+        "equity": {
+            "marks": len(summary.equity_marks),
+            "first": round(summary.equity_marks[0]["equity"], 4)
+            if summary.equity_marks
+            else None,
+            "last": round(summary.equity_marks[-1]["equity"], 4)
+            if summary.equity_marks
+            else None,
+            "peak": round(summary.marked_peak_equity, 4)
+            if summary.marked_peak_equity is not None
+            else None,
+            "trough": round(summary.marked_trough_equity, 4)
+            if summary.marked_trough_equity is not None
+            else None,
+            "max_drawdown_usdt": round(summary.marked_max_drawdown_usdt, 4)
+            if summary.marked_max_drawdown_usdt is not None
+            else None,
+            "max_drawdown_pct": round(summary.marked_max_drawdown_pct, 3)
+            if summary.marked_max_drawdown_pct is not None
+            else None,
+        },
+        "daily_pnl": {
+            day: round(pnl, 4) for day, pnl in sorted(summary.daily_pnl.items())
         },
         "by_symbol": {
             sym: {
@@ -889,6 +1401,27 @@ def summary_to_dict(summary: Summary) -> dict:
             "net_pnl_usdt": round(summary.flipped_pnl, 4),
             "flip_tp_sl_trades": summary.flip_tp_sl_trades,
             "flip_tp_sl_net_pnl_usdt": round(summary.flip_tp_sl_pnl, 4),
+        },
+        "edge": {
+            "profit_factor": round(summary.profit_factor, 3)
+            if summary.profit_factor is not None
+            else None,
+            "payoff_ratio": round(summary.payoff_ratio, 3)
+            if summary.payoff_ratio is not None
+            else None,
+            "avg_mfe_pct": round(summary.avg_mfe_pct, 3),
+            "avg_mae_pct": round(summary.avg_mae_pct, 3),
+            "winners_avg_giveback_pct": round(summary.winners_avg_giveback_pct, 2)
+            if summary.winners_avg_giveback_pct is not None
+            else None,
+        },
+        "reconciliation": {
+            "seeded": summary.seeded_count,
+            "cleared": sum(summary.cleared_reasons.values()),
+            "flat_closes": summary.cleared_reasons.get("flat", 0),
+            "reconciled_pnl": summary.total_trades,
+            "open_positions": summary.open_positions,
+            "closed_without_pnl": summary.missing_pnl,
         },
         "sl_slippage": summary.slippage_trades,
         "stopout_peak_trades": summary.stopout_peak_trades,
