@@ -395,7 +395,12 @@ DEFAULT_STRATEGY_CONFIG: dict[str, dict[str, Any]] = {
 DEFAULT_TRADE_MANAGEMENT: dict[str, Any] = {
     "enabled": True,
     "breakeven_enabled": True,
-    "breakeven_at_r": 0.7,
+    # Lowered 0.7 → 0.3 (2026-09-09) so the breakeven stop fires earlier and
+    # locks in profit sooner.  At the median structural risk (~1.4%), 0.3R
+    # arms breakeven at ~0.4% favorable move instead of waiting for ~1.0%,
+    # which directly reduces the "was in profit → gave it all back" failure
+    # (observed 83.7% winner give-back in the performance summary).
+    "breakeven_at_r": 0.3,
     "breakeven_buffer_pct": 0.05,
     "partial_tp_enabled": True,
     "partial_tp_at_r": 0.8,
@@ -410,10 +415,17 @@ DEFAULT_TRADE_MANAGEMENT: dict[str, Any] = {
     # Lowered 1.0→0.8 so the runner is protected the moment the partial TP
     # fires (partial_tp_at_r=0.8), instead of drifting from 0.8R→1.0R with no
     # stop and giving its profit back to the time-stop.
-    "trailing_activate_r": 0.8,
-    "trailing_distance_atr": 1.5,
-    "trailing_floor_r": 0.5,
-    "trailing_step_r": 0.2,
+    #
+    # 2026-09-09 tuning: the trailing stop almost never ARMED in production
+    # (28 partial-TP fires vs only 3 trailing fires in 4.5 days).  Root cause:
+    # the ratchet required ``risk_pct > 2.5 × atr_pct`` to clear the breakeven
+    # stop + step distance, which median trades (risk≈1.4%, atr≈1%) never hit,
+    # so the runner had no working exit and gave back its move.  Fix: arm
+    # earlier, trail tighter, lower the floor, and take smaller ratchet steps.
+    "trailing_activate_r": 0.6,
+    "trailing_distance_atr": 1.0,
+    "trailing_floor_r": 0.25,
+    "trailing_step_r": 0.1,
     # Drop the fixed TP on the runner after the partial fires so the trailing
     # stop is the profit-taker (asymmetric exit).  When False, the original TP
     # is preserved (legacy capped behaviour).
