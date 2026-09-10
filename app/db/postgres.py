@@ -65,8 +65,8 @@ CREATE TABLE IF NOT EXISTS prompt_versions (
 """
 
 INSERT_SQL = (
-    "INSERT INTO executed_trades (id, timestamp, symbol, instrument, side, size, price, amount, llm_reasoning, pnl, fee, fee_paid_at, strategy) "
-    "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)"
+    "INSERT INTO executed_trades (id, timestamp, symbol, instrument, side, size, price, amount, llm_reasoning, pnl, fee, fee_paid_at, strategy, okx_order_id) "
+    "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)"
 )
 
 UPDATE_TRADE_PNL_SQL = (
@@ -88,15 +88,29 @@ UPDATE_ENTRY_FEE_SQL = (
 )
 
 FETCH_UNRECONCILED_SQL = """
-    SELECT id, timestamp, symbol, side
+    SELECT id, timestamp, symbol, side, okx_order_id
     FROM executed_trades
     WHERE symbol = $1
       AND side = $2
       AND pnl IS NULL
       AND okx_fill_id IS NULL
       AND timestamp >= NOW() - ($3::double precision * INTERVAL '1 hour')
-    ORDER BY timestamp DESC
+    ORDER BY timestamp ASC
     LIMIT 5
+"""
+
+# Look up a single unreconciled entry by its OWN okx_order_id (matches an entry
+# fill to the exact row the bot created for that order), used by the entry-fee
+# back-fill pass so fees are not attributed to a neighbouring row of the same
+# symbol+side.
+FETCH_BY_ORDER_ID_SQL = """
+    SELECT id, timestamp, symbol, side, okx_order_id
+    FROM executed_trades
+    WHERE okx_order_id = $1
+      AND pnl IS NULL
+      AND okx_fill_id IS NULL
+    ORDER BY timestamp ASC
+    LIMIT 1
 """
 
 FETCH_RECENT_SQL = (
@@ -240,6 +254,12 @@ async def init_postgres_pool(*, min_size: int = 1, max_size: int = 10) -> asyncp
         ADD COLUMN IF NOT EXISTS strategy TEXT;
         """
     )
+    await _POOL.execute(
+        """
+        ALTER TABLE executed_trades
+        ADD COLUMN IF NOT EXISTS okx_order_id TEXT;
+        """
+    )
     logger.info("PostgreSQL pool initialized")
     return _POOL
 
@@ -279,6 +299,7 @@ async def insert_executed_trade(trade: ExecutedTrade) -> None:
         # back-filled later by the reconciler via UPDATE_TRADE_PNL_SQL.
         datetime.now(timezone.utc) if trade.fee is not None else None,
         trade.strategy,
+        trade.okx_order_id,
     )
 
 
@@ -339,6 +360,20 @@ async def fetch_unreconciled_trades(
         resolved_side,
         float(lookback_hours),
     )
+    return [dict(row) for row in records]
+
+
+async def fetch_unreconciled_by_order_id(order_id: str) -> list[dict[str, Any]]:
+    """Return the unreconciled entry whose own ``okx_order_id`` matches *order_id*.
+
+    Used by the entry-fee back-fill pass to link an entry fill to the exact row
+    the bot created for that order, rather than guessing by symbol+side (which
+    can attribute a fee to a neighbouring entry of the same symbol).
+    """
+    if not order_id:
+        return []
+    pool = await get_postgres_pool()
+    records = await pool.fetch(FETCH_BY_ORDER_ID_SQL, str(order_id))
     return [dict(row) for row in records]
 
 
@@ -1299,6 +1334,7 @@ __all__ = [
     "fetch_recent_trades",
     "fetch_trading_pairs",
     "fetch_unreconciled_trades",
+    "fetch_unreconciled_by_order_id",
     "get_postgres_pool",
     "get_prompt_version",
     "init_postgres_pool",

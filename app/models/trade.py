@@ -23,6 +23,11 @@ class ExecutedTrade(BaseModel):
     pnl: Optional[Decimal] = None
     fee: Optional[Decimal] = None
     strategy: Optional[str] = None
+    # OKX order id (``ordId``) of the bot's own entry order.  Provides a stable
+    # identity to link the exchange fill for THIS entry back to the row, so the
+    # reconciler can match entry fills precisely instead of guessing by
+    # symbol+side (which can cross-contaminate manual vs bot trades).
+    okx_order_id: Optional[str] = None
 
     @field_validator("symbol", mode="before")
     def normalize_symbol(cls, value: str) -> str:  # noqa: N805

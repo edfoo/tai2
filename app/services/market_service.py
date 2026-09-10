@@ -23,6 +23,7 @@ import pandas_ta as ta
 from app.core.config import get_settings
 from app.db.postgres import (
     fetch_unreconciled_trades,
+    fetch_unreconciled_by_order_id,
     insert_equity_point,
     insert_executed_trade,
     update_entry_fee,
@@ -11426,6 +11427,7 @@ class MarketService:
             fee=fee_value,
             is_close=reduce_only,
             strategy_name=decision.get("_strategy_name"),
+            okx_order_id=str(order_id) if not reduce_only else None,
         )
         return True
 
@@ -11800,6 +11802,25 @@ class MarketService:
         random_suffix = secrets.token_hex(3)
         value = f"{safe_prefix}{timestamp}{random_suffix}"
         return value[:32]
+
+    @staticmethod
+    def _is_bot_client_order_id(cl_order_id: str) -> bool:
+        """Return True if *cl_order_id* matches a known bot-generated prefix.
+
+        Used by the fill reconciler to distinguish bot-owned fills (all of which
+        carry a `_generate_client_order_id` prefix) from manually-placed orders
+        (which do not).  A manual close fill must never be attributed to a bot
+        entry, or the bot's realised PnL gets polluted / orphaned.
+
+        Prefixes mirror the `prefix=` arguments passed to
+        `_generate_client_order_id` across the close/entry helpers.
+        """
+        if not cl_order_id:
+            return False
+        cid = cl_order_id.lower()
+        return cid.startswith(
+            ("tai2", "gov", "shot", "skim", "tm-", "cmtr-", "altr-")
+        )
 
     def _normalize_order_response(self, response: Any) -> dict[str, Any] | None:
         """Return the first OKX data entry if the envelope and sub-codes signal success."""
@@ -12749,8 +12770,15 @@ class MarketService:
         pnl_usd: float | None = None,
         pnl_ratio: float | None = None,
         strategy_name: str | None = None,
+        okx_order_id: str | None = None,
     ) -> None:
-        """Persist successful fills so downstream analytics and the UI have context."""
+        """Persist successful fills so downstream analytics and the UI have context.
+
+        ``okx_order_id`` is the exchange ``ordId`` of the BOT's OWN order that
+        produced this entry.  It is stored on the row so the fill reconciler can
+        link an entry fill back to the exact row (identity-aware), rather than
+        guessing by symbol+side.  Close legs pass it as None.
+        """
         if price is None or amount is None:
             return
         symbol_key = symbol.upper()
@@ -12780,6 +12808,7 @@ class MarketService:
                 llm_reasoning=rationale,
                 fee=Decimal(str(fee)) if fee is not None else None,
                 strategy=strategy_name,
+                okx_order_id=okx_order_id,
             )
             await insert_executed_trade(trade)
         except Exception as exc:  # pragma: no cover - persistence best-effort
@@ -13004,6 +13033,26 @@ class MarketService:
             if not inst_id or not fill_side:
                 continue
 
+            # ── Bot-fill identity guard ──────────────────────────────────
+            # The closing fill carries the client order id of the order that
+            # caused it.  Every bot order uses a known prefix (see
+            # `_generate_client_order_id`: "tai2", "gov", "gov-c", "shot",
+            # "skim", "tm-*", "cmtr-*", "altr-*"), whereas a manually-placed
+            # order does not.  If the fill's clOrdId is present AND non-empty
+            # AND does not match a known bot prefix, it is a manual fill and
+            # must NOT be attributed to a bot entry — pairing it would both
+            # pollute a bot row with manual PnL and orphan the bot's real close
+            # fill (losing its PnL).  We only skip when we are *sure* it is
+            # manual (clOrdId present and unknown); a missing/empty clOrdId is
+            # treated as ambiguous and left to the existing symbol+side match.
+            fill_clordid = str(fill.get("clOrdId") or "").strip()
+            if fill_clordid and not self._is_bot_client_order_id(fill_clordid):
+                self._emit_debug(
+                    f"Fill reconciliation: skipping manual fill for {inst_id} "
+                    f"(clOrdId={fill_clordid}, fill {fill_id})"
+                )
+                continue
+
             try:
                 candidates = await fetch_unreconciled_trades(
                     symbol=inst_id,
@@ -13017,7 +13066,11 @@ class MarketService:
             if not candidates:
                 continue
 
-            # Take the most recent unreconciled entry as the match.
+            # FIFO liquidation matching: OKX closes the OLDEST open position
+            # first, so the earliest unreconciled entry is the correct pairing
+            # (the SQL now orders by timestamp ASC).  The previous LIFO match
+            # (most recent) mis-attributed a close to a newer entry when several
+            # entries for one symbol were open within the lookback window.
             target = candidates[0]
             try:
                 await update_trade_pnl(
@@ -13069,12 +13122,21 @@ class MarketService:
 
             try:
                 # For entry fills the row side matches the fill side (same direction).
-                candidates = await fetch_unreconciled_trades(
-                    symbol=inst_id,
-                    side=fill_side,
-                    lookback_hours=48.0,
-                    same_side=True,
-                )
+                # Identity-aware: prefer matching by the fill's own ordId (the bot's
+                # order id stored at entry time) so the fee lands on the exact row.
+                fill_ordid = str(fill.get("ordId") or "").strip()
+                candidates: list[dict[str, Any]] = []
+                if fill_ordid:
+                    candidates = await fetch_unreconciled_by_order_id(fill_ordid)
+                if not candidates:
+                    # Fall back to symbol+side matching when the fill lacks an ordId
+                    # (or the row predates the identity column).
+                    candidates = await fetch_unreconciled_trades(
+                        symbol=inst_id,
+                        side=fill_side,
+                        lookback_hours=48.0,
+                        same_side=True,
+                    )
             except TypeError:
                 # fetch_unreconciled_trades may not support same_side yet; skip gracefully.
                 continue
