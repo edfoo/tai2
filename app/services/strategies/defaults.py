@@ -292,9 +292,14 @@ DEFAULT_TREND_PULLBACK: dict[str, Any] = {
     "sl_pct": 4.0,
     "pullback_ema": 21,
     # Fixed % proximity floor (never collapses to zero on dead coins).
-    "pullback_proximity_pct": 0.3,
+    # Tightened 0.3 → 0.2 (2026-09-10): the fixed floor matters on low-ATR names.
+    "pullback_proximity_pct": 0.2,
     # Volatility-normalised proximity: effective band = max(floor, atr × ATR%).
-    "pullback_proximity_atr": 0.5,
+    # Tightened 0.5 → 0.3 (2026-09-10): on high-ATR names (e.g. a coin that just
+    # 2×'d overnight) 0.5×ATR% became a needlessly wide "touch" band and admitted
+    # fake pullbacks several % away from VWAP/EMA21.  A tighter band requires a
+    # genuine arrival at value before entering.
+    "pullback_proximity_atr": 0.3,
     "use_vwap_as_level": True,
     "require_htf_trend": True,
     "require_bullish_candle": True,
@@ -307,7 +312,11 @@ DEFAULT_TREND_PULLBACK: dict[str, Any] = {
     "max_adx_for_entry": 30.0,
     # Volatility-normalised extension gate: price must not be more than this
     # × ATR% past the pullback level (blocks late entries). 0 = disabled.
-    "max_pullback_extension_atr": 2.0,
+    # Tightened 2.0 → 1.0 (2026-09-10): at 2.0, a high-ATR coin (6.6% ATR) was
+    # allowed to be ~13% past the level and still enter — a parabolic blow-off
+    # entry, not a pullback.  1.0 halves that allowance so a genuine
+    # continuation-away-from-the-level rejects the entry.
+    "max_pullback_extension_atr": 1.0,
     "use_atr_sizing": True,
     "use_structural_sizing": True,
     "structural_sl_buffer_atr": 0.15,
