@@ -78,6 +78,24 @@ def test_result_to_dict_is_json_serialisable() -> None:
     assert d["trades"][0]["direction"] == "long"
 
 
+def test_result_to_dict_sanitises_non_finite_floats() -> None:
+    """inf/-inf/nan must become None (JSONResponse uses allow_nan=False)."""
+    result = _sample_result()
+    result.metrics["profit_factor"] = float("inf")
+    result.per_strategy["mean_reversion"]["profit_factor"] = float("inf")
+    result.metrics["some_nan"] = float("nan")
+
+    d = P.result_to_dict(result)
+    # json.dumps with allow_nan=False must not raise (this is what FastAPI does).
+    json.dumps(d, allow_nan=False)
+
+    assert d["metrics"]["profit_factor"] is None
+    assert d["metrics"]["some_nan"] is None
+    assert d["per_strategy"]["mean_reversion"]["profit_factor"] is None
+    # A valid finite float is left untouched.
+    assert d["metrics"]["net_profit"] == 200.0
+
+
 def test_round_trip_preserves_result() -> None:
     d = P.result_to_dict(_sample_result())
     back = P.result_from_dict(d)
