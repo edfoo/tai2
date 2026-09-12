@@ -139,6 +139,7 @@ def build_backtest_config(
     evaluation_timeframe: str = "1m",
     launcher_config: dict[str, Any] | None = None,
     strategy_config: dict[str, Any] | None = None,
+    guardrails_config: dict[str, Any] | None = None,
 ) -> BacktestConfig:
     """Build a :class:`BacktestConfig` — the single config constructor.
 
@@ -163,6 +164,7 @@ def build_backtest_config(
         strategy_names=strategy_names,
         launcher_config=launcher_config,
         strategy_config=dict(strategy_config or {}),
+        guardrails_config=dict(guardrails_config or {}),
         warmup_candles=warmup,
         disable_live_execution=True,
         evaluation_mode=evaluation_mode,

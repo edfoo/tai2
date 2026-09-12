@@ -107,12 +107,33 @@ class BacktestEngine:
         _strat_cfg = dict(config.strategy_config or {})
         if "trade_management" in _strat_cfg and "trade_management" not in _sim_cfg:
             _sim_cfg["trade_management"] = _strat_cfg["trade_management"]
+        # Merge the live guardrails config so the simulator's sizing, daily-loss
+        # lockout, and re-entry logic read the same values live uses.  Live keeps
+        # these under runtime_config["guardrails"] (separate from launcher/strategy),
+        # so without this the backtest's max_position_pct / atr_risk_per_trade_pct /
+        # daily_loss_limit_pct / leverage would all be inert.
+        self._guardrails_config = dict(config.guardrails_config or {})
+        if self._guardrails_config:
+            _existing_guard = _sim_cfg.get("guardrails")
+            if isinstance(_existing_guard, dict):
+                _existing_guard.update(self._guardrails_config)
+            else:
+                _sim_cfg["guardrails"] = self._guardrails_config
+        # Derive the per-candle time-stop from time_stop_seconds (see Simulator).
+        _timeframe_seconds: float | None = None
+        try:
+            _tf_ms = timeframe_ms(self._config.timeframe)
+            if _tf_ms and _tf_ms > 0:
+                _timeframe_seconds = _tf_ms / 1000.0
+        except Exception:
+            _timeframe_seconds = None
         self._simulator = Simulator(
             initial_capital=config.initial_capital,
             notional_per_trade=float(
                 (config.launcher_config or {}).get("notional_usd") or 10.0
             ),
             strategy_config=_sim_cfg,
+            timeframe_seconds=_timeframe_seconds,
             cost_model=CostModel(
                 taker_fee_bps=config.taker_fee_bps,
                 maker_fee_bps=config.maker_fee_bps,
@@ -427,7 +448,7 @@ class BacktestEngine:
                     )
                     if not _passes_protection_guard(
                         resolved=resolved,
-                        launcher_config=self._config.launcher_config,
+                        guardrails_config=self._guardrails_config,
                     ):
                         continue
                     if not _passes_reward_risk_guard(
@@ -435,7 +456,7 @@ class BacktestEngine:
                         entry_price=candle.close,
                         tp_price=resolved.tp_price,
                         sl_price=resolved.sl_price,
-                        launcher_config=self._config.launcher_config,
+                        guardrails_config=self._guardrails_config,
                         strategy_config=strat_cfg,
                         skip_guard=resolved.skip_rr_guard,
                     ):
@@ -622,7 +643,7 @@ class BacktestEngine:
                     )
                     if not _passes_protection_guard(
                         resolved=resolved,
-                        launcher_config=self._config.launcher_config,
+                        guardrails_config=self._guardrails_config,
                     ):
                         continue
                     if not _passes_reward_risk_guard(
@@ -630,7 +651,7 @@ class BacktestEngine:
                         entry_price=eval_candle.close,
                         tp_price=resolved.tp_price,
                         sl_price=resolved.sl_price,
-                        launcher_config=self._config.launcher_config,
+                        guardrails_config=self._guardrails_config,
                         strategy_config=strat_cfg,
                         skip_guard=resolved.skip_rr_guard,
                     ):
@@ -698,7 +719,7 @@ class BacktestEngine:
         # block internally via resolve_analysis_block).
         _md = (snapshot or {}).get("market_data") or {}
         sym_data = next(iter(_md.values()), {}) or {}
-        guardrails_config = launcher_config.get("guardrails") or {}
+        guardrails_config = self._guardrails_config or launcher_config.get("guardrails") or {}
         return resolve_launcher_tp_sl(
             strategy_name=signal.strategy_name,
             direction=signal.direction,
@@ -739,7 +760,7 @@ def _passes_reward_risk_guard(
     entry_price: float,
     tp_price: float | None,
     sl_price: float | None,
-    launcher_config: dict[str, Any],
+    guardrails_config: dict[str, Any],
     strategy_config: dict[str, Any],
     skip_guard: bool = False,
 ) -> bool:
@@ -747,7 +768,7 @@ def _passes_reward_risk_guard(
     if skip_guard or not tp_price or not sl_price or entry_price <= 0:
         return True
 
-    guardrails = launcher_config.get("guardrails") or {}
+    guardrails = guardrails_config or {}
     min_rr = _extract_float(guardrails.get("min_reward_risk_ratio")) or 1.0
     strategy_rr = _extract_float(strategy_config.get("min_reward_risk_ratio"))
     if strategy_rr is not None:
@@ -770,10 +791,10 @@ def _passes_reward_risk_guard(
 def _passes_protection_guard(
     *,
     resolved: LauncherTpSl,
-    launcher_config: dict[str, Any],
+    guardrails_config: dict[str, Any],
 ) -> bool:
     """Return whether an entry has the protection required by live config."""
-    guardrails = launcher_config.get("guardrails") or {}
+    guardrails = guardrails_config or {}
     if not bool(guardrails.get("require_protection", False)) or resolved.disable_protection:
         return True
     return (

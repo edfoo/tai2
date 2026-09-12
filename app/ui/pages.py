@@ -9614,6 +9614,7 @@ def register_pages(app: FastAPI) -> None:
                 evaluation_timeframe=evaluation_timeframe,
                 launcher_config=dict(launcher_config),
                 strategy_config=dict(strategy_config),
+                guardrails_config=copy.deepcopy(config.get("guardrails") or {}),
             )
 
             app.state.backtest_running["flag"] = True
@@ -9758,6 +9759,7 @@ def register_pages(app: FastAPI) -> None:
                 evaluation_timeframe=evaluation_timeframe,
                 launcher_config=copy.deepcopy(launcher_config),
                 strategy_config=dict(strategy_config),
+                guardrails_config=copy.deepcopy(config.get("guardrails") or {}),
             )
 
             grid_cfg = GridConfig(

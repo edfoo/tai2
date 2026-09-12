@@ -27,6 +27,7 @@ triggered first (pessimistic assumption).
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -131,6 +132,7 @@ class Simulator:
         initial_capital: float = 1000.0,
         notional_per_trade: float = 10.0,
         strategy_config: dict[str, Any] | None = None,
+        timeframe_seconds: float | None = None,
         cost_model: CostModel | None = None,
     ) -> None:
         self._initial_capital = initial_capital
@@ -157,6 +159,16 @@ class Simulator:
             if isinstance(_launcher.get("trade_management"), dict)
             else {}
         )
+        # Time-stop in candles.  Live defaults to a wall-clock ``time_stop_seconds``
+        # (45m); the backtest only steps on candles, so when ``time_stop_candles``
+        # is unset/0 we derive it from ``time_stop_seconds`` on the configured
+        # timeframe.  Without this the default backtest would hold underwater
+        # trades indefinitely while live cuts them at ~45m.
+        self._time_stop_candles = int(self._tm.get("time_stop_candles") or 0)
+        if self._time_stop_candles <= 0:
+            _ts_seconds = _to_positive_float(self._tm.get("time_stop_seconds"))
+            if _ts_seconds and timeframe_seconds and timeframe_seconds > 0:
+                self._time_stop_candles = max(1, int(math.ceil(_ts_seconds / timeframe_seconds)))
 
     # ── Properties ────────────────────────────────────────────────────
 
@@ -206,7 +218,13 @@ class Simulator:
 
     def can_enter(self, symbol: str, entry_ts: int) -> bool:
         """Return whether live-style re-entry cooldown permits a new entry."""
-        cooldown_seconds = float(self._tm.get("reentry_cooldown_seconds") or 0.0)
+        _g = self._guardrails()
+        cooldown_seconds = float(
+            self._tm.get("reentry_cooldown_seconds")
+            or _g.get("min_hold_seconds")
+            or _g.get("cooldown_seconds")
+            or 0.0
+        )
         if cooldown_seconds <= 0:
             return True
         last_close_ts = self._last_close_ts.get(symbol)
@@ -547,7 +565,7 @@ class Simulator:
         r_multiple = (best_pct / risk_pct) if (risk_pct and risk_pct > 0) else None
 
         # Time-stop (backtest = candle-count, progress + underwater conditions).
-        time_stop_candles = int(tm.get("time_stop_candles") or 0)
+        time_stop_candles = self._time_stop_candles
         progress_r = (pnl_pct / risk_pct) if (risk_pct and risk_pct > 0) else None
         underwater_only = bool(tm.get("time_stop_underwater_only", True))
         timed_out = (

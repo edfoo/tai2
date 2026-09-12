@@ -138,6 +138,12 @@ class BacktestConfig:
     # captured at run start so mid-run config changes don't affect results.
     launcher_config: dict[str, Any] = field(default_factory=dict)
     strategy_config: dict[str, Any] = field(default_factory=dict)
+    # Snapshot of runtime_config["guardrails"] (max_position_pct, daily_loss
+    # limit, atr_risk_per_trade_pct, min/max leverage, R:R/protection toggles,
+    # min_hold_seconds, etc.).  Live keeps these separate from launcher/strategy;
+    # the backtest must be passed them explicitly or its sizing, daily-loss
+    # lockout, leverage (PnL%-mode), and R:R guards silently diverge from live.
+    guardrails_config: dict[str, Any] = field(default_factory=dict)
     # Warmup candles to fetch before start_ts (for indicator stabilisation).
     warmup_candles: int = 200
     # Whether to disable live execution during the backtest.

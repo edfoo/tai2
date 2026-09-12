@@ -350,7 +350,7 @@ class TestRewardRiskGuard:
             "entry_price": 100.0,
             "tp_price": 120.0,
             "sl_price": 110.0,
-            "launcher_config": {"guardrails": {"min_reward_risk_ratio": 1.5}},
+            "guardrails_config": {"min_reward_risk_ratio": 1.5},
             "strategy_config": {},
         }
         values.update(overrides)
@@ -394,25 +394,25 @@ class TestProtectionGuard:
     def test_blocks_missing_stop_loss(self) -> None:
         assert not _passes_protection_guard(
             resolved=self._resolved(120.0, None),
-            launcher_config={"guardrails": {"require_protection": True}},
+            guardrails_config={"require_protection": True},
         )
 
     def test_blocks_missing_take_profit(self) -> None:
         assert not _passes_protection_guard(
             resolved=self._resolved(None, 90.0),
-            launcher_config={"guardrails": {"require_protection": True}},
+            guardrails_config={"require_protection": True},
         )
 
     def test_accepts_complete_protection(self) -> None:
         assert _passes_protection_guard(
             resolved=self._resolved(120.0, 90.0),
-            launcher_config={"guardrails": {"require_protection": True}},
+            guardrails_config={"require_protection": True},
         )
 
     def test_allows_explicit_unmanaged_entry(self) -> None:
         assert _passes_protection_guard(
             resolved=self._resolved(None, None, disable=True),
-            launcher_config={"guardrails": {"require_protection": True}},
+            guardrails_config={"require_protection": True},
         )
 
 
