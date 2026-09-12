@@ -26,7 +26,12 @@ from app.services.backtest.data_fetcher import (
     ltf_bucket_ts,
     timeframe_ms,
 )
-from app.services.backtest.metrics import compute_metrics, compute_per_strategy_metrics
+from app.services.backtest.costs import CostModel
+from app.services.backtest.metrics import (
+    compute_buy_and_hold,
+    compute_metrics,
+    compute_per_strategy_metrics,
+)
 from app.services.backtest.models import (
     BacktestConfig,
     BacktestProgress,
@@ -35,7 +40,8 @@ from app.services.backtest.models import (
 )
 from app.services.backtest.simulator import Simulator
 from app.services.backtest.snapshot_builder import SnapshotBuilder
-from app.services.strategies import Strategy, StrategyHelpers, resolve_analysis_block
+from app.services.launcher_tp_sl import LauncherTpSl, resolve_launcher_tp_sl
+from app.services.strategies import Strategy, StrategyHelpers
 from app.services.strategies.liquidity_sweep import LiquiditySweepStrategy
 from app.services.strategies.mean_reversion import MeanReversionStrategy
 from app.services.strategies.spike_continuation import SpikeContinuationStrategy
@@ -107,6 +113,13 @@ class BacktestEngine:
                 (config.launcher_config or {}).get("notional_usd") or 10.0
             ),
             strategy_config=_sim_cfg,
+            cost_model=CostModel(
+                taker_fee_bps=config.taker_fee_bps,
+                maker_fee_bps=config.maker_fee_bps,
+                slippage_bps=config.slippage_bps,
+                funding_rate_pct=config.funding_rate_pct,
+                funding_interval_ms=config.funding_interval_ms,
+            ),
         )
         # Build the list of strategy instances to evaluate.
         self._strategies: list[Strategy] = [
@@ -318,8 +331,19 @@ class BacktestEngine:
             all_trades = self._simulator.closed_positions
             result.trades = all_trades
             result.equity_curve = self._simulator.equity_curve
-            result.metrics = compute_metrics(all_trades, self._simulator.equity_curve, self._config.initial_capital)
+            # Annualise Sharpe/Sortino/Calmar based on the eval timeframe.
+            cpy = _candles_per_year(self._eval_tf if use_finer_ltf else self._config.timeframe)
+            result.metrics = compute_metrics(
+                all_trades,
+                self._simulator.equity_curve,
+                self._config.initial_capital,
+                candles_per_year=cpy,
+            )
             result.per_strategy = compute_per_strategy_metrics(all_trades)
+            # Buy-and-hold benchmark on the first symbol's LTF candles.
+            _benchmark = self._compute_benchmark(symbol_candles)
+            if _benchmark is not None:
+                result.metrics["buy_and_hold"] = _benchmark
             result.candles_processed = candles_processed
 
             if progress_cb:
@@ -374,11 +398,13 @@ class BacktestEngine:
                     self._last_candle_ts = candle.ts
 
             # Evaluate strategies for each symbol.
+            step_snapshots: dict[str, dict[str, Any]] = {}
             for symbol, candle in step_candles.items():
                 builder = snapshot_builders[symbol]
                 # The window includes all candles up to the current one.
                 candle_idx = start_indices[symbol] + step
                 snapshot = builder.build(candle_idx)
+                step_snapshots[symbol] = snapshot
 
                 # Evaluate each selected strategy.
                 for strategy in self._strategies:
@@ -386,29 +412,49 @@ class BacktestEngine:
                     if not strat_cfg.get("enabled", False):
                         continue
                     # Per-strategy position guard: skip if already in position.
-                    if self._simulator.has_open_position(symbol, strategy.name):
+                    if (
+                        self._simulator.has_open_position(symbol, strategy.name)
+                        or not self._simulator.can_enter(symbol, candle.ts)
+                    ):
                         continue
                     signal = strategy.evaluate(symbol, snapshot, strat_cfg, self._helpers)
                     if signal is None:
                         continue
-                    # Compute TP/SL prices from signal (matching live logic).
-                    tp_price, sl_price = self._compute_tp_sl(
+                    # Resolve TP/SL and direction-flip from signal (shared with live).
+                    resolved = self._compute_tp_sl(
                         signal, candle.close, self._config.launcher_config,
                         snapshot=snapshot, strat_cfg=strat_cfg,
                     )
-                    direction = "long" if signal.direction == "buy" else "short"
+                    if not _passes_protection_guard(
+                        resolved=resolved,
+                        launcher_config=self._config.launcher_config,
+                    ):
+                        continue
+                    if not _passes_reward_risk_guard(
+                        action=resolved.action,
+                        entry_price=candle.close,
+                        tp_price=resolved.tp_price,
+                        sl_price=resolved.sl_price,
+                        launcher_config=self._config.launcher_config,
+                        strategy_config=strat_cfg,
+                        skip_guard=resolved.skip_rr_guard,
+                    ):
+                        continue
+                    direction = "long" if resolved.action == "BUY" else "short"
                     self._simulator.open_position(
                         symbol=symbol,
                         direction=direction,
                         entry_price=candle.close,
                         entry_ts=candle.ts,
-                        tp_price=tp_price,
-                        sl_price=sl_price,
+                        tp_price=resolved.tp_price,
+                        sl_price=resolved.sl_price,
                         strategy_name=strategy.name,
                     )
 
             # Update simulator (check TP/SL, record equity).
             self._simulator.update_multi(step_candles)
+            # Strategy-specific exits (regime-breakdown / momentum-rollover).
+            self._simulator.apply_strategy_exits(step_snapshots, step_candles)
 
             candles_processed += 1
             if progress_cb and step % 10 == 0:
@@ -534,6 +580,7 @@ class BacktestEngine:
                     }
 
             # Evaluate strategies for each symbol using the incomplete LTF candle.
+            step_snapshots: dict[str, dict[str, Any]] = {}
             for symbol, eval_candle in step_candles.items():
                 cur = acc[symbol]
                 if cur is None:
@@ -552,6 +599,7 @@ class BacktestEngine:
                     incomplete_candle=incomplete,
                     current_ts=eval_candle.ts,
                 )
+                step_snapshots[symbol] = snapshot
 
                 # Evaluate each selected strategy.
                 for strategy in self._strategies:
@@ -559,29 +607,49 @@ class BacktestEngine:
                     if not strat_cfg.get("enabled", False):
                         continue
                     # Per-strategy position guard: skip if already in position.
-                    if self._simulator.has_open_position(symbol, strategy.name):
+                    if (
+                        self._simulator.has_open_position(symbol, strategy.name)
+                        or not self._simulator.can_enter(symbol, eval_candle.ts)
+                    ):
                         continue
                     signal = strategy.evaluate(symbol, snapshot, strat_cfg, self._helpers)
                     if signal is None:
                         continue
-                    # Compute TP/SL prices from signal (matching live logic).
-                    tp_price, sl_price = self._compute_tp_sl(
+                    # Resolve TP/SL and direction-flip from signal (shared with live).
+                    resolved = self._compute_tp_sl(
                         signal, eval_candle.close, self._config.launcher_config,
                         snapshot=snapshot, strat_cfg=strat_cfg,
                     )
-                    direction = "long" if signal.direction == "buy" else "short"
+                    if not _passes_protection_guard(
+                        resolved=resolved,
+                        launcher_config=self._config.launcher_config,
+                    ):
+                        continue
+                    if not _passes_reward_risk_guard(
+                        action=resolved.action,
+                        entry_price=eval_candle.close,
+                        tp_price=resolved.tp_price,
+                        sl_price=resolved.sl_price,
+                        launcher_config=self._config.launcher_config,
+                        strategy_config=strat_cfg,
+                        skip_guard=resolved.skip_rr_guard,
+                    ):
+                        continue
+                    direction = "long" if resolved.action == "BUY" else "short"
                     self._simulator.open_position(
                         symbol=symbol,
                         direction=direction,
                         entry_price=eval_candle.close,
                         entry_ts=eval_candle.ts,
-                        tp_price=tp_price,
-                        sl_price=sl_price,
+                        tp_price=resolved.tp_price,
+                        sl_price=resolved.sl_price,
                         strategy_name=strategy.name,
                     )
 
             # Update simulator (check TP/SL at eval granularity, record equity).
             self._simulator.update_multi(step_candles)
+            # Strategy-specific exits (regime-breakdown / momentum-rollover).
+            self._simulator.apply_strategy_exits(step_snapshots, step_candles)
 
             candles_processed += 1
             if progress_cb and step % 50 == 0:
@@ -598,6 +666,16 @@ class BacktestEngine:
         """Return the current price for a symbol (from the backtest window)."""
         return self._current_prices.get(symbol)
 
+    def _compute_benchmark(self, symbol_candles: dict[str, list[Candle]]) -> dict[str, Any] | None:
+        """Return a buy-and-hold benchmark for the first symbol, if available."""
+        if not symbol_candles:
+            return None
+        first_symbol = self._config.symbols[0]
+        candles = symbol_candles.get(first_symbol)
+        if not candles:
+            return None
+        return compute_buy_and_hold(candles, self._config.initial_capital)
+
     def _compute_tp_sl(
         self,
         signal: Any,
@@ -605,91 +683,33 @@ class BacktestEngine:
         launcher_config: dict[str, Any],
         snapshot: dict[str, Any] | None = None,
         strat_cfg: dict[str, Any] | None = None,
-    ) -> tuple[float | None, float | None]:
-        """Compute TP/SL prices from a strategy signal.
+    ) -> LauncherTpSl:
+        """Resolve TP/SL (and direction-flip) for a strategy signal.
 
-        Mirrors ``build_launcher_decisions()`` in market_service.py:
-            BUY:  tp = last * (1 + tp_pct/100),  sl = last * (1 - sl_pct/100)
-            SELL: tp = last * (1 - tp_pct/100),  sl = last * (1 + sl_pct/100)
-
-        Also mirrors the **Dynamic TP** logic for Mean Reversion: when
-        ``strat_cfg["dynamic_tp"]`` is True, the effective TP is tightened
-        using the current BB bandwidth (``min(static_tp, bandwidth/2 × fraction)``).
-        This previously only existed in the live path, causing backtests to
-        diverge from live trade behaviour.
+        Delegates to :func:`resolve_launcher_tp_sl`, the same function used
+        by ``MarketService.build_launcher_decisions`` live — see
+        app/services/launcher_tp_sl.py. This guarantees the backtest applies
+        identical static/ATR/structural fallback, PnL%-mode conversion,
+        Mean-Reversion dynamic-TP, and per-strategy direction-flip logic that
+        live uses, instead of a hand-mirrored subset.
         """
-        _disable_protection = False
-        if signal.strategy_name == "mean_reversion" and strat_cfg is not None:
-            _mr_use_atr = bool(strat_cfg.get("use_atr_sizing", True))
-            _mr_use_struct = bool(strat_cfg.get("use_structural_sizing", True))
-            _mr_static_tp = _extract_float(strat_cfg.get("tp_pct"))
-            _mr_static_sl = _extract_float(strat_cfg.get("sl_pct"))
-            if not _mr_use_atr and not _mr_use_struct and _mr_static_tp is None and _mr_static_sl is None:
-                _disable_protection = True
+        # The snapshot is single-symbol in backtest — grab the first symbol's
+        # per-symbol block (dynamic-TP resolves its own analysis timeframe
+        # block internally via resolve_analysis_block).
+        _md = (snapshot or {}).get("market_data") or {}
+        sym_data = next(iter(_md.values()), {}) or {}
+        guardrails_config = launcher_config.get("guardrails") or {}
+        return resolve_launcher_tp_sl(
+            strategy_name=signal.strategy_name,
+            direction=signal.direction,
+            signal_tp_pct=signal.tp_pct,
+            signal_sl_pct=signal.sl_pct,
+            last_price=last_price,
+            launcher_config=launcher_config,
+            guardrails_config=guardrails_config,
+            sym_data=sym_data,
+        )
 
-        tp_pct = signal.tp_pct
-        sl_pct = signal.sl_pct
-        if not _disable_protection:
-            if tp_pct is None:
-                tp_pct = _extract_float(launcher_config.get("tp_pct"))
-            if sl_pct is None:
-                sl_pct = _extract_float(launcher_config.get("sl_pct"))
-
-        # ── Dynamic TP (Mean Reversion only) ──────────────────────────
-        # Tighten TP using BB bandwidth at entry.  Mirrors the live logic in
-        # ``MarketService.build_launcher_decisions`` so backtests reproduce
-        # live trade behaviour when dynamic_tp is enabled.
-        # Disabled when use_atr_sizing is True — ATR sizing already adapts
-        # TP to volatility, so dynamic_tp would double-tighten it.
-        effective_tp_pct = tp_pct
-        if (
-            signal.strategy_name == "mean_reversion"
-            and snapshot is not None
-            and strat_cfg is not None
-            and bool(strat_cfg.get("dynamic_tp", False))
-            and not bool(strat_cfg.get("use_atr_sizing", False))
-            and tp_pct is not None
-            and tp_pct > 0
-        ):
-            dynamic_tp_fraction = _extract_float(strat_cfg.get("dynamic_tp_fraction")) or 0.7
-            # The snapshot is single-symbol in backtest — grab the first
-            # symbol's indicator block, resolved to the strategy's analysis
-            # timeframe so live/backtest stay aligned.
-            _md = snapshot.get("market_data") or {}
-            sym_data = next(iter(_md.values()), {}) or {}
-            sym_indicators = resolve_analysis_block(sym_data, strat_cfg)
-            _bb = sym_indicators.get("bollinger_bands") or {}
-            _bb_lower = _extract_float(_bb.get("lower"))
-            _bb_upper = _extract_float(_bb.get("upper"))
-            _bb_middle = _extract_float(_bb.get("middle"))
-            if (
-                _bb_lower is not None
-                and _bb_upper is not None
-                and _bb_middle is not None
-                and _bb_middle > 0
-            ):
-                _bw = (_bb_upper - _bb_lower) / _bb_middle * 100.0
-                _dyn = (_bw / 2.0) * dynamic_tp_fraction * 1.0  # leverage = 1.0
-                if _dyn > 0:
-                    effective_tp_pct = min(tp_pct, _dyn)
-                    logger.debug(
-                        "[backtest] Dynamic TP: bw=%.2f%% frac=%.2f → dyn=%.2f%% → eff=%.2f%%",
-                        _bw, dynamic_tp_fraction, _dyn, effective_tp_pct,
-                    )
-
-        tp_price: float | None = None
-        sl_price: float | None = None
-        if effective_tp_pct and effective_tp_pct > 0:
-            if signal.direction == "buy":
-                tp_price = last_price * (1 + effective_tp_pct / 100.0)
-            else:
-                tp_price = last_price * (1 - effective_tp_pct / 100.0)
-        if sl_pct and sl_pct > 0:
-            if signal.direction == "buy":
-                sl_price = last_price * (1 - sl_pct / 100.0)
-            else:
-                sl_price = last_price * (1 + sl_pct / 100.0)
-        return tp_price, sl_price
 
 
 def _extract_float(value: Any) -> float | None:
@@ -703,3 +723,62 @@ def _extract_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _candles_per_year(timeframe: str) -> int:
+    """Return the number of bars per year for a timeframe string (approx)."""
+    ms = timeframe_ms(timeframe)
+    if ms <= 0:
+        return 0
+    return int(round(365.0 * 24 * 60 * 60 * 1000 / ms))
+
+
+def _passes_reward_risk_guard(
+    *,
+    action: str,
+    entry_price: float,
+    tp_price: float | None,
+    sl_price: float | None,
+    launcher_config: dict[str, Any],
+    strategy_config: dict[str, Any],
+    skip_guard: bool = False,
+) -> bool:
+    """Return whether a launcher entry satisfies the live R:R guardrail."""
+    if skip_guard or not tp_price or not sl_price or entry_price <= 0:
+        return True
+
+    guardrails = launcher_config.get("guardrails") or {}
+    min_rr = _extract_float(guardrails.get("min_reward_risk_ratio")) or 1.0
+    strategy_rr = _extract_float(strategy_config.get("min_reward_risk_ratio"))
+    if strategy_rr is not None:
+        min_rr = strategy_rr
+
+    if action == "BUY":
+        tp_distance = tp_price - entry_price
+        sl_distance = entry_price - sl_price
+    else:
+        tp_distance = entry_price - tp_price
+        sl_distance = sl_price - entry_price
+
+    if sl_distance <= 0:
+        return True
+    if tp_distance <= 0:
+        return False
+    return (tp_distance / sl_distance) >= min_rr - 1e-6
+
+
+def _passes_protection_guard(
+    *,
+    resolved: LauncherTpSl,
+    launcher_config: dict[str, Any],
+) -> bool:
+    """Return whether an entry has the protection required by live config."""
+    guardrails = launcher_config.get("guardrails") or {}
+    if not bool(guardrails.get("require_protection", False)) or resolved.disable_protection:
+        return True
+    return (
+        isinstance(resolved.tp_price, (int, float))
+        and resolved.tp_price > 0
+        and isinstance(resolved.sl_price, (int, float))
+        and resolved.sl_price > 0
+    )

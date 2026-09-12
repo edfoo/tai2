@@ -15,10 +15,21 @@ from __future__ import annotations
 import pytest
 
 from app.services.backtest.data_fetcher import htf_for, _timeframe_to_ms
-from app.services.backtest.engine import available_strategy_names, _extract_float
-from app.services.backtest.metrics import compute_metrics, compute_per_strategy_metrics
+from app.services.backtest.engine import (
+    _extract_float,
+    _passes_protection_guard,
+    _passes_reward_risk_guard,
+    available_strategy_names,
+)
+from app.services.launcher_tp_sl import LauncherTpSl
+from app.services.backtest.metrics import (
+    compute_buy_and_hold,
+    compute_metrics,
+    compute_per_strategy_metrics,
+)
 from app.services.backtest.models import Candle, EquityPoint, SimPosition
 from app.services.backtest.simulator import Simulator
+from app.services.backtest.sizing import compute_order_size
 from app.services.backtest.snapshot_builder import SnapshotBuilder
 
 
@@ -238,6 +249,366 @@ class TestSimulatorTPSL:
         assert sim.cash == pytest.approx(1002.0)
 
 
+# ── Sizing tests ─────────────────────────────────────────────────────────────
+# ``max_position_pct`` and ``symbol_position_caps`` are stored live as
+# *fractions* (0.2 = 20%), matching ``ui/pages.py::_percent_to_fraction`` and
+# ``MarketService.base_max_pct``/``symbol_cap_pct`` — NOT percentages divided
+# by 100 like ``atr_risk_per_trade_pct``. These tests pin that convention so
+# backtest sizing can't silently drift back to the wrong scale.
+
+
+class TestSizing:
+    """Test compute_order_size against the live sizing conventions."""
+
+    def test_max_position_pct_is_a_fraction_not_a_percent(self) -> None:
+        """0.2 means 20% of equity, matching live's base_max_pct convention."""
+        _, notional = compute_order_size(
+            requested_notional=1000.0,
+            entry_price=100.0,
+            equity=1000.0,
+            guardrails={"max_position_pct": 0.2},
+        )
+        # Cap = equity * 0.2 = 200, well below the requested 1000.
+        assert notional == pytest.approx(200.0)
+
+    def test_max_position_pct_no_cap_when_requested_is_smaller(self) -> None:
+        _, notional = compute_order_size(
+            requested_notional=50.0,
+            entry_price=100.0,
+            equity=1000.0,
+            guardrails={"max_position_pct": 0.5},
+        )
+        assert notional == pytest.approx(50.0)
+
+    def test_symbol_position_caps_overrides_base_cap(self) -> None:
+        """A tighter per-symbol cap should win over the base max_position_pct."""
+        _, notional = compute_order_size(
+            requested_notional=1000.0,
+            entry_price=100.0,
+            equity=1000.0,
+            guardrails={
+                "max_position_pct": 0.5,
+                "symbol_position_caps": {"BTC-USDT-SWAP": 0.1},
+            },
+            symbol="BTC-USDT-SWAP",
+        )
+        assert notional == pytest.approx(100.0)
+
+    def test_symbol_position_caps_ignored_for_other_symbols(self) -> None:
+        _, notional = compute_order_size(
+            requested_notional=1000.0,
+            entry_price=100.0,
+            equity=1000.0,
+            guardrails={
+                "max_position_pct": 0.5,
+                "symbol_position_caps": {"ETH-USDT-SWAP": 0.1},
+            },
+            symbol="BTC-USDT-SWAP",
+        )
+        assert notional == pytest.approx(500.0)
+
+    def test_atr_risk_per_trade_pct_is_a_percent(self) -> None:
+        """atr_risk_per_trade_pct=1.0 means 1% of equity risked, divided by stop distance."""
+        _, notional = compute_order_size(
+            requested_notional=1000.0,
+            entry_price=100.0,
+            equity=1000.0,
+            stop_price=99.0,  # 1% stop distance
+            guardrails={"atr_risk_per_trade_pct": 1.0},
+        )
+        # max_notional = (equity * 1%) / stop_fraction = 10 / 0.01 = 1000
+        assert notional == pytest.approx(1000.0)
+
+    def test_ct_val_and_lot_size_quantization(self) -> None:
+        base_units, notional = compute_order_size(
+            requested_notional=1000.0,
+            entry_price=100.0,
+            equity=10_000.0,
+            instrument={"ct_val": 10.0, "lot_size": 1.0},
+        )
+        # contracts = 1000 / (100 * 10) = 1.0 → already on the lot increment.
+        assert base_units == pytest.approx(10.0)
+        assert notional == pytest.approx(1000.0)
+
+    def test_zero_size_below_lot_increment(self) -> None:
+        base_units, notional = compute_order_size(
+            requested_notional=1.0,
+            entry_price=100.0,
+            equity=10_000.0,
+            instrument={"ct_val": 10.0, "lot_size": 1.0},
+        )
+        assert base_units == 0.0
+        assert notional == 0.0
+
+
+class TestRewardRiskGuard:
+    """Test the live-compatible launcher reward-to-risk entry gate."""
+
+    def _passes(self, **overrides: object) -> bool:
+        values = {
+            "action": "BUY",
+            "entry_price": 100.0,
+            "tp_price": 120.0,
+            "sl_price": 110.0,
+            "launcher_config": {"guardrails": {"min_reward_risk_ratio": 1.5}},
+            "strategy_config": {},
+        }
+        values.update(overrides)
+        return _passes_reward_risk_guard(**values)
+
+    def test_blocks_below_minimum(self) -> None:
+        assert not self._passes(tp_price=110.0, sl_price=90.0)
+
+    def test_accepts_exact_floor_with_epsilon(self) -> None:
+        assert self._passes(tp_price=115.0, sl_price=100.0)
+
+    def test_handles_short_direction(self) -> None:
+        assert self._passes(
+            action="SELL",
+            entry_price=100.0,
+            tp_price=85.0,
+            sl_price=110.0,
+        )
+
+    def test_blocks_take_profit_on_wrong_side(self) -> None:
+        assert not self._passes(tp_price=95.0, sl_price=90.0)
+
+    def test_missing_protection_does_not_apply_rr_gate(self) -> None:
+        assert self._passes(tp_price=None, sl_price=90.0)
+
+    def test_flip_rr_bypass(self) -> None:
+        assert self._passes(tp_price=105.0, sl_price=90.0, skip_guard=True)
+
+
+class TestProtectionGuard:
+    """Test the live-compatible TP/SL protection entry gate."""
+
+    def _resolved(self, tp_price: float | None, sl_price: float | None, disable: bool = False) -> LauncherTpSl:
+        return LauncherTpSl(
+            action="BUY",
+            tp_price=tp_price,
+            sl_price=sl_price,
+            disable_protection=disable,
+        )
+
+    def test_blocks_missing_stop_loss(self) -> None:
+        assert not _passes_protection_guard(
+            resolved=self._resolved(120.0, None),
+            launcher_config={"guardrails": {"require_protection": True}},
+        )
+
+    def test_blocks_missing_take_profit(self) -> None:
+        assert not _passes_protection_guard(
+            resolved=self._resolved(None, 90.0),
+            launcher_config={"guardrails": {"require_protection": True}},
+        )
+
+    def test_accepts_complete_protection(self) -> None:
+        assert _passes_protection_guard(
+            resolved=self._resolved(120.0, 90.0),
+            launcher_config={"guardrails": {"require_protection": True}},
+        )
+
+    def test_allows_explicit_unmanaged_entry(self) -> None:
+        assert _passes_protection_guard(
+            resolved=self._resolved(None, None, disable=True),
+            launcher_config={"guardrails": {"require_protection": True}},
+        )
+
+
+class TestDailyLossGuard:
+    """Test the live-compatible daily-loss entry lockout."""
+
+    def _make_sim(self, limit: float | None) -> Simulator:
+        config: dict[str, object] = {}
+        if limit is not None:
+            config["guardrails"] = {"daily_loss_limit_pct": limit}
+        return Simulator(initial_capital=1000.0, notional_per_trade=100.0, strategy_config=config)
+
+    def test_disabled_when_no_limit(self) -> None:
+        sim = self._make_sim(None)
+        sim._equity_history = [(0, 900.0)]  # already down 10%
+        assert not sim.is_daily_loss_locked(1000)
+
+    def test_not_locked_when_drop_below_threshold(self) -> None:
+        sim = self._make_sim(0.03)
+        sim._equity_history = [(0, 1000.0), (1000, 990.0)]
+        assert not sim.is_daily_loss_locked(1000)
+
+    def test_locked_when_drop_reaches_threshold(self) -> None:
+        sim = self._make_sim(0.03)
+        sim._equity_history = [(0, 1000.0), (1000, 960.0)]  # -4%
+        assert sim.is_daily_loss_locked(1000)
+
+    def test_reference_uses_window_start_not_peak(self) -> None:
+        # Reference is the first equity in the 24h window, matching live.
+        sim = self._make_sim(0.03)
+        sim._equity_history = [(0, 900.0), (1000, 1000.0), (2000, 960.0)]
+        # Reference 900 → 960 is a gain, so no lock.
+        assert not sim.is_daily_loss_locked(2000)
+
+    def test_blocks_open_position_when_locked(self) -> None:
+        sim = self._make_sim(0.03)
+        sim._equity_history = [(0, 1000.0), (1000, 960.0)]
+        result = sim.open_position(
+            symbol="BTC-USDT-SWAP",
+            direction="long",
+            entry_price=100.0,
+            entry_ts=1000,
+            tp_price=120.0,
+            sl_price=90.0,
+            strategy_name="test",
+        )
+        assert result is None
+        assert len(sim.open_positions) == 0
+
+
+class TestPortfolioCap:
+    """Test the live-compatible portfolio free-equity cap."""
+
+    def test_blocks_when_equity_exhausted(self) -> None:
+        sim = Simulator(initial_capital=100.0, notional_per_trade=100.0)
+        sim.open_position(
+            symbol="BTC-USDT-SWAP",
+            direction="long",
+            entry_price=100.0,
+            entry_ts=0,
+            strategy_name="test",
+        )
+        # Existing position already deploys all equity → second entry blocked.
+        result = sim.open_position(
+            symbol="ETH-USDT-SWAP",
+            direction="long",
+            entry_price=100.0,
+            entry_ts=0,
+            strategy_name="test",
+        )
+        assert result is None
+
+    def test_clips_notional_to_free_equity(self) -> None:
+        sim = Simulator(initial_capital=100.0, notional_per_trade=100.0)
+        pos = sim.open_position(
+            symbol="BTC-USDT-SWAP",
+            direction="long",
+            entry_price=100.0,
+            entry_ts=0,
+            strategy_name="test",
+        )
+        # First entry deploys min(100, 100) = 100 notional → equity fully used.
+        assert pos is not None
+        assert sim.open_position_notional() == pytest.approx(100.0)
+
+
+class TestStrategyExits:
+    """Test the live-compatible regime-breakdown and momentum-rollover exits."""
+
+    def _sim_with_strategy(self, strategies: dict[str, object]) -> Simulator:
+        return Simulator(
+            initial_capital=1000.0,
+            notional_per_trade=100.0,
+            strategy_config={"strategies": strategies},
+        )
+
+    def _open(self, sim: Simulator, strategy: str, direction: str, entry: float = 100.0) -> SimPosition:
+        pos = sim.open_position(
+            symbol="BTC-USDT-SWAP",
+            direction=direction,
+            entry_price=entry,
+            entry_ts=0,
+            tp_price=entry * 1.2,
+            sl_price=entry * 0.9,
+            strategy_name=strategy,
+        )
+        assert pos is not None
+        return pos
+
+    def test_regime_breakdown_flattens_underwater_long(self) -> None:
+        sim = self._sim_with_strategy(
+            {"mean_reversion": {"exit_on_regime_breakdown": True, "htf_regime_preference": "chop"}}
+        )
+        self._open(sim, "mean_reversion", "long", entry=100.0)
+        snapshot = {
+            "market_data": {
+                "BTC-USDT-SWAP": {
+                    "indicators": {"adx_htf": 35.0, "choppiness_htf": 20.0}  # trending
+                }
+            }
+        }
+        candle = Candle(ts=1, open=99, high=99, low=98, close=98.0, volume=1.0)  # underwater
+        sim.apply_strategy_exits({"BTC-USDT-SWAP": snapshot}, {"BTC-USDT-SWAP": candle})
+        assert len(sim.open_positions) == 0
+        trade = sim.closed_positions[0]
+        assert trade.close_reason == "regime_breakdown"
+
+    def test_regime_breakdown_skips_profitable_position(self) -> None:
+        sim = self._sim_with_strategy(
+            {"mean_reversion": {"exit_on_regime_breakdown": True, "htf_regime_preference": "chop"}}
+        )
+        self._open(sim, "mean_reversion", "long", entry=100.0)
+        snapshot = {
+            "market_data": {
+                "BTC-USDT-SWAP": {"indicators": {"adx_htf": 35.0, "choppiness_htf": 20.0}}
+            }
+        }
+        candle = Candle(ts=1, open=101, high=102, low=101, close=102.0, volume=1.0)  # in profit
+        sim.apply_strategy_exits({"BTC-USDT-SWAP": snapshot}, {"BTC-USDT-SWAP": candle})
+        assert len(sim.open_positions) == 1
+
+    def test_regime_breakdown_skips_when_still_chop(self) -> None:
+        sim = self._sim_with_strategy(
+            {"mean_reversion": {"exit_on_regime_breakdown": True, "htf_regime_preference": "chop"}}
+        )
+        self._open(sim, "mean_reversion", "long", entry=100.0)
+        snapshot = {
+            "market_data": {
+                "BTC-USDT-SWAP": {"indicators": {"adx_htf": 15.0, "choppiness_htf": 55.0}}  # chop
+            }
+        }
+        candle = Candle(ts=1, open=99, high=99, low=98, close=98.0, volume=1.0)
+        sim.apply_strategy_exits({"BTC-USDT-SWAP": snapshot}, {"BTC-USDT-SWAP": candle})
+        assert len(sim.open_positions) == 1
+
+    def test_momentum_rollover_flattens_profitable_long(self) -> None:
+        sim = self._sim_with_strategy(
+            {"spike_continuation": {"exit_on_momentum_rollover": True}}
+        )
+        self._open(sim, "spike_continuation", "long", entry=100.0)
+        snapshot = {
+            "market_data": {
+                "BTC-USDT-SWAP": {
+                    "indicators": {
+                        "volume_rsi_series": [60.0, 50.0],  # fading
+                        "rsi_series": [70.0, 60.0],  # rolled over for long
+                    }
+                }
+            }
+        }
+        candle = Candle(ts=1, open=101, high=102, low=101, close=102.0, volume=1.0)  # in profit
+        sim.apply_strategy_exits({"BTC-USDT-SWAP": snapshot}, {"BTC-USDT-SWAP": candle})
+        assert len(sim.open_positions) == 0
+        trade = sim.closed_positions[0]
+        assert trade.close_reason == "momentum_rollover"
+
+    def test_momentum_rollover_skips_underwater(self) -> None:
+        sim = self._sim_with_strategy(
+            {"spike_continuation": {"exit_on_momentum_rollover": True}}
+        )
+        self._open(sim, "spike_continuation", "long", entry=100.0)
+        snapshot = {
+            "market_data": {
+                "BTC-USDT-SWAP": {
+                    "indicators": {
+                        "volume_rsi_series": [60.0, 50.0],
+                        "rsi_series": [70.0, 60.0],
+                    }
+                }
+            }
+        }
+        candle = Candle(ts=1, open=99, high=99, low=98, close=98.0, volume=1.0)  # underwater
+        sim.apply_strategy_exits({"BTC-USDT-SWAP": snapshot}, {"BTC-USDT-SWAP": candle})
+        assert len(sim.open_positions) == 1
+
+
 # ── Metrics tests ────────────────────────────────────────────────────────────
 
 
@@ -341,6 +712,95 @@ class TestMetrics:
         assert result["spike_continuation"]["trades"] == 1
         assert result["mean_reversion"]["net_profit"] == 1.0
         assert result["spike_continuation"]["net_profit"] == 3.0
+
+
+class TestAdvancedMetrics:
+    """Test the Phase 5 informative metrics (MAE/MFE, R-multiple, exit reasons)."""
+
+    def _trade(self, **overrides: object) -> SimPosition:
+        values = {
+            "symbol": "BTC-USDT-SWAP",
+            "direction": "long",
+            "size": 0.002,
+            "entry_price": 100.0,
+            "entry_ts": 1000,
+            "tp_price": 110.0,
+            "sl_price": 95.0,
+            "strategy_name": "test",
+            "close_price": 110.0,
+            "close_ts": 2000,
+            "close_reason": "tp",
+            "pnl": 0.02,
+            "pnl_pct": 10.0,
+            "max_favorable_pct": 12.0,
+            "max_adverse_pct": -2.0,
+        }
+        values.update(overrides)
+        return SimPosition(**values)
+
+    def test_r_multiple_computed(self) -> None:
+        # SL at 95 → risk_pct = 5%; pnl_pct = 10% → R = 2.0
+        m = compute_metrics([self._trade()], [], 1000.0)
+        assert m["avg_r_multiple"] == pytest.approx(2.0)
+
+    def test_mae_mfe_aggregated(self) -> None:
+        m = compute_metrics([self._trade()], [], 1000.0)
+        assert m["max_mfe_pct"] == 12.0
+        assert m["max_mae_pct"] == -2.0
+        assert m["avg_mfe_pct"] == 12.0
+        assert m["avg_mae_pct"] == -2.0
+        # giveback = mfe - realized pnl_pct = 12 - 10 = 2
+        assert m["avg_giveback_pct"] == pytest.approx(2.0)
+
+    def test_exit_reason_breakdown(self) -> None:
+        trades = [
+            self._trade(close_reason="tp"),
+            self._trade(close_reason="sl", pnl=-0.05, pnl_pct=-5.0),
+            self._trade(close_reason="timeout", pnl=0.0, pnl_pct=0.0),
+        ]
+        m = compute_metrics(trades, [], 1000.0)
+        assert m["exit_reasons"] == {"tp": 1, "sl": 1, "timeout": 1}
+
+    def test_time_in_trade(self) -> None:
+        trades = [self._trade(candles_held=3), self._trade(candles_held=5)]
+        m = compute_metrics(trades, [], 1000.0)
+        assert m["avg_candles_held"] == 4.0
+        assert m["max_candles_held"] == 5
+
+    def test_annualized_sharpe_scales_with_timeframe(self) -> None:
+        curve = [
+            EquityPoint(ts=0, equity=1000.0, open_positions=0),
+            EquityPoint(ts=1, equity=1001.0, open_positions=0),
+            EquityPoint(ts=2, equity=1002.0, open_positions=0),
+            EquityPoint(ts=3, equity=1003.0, open_positions=0),
+        ]
+        raw = compute_metrics([], curve, 1000.0, candles_per_year=0)
+        ann = compute_metrics([], curve, 1000.0, candles_per_year=100)
+        assert raw["sharpe_per_candle"] > 0
+        assert ann["sharpe_annualized"] > raw["sharpe_per_candle"]
+
+
+class TestBuyAndHold:
+    def test_flat_returns_zero(self) -> None:
+        candles = [Candle(ts=0, open=100, high=100, low=100, close=100, volume=1.0)] * 5
+        m = compute_buy_and_hold(candles, 1000.0)
+        assert m["total_return_pct"] == 0.0
+        assert m["final_equity"] == 1000.0
+
+    def test_gain_and_drawdown(self) -> None:
+        candles = [
+            Candle(ts=0, open=100, high=100, low=100, close=100, volume=1.0),
+            Candle(ts=1, open=100, high=150, low=100, close=150, volume=1.0),
+            Candle(ts=2, open=150, high=150, low=120, close=120, volume=1.0),
+        ]
+        m = compute_buy_and_hold(candles, 1000.0)
+        assert m["total_return_pct"] == pytest.approx(20.0)
+        # peak 150 → trough 120 = 20% drawdown
+        assert m["max_drawdown_pct"] == pytest.approx(20.0)
+
+    def test_empty_returns_initial(self) -> None:
+        m = compute_buy_and_hold([], 1000.0)
+        assert m["final_equity"] == 1000.0
 
 
 # ── SnapshotBuilder tests ────────────────────────────────────────────────────

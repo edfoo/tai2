@@ -117,6 +117,11 @@ class SnapshotBuilder:
                 indicators["ohlcv_htf"] = htf_window_raw
                 indicators["htf_indicators"] = MarketService._compute_indicators(htf_window_raw)
                 indicators["ohlcv_htf_bar"] = htf_bar
+                # Flatten HTF regime scalars (mirrors live) so regime gates
+                # and regime-exit checks see adx_htf / choppiness_htf.
+                _htf = indicators.get("htf_indicators") or {}
+                indicators["adx_htf"] = (_htf.get("adx") or {}).get("value")
+                indicators["choppiness_htf"] = _htf.get("choppiness")
 
         # ── Per-strategy analysis timeframes ─────────────────────────
         # Build a ``timeframes`` map for each requested bar, aligning each
@@ -214,6 +219,11 @@ class SnapshotBuilder:
                 indicators["ohlcv_htf"] = htf_window_raw
                 indicators["htf_indicators"] = MarketService._compute_indicators(htf_window_raw)
                 indicators["ohlcv_htf_bar"] = htf_bar
+                # Flatten HTF regime scalars (mirrors live) so regime gates
+                # and regime-exit checks see adx_htf / choppiness_htf.
+                _htf = indicators.get("htf_indicators") or {}
+                indicators["adx_htf"] = (_htf.get("adx") or {}).get("value")
+                indicators["choppiness_htf"] = _htf.get("choppiness")
 
         # ── Per-strategy analysis timeframes ─────────────────────────
         timeframes: dict[str, dict[str, Any]] = {}

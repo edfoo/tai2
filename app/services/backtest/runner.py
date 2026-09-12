@@ -98,6 +98,34 @@ def seed_strategy_configs(strategy_names: list[str]) -> dict[str, Any]:
     return cfg
 
 
+def walk_forward_splits(
+    *,
+    start_ts: int,
+    end_ts: int,
+    folds: int,
+    train_ratio: float = 0.7,
+) -> list[tuple[int, int, int, int]]:
+    """Return ``(train_start, train_end, test_start, test_end)`` walk-forward folds.
+
+    Splits ``[start_ts, end_ts]`` into ``folds`` equally-spaced test segments;
+    each fold's train window runs from ``start_ts`` to ``train_end`` (a
+    ``train_ratio`` fraction of the way to the test start), so later folds
+    train on progressively more history (expanding window).  Returns an empty
+    list when ``folds <= 1`` or the range is invalid.
+    """
+    if folds <= 1 or end_ts <= start_ts:
+        return []
+    span = end_ts - start_ts
+    fold_span = span // folds
+    splits: list[tuple[int, int, int, int]] = []
+    for i in range(folds):
+        test_start = start_ts + (i + 1) * fold_span
+        test_end = min(test_start + fold_span, end_ts)
+        train_end = start_ts + int((test_start - start_ts) * train_ratio)
+        splits.append((start_ts, train_end, test_start, test_end))
+    return splits
+
+
 def build_backtest_config(
     *,
     symbols: list[str],

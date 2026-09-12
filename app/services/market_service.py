@@ -18,6 +18,7 @@ import httpx
 import inspect
 
 import pandas as pd
+from app.services.backtest.sizing import quantize_contracts
 import pandas_ta as ta
 
 from app.core.config import get_settings
@@ -31,6 +32,13 @@ from app.db.postgres import (
 )
 from app.lib.volume_profile import value_area
 from app.models.trade import ExecutedTrade
+from app.services.launcher_tp_sl import resolve_launcher_tp_sl
+from app.services.trade_management_rules import (
+    compute_breakeven_sl,
+    compute_far_tp,
+    compute_trailing_sl,
+    should_ratchet_sl,
+)
 from app.services.okx_metrics import fetch_funding_history, oi_delta_zscore, zscore_latest
 from app.services.okx_sdk_adapter import OkxAccountAdapter, OkxTradeAdapter
 from app.services.state_service import StateService
@@ -2605,10 +2613,11 @@ class MarketService:
                 and r_multiple >= be_at_r
                 and symbol not in self._trade_mgmt_be_updating
             ):
-                if is_long:
-                    new_sl = entry_price * (1.0 + be_buffer_pct / 100.0)
-                else:
-                    new_sl = entry_price * (1.0 - be_buffer_pct / 100.0)
+                new_sl = compute_breakeven_sl(
+                    is_long=is_long,
+                    entry_price=entry_price,
+                    breakeven_buffer_pct=be_buffer_pct,
+                )
                 current_sl = self._extract_float(
                     (self._position_protection.get(symbol) or {}).get("stop_loss")
                 ) or state.get("sl_price")
@@ -2693,15 +2702,15 @@ class MarketService:
                     atr_tf_pct = risk_pct  # fallback: use the SL distance as ATR proxy
 
                 # Trailing SL distance behind price (in price units).
-                trail_dist = trailing_distance_atr * atr_tf_pct / 100.0 * last_price
-                if is_long:
-                    trail_sl = last_price - trail_dist
-                    floor_sl = entry_price * (1.0 - trailing_floor_r * risk_pct / 100.0)
-                    new_sl = max(trail_sl, floor_sl)
-                else:
-                    trail_sl = last_price + trail_dist
-                    floor_sl = entry_price * (1.0 + trailing_floor_r * risk_pct / 100.0)
-                    new_sl = min(trail_sl, floor_sl)
+                new_sl, floor_sl = compute_trailing_sl(
+                    is_long=is_long,
+                    entry_price=entry_price,
+                    mark_price=last_price,
+                    risk_pct=risk_pct,
+                    atr_pct=atr_tf_pct,
+                    trailing_distance_atr=trailing_distance_atr,
+                    trailing_floor_r=trailing_floor_r,
+                )
 
                 # Ratchet: only update if strictly better than the current SL by
                 # at least trailing_step_r * risk_pct (avoids re-placing every tick).
@@ -2709,12 +2718,12 @@ class MarketService:
                     (self._position_protection.get(symbol) or {}).get("stop_loss")
                 ) or state.get("sl_price")
                 step_dist = trailing_step_r * risk_pct / 100.0 * entry_price
-                should_update = True
-                if current_sl is not None:
-                    if is_long and new_sl <= current_sl + step_dist:
-                        should_update = False
-                    if not is_long and new_sl >= current_sl - step_dist:
-                        should_update = False
+                should_update = should_ratchet_sl(
+                    is_long=is_long,
+                    current_sl=current_sl,
+                    new_sl=new_sl,
+                    step_distance=step_dist,
+                )
                 if should_update:
                     # Asymmetric exit: once the partial has fired, drop the fixed
                     # TP on the runner (unless a far-out safety TP is configured)
@@ -2722,10 +2731,11 @@ class MarketService:
                     _remove_tp = trailing_remove_tp and state.get("partial_done")
                     _far_tp = None
                     if not _remove_tp and trailing_far_tp_mult is not None and risk_pct > 0:
-                        _far_tp = (
-                            entry_price * (1.0 + trailing_far_tp_mult * risk_pct / 100.0)
-                            if is_long
-                            else entry_price * (1.0 - trailing_far_tp_mult * risk_pct / 100.0)
+                        _far_tp = compute_far_tp(
+                            is_long=is_long,
+                            entry_price=entry_price,
+                            risk_pct=risk_pct,
+                            trailing_far_tp_mult=trailing_far_tp_mult,
                         )
                     self._emit_debug(
                         f"TradeMgmt trailing: {symbol} R={r_multiple:.2f} ≥ "
@@ -4022,7 +4032,6 @@ class MarketService:
         decisions: list[dict[str, Any]] = []
         for signal in signals:
             strat_key = f"{signal.strategy_name}:{symbol_upper}"
-            _strat_cfg_for_sizing = (gov.get("strategies") or {}).get(signal.strategy_name) or {}
 
             # Per-strategy position guard: skip if this strategy already has
             # an open or in-flight position on this symbol.
@@ -4042,165 +4051,33 @@ class MarketService:
                 )
                 continue
 
-            # TP/SL from the strategy signal, falling back to launcher-level.
-            tp_pct = signal.tp_pct if signal.tp_pct is not None else self._extract_float(gov.get("tp_pct"))
-            sl_pct = signal.sl_pct if signal.sl_pct is not None else self._extract_float(gov.get("sl_pct"))
+            # TP/SL resolution (static/ATR/structural fallback, PnL%-mode,
+            # dynamic-TP, direction-flip) is shared with the backtest engine
+            # via ``resolve_launcher_tp_sl`` — see app/services/launcher_tp_sl.py.
+            sym_data = ((self._last_full_snapshot or {}).get("market_data") or {}).get(symbol) or {}
+            resolved = resolve_launcher_tp_sl(
+                strategy_name=signal.strategy_name,
+                direction=signal.direction,
+                signal_tp_pct=signal.tp_pct,
+                signal_sl_pct=signal.sl_pct,
+                last_price=last_price,
+                launcher_config=gov,
+                guardrails_config=self._guardrails_config,
+                sym_data=sym_data,
+            )
+            action = resolved.action
+            tp_price = resolved.tp_price
+            sl_price = resolved.sl_price
+            _disable_protection = resolved.disable_protection
 
-            # Mean Reversion opt-out: if both adaptive sizing modes are explicitly
-            # disabled and static TP/SL are both blank, do not attach protection.
-            # This enables external trade management (e.g., Skimming-like logic)
-            # without placing TP/SL algos on the order book.
-            _disable_protection = False
-            if signal.strategy_name == "mean_reversion":
-                _mr_use_atr = bool(_strat_cfg_for_sizing.get("use_atr_sizing", True))
-                _mr_use_struct = bool(_strat_cfg_for_sizing.get("use_structural_sizing", True))
-                _mr_static_tp = self._extract_float(_strat_cfg_for_sizing.get("tp_pct"))
-                _mr_static_sl = self._extract_float(_strat_cfg_for_sizing.get("sl_pct"))
-                if not _mr_use_atr and not _mr_use_struct and _mr_static_tp is None and _mr_static_sl is None:
-                    _disable_protection = True
-                    tp_pct = None
-                    sl_pct = None
-
-            # PnL% mode: when enabled, the strategy TP/SL fields are interpreted
-            # as Floating PnL % on margin (after leverage). Convert them to price
-            # distances using the guardrail leverage: price% = PnL% / leverage.
-            # This ONLY applies to static percentage targets. ATR and structural
-            # sizing compute price-based levels directly (already in price %),
-            # so they must NOT be divided by leverage.
-            _pnl_pct_mode = bool(gov.get("tp_sl_in_pnl_pct", False))
-            # Reuse the execution guardrails' leverage bounds for the conversion.
-            # Prefer max_leverage (the hard cap) as the effective leverage; fall
-            # back to min_leverage if max is unset.
-            _guard_leverage = self._extract_float(self._guardrails_config.get("max_leverage"))
-            if not _guard_leverage or _guard_leverage <= 0:
-                _guard_leverage = self._extract_float(self._guardrails_config.get("min_leverage"))
-            _uses_atr = bool(_strat_cfg_for_sizing.get("use_atr_sizing", False))
-            _uses_struct = bool(_strat_cfg_for_sizing.get("use_structural_sizing", False))
-            if (
-                _pnl_pct_mode
-                and _guard_leverage
-                and _guard_leverage > 0
-                and not _uses_atr
-                and not _uses_struct
-            ):
-                if tp_pct is not None:
-                    tp_pct = tp_pct / _guard_leverage
-                if sl_pct is not None:
-                    sl_pct = sl_pct / _guard_leverage
-                self._emit_debug(
-                    f"Launcher PnL%→price: {symbol} [{signal.strategy_name}] "
-                    f"leverage={_guard_leverage:.1f}x → tp_pct={tp_pct:.3f}% sl_pct={sl_pct:.3f}%"
-                )
-
-            # Dynamic TP (Mean Reversion only): tighten TP using BB bandwidth.
-            # Disabled when use_atr_sizing is True — ATR sizing already adapts
-            # TP to volatility, so dynamic_tp would double-tighten it.
-            effective_tp_pct = tp_pct
-            dynamic_tp_source = "static"
-            _mr_cfg = (gov.get("strategies") or {}).get("mean_reversion") or {}
-            if signal.strategy_name == "mean_reversion":
-                dynamic_tp = bool(_mr_cfg.get("dynamic_tp", False))
-                _mr_use_atr = bool(_mr_cfg.get("use_atr_sizing", False))
-                if _mr_use_atr and dynamic_tp:
-                    dynamic_tp = False
-                    dynamic_tp_source = "skipped(atr_sizing active)"
-                dynamic_tp_fraction = self._extract_float(_mr_cfg.get("dynamic_tp_fraction")) or 0.7
-                if dynamic_tp and tp_pct and tp_pct > 0:
-                    sym_indicators = ((self._last_full_snapshot or {}).get("market_data") or {}).get(symbol) or {}
-                    sym_indicators = sym_indicators.get("indicators") or {}
-                    _bb = sym_indicators.get("bollinger_bands") or {}
-                    _bb_lower = self._extract_float(_bb.get("lower"))
-                    _bb_upper = self._extract_float(_bb.get("upper"))
-                    _bb_middle = self._extract_float(_bb.get("middle"))
-                    if _bb_lower is not None and _bb_upper is not None and _bb_middle and _bb_middle > 0:
-                        _bw = (_bb_upper - _bb_lower) / _bb_middle * 100.0
-                        _lever = 1.0
-                        _dyn = (_bw / 2.0) * dynamic_tp_fraction * _lever
-                        if _dyn > 0:
-                            effective_tp_pct = min(tp_pct, _dyn)
-                            dynamic_tp_source = (
-                                f"dynamic(bw={_bw:.2f}%,frac={dynamic_tp_fraction}) "
-                                f"→ {_dyn:.2f}% → min={effective_tp_pct:.2f}%"
-                            )
-                    else:
-                        dynamic_tp_source = "dynamic(BB unavailable, fallback to static)"
-
-            tp_price: float | None = None
-            sl_price: float | None = None
-            if effective_tp_pct and effective_tp_pct > 0:
-                tp_price = (
-                    last_price * (1 + effective_tp_pct / 100.0)
-                    if signal.direction == "buy"
-                    else last_price * (1 - effective_tp_pct / 100.0)
-                )
-            if sl_pct and sl_pct > 0:
-                sl_price = (
-                    last_price * (1 - sl_pct / 100.0)
-                    if signal.direction == "buy"
-                    else last_price * (1 + sl_pct / 100.0)
-                )
-
-            action = "BUY" if signal.direction == "buy" else "SELL"
-
-            # Flip direction (Mean Reversion / VWAP Reversion / Liquidity Sweep / Trend Pullback / Spike Continuation).
-            # Mirrors TP/SL around last_price so they land on the correct
-            # side of entry for the flipped direction.
-            _flip_cfg: dict[str, Any] = {}
-            if signal.strategy_name == "mean_reversion":
-                _flip_cfg = _mr_cfg
-            elif signal.strategy_name == "vwap_reversion":
-                _flip_cfg = (gov.get("strategies") or {}).get("vwap_reversion") or {}
-            elif signal.strategy_name == "liquidity_sweep":
-                _flip_cfg = (gov.get("strategies") or {}).get("liquidity_sweep") or {}
-            elif signal.strategy_name == "trend_pullback":
-                _flip_cfg = (gov.get("strategies") or {}).get("trend_pullback") or {}
-            elif signal.strategy_name == "spike_continuation":
-                _flip_cfg = (gov.get("strategies") or {}).get("spike_continuation") or {}
-            # When flip_tp_sl is active, the TP/SL distances are swapped and the
-            # resulting trade is deliberately inverted-R:R (taking the small
-            # profit where it would normally stop out).  We flag that trade so the
-            # execution R:R guardrail is bypassed for it and it only.
-            _flip_tp_sl_active = False
-            _flipped = False
-            if _flip_cfg:
-                flip_dir = str(_flip_cfg.get("flip_launcher_direction") or "").strip().lower()
-                if flip_dir in ("both", "from_long", "from_short"):
-                    should_flip = (
-                        flip_dir == "both"
-                        or (flip_dir == "from_long" and action == "BUY")
-                        or (flip_dir == "from_short" and action == "SELL")
-                    )
-                    if should_flip:
-                        _flipped = True
-                        orig_action = action
-                        action = "SELL" if action == "BUY" else "BUY"
-                        if last_price and last_price > 0:
-                            if bool(_flip_cfg.get("flip_tp_sl", False)):
-                                _flip_tp_sl_active = True
-                                # Swap TP/SL distances instead of mirroring:
-                                # the old TP distance becomes the new SL distance
-                                # and vice versa.  This inverts the R:R geometry of
-                                # the flipped trade rather than preserving it.
-                                tp_dist = abs(tp_price - last_price) if tp_price else None
-                                sl_dist = abs(sl_price - last_price) if sl_price else None
-                                if action == "BUY":
-                                    tp_price = round(last_price + sl_dist, 10) if sl_dist is not None else None
-                                    sl_price = round(last_price - tp_dist, 10) if tp_dist is not None else None
-                                else:
-                                    tp_price = round(last_price - sl_dist, 10) if sl_dist is not None else None
-                                    sl_price = round(last_price + tp_dist, 10) if tp_dist is not None else None
-                            else:
-                                tp_price = round(2 * last_price - tp_price, 10) if tp_price else None
-                                sl_price = round(2 * last_price - sl_price, 10) if sl_price else None
-                        self._emit_debug(
-                            f"Launcher flip ({flip_dir}): {symbol} {orig_action} → {action} "
-                            f"tp={tp_price} sl={sl_price}"
-                        )
+            for line in resolved.debug_lines:
+                self._emit_debug(f"Launcher {line}: {symbol} [{signal.strategy_name}]")
 
             self._emit_debug(
                 f"Launcher signal: {symbol} {action} [{signal.strategy_name}] "
                 f"last={last_price} notional={notional_usd} tp={tp_price} sl={sl_price} "
-                f"flipped={_flipped} flip_tp_sl={_flip_tp_sl_active} [{dynamic_tp_source}]"
+                f"flipped={resolved.flipped} flip_tp_sl={resolved.flip_tp_sl_active} "
+                f"[{resolved.dynamic_tp_source}]"
             )
 
             decisions.append({
@@ -4215,7 +4092,7 @@ class MarketService:
                 "_decision_origin": "launcher",
                 "_strategy_name": signal.strategy_name,
                 "_disable_protection": _disable_protection,
-                "_skip_rr_guard": _flip_tp_sl_active,
+                "_skip_rr_guard": resolved.skip_rr_guard,
             })
 
         return decisions
@@ -11932,11 +11809,7 @@ class MarketService:
             return size
         lot = spec.get("lot_size") or 0.0
         min_size = spec.get("min_size") or 0.0
-        if lot > 0:
-            multiples = math.floor((size + 1e-9) / lot)
-            quantized = multiples * lot
-        else:
-            quantized = size
+        quantized = quantize_contracts(size, lot)
         if quantized < min_size and min_size > 0:
             return None
         return quantized if quantized > 0 else None

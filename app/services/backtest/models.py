@@ -55,9 +55,18 @@ class SimPosition:
     close_reason: str = ""  # "tp" | "sl" | "pm_skimming" | "end_of_data" | ...
     pnl: float = 0.0
     pnl_pct: float = 0.0
+    # Trading costs accrued over the position's life (quote currency).
+    entry_fee: float = 0.0
+    exit_fee: float = 0.0
+    funding: float = 0.0
+    slippage_cost: float = 0.0
     # Number of candles the position has been held through (incremented
     # by the simulator on each update_multi/update tick).
     candles_held: int = 0
+    # Peak favorable / adverse excursion (unrealised PnL %, direction-signed).
+    # Tracked per candle while open for MAE/MFE metrics.
+    max_favorable_pct: float = 0.0
+    max_adverse_pct: float = 0.0
     # Trade-management state (breakeven / partial TP).
     initial_size: float | None = None
     breakeven_done: bool = False
@@ -84,6 +93,20 @@ class SimPosition:
         if self.is_long:
             return (price - self.entry_price) / self.entry_price * 100.0
         return (self.entry_price - price) / self.entry_price * 100.0
+
+    @property
+    def fee_and_funding_cost(self) -> float:
+        """Cash costs (entry fee, exit fee, funding) not already in ``pnl``.
+
+        Slippage is excluded because it is baked into the fill prices and thus
+        already reflected in ``pnl`` / ``unrealised_pnl``.
+        """
+        return self.entry_fee + self.exit_fee + self.funding
+
+    @property
+    def net_pnl(self) -> float:
+        """Realised PnL after fees and funding (slippage already in ``pnl``)."""
+        return self.pnl - self.fee_and_funding_cost
 
 
 # ── Equity curve point ──────────────────────────────────────────────────
@@ -133,6 +156,18 @@ class BacktestConfig:
     # Must be strictly finer than `timeframe`. If equal or coarser, the engine
     # falls back to "closed" mode automatically.
     evaluation_timeframe: str = "1m"
+    # ── Cost model (fees / slippage / funding) ────────────────────────
+    # Taker fee per fill in basis points (5 = 0.05%).  Maker fills are not
+    # modeled by the launcher (market orders), so maker_fee_bps defaults to 0.
+    taker_fee_bps: float = 5.0
+    maker_fee_bps: float = 0.0
+    # Adverse price move on entry and exit, in basis points (0 = disabled).
+    slippage_bps: float = 0.0
+    # Assumed funding rate per interval (0 = disabled).  e.g. 0.01 = 0.01%
+    # of notional per funding interval (8h by default).
+    funding_rate_pct: float = 0.0
+    # Funding cadence in milliseconds (default 8h).
+    funding_interval_ms: int = 8 * 60 * 60 * 1000
 
 
 # ── Backtest result ─────────────────────────────────────────────────────

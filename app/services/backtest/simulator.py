@@ -31,8 +31,36 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from app.services.backtest.models import Candle, EquityPoint, SimPosition
+from app.services.backtest.sizing import compute_order_size
+from app.services.backtest.costs import CostModel
+from app.services.indicator_service import htf_regime_allows
+from app.services.strategies import resolve_analysis_block
+from app.services.strategies.defaults import merged_config
+from app.services.trade_management_rules import (
+    compute_trade_management_decision,
+    resolve_tm_params,
+)
 
 logger = logging.getLogger(__name__)
+
+# Rolling window (ms) used by the daily-loss lockout, matching live's
+# ``DAILY_LOSS_WINDOW_HOURS = 24`` in prompt_runner.py.
+DAILY_LOSS_WINDOW_MS = 24 * 60 * 60 * 1000
+
+
+def _to_positive_float(value: Any) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _to_float(value: Any) -> float | None:
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 # ── Position-management strategy protocol (future phase) ───────────────
@@ -103,15 +131,21 @@ class Simulator:
         initial_capital: float = 1000.0,
         notional_per_trade: float = 10.0,
         strategy_config: dict[str, Any] | None = None,
+        cost_model: CostModel | None = None,
     ) -> None:
         self._initial_capital = initial_capital
         self._notional_per_trade = notional_per_trade
         self._strategy_config = strategy_config or {}
+        self._cost_model = cost_model or CostModel()
         self._open_positions: list[SimPosition] = []
         self._closed_positions: list[SimPosition] = []
         self._equity_curve: list[EquityPoint] = []
         self._cash = initial_capital
         self._pm_strategies: list[PositionManagementStrategy] = []  # future phase
+        self._last_close_ts: dict[str, int] = {}
+        self._recent_candles: dict[str, list[Candle]] = {}
+        # Rolling equity history (ts, equity) for the daily-loss lockout.
+        self._equity_history: list[tuple[int, float]] = []
         # Max candles a position may be held before forced close (0 = disabled).
         # Read from the strategy config: launcher-level or per-strategy.
         _launcher = self._strategy_config or {}
@@ -170,6 +204,51 @@ class Simulator:
             return True
         return False
 
+    def can_enter(self, symbol: str, entry_ts: int) -> bool:
+        """Return whether live-style re-entry cooldown permits a new entry."""
+        cooldown_seconds = float(self._tm.get("reentry_cooldown_seconds") or 0.0)
+        if cooldown_seconds <= 0:
+            return True
+        last_close_ts = self._last_close_ts.get(symbol)
+        if last_close_ts is None:
+            return True
+        return entry_ts - last_close_ts >= cooldown_seconds * 1000.0
+
+    def _guardrails(self) -> dict[str, Any]:
+        return self._strategy_config.get("guardrails") or {}
+
+    def open_position_notional(self) -> float:
+        """Sum of entry notional across all currently-open positions."""
+        total = 0.0
+        for pos in self._open_positions:
+            total += pos.entry_price * pos.size
+        return total
+
+    def is_daily_loss_locked(self, current_ts: int) -> bool:
+        """Return whether the live daily-loss guardrail would block new entries.
+
+        Mirrors ``compute_daily_loss_guard_state``: the reference is the first
+        equity observed within the rolling 24h window, and the lock activates
+        when the drop from that reference reaches ``daily_loss_limit_pct``.
+        """
+        limit = _to_positive_float(self._guardrails().get("daily_loss_limit_pct"))
+        if limit is None or not self._equity_history:
+            return False
+        current_equity = self._equity_history[-1][1]
+        cutoff = current_ts - DAILY_LOSS_WINDOW_MS
+        window = [eq for ts, eq in self._equity_history if ts >= cutoff]
+        if not window:
+            return False
+        reference = window[0]
+        if reference <= 0:
+            return False
+        change_pct = (reference - current_equity) / reference
+        return change_pct >= limit
+
+    def available_equity_for_trade(self, account_equity: float) -> float:
+        """Free equity after existing positions, mirroring live sizing."""
+        return max(account_equity - self.open_position_notional(), 0.0)
+
     # ── Open / close ──────────────────────────────────────────────────
 
     def open_position(
@@ -182,23 +261,63 @@ class Simulator:
         tp_price: float | None = None,
         sl_price: float | None = None,
         strategy_name: str = "",
-    ) -> SimPosition:
-        """Open a new simulated position.
+    ) -> SimPosition | None:
+        """Open a new simulated position, or return None if a guardrail blocks.
 
-        Size is derived from ``notional_per_trade / entry_price``.
+        Size is derived from ``notional_per_trade / entry_price``, subject to
+        the live daily-loss lockout and portfolio free-equity cap.
         """
-        size = self._notional_per_trade / entry_price if entry_price > 0 else 0.0
+        guardrails = self._strategy_config.get("guardrails") or {}
+        instrument_specs = self._strategy_config.get("instrument_specs") or {}
+        instrument = instrument_specs.get(symbol) or instrument_specs.get(symbol.upper()) or {}
+
+        # Daily-loss lockout — block all new entries once the rolling 24h
+        # equity drop reaches the configured threshold.
+        if self.is_daily_loss_locked(entry_ts):
+            return None
+
+        # Portfolio free-equity cap — clip (or block) the requested notional
+        # so total deployed notional never exceeds account equity.
+        current_equity = self._equity_history[-1][1] if self._equity_history else self._cash
+        free_equity = max(current_equity - self.open_position_notional(), 0.0)
+        if free_equity <= 0:
+            return None
+        requested_notional = min(self._notional_per_trade, free_equity)
+
+        size, _actual_notional = compute_order_size(
+            requested_notional=requested_notional,
+            entry_price=entry_price,
+            equity=self._cash,
+            stop_price=sl_price,
+            guardrails=guardrails,
+            instrument=instrument,
+            symbol=symbol,
+        )
+        if size <= 0:
+            return None
+
+        # Effective entry fill price after slippage (slippage is baked into
+        # fill_price, so it is already reflected in the position's PnL).
+        fill_price = self._cost_model.entry_price_for(entry_price, direction == "long")
+        notional = size * fill_price
+        entry_fee = self._cost_model.fee_for(notional, taker=True)
+        # Informational only — entry slippage cost (already in fill_price).
+        entry_slippage = size * (fill_price - entry_price)
+
         position = SimPosition(
             symbol=symbol,
             direction=direction,
             size=size,
-            entry_price=entry_price,
+            entry_price=fill_price,
             entry_ts=entry_ts,
             tp_price=tp_price,
             sl_price=sl_price,
             strategy_name=strategy_name,
             initial_size=size,
+            entry_fee=entry_fee,
+            slippage_cost=entry_slippage,
         )
+        self._cash -= entry_fee
         # Entry-time hook for position-management strategies (future phase).
         for pm in self._pm_strategies:
             pm.on_entry(position, self._strategy_config)
@@ -225,24 +344,44 @@ class Simulator:
         if size_fraction <= 0:
             return
         if size_fraction >= 1.0:
-            position.close_price = close_price
+            # Effective exit fill after slippage.
+            exit_px = self._cost_model.exit_price_for(close_price, position.is_long)
+            exit_notional = position.size * exit_px
+            exit_fee = self._cost_model.fee_for(exit_notional, taker=True)
+            # Funding accrued over the holding period (settles every interval).
+            held_ms = max(close_ts - position.entry_ts, 0)
+            intervals = held_ms // self._cost_model.funding_interval_ms
+            funding = self._cost_model.funding_payment(
+                position.size * position.entry_price,
+                is_long=position.is_long,
+                intervals=intervals,
+            )
+
+            position.close_price = exit_px
             position.close_ts = close_ts
             position.close_reason = reason
-            position.pnl = position.unrealised_pnl(close_price)
+            position.exit_fee = exit_fee
+            position.funding = funding
+            # Accumulate exit slippage into the informational total.
+            position.slippage_cost += position.size * abs(exit_px - close_price)
+            position.pnl = position.unrealised_pnl(exit_px)
             if position.entry_price > 0:
-                position.pnl_pct = position.unrealised_pnl_pct(close_price)
-            self._cash += position.pnl
+                position.pnl_pct = position.unrealised_pnl_pct(exit_px)
+            self._cash += position.pnl - exit_fee - funding
             self._open_positions.remove(position)
             self._closed_positions.append(position)
+            self._last_close_ts[position.symbol] = close_ts
             return
 
         # Partial close: realise PnL on the closed fraction, keep remainder open.
         closed_size = position.size * size_fraction
+        exit_px = self._cost_model.exit_price_for(close_price, position.is_long)
         if position.is_long:
-            partial_pnl = (close_price - position.entry_price) * closed_size
+            partial_pnl = (exit_px - position.entry_price) * closed_size
         else:
-            partial_pnl = (position.entry_price - close_price) * closed_size
-        self._cash += partial_pnl
+            partial_pnl = (position.entry_price - exit_px) * closed_size
+        partial_fee = self._cost_model.fee_for(closed_size * exit_px, taker=True)
+        self._cash += partial_pnl - partial_fee
         # Record a closed leg for metrics.
         closed_leg = SimPosition(
             symbol=position.symbol,
@@ -253,19 +392,20 @@ class Simulator:
             tp_price=position.tp_price,
             sl_price=position.sl_price,
             strategy_name=position.strategy_name,
-            close_price=close_price,
+            close_price=exit_px,
             close_ts=close_ts,
             close_reason=reason,
             pnl=partial_pnl,
             pnl_pct=(
-                (close_price - position.entry_price) / position.entry_price * 100.0
+                (exit_px - position.entry_price) / position.entry_price * 100.0
                 if position.is_long and position.entry_price > 0
                 else (
-                    (position.entry_price - close_price) / position.entry_price * 100.0
+                    (position.entry_price - exit_px) / position.entry_price * 100.0
                     if position.entry_price > 0
                     else 0.0
                 )
             ),
+            exit_fee=partial_fee,
             candles_held=position.candles_held,
             initial_size=position.initial_size,
             breakeven_done=position.breakeven_done,
@@ -276,6 +416,19 @@ class Simulator:
         position.partial_done = True
 
     # ── Per-candle update ────────────────────────────────────────────
+
+    def _track_excursion(self, position: SimPosition, candle: Candle) -> None:
+        """Update MAE/MFE for an open position from a candle's high/low."""
+        if position.entry_price <= 0:
+            return
+        if position.is_long:
+            fav_pct = (candle.high - position.entry_price) / position.entry_price * 100.0
+            adv_pct = (candle.low - position.entry_price) / position.entry_price * 100.0
+        else:
+            fav_pct = (position.entry_price - candle.low) / position.entry_price * 100.0
+            adv_pct = (position.entry_price - candle.high) / position.entry_price * 100.0
+        position.max_favorable_pct = max(position.max_favorable_pct, fav_pct)
+        position.max_adverse_pct = min(position.max_adverse_pct, adv_pct)
 
     def update(self, candle: Candle) -> None:
         """Process one candle: check TP/SL and position-management strategies.
@@ -289,6 +442,7 @@ class Simulator:
                 # (multi-symbol backtests pass candles for each symbol).
                 continue
             position.candles_held += 1
+            self._track_excursion(position, candle)
             if self._check_tp_sl(position, candle):
                 continue  # position was closed
             # 1b. Trade management (breakeven / partial / time-stop).
@@ -310,18 +464,26 @@ class Simulator:
         self._equity_curve.append(
             EquityPoint(ts=candle.ts, equity=eq, open_positions=len(self._open_positions))
         )
+        self._equity_history.append((candle.ts, eq))
 
     def update_multi(self, prices: dict[str, Candle]) -> None:
         """Process one time-step across multiple symbols.
 
         ``prices`` maps symbol → Candle for the current time-step.
         """
+        for symbol, candle in prices.items():
+            history = self._recent_candles.setdefault(symbol, [])
+            history.append(candle)
+            if len(history) > 100:
+                del history[:-100]
+
         # 1. Check TP/SL for each open position against its symbol's candle.
         for position in list(self._open_positions):
             candle = prices.get(position.symbol)
             if candle is None:
                 continue
             position.candles_held += 1
+            self._track_excursion(position, candle)
             if self._check_tp_sl(position, candle):
                 continue
             # 1b. Trade management (breakeven / partial / time-stop).
@@ -344,9 +506,16 @@ class Simulator:
         self._equity_curve.append(
             EquityPoint(ts=ts, equity=eq, open_positions=len(self._open_positions))
         )
+        if ts:
+            self._equity_history.append((ts, eq))
 
     def _apply_trade_management(self, position: SimPosition, candle: Candle) -> bool:
-        """Apply breakeven / partial TP / time-stop.  Returns True if fully closed."""
+        """Apply breakeven / partial TP / trailing / software-stop / time-stop.
+
+        Delegates the threshold + stop-price arithmetic to
+        ``compute_trade_management_decision`` (shared with live); only the
+        intrabar fill estimate and position mutation stay here.
+        """
         tm = self._tm or {}
         if not tm.get("enabled"):
             return False
@@ -365,11 +534,11 @@ class Simulator:
             if risk_pct is not None and risk_pct <= 0:
                 risk_pct = None
 
-        # Use candle close as mark for R-multiple (conservative vs high/low).
+        # Mark = candle close; R-multiple uses the best excursion this candle
+        # (high/low) so intrabar BE/partial/trailing triggers are detected.
         mark = candle.close
         if position.is_long:
             pnl_pct = (mark - entry) / entry * 100.0
-            # Best excursion this candle for BE/partial triggers.
             best_pct = (candle.high - entry) / entry * 100.0
         else:
             pnl_pct = (entry - mark) / entry * 100.0
@@ -377,42 +546,47 @@ class Simulator:
 
         r_multiple = (best_pct / risk_pct) if (risk_pct and risk_pct > 0) else None
 
-        # ── Breakeven stop ────────────────────────────────────────────
-        be_enabled = bool(tm.get("breakeven_enabled", True))
-        be_at_r = float(tm.get("breakeven_at_r") or 0.7)
-        be_buffer_pct = float(tm.get("breakeven_buffer_pct") or 0.05)
-        if (
-            be_enabled
-            and not position.breakeven_done
-            and r_multiple is not None
-            and r_multiple >= be_at_r
-        ):
-            if position.is_long:
-                new_sl = entry * (1.0 + be_buffer_pct / 100.0)
-                if position.sl_price is None or new_sl > position.sl_price:
-                    position.sl_price = new_sl
-            else:
-                new_sl = entry * (1.0 - be_buffer_pct / 100.0)
-                if position.sl_price is None or new_sl < position.sl_price:
-                    position.sl_price = new_sl
+        # Time-stop (backtest = candle-count, progress + underwater conditions).
+        time_stop_candles = int(tm.get("time_stop_candles") or 0)
+        progress_r = (pnl_pct / risk_pct) if (risk_pct and risk_pct > 0) else None
+        underwater_only = bool(tm.get("time_stop_underwater_only", True))
+        timed_out = (
+            bool(tm.get("time_stop_enabled", True))
+            and time_stop_candles > 0
+            and position.candles_held >= time_stop_candles
+            and (progress_r is None or progress_r < float(tm.get("time_stop_min_r") or 0.3))
+            and (not underwater_only or pnl_pct < 0.0)
+        )
+
+        atr_pct = self._atr_pct(position.symbol)
+
+        decision = compute_trade_management_decision(
+            resolve_tm_params(tm),
+            is_long=position.is_long,
+            entry_price=entry,
+            mark_price=mark,
+            risk_pct=risk_pct,
+            pnl_pct=pnl_pct,
+            r_multiple=r_multiple,
+            atr_pct=atr_pct,
+            current_sl=position.sl_price,
+            breakeven_done=position.breakeven_done,
+            partial_done=position.partial_done,
+            timed_out=timed_out,
+        )
+
+        if decision.software_stop:
+            self._close_position(position, candle.close, candle.ts, "software_sl")
+            return True
+
+        if decision.breakeven_new_sl is not None:
+            position.sl_price = decision.breakeven_new_sl
             position.breakeven_done = True
-            # Re-check SL on this same candle after BE move.
             if self._check_tp_sl(position, candle):
                 return True
 
-        # ── Partial take-profit ───────────────────────────────────────
-        partial_enabled = bool(tm.get("partial_tp_enabled", True))
-        partial_at_r = float(tm.get("partial_tp_at_r") or 0.8)
-        partial_frac = float(tm.get("partial_tp_fraction") or 0.5)
-        if (
-            partial_enabled
-            and not position.partial_done
-            and r_multiple is not None
-            and r_multiple >= partial_at_r
-            and 0.0 < partial_frac < 1.0
-        ):
-            # Close partial at the TP-side extreme of this candle (optimistic
-            # for partial fill once R is reached), clamped to candle range.
+        if decision.partial_trigger:
+            partial_at_r = float(tm.get("partial_tp_at_r") or 0.8)
             if position.is_long:
                 partial_px = min(candle.high, entry * (1.0 + (risk_pct or 0) * partial_at_r / 100.0))
                 if partial_px < candle.low:
@@ -422,25 +596,39 @@ class Simulator:
                 if partial_px > candle.high:
                     partial_px = candle.close
             self._close_position(
-                position, partial_px, candle.ts, "partial_tp", size_fraction=partial_frac
+                position, partial_px, candle.ts, "partial_tp",
+                size_fraction=decision.partial_fraction,
             )
-            # Position remains open with reduced size.
 
-        # ── Time stop ────────────────────────────────────────────────
-        time_stop_enabled = bool(tm.get("time_stop_enabled", True))
-        # Prefer candle-count time stop in backtest (more stable than wall-clock).
-        time_stop_candles = int(tm.get("time_stop_candles") or 0)
-        time_stop_min_r = float(tm.get("time_stop_min_r") or 0.3)
-        if time_stop_enabled and time_stop_candles > 0:
-            progress_r = (pnl_pct / risk_pct) if (risk_pct and risk_pct > 0) else None
-            if (
-                position.candles_held >= time_stop_candles
-                and (progress_r is None or progress_r < time_stop_min_r)
-            ):
-                self._close_position(position, candle.close, candle.ts, "timeout")
+        if decision.trailing_new_sl is not None:
+            position.sl_price = decision.trailing_new_sl
+            if decision.trailing_remove_tp and position.partial_done:
+                position.tp_price = None
+            if self._check_tp_sl(position, candle):
                 return True
 
+        if decision.timeout:
+            self._close_position(position, candle.close, candle.ts, "timeout")
+            return True
+
         return False
+
+    def _atr_pct(self, symbol: str, period: int = 14) -> float | None:
+        """Estimate ATR percentage from the historical OHLC stream."""
+        candles = self._recent_candles.get(symbol, [])
+        if len(candles) < 2:
+            return None
+        window = candles[-(period + 1):]
+        true_ranges: list[float] = []
+        for previous, current in zip(window, window[1:]):
+            true_ranges.append(max(
+                current.high - current.low,
+                abs(current.high - previous.close),
+                abs(current.low - previous.close),
+            ))
+        if not true_ranges or window[-1].close <= 0:
+            return None
+        return sum(true_ranges) / len(true_ranges) / window[-1].close * 100.0
 
     def _matches_symbol(self, position: SimPosition, candle: Candle) -> bool:
         """Check if a candle belongs to a position's symbol.
@@ -496,6 +684,111 @@ class Simulator:
                 sl_price=action.new_sl_price,
                 strategy_name=position.strategy_name,
             )
+
+    def apply_strategy_exits(
+        self,
+        symbol_snapshots: dict[str, dict[str, Any]],
+        prices: dict[str, Candle],
+    ) -> None:
+        """Flatten open positions when a strategy-specific exit condition fires.
+
+        Mirrors live ``_check_strategy_regime_exits`` (mean_reversion
+        ``exit_on_regime_breakdown``) and
+        ``_check_spike_continuation_rollover_exits`` (spike_continuation
+        ``exit_on_momentum_rollover``).  Runs after TP/SL and trade-management
+        checks, so positions already closed by those are skipped.
+        """
+        strategies_cfg = self._strategy_config.get("strategies") or {}
+
+        for position in list(self._open_positions):
+            candle = prices.get(position.symbol)
+            if candle is None:
+                continue
+            snapshot = symbol_snapshots.get(position.symbol)
+            if not snapshot:
+                continue
+            sym_data = (snapshot.get("market_data") or {}).get(position.symbol) or {}
+            indicators = sym_data.get("indicators") or {}
+
+            if position.strategy_name == "mean_reversion":
+                if self._regime_breakdown_exit(position, candle, indicators, strategies_cfg):
+                    continue
+            elif position.strategy_name == "spike_continuation":
+                if self._momentum_rollover_exit(position, candle, sym_data, strategies_cfg):
+                    continue
+
+    def _regime_breakdown_exit(
+        self,
+        position: SimPosition,
+        candle: Candle,
+        indicators: dict[str, Any],
+        strategies_cfg: dict[str, Any],
+    ) -> bool:
+        """Flatten an underwater mean-reversion position on HTF chop→trend flip."""
+        mr_cfg = strategies_cfg.get("mean_reversion") or {}
+        if not bool(mr_cfg.get("exit_on_regime_breakdown", False)):
+            return False
+        htf_pref = str(mr_cfg.get("htf_regime_preference", "chop"))
+        if htf_pref != "chop":
+            return False
+
+        adx_htf = _to_float(indicators.get("adx_htf"))
+        chop_htf = _to_float(indicators.get("choppiness_htf"))
+        if htf_regime_allows(adx_htf, chop_htf, htf_pref):
+            return False  # still chop — thesis intact
+
+        entry = position.entry_price
+        last = candle.close
+        if entry <= 0 or last <= 0:
+            return False
+        underwater = last < entry if position.is_long else last > entry
+        if not underwater:
+            return False
+
+        self._close_position(position, last, candle.ts, "regime_breakdown")
+        return True
+
+    def _momentum_rollover_exit(
+        self,
+        position: SimPosition,
+        candle: Candle,
+        sym_data: dict[str, Any],
+        strategies_cfg: dict[str, Any],
+    ) -> bool:
+        """Flatten a profitable spike-continuation position on momentum rollover."""
+        sc_cfg = strategies_cfg.get("spike_continuation") or {}
+        if not bool(sc_cfg.get("exit_on_momentum_rollover", False)):
+            return False
+
+        entry = position.entry_price
+        last = candle.close
+        if entry <= 0 or last <= 0:
+            return False
+        # Only exit when above breakeven — fading momentum is profit-protection.
+        if position.is_long and last <= entry:
+            return False
+        if not position.is_long and last >= entry:
+            return False
+
+        block = resolve_analysis_block(sym_data, merged_config(sc_cfg, "spike_continuation"))
+        vrsi_series = block.get("volume_rsi_series") or []
+        rsi_series = block.get("rsi_series") or []
+        if len(vrsi_series) < 2 or len(rsi_series) < 2:
+            return False
+        vrsi_cur = _to_float(vrsi_series[-1])
+        vrsi_prev = _to_float(vrsi_series[-2])
+        rsi_cur = _to_float(rsi_series[-1])
+        rsi_prev = _to_float(rsi_series[-2])
+        if None in (vrsi_cur, vrsi_prev, rsi_cur, rsi_prev):
+            return False
+
+        volume_fading = vrsi_cur < vrsi_prev
+        rsi_rolled = (rsi_cur < rsi_prev) if position.is_long else (rsi_cur > rsi_prev)
+        if not (volume_fading and rsi_rolled):
+            return False
+
+        self._close_position(position, last, candle.ts, "momentum_rollover")
+        return True
 
     # ── End-of-data cleanup ──────────────────────────────────────────
 
