@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Parse and compare backtest CLI results into a readable side-by-side table.
+"""Parse and compare backtest results into a readable side-by-side table.
 
-Reads the outputs produced by ``run_backtest_cli.py``:
+Reads the outputs produced by backtest runs (the REST API persists results to
+the same ``backtest_cache/cli/`` tree the old CLI used):
 
   * ``backtest_cache/cli/*_results.json``   full per-run results
   * ``backtest_cache/cli/comparison.csv``   one row per run (cumulative)
@@ -69,7 +70,7 @@ def load_from_csv() -> list[dict[str, Any]]:
     if not CSV_PATH.exists():
         print(f"┌──────────────────────────────────────────────────────────────┐")
         print(f"│  No comparison.csv found at {CSV_PATH}           │")
-        print(f"│  Run `run_backtest_cli.py` first to generate results.       │")
+        print(f"│  Run a backtest first (REST API or UI) to generate results. │")
         print(f"└──────────────────────────────────────────────────────────────┘", file=sys.stderr)
         return []
     return read_comparison_csv()

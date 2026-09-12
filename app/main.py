@@ -51,6 +51,8 @@ from app.services.prompt_runner import (
     prepare_prompt_payload,
 )
 from app.ui.pages import register_pages
+from app.services.backtest.api import router as backtest_router
+from app.services.backtest.job_manager import BacktestJobManager
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +113,10 @@ def _create_lifespan(enable_background_services: bool):
         app.state.frontend_events = deque(maxlen=1000)
         app.state.websocket_events = deque(maxlen=1000)
         app.state.log_lines = deque(maxlen=5000)
+        # Backtest job manager (REST-triggered backtests).  Started eagerly so
+        # the worker task is registered on the running event loop.
+        app.state.backtest_jobs = BacktestJobManager(app.state)
+        app.state.backtest_jobs.start()
 
         data_log_markers = (
             "api/v5/account/balance",
@@ -537,6 +543,9 @@ def _create_lifespan(enable_background_services: bool):
                 await scheduler.stop()
             if app.state.market_service:
                 await app.state.market_service.stop()
+            _bt_jobs = getattr(app.state, "backtest_jobs", None)
+            if _bt_jobs is not None:
+                await _bt_jobs.shutdown()
             await close_postgres_pool()
             await close_redis_client()
 
@@ -733,6 +742,8 @@ def create_app(enable_background_services: bool | None = None) -> FastAPI:
             "source": "websocket",
         }
         events.append(entry)
+
+    app.include_router(backtest_router)
 
     @app.websocket("/ws/state")
     async def state_stream(ws: WebSocket) -> None:

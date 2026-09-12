@@ -2,9 +2,9 @@
 
 The heavy lifting — :class:`BacktestEngine`, persistence, metrics, sweep
 catalogue, sensitivity analysis — is already shared.  This module consolidates
-the *orchestration* layer that was previously duplicated across four call
-sites (``run_backtest_cli.py``, ``run_grid_sweep.py``, and the two runners in
-``app/ui/pages.py``):
+the *orchestration* layer previously duplicated across the call sites (the
+REST job manager, the UI runners in ``app/ui/pages.py``, and the headless
+REST clients in ``scripts/``):
 
   * ``parse_timeframe``     — one canonical timeframe normaliser.
   * ``htf_for``             — one canonical LTF→HTF map (display/selection).
@@ -12,10 +12,10 @@ sites (``run_backtest_cli.py``, ``run_grid_sweep.py``, and the two runners in
   * ``seed_strategy_configs`` — seed launcher ``strategies`` from canonical defaults.
   * ``build_backtest_config`` — one :class:`BacktestConfig` constructor.
 
-Both the headless CLI scripts and the NiceGUI runners build their configs
+Both the REST API (job manager) and the NiceGUI runners build their configs
 through :func:`build_backtest_config`, so a change to config shape (a new
 required field, a default warmup, a new eval mode) is made in exactly one
-place and cannot silently drift between CLI and UI.
+place and cannot silently drift between API and UI.
 """
 
 from __future__ import annotations

@@ -66,6 +66,19 @@ app/
     okx_sdk_adapter.py  # Wraps OKX SDK for sub-account routing
     openrouter_service.py
     prompt_utils.py
+    backtest/           # Backtest engine + REST API
+      engine.py         # Orchestrator: fetch → snapshot → evaluate → simulate → metrics
+      simulator.py      # Simulated broker (TP/SL, trade management, costs)
+      metrics.py        # Sharpe / max DD / win rate / MAE-MFE / R-multiples
+      sizing.py         # Deterministic sizing (ct_val/lot_size/max_position_pct)
+      costs.py          # Fees / slippage / funding model
+      runner.py         # Single build_backtest_config constructor (CLI + UI + API)
+      grid.py           # BacktestGrid parameter sweep
+      persistence.py    # JSON/CSV result serialisation (result_to_dict/from_dict)
+      api.py            # FastAPI router: /backtest/run|grid|status|result
+      api_models.py     # Pydantic request models (BacktestRunRequest/GridRequest)
+      job_manager.py    # In-process FIFO job queue + executor (app.state.backtest_jobs)
+      client.py         # Shared REST client helpers for CLI scripts
   ui/
     pages.py            # All NiceGUI page renderers (LIVE, TA, STRATEGY, HISTORY, DEBUG, PROMPT, CFG)
     components.py
@@ -125,6 +138,14 @@ logs/
 - All log lines → `logs/app.log` (RotatingFileHandler, 5 MB × 5 backups)
 - Debug page reads from `log_lines` deque; preloaded on every page render
 - `GET /api/logs?lines=500&filter=text` — JSON endpoint for log tail
+
+## Backtest REST API
+- `POST /backtest/run` / `POST /backtest/grid` → `202 {job_id}` (in-process FIFO queue, one job at a time)
+- `GET /backtest/status/{job_id}` → queued/running/completed/failed
+- `GET /backtest/result/{job_id}` → full `result_to_dict` payload (409 until completed)
+- Job registry lives on `app.state.backtest_jobs` (`BacktestJobManager`), started in lifespan, cancelled on shutdown
+- Request body mirrors `BacktestConfig`; guardrails passed via `guardrails_config` (separate from `launcher_config`/`strategy_config`, matching live `runtime_config` split)
+- CLI scripts (`scripts/backtest_client.py`, `run_gate_ab_sweep.py`, `run_trend_pullback_ab.py`, `run_vwap_ab_sweep.py`) are thin REST clients using `app/services/backtest/client.py` — they do NOT import `BacktestEngine` directly
 
 ---
 

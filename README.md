@@ -492,6 +492,47 @@ On the BACKTEST page:
 - **Position-management strategies** — The current phase simulates the OKX algo-order TP/SL close mechanism. Position-management strategies (Skimming, Protector, Commutator, Alternator) are not yet simulated but the simulator includes extension hooks (`on_entry` and per-candle `check`) for a future phase.
 - **Order book** — Historical L2 order book data is not available, so OB Wall Guard and OB Wall Stops are not simulated.
 
+### REST API (headless / CLI)
+
+The same backtest engine is exposed over REST so it can be driven headless (no
+NiceGUI client required). All heavy lifting runs inside the tai2 server; thin
+clients submit a job and poll for its result.
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/backtest/run` | POST | Submit a single engine run → `202 {job_id}` |
+| `/backtest/grid` | POST | Submit a parameter sweep → `202 {job_id}` |
+| `/backtest/status/{job_id}` | GET | Job status (`queued`/`running`/`completed`/`failed`) |
+| `/backtest/result/{job_id}` | GET | Full serialised result (409 until completed) |
+
+The request body mirrors `BacktestConfig`: `symbols`, `timeframe`,
+`strategy_names`, a date window (`start_ts`/`end_ts` or trailing `days`),
+`capital`, `warmup`, `evaluation_mode`, plus the live `launcher_config` /
+`strategy_config` / `guardrails_config` dicts.
+
+CLI clients (in `scripts/`, all talk to the REST API — see
+`app/services/backtest/client.py` for the shared transport):
+
+```bash
+# Single run
+.venv/bin/python scripts/backtest_client.py run \
+    --symbols BTC-USDT-SWAP,ETH-USDT-SWAP --timeframe 15m \
+    --strategies mean_reversion,trend_pullback --days 60 --capital 1000
+
+# Parameter sweep
+.venv/bin/python scripts/backtest_client.py grid \
+    --symbols BTC-USDT-SWAP --timeframe 15m --strategies mean_reversion \
+    --days 60 --capital 1000 \
+    --params strategies.mean_reversion.rsi_oversold=25,30,35
+
+# Strategy-specific A/B sweeps (catalog lives client-side)
+.venv/bin/python scripts/run_gate_ab_sweep.py --strategy liquidity_sweep --gate all
+.venv/bin/python scripts/run_trend_pullback_ab.py --symbols AEON-USDT-SWAP
+.venv/bin/python scripts/run_vwap_ab_sweep.py --symbols BTC-USDT-SWAP
+```
+
+All add `--base-url http://localhost:8000` (or your server address).
+
 ### Architecture
 
 ```
@@ -503,6 +544,10 @@ app/services/backtest/
   simulator.py       # Simulated broker (TP/SL close, equity tracking, PM hooks)
   metrics.py         # Performance metrics (Sharpe, max DD, win rate, etc.)
   engine.py          # Orchestrator: fetch → window-slide → evaluate → simulate → metrics
+  api.py             # FastAPI router (POST/GET /backtest/*)
+  api_models.py      # Pydantic request models
+  job_manager.py     # In-process job queue + executor (app.state.backtest_jobs)
+  client.py          # Shared REST client helpers for CLI scripts
 ```
 
 The engine runs entirely in Python memory — no Redis or PostgreSQL involvement. It does not interfere with live trading since it uses its own data fetcher and simulated broker, sharing only the read-only strategy config values.

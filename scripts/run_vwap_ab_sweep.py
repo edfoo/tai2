@@ -1,30 +1,25 @@
 #!/usr/bin/env python3
-"""Headless A/B sweep for the VWAP Reversion strategy.
+"""REST-client A/B sweep for the VWAP Reversion strategy.
 
+Thin client driving the tai2 backtest REST API (``POST /backtest/run``).
 Focused on the three parameter families identified as the highest-leverage
 profitability levers for ``vwap_reversion``:
 
-  Phase 1 — trend-veto (``regime_primary_gate`` × ``max_adx``):
-      The default ``regime_primary_gate="bb"`` demotes ADX to a soft filter,
-      so a low-volatility grinding trend passes the BB-bandwidth chop gate and
-      the strategy knife-catches.  Compare "adx" vs "bb" as primary.
-
+  Phase 1 — trend-veto (``regime_primary_gate`` × ``max_adx``).
   Phase 2 — structural stop width (``structural_sl_buffer_atr`` ×
       ``atr_min_sl_mult``), coupled with the entry-distance floor
-      (``vwap_min_distance_atr``) to preserve R:R (wider SL needs a bigger
-      TP-hop back to VWAP).
-
+      (``vwap_min_distance_atr``) to preserve R:R.
   Phase 3 — liquidity gates (``require_min_volume`` / ``require_no_funding_bias``).
 
 Each phase prints an OFF/ON (or A/B) quality diff: win rate, profit factor,
-net profit, stop-out count, and expectancy.  Results are persisted under
-``backtest_cache/cli/vwap/`` and a comparison CSV is written.
+net profit, stop-out count, and TP count.
 
-Usage
------
-    .venv/bin/python scripts/run_vwap_ab_sweep.py \
-        --symbols BTC-USDT-SWAP,ETH-USDT-SWAP,XRP-USDT-SWAP,LTC-USDT-SWAP,ADA-USDT-SWAP \
-        --timeframe 15m --days 60 --capital 1000
+Usage (server must be running)::
+
+    .venv/bin/python scripts/run_vwap_ab_sweep.py \\
+        --symbols BTC-USDT-SWAP,ETH-USDT-SWAP,XRP-USDT-SWAP,LTC-USDT-SWAP,ADA-USDT-SWAP \\
+        --timeframe 15m --days 60 --capital 1000 \\
+        --base-url http://localhost:8000
 
 Exit code 0 on success, 1 on error.
 """
@@ -32,136 +27,107 @@ Exit code 0 on success, 1 on error.
 from __future__ import annotations
 
 import argparse
-import asyncio
-import json
 import sys
-import time
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Any
 
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
-
-from app.services.backtest.engine import BacktestEngine  # noqa: E402
-from app.services.backtest.models import BacktestResult  # noqa: E402
-from app.services.backtest.persistence import result_summary_row, write_comparison_csv  # noqa: E402
-from app.services.backtest.runner import (  # noqa: E402
-    build_single_strategy_config,
-    count_close_reasons,
-    count_stop_outs as _count_stop_out,
-    htf_for as _htf_for,
+from app.services.backtest.client import (
+    BacktestClientError,
+    build_single_strategy_launcher,
+    count_stop_outs,
+    count_tp,
+    submit_and_poll,
+    summary_row,
 )
-
-OUTPUT_DIR = ROOT / "backtest_cache" / "cli" / "vwap"
-_MS = 1_000
 
 STRATEGY = "vwap_reversion"
 
 
-def _count_tp(result: BacktestResult) -> int:
-    """Count trades closed at take-profit (close_reason == 'tp'/...)."""
-    return count_close_reasons(result, "tp")
-
-
-async def run_one(
+def _run_one(
     *,
+    base_url: str,
     symbol: str,
     ltf: str,
+    label: str,
     overrides: dict[str, Any],
-    start_ts: int,
-    end_ts: int,
+    days: int,
     capital: float,
     warmup: int,
-) -> BacktestResult:
-    config = build_single_strategy_config(
-        symbol=symbol,
-        timeframe=ltf,
-        strategy_name=STRATEGY,
-        start_ts=start_ts,
-        end_ts=end_ts,
-        capital=capital,
-        warmup=warmup,
-        overrides=overrides,
+    run_id: str,
+) -> dict[str, Any]:
+    launcher = build_single_strategy_launcher(
+        strategy_name=STRATEGY, capital=capital, overrides=overrides,
     )
-    engine = BacktestEngine(config)
-    return await engine.run()
-
-
-def _row(result: BacktestResult, run_id: str, ltf: str, symbol: str, label: str) -> dict[str, Any]:
-    htf = _htf_for(ltf)
-    m = result.metrics or {}
-    summary = result_summary_row(result, run_id=run_id, ltf=ltf, htf=htf)
-    summary.update({
-        "symbol": symbol,
-        "label": label,
-        "strategy": STRATEGY,
-        "stop_out_count": _count_stop_out(result),
-        "tp_count": _count_tp(result),
-    })
-    return summary
+    payload = {
+        "symbols": [symbol],
+        "timeframe": ltf,
+        "strategy_names": [STRATEGY],
+        "days": days,
+        "capital": capital,
+        "warmup": warmup,
+        "launcher_config": launcher,
+    }
+    envelope = submit_and_poll(base_url=base_url, payload=payload)
+    return summary_row(
+        envelope,
+        run_id=run_id,
+        ltf=ltf,
+        htf="",
+        symbols=symbol,
+        strategies=STRATEGY,
+        extra={
+            "symbol": symbol,
+            "label": label,
+            "strategy": STRATEGY,
+            "stop_out_count": count_stop_outs(envelope),
+            "tp_count": count_tp(envelope),
+        },
+    )
 
 
 def _fmt(summary: dict[str, Any]) -> str:
-    m = summary
     return (
-        f"trades={m.get('m_total_trades'):>3}  win={m.get('m_win_rate'):>5}%  "
-        f"PF={m.get('m_profit_factor'):>5}  net={m.get('m_net_profit'):>8}  "
-        f"avg_trade={m.get('m_average_trade'):>7}  stop_out={summary.get('stop_out_count'):>3}  "
-        f"sharpe={m.get('m_sharpe_per_candle'):>7}"
+        f"trades={summary.get('m_total_trades'):>3}  win={summary.get('m_win_rate'):>5}%  "
+        f"PF={summary.get('m_profit_factor'):>5}  net={summary.get('m_net_profit'):>8}  "
+        f"avg_trade={summary.get('m_average_trade'):>7}  stop_out={summary.get('stop_out_count'):>3}  "
+        f"tp={summary.get('tp_count'):>3}  sharpe={summary.get('m_sharpe_per_candle'):>7}"
     )
 
 
-async def _amain(args: argparse.Namespace) -> int:
-    now = datetime.now(timezone.utc)
-    run_tag = now.strftime("%Y%m%d_%H%M%S")
-    OC = OUTPUT_DIR / run_tag
-    OC.mkdir(parents=True, exist_ok=True)
-
-    end_ts = int(now.timestamp() * _MS)
-    start_ts = int((now - timedelta(days=args.days)).timestamp() * _MS)
+def _main(args: argparse.Namespace) -> int:
     ltf = args.timeframe
-
-    summaries: list[dict[str, Any]] = []
     exit_code = 0
 
     for symbol in args.symbols:
         print(f"\n{'=' * 70}\n{symbol}  {ltf}  ({args.days}d, capital={args.capital})\n{'=' * 70}")
 
+        def run(label: str, overrides: dict[str, Any]) -> dict[str, Any] | None:
+            try:
+                return _run_one(
+                    base_url=args.base_url, symbol=symbol, ltf=ltf, label=label,
+                    overrides=overrides, days=args.days, capital=args.capital,
+                    warmup=args.warmup, run_id=f"{symbol}_{label}",
+                )
+            except BacktestClientError as exc:
+                print(f"    ✗ {label} errored: {exc}")
+                return None
+
         # ── Baseline (canonical defaults) ─────────────────────────────
-        try:
-            base = await run_one(symbol=symbol, ltf=ltf, overrides={},
-                                 start_ts=start_ts, end_ts=end_ts,
-                                 capital=args.capital, warmup=args.warmup)
-        except Exception as exc:  # noqa: BLE001
-            print(f"  ✗ baseline errored: {exc}")
+        base = run("baseline", {})
+        if base is None:
             exit_code = 1
             continue
-        base_row = _row(base, f"{run_tag}_{symbol}_baseline", ltf, symbol, "baseline")
-        summaries.append(base_row)
-        print(f"  [baseline] {_fmt(base_row)}")
-        if base.error:
-            print(f"    ⚠ engine error: {base.error}")
+        print(f"  [baseline] {_fmt(base)}")
 
         # ── Phase 1: trend veto ───────────────────────────────────────
         print("\n  -- Phase 1: regime_primary_gate × max_adx --")
         for gate in ("adx", "bb"):
             for max_adx in (22.0, 25.0, 28.0):
                 label = f"p1_gate={gate}_max_adx={max_adx}"
-                try:
-                    r = await run_one(
-                        symbol=symbol, ltf=ltf,
-                        overrides={"regime_primary_gate": gate, "max_adx": max_adx},
-                        start_ts=start_ts, end_ts=end_ts,
-                        capital=args.capital, warmup=args.warmup,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    print(f"    ✗ {label} errored: {exc}")
+                row = run(label, {"regime_primary_gate": gate, "max_adx": max_adx})
+                if row is None:
                     exit_code = 1
-                    continue
-                row = _row(r, f"{run_tag}_{symbol}_{label}", ltf, symbol, label)
-                summaries.append(row)
-                print(f"    [{label:>30}] {_fmt(row)}")
+                else:
+                    print(f"    [{label:>30}] {_fmt(row)}")
 
         # ── Phase 2: structural stop width × distance floor ───────────
         print("\n  -- Phase 2: SL buffer / min-SL × vwap_min_distance_atr --")
@@ -171,20 +137,14 @@ async def _amain(args: argparse.Namespace) -> int:
             {"structural_sl_buffer_atr": 0.35, "atr_min_sl_mult": 1.0, "vwap_min_distance_atr": 3.0},
             {"structural_sl_buffer_atr": 0.35, "atr_min_sl_mult": 1.0, "vwap_min_distance_atr": 3.25},
         ]
-        for i, ov in enumerate(phase2):
+        for ov in phase2:
             label = (f"p2_slbuf={ov['structural_sl_buffer_atr']}_"
                      f"minsl={ov['atr_min_sl_mult']}_mindist={ov['vwap_min_distance_atr']}")
-            try:
-                r = await run_one(symbol=symbol, ltf=ltf, overrides=ov,
-                                  start_ts=start_ts, end_ts=end_ts,
-                                  capital=args.capital, warmup=args.warmup)
-            except Exception as exc:  # noqa: BLE001
-                print(f"    ✗ {label} errored: {exc}")
+            row = run(label, ov)
+            if row is None:
                 exit_code = 1
-                continue
-            row = _row(r, f"{run_tag}_{symbol}_{label}", ltf, symbol, label)
-            summaries.append(row)
-            print(f"    [{label:>48}] {_fmt(row)}")
+            else:
+                print(f"    [{label:>48}] {_fmt(row)}")
 
         # ── Phase 3: liquidity gates ─────────────────────────────────
         print("\n  -- Phase 3: liquidity gates --")
@@ -194,29 +154,18 @@ async def _amain(args: argparse.Namespace) -> int:
         ]
         for ov in phase3:
             label = "_".join(f"{k}={v}" for k, v in ov.items())
-            try:
-                r = await run_one(symbol=symbol, ltf=ltf, overrides=ov,
-                                  start_ts=start_ts, end_ts=end_ts,
-                                  capital=args.capital, warmup=args.warmup)
-            except Exception as exc:  # noqa: BLE001
-                print(f"    ✗ {label} errored: {exc}")
+            row = run(label, ov)
+            if row is None:
                 exit_code = 1
-                continue
-            row = _row(r, f"{run_tag}_{symbol}_{label}", ltf, symbol, label)
-            summaries.append(row)
-            print(f"    [{label:>28}] {_fmt(row)}")
+            else:
+                print(f"    [{label:>28}] {_fmt(row)}")
 
-    # ── Persist comparison ───────────────────────────────────────────
-    csv_path = write_comparison_csv(summaries, output_dir=OUTPUT_DIR, append=False)
-    overview = OC / "overview.json"
-    overview.write_text(json.dumps({"generated_at": run_tag, "runs": summaries}, indent=2, default=str))
-    print(f"\nFull results:  {OC}")
-    print(f"Comparison CSV: {csv_path}")
     return exit_code
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="A/B sweep for VWAP Reversion.")
+    parser = argparse.ArgumentParser(description="REST-client A/B sweep for VWAP Reversion.")
+    parser.add_argument("--base-url", default="http://localhost:8000")
     parser.add_argument("--symbols", default="BTC-USDT-SWAP,ETH-USDT-SWAP,XRP-USDT-SWAP,LTC-USDT-SWAP,ADA-USDT-SWAP",
                         help="Comma-separated OKX symbols.")
     parser.add_argument("--timeframe", default="15m", help="LTF to backtest (default 15m).")
@@ -226,7 +175,7 @@ def main() -> int:
     args = parser.parse_args()
 
     args.symbols = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
-    return asyncio.run(_amain(args))
+    return _main(args)
 
 
 if __name__ == "__main__":

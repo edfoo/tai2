@@ -1,10 +1,10 @@
-# Backtesting (headless CLI + UI persistence)
+# Backtesting (headless REST client + UI persistence)
 
 This document explains how to run **deterministic, headless** backtests and
 parse the results, outside of the NiceGUI UI. The UI is fine for a quick look,
-but its results live on `app.state` and are **lost on refresh**. The CLI tools
-below persist everything to disk so results survive and can be diffed across
-runs.
+but its results live on `app.state` and are **lost on refresh**. The REST API
+and its thin clients below persist everything to disk so results survive and
+can be diffed across runs.
 
 > **Note on the UI**: the BACKTEST page now **persists every completed result
 > to disk automatically** and has a **Saved Runs** browser, so results also
@@ -17,14 +17,15 @@ runs.
 
 | Interest | You want |
 |---|---|
-| Run backtests / compare timeframes (CLI) | [`scripts/run_backtest_cli.py`](#1-run-backtests) |
+| Run backtests / compare timeframes (REST client) | [`scripts/backtest_client.py`](#1-run-backtests) |
 | Parse / compare results (CLI) | [`scripts/parse_backtest_results.py`](#2-parse-results) |
 | Run / browse / load results (UI) | BACKTEST page → Saved Runs |
 
-Both scripts live in `scripts/` and use the project venv. Run them from the
-**repo root**. The UI and CLI share the same persistence format
-(`app/services/backtest/persistence.py`), so a run produced by either is
-viewable by the other.
+The headless path is now a **thin REST client** that submits jobs to the
+running tai2 server (`POST /backtest/run` / `POST /backtest/grid`) and polls
+for the result — the same single interface the UI uses. The server persists
+results via `app/services/backtest/persistence.py`, so a run produced by
+either path is viewable by the other.
 
 ---
 
@@ -48,28 +49,64 @@ A run created in the UI is visible to the CLI parser and vice-versa.
 
 ## 1. Run backtests
 
+> The server must be running (e.g. `uv run uvicorn app.main:app --host 0.0.0.0 --port 8000`).
+> The client submits a job and polls it to completion.
+
 ### Basic usage
 
 ```bash
-.venv/bin/python scripts/run_backtest_cli.py \
+.venv/bin/python scripts/backtest_client.py run \
     --symbols BTC-USDT-SWAP,ETH-USDT-SWAP \
-    --timeframes 15m,1H \
+    --timeframe 15m \
     --strategies mean_reversion,liquidity_sweep,trend_pullback,vwap_reversion,spike_continuation \
     --days 60 \
-    --capital 1000
+    --capital 1000 \
+    --base-url http://localhost:8000
 ```
 
-### Options
+To compare multiple timeframes, run once per LTF (each maps to its own HTF
+automatically):
+
+```bash
+for ltf in 15m 1H; do
+  .venv/bin/python scripts/backtest_client.py run --timeframe $ltf --days 60
+done
+```
+
+### Options (shared `run` / `grid` subcommands)
 
 | Flag | Default | Meaning |
 |---|---|---|
 | `--symbols` | `BTC-USDT-SWAP` | Comma-separated OKX symbols |
-| `--timeframes` | `15m,1H` | Comma-separated LTFs to backtest (each maps to its own HTF automatically) |
+| `--timeframe` | `15m` | LTF to backtest (maps to its own HTF automatically) |
 | `--strategies` | all 5 | Comma-separated strategy names to enable |
-| `--days` | `60` | Trailing window in days, ending now |
+| `--days` | `30` | Trailing window in days, ending now |
 | `--capital` | `1000` | Initial capital / per-trade notional |
 | `--warmup` | `200` | Warmup candles before `start_ts` for indicator stabilisation |
-| `--rank-by` | `m_sharpe_per_candle` | Metric used to sort the printed comparison |
+| `--base-url` | `http://localhost:8000` | Server address |
+| `--evaluation-mode` / `--evaluation-timeframe` | `finer_ltf` / `1m` | Evaluation stepping |
+
+### Parameter sweep (`grid` subcommand)
+
+```bash
+.venv/bin/python scripts/backtest_client.py grid \
+    --symbols BTC-USDT-SWAP --timeframe 15m --strategies mean_reversion \
+    --days 60 --capital 1000 \
+    --params strategies.mean_reversion.rsi_oversold=25,30,35 \
+    --params strategies.mean_reversion.max_adx=20,25,30 \
+    --rank-by sharpe_per_candle
+```
+
+### Strategy-specific A/B sweeps
+
+Thin clients (also REST-driven) that keep their strategy-specific catalog
+client-side and submit one single-strategy run per variant:
+
+```bash
+.venv/bin/python scripts/run_gate_ab_sweep.py --strategy liquidity_sweep --gate all
+.venv/bin/python scripts/run_trend_pullback_ab.py --symbols AEON-USDT-SWAP
+.venv/bin/python scripts/run_vwap_ab_sweep.py --symbols BTC-USDT-SWAP
+```
 
 ### Timeframe → higher-timeframe mapping
 
@@ -81,7 +118,7 @@ The engine resolves the HTF automatically via `htf_for()`:
 | 1H  | 4H |
 | 4H  | 1D |
 
-So `--timeframes 15m,1H` compares **15m/1H** against **1H/4H** regimes.
+So `--timeframe 15m` compares **15m/1H** against `--timeframe 1H` → **1H/4H** regimes.
 
 ### Notes on data
 
@@ -150,11 +187,13 @@ These strategies generally scale well to a 1H analysis timeframe:
 To confirm with data on your symbols:
 
 ```bash
-# 1. Run the comparison
-.venv/bin/python scripts/run_backtest_cli.py \
+# 1. Run the comparison (once per timeframe)
+.venv/bin/python scripts/backtest_client.py run \
     --strategies liquidity_sweep,trend_pullback \
-    --timeframes 15m,1H \
-    --days 60 --capital 1000
+    --timeframe 15m --days 60 --capital 1000
+.venv/bin/python scripts/backtest_client.py run \
+    --strategies liquidity_sweep,trend_pullback \
+    --timeframe 1H --days 60 --capital 1000
 
 # 2. Inspect results
 .venv/bin/python scripts/parse_backtest_results.py
@@ -163,8 +202,8 @@ To confirm with data on your symbols:
 Repeat for all 5 strategies if you want the full picture:
 
 ```bash
-.venv/bin/python scripts/run_backtest_cli.py \
-    --timeframes 15m,1H --days 60
+.venv/bin/python scripts/backtest_client.py run --timeframe 15m --days 60
+.venv/bin/python scripts/backtest_client.py run --timeframe 1H --days 60
 ```
 
 ---
@@ -173,9 +212,11 @@ Repeat for all 5 strategies if you want the full picture:
 
 - **`No comparison.csv found` / `No matching runs found`** — you haven't run a
   backtest yet, or filtered to an LTF with no results. Run
-  `run_backtest_cli.py` first, then check `backtest_cache/cli/`.
+  `backtest_client.py` first, then check `backtest_cache/cli/`.
 - **`Unsupported timeframe 'XYZ'`** — pass a supported LTF: `1m, 5m, 15m, 1H, 4H, 1D`.
-- **Unknown strategies** — the runner validates against
+- **`request failed` / connection refused** — the tai2 server isn't running at
+  `--base-url`; start it first.
+- **Unknown strategies** — the server validates against
   `available_strategy_names()` and prints the valid list.
 - **No data fetched** — the (read-only) OKX `MarketData` client needs a network
   connection for pairs not already in the local cache.
