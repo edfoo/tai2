@@ -20,6 +20,7 @@ dependencies = [
     "pytest",
     "pytest-xdist",
     "openrouter",
+    "flake8>=7.3.0",
 ]
 
 [project.optional-dependencies]
