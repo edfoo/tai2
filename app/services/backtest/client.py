@@ -12,8 +12,9 @@ and the config/summary plumbing.
 
 from __future__ import annotations
 
+import concurrent.futures
 import time
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 
@@ -95,6 +96,35 @@ def submit_and_poll(
             f"/backtest/result returned {result_resp.status_code}: {result_resp.text}"
         )
     return result_resp.json()
+
+
+def submit_many_and_poll(
+    *,
+    base_url: str,
+    payloads: list[dict[str, Any]],
+    max_workers: int | None = None,
+    poll_interval: float = 1.5,
+) -> list[tuple[dict[str, Any], BaseException | None]]:
+    """Submit many backtests concurrently and return ``(envelope, error)`` pairs.
+
+    The server runs a pool of workers, so submitting N jobs at once overlaps
+    their execution.  Results are returned in submission order.  Each element
+    is ``(envelope_dict, None)`` on success or ``(None, exception)`` on
+    failure (the exception may be a :class:`BacktestClientError` or a
+    transport error), so a single failed variant never aborts the batch.
+    """
+    if not payloads:
+        return []
+
+    def _one(payload: dict[str, Any]) -> tuple[dict[str, Any], BaseException | None]:
+        try:
+            return submit_and_poll(base_url=base_url, payload=payload, poll_interval=poll_interval), None
+        except BaseException as exc:  # noqa: BLE001 - collect per-variant failure
+            return None, exc
+
+    workers = max_workers or len(payloads)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
+        return list(ex.map(_one, payloads))
 
 
 def summary_row(

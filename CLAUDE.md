@@ -144,6 +144,7 @@ logs/
 - `GET /backtest/status/{job_id}` → queued/running/completed/failed
 - `GET /backtest/result/{job_id}` → full `result_to_dict` payload (409 until completed)
 - Job registry lives on `app.state.backtest_jobs` (`BacktestJobManager`), started in lifespan, cancelled on shutdown
+- Jobs execute **concurrently** across a pool of worker tasks; default pool size = `os.cpu_count()`, overridable via `BACKTEST_WORKERS` env var
 - Request body mirrors `BacktestConfig`; guardrails passed via `guardrails_config` (separate from `launcher_config`/`strategy_config`, matching live `runtime_config` split)
 - CLI scripts (`scripts/backtest_client.py`, `run_gate_ab_sweep.py`, `run_trend_pullback_ab.py`, `run_vwap_ab_sweep.py`) are thin REST clients using `app/services/backtest/client.py` — they do NOT import `BacktestEngine` directly
 

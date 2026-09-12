@@ -12,6 +12,7 @@ from app.services.backtest.client import (
     count_stop_outs,
     count_timeouts,
     count_tp,
+    submit_many_and_poll,
     summary_row,
 )
 
@@ -82,3 +83,29 @@ def test_count_helpers_handle_empty_trades():
     assert count_tp(env) == 0
     assert count_stop_outs(env) == 0
     assert count_timeouts(env) == 0
+
+
+def test_submit_many_and_poll_empty():
+    assert submit_many_and_poll(base_url="http://x", payloads=[]) == []
+
+
+def test_submit_many_and_poll_collects_errors(monkeypatch):
+    """Per-variant failures are collected as (None, exc) pairs, not raised."""
+    def _fake_submit(base_url, payload, poll_interval=1.5):
+        if payload["fail"]:
+            raise RuntimeError("boom")
+        return {"job_id": "j", "result": {"metrics": {"total_trades": 1}}}
+
+    monkeypatch.setattr(
+        "app.services.backtest.client.submit_and_poll", _fake_submit
+    )
+    results = submit_many_and_poll(
+        base_url="http://x",
+        payloads=[{"fail": False}, {"fail": True}, {"fail": False}],
+        max_workers=3,
+    )
+    assert len(results) == 3
+    # Success envelopes come through; the failure is captured.
+    assert results[0][0]["result"]["metrics"]["total_trades"] == 1
+    assert results[1][0] is None and isinstance(results[1][1], RuntimeError)
+    assert results[2][0] is not None

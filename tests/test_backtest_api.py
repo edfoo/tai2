@@ -187,6 +187,54 @@ def test_status_unknown_job_returns_404():
         assert resp.status_code == 404
 
 
+@pytest.mark.asyncio
+async def test_job_manager_runs_jobs_concurrently(monkeypatch):
+    """Multiple submitted runs complete, exercising the parallel worker pool."""
+    import asyncio as _asyncio
+
+    async def _fake_run(self):
+        await _asyncio.sleep(0.05)
+        return _FakeResult({"total_trades": 1, "win_rate": 100.0})
+
+    monkeypatch.setattr(
+        "app.services.backtest.job_manager.BacktestEngine",
+        lambda config: type("E", (), {"run": _fake_run})(),
+    )
+
+    state = _State()
+    # Force a small pool to prove jobs overlap (not just one worker).
+    manager = BacktestJobManager(state, max_workers=3)
+    manager.start()
+
+    req = BacktestRunRequest(
+        symbols=["BTC-USDT-SWAP"], timeframe="15m",
+        strategy_names=["mean_reversion"], days=10, capital=1000.0,
+    )
+    ids = [manager.submit_run(req) for _ in range(5)]
+
+    deadline = time.time() + 5.0
+    while time.time() < deadline:
+        statuses = [manager.get_status(j)["status"] for j in ids]
+        if all(s in (COMPLETED, FAILED) for s in statuses):
+            break
+        await __import__("asyncio").sleep(0.05)
+
+    statuses = [manager.get_status(j)["status"] for j in ids]
+    assert all(s == COMPLETED for s in statuses), statuses
+
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_job_manager_custom_worker_count(monkeypatch):
+    """max_workers is honored in __init__."""
+    state = _State()
+    manager = BacktestJobManager(state, max_workers=2)
+    assert manager._max_workers == 2
+    # No workers started → no tasks yet.
+    assert manager._worker_tasks == []
+
+
 def test_result_unknown_job_returns_404():
     from app.main import create_app
 

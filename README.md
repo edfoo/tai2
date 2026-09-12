@@ -510,6 +510,11 @@ The request body mirrors `BacktestConfig`: `symbols`, `timeframe`,
 `capital`, `warmup`, `evaluation_mode`, plus the live `launcher_config` /
 `strategy_config` / `guardrails_config` dicts.
 
+Jobs run **concurrently** across a pool of worker tasks (default
+`os.cpu_count()`; override with the `BACKTEST_WORKERS` env var). The CLI
+clients submit multiple variants at once via their `--workers` flag, so
+sweeps execute in parallel.
+
 CLI clients (in `scripts/`, all talk to the REST API — see
 `app/services/backtest/client.py` for the shared transport):
 

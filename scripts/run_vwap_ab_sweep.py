@@ -31,33 +31,30 @@ import sys
 from typing import Any
 
 from app.services.backtest.client import (
-    BacktestClientError,
     build_single_strategy_launcher,
     count_stop_outs,
     count_tp,
-    submit_and_poll,
+    submit_many_and_poll,
     summary_row,
 )
 
 STRATEGY = "vwap_reversion"
 
 
-def _run_one(
+def _payload_for(
     *,
     base_url: str,
     symbol: str,
     ltf: str,
-    label: str,
     overrides: dict[str, Any],
     days: int,
     capital: float,
     warmup: int,
-    run_id: str,
 ) -> dict[str, Any]:
     launcher = build_single_strategy_launcher(
         strategy_name=STRATEGY, capital=capital, overrides=overrides,
     )
-    payload = {
+    return {
         "symbols": [symbol],
         "timeframe": ltf,
         "strategy_names": [STRATEGY],
@@ -66,7 +63,16 @@ def _run_one(
         "warmup": warmup,
         "launcher_config": launcher,
     }
-    envelope = submit_and_poll(base_url=base_url, payload=payload)
+
+
+def _row_from_envelope(
+    envelope: dict[str, Any],
+    *,
+    symbol: str,
+    ltf: str,
+    label: str,
+    run_id: str,
+) -> dict[str, Any]:
     return summary_row(
         envelope,
         run_id=run_id,
@@ -100,65 +106,63 @@ def _main(args: argparse.Namespace) -> int:
     for symbol in args.symbols:
         print(f"\n{'=' * 70}\n{symbol}  {ltf}  ({args.days}d, capital={args.capital})\n{'=' * 70}")
 
-        def run(label: str, overrides: dict[str, Any]) -> dict[str, Any] | None:
-            try:
-                return _run_one(
-                    base_url=args.base_url, symbol=symbol, ltf=ltf, label=label,
-                    overrides=overrides, days=args.days, capital=args.capital,
-                    warmup=args.warmup, run_id=f"{symbol}_{label}",
-                )
-            except BacktestClientError as exc:
-                print(f"    ✗ {label} errored: {exc}")
+        def make_payload(overrides: dict[str, Any]) -> dict[str, Any]:
+            return _payload_for(
+                base_url=args.base_url, symbol=symbol, ltf=ltf, overrides=overrides,
+                days=args.days, capital=args.capital, warmup=args.warmup,
+            )
+
+        def submit(label: str, overrides: dict[str, Any]) -> dict[str, Any] | None:
+            ((envelope, err),) = submit_many_and_poll(
+                base_url=args.base_url, payloads=[make_payload(overrides)], max_workers=args.workers,
+            )
+            if err is not None:
+                print(f"    ✗ {label} errored: {err}")
                 return None
+            return _row_from_envelope(envelope, symbol=symbol, ltf=ltf, label=label, run_id=f"{symbol}_{label}")
 
         # ── Baseline (canonical defaults) ─────────────────────────────
-        base = run("baseline", {})
+        base = submit("baseline", {})
         if base is None:
             exit_code = 1
             continue
         print(f"  [baseline] {_fmt(base)}")
 
-        # ── Phase 1: trend veto ───────────────────────────────────────
-        print("\n  -- Phase 1: regime_primary_gate × max_adx --")
-        for gate in ("adx", "bb"):
-            for max_adx in (22.0, 25.0, 28.0):
-                label = f"p1_gate={gate}_max_adx={max_adx}"
-                row = run(label, {"regime_primary_gate": gate, "max_adx": max_adx})
-                if row is None:
-                    exit_code = 1
-                else:
-                    print(f"    [{label:>30}] {_fmt(row)}")
-
-        # ── Phase 2: structural stop width × distance floor ───────────
-        print("\n  -- Phase 2: SL buffer / min-SL × vwap_min_distance_atr --")
+        # ── Build all variant specs, then submit concurrently ─────────
+        phase1 = [
+            (f"p1_gate={gate}_max_adx={max_adx}", {"regime_primary_gate": gate, "max_adx": max_adx})
+            for gate in ("adx", "bb") for max_adx in (22.0, 25.0, 28.0)
+        ]
         phase2 = [
-            {"structural_sl_buffer_atr": 0.15, "atr_min_sl_mult": 0.5, "vwap_min_distance_atr": 2.5},
-            {"structural_sl_buffer_atr": 0.25, "atr_min_sl_mult": 0.75, "vwap_min_distance_atr": 2.75},
-            {"structural_sl_buffer_atr": 0.35, "atr_min_sl_mult": 1.0, "vwap_min_distance_atr": 3.0},
-            {"structural_sl_buffer_atr": 0.35, "atr_min_sl_mult": 1.0, "vwap_min_distance_atr": 3.25},
+            (f"p2_slbuf={ov['structural_sl_buffer_atr']}_minsl={ov['atr_min_sl_mult']}_mindist={ov['vwap_min_distance_atr']}", ov)
+            for ov in [
+                {"structural_sl_buffer_atr": 0.15, "atr_min_sl_mult": 0.5, "vwap_min_distance_atr": 2.5},
+                {"structural_sl_buffer_atr": 0.25, "atr_min_sl_mult": 0.75, "vwap_min_distance_atr": 2.75},
+                {"structural_sl_buffer_atr": 0.35, "atr_min_sl_mult": 1.0, "vwap_min_distance_atr": 3.0},
+                {"structural_sl_buffer_atr": 0.35, "atr_min_sl_mult": 1.0, "vwap_min_distance_atr": 3.25},
+            ]
         ]
-        for ov in phase2:
-            label = (f"p2_slbuf={ov['structural_sl_buffer_atr']}_"
-                     f"minsl={ov['atr_min_sl_mult']}_mindist={ov['vwap_min_distance_atr']}")
-            row = run(label, ov)
-            if row is None:
-                exit_code = 1
-            else:
-                print(f"    [{label:>48}] {_fmt(row)}")
-
-        # ── Phase 3: liquidity gates ─────────────────────────────────
-        print("\n  -- Phase 3: liquidity gates --")
         phase3 = [
-            {"require_min_volume": True},
-            {"require_no_funding_bias": True},
+            ("_".join(f"{k}={v}" for k, v in ov.items()), ov)
+            for ov in [
+                {"require_min_volume": True},
+                {"require_no_funding_bias": True},
+            ]
         ]
-        for ov in phase3:
-            label = "_".join(f"{k}={v}" for k, v in ov.items())
-            row = run(label, ov)
-            if row is None:
+        all_variants = phase1 + phase2 + phase3
+
+        results = submit_many_and_poll(
+            base_url=args.base_url,
+            payloads=[make_payload(ov) for (_, ov) in all_variants],
+            max_workers=args.workers,
+        )
+        for (label, _ov), (envelope, err) in zip(all_variants, results):
+            if err is not None:
+                print(f"    ✗ {label} errored: {err}")
                 exit_code = 1
-            else:
-                print(f"    [{label:>28}] {_fmt(row)}")
+                continue
+            row = _row_from_envelope(envelope, symbol=symbol, ltf=ltf, label=label, run_id=f"{symbol}_{label}")
+            print(f"    [{label:>48}] {_fmt(row)}")
 
     return exit_code
 
@@ -172,6 +176,8 @@ def main() -> int:
     parser.add_argument("--days", type=int, default=60, help="Trailing window in days (default 60).")
     parser.add_argument("--capital", type=float, default=1000.0, help="Initial capital / notional (default 1000).")
     parser.add_argument("--warmup", type=int, default=200, help="Warmup candles (default 200).")
+    parser.add_argument("--workers", type=int, default=8,
+                        help="Max concurrent submissions to the server (default 8).")
     args = parser.parse_args()
 
     args.symbols = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]

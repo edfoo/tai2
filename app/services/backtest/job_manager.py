@@ -1,14 +1,15 @@
 """In-process backtest job manager.
 
-A small registry that runs backtest jobs (single engine runs and grid sweeps)
-as detached asyncio tasks and exposes their status/results by ``job_id``.
+A registry that runs backtest jobs (single engine runs and grid sweeps) as
+detached asyncio tasks and exposes their status/results by ``job_id``.
 
 The engine is CPU-bound (recomputes pandas-ta indicators per step), so each
-job's run is delegated to ``asyncio.to_thread``.  Only one job executes at a
-time (a simple FIFO queue) to avoid oversubscribing the single process —
-grid sweeps can still be large, but we keep the concurrency model simple and
-deterministic.  This mirrors how the NiceGUI BACKTEST page already runs
-backtests detached from the client lifecycle.
+job's run is delegated to ``asyncio.to_thread``.  Jobs are executed
+**concurrently** across a pool of ``max_workers`` worker tasks (a FIFO queue
+feeds them); the default worker count is ``os.cpu_count()``, overridable via
+the ``BACKTEST_WORKERS`` environment variable.  The engine releases the GIL
+during indicator computation and its per-step ``time.sleep(0)`` yields, so
+concurrent jobs overlap their fetch (I/O) and indicator phases.
 
 Jobs are stored in-memory on ``app.state``; completed results are additionally
 persisted to disk via :func:`save_result` so they survive restarts and appear
@@ -19,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -36,6 +38,20 @@ QUEUED = "queued"
 RUNNING = "running"
 COMPLETED = "completed"
 FAILED = "failed"
+
+# Default concurrent workers: one per CPU core (bounded to a sane floor).
+# Override with the BACKTEST_WORKERS environment variable.
+_DEFAULT_WORKERS = max(1, os.cpu_count() or 1)
+
+
+def _default_workers() -> int:
+    raw = os.environ.get("BACKTEST_WORKERS", "")
+    if raw.strip():
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            logger.warning("Invalid BACKTEST_WORKERS=%r; using %d", raw, _DEFAULT_WORKERS)
+    return _DEFAULT_WORKERS
 
 
 def _resolve_window(req: Any) -> tuple[int, int]:
@@ -56,29 +72,32 @@ def _resolve_window(req: Any) -> tuple[int, int]:
 class BacktestJobManager:
     """Registry + executor for backtest jobs (single-run and grid)."""
 
-    def __init__(self, app_state: Any) -> None:
+    def __init__(self, app_state: Any, *, max_workers: int | None = None) -> None:
         self._state = app_state
         self._jobs: dict[str, dict[str, Any]] = {}
         self._queue: asyncio.Queue[str] = asyncio.Queue()
-        self._worker_task: asyncio.Task | None = None
+        self._max_workers = max_workers if max_workers and max_workers > 0 else _default_workers()
+        self._worker_tasks: list[asyncio.Task] = []
         self._lock = asyncio.Lock()
 
     # ── Public API ────────────────────────────────────────────────────
 
     def start(self) -> None:
-        """Start the background worker (idempotent)."""
-        if self._worker_task is None or self._worker_task.done():
-            self._worker_task = asyncio.create_task(self._worker())
+        """Start the background worker pool (idempotent)."""
+        if not self._worker_tasks:
+            self._worker_tasks = [
+                asyncio.create_task(self._worker()) for _ in range(self._max_workers)
+            ]
 
     async def shutdown(self) -> None:
-        """Cancel the worker task (called on app shutdown)."""
-        if self._worker_task is not None and not self._worker_task.done():
-            self._worker_task.cancel()
-            try:
-                await self._worker_task
-            except (asyncio.CancelledError, Exception):
-                pass
-            self._worker_task = None
+        """Cancel the worker tasks (called on app shutdown)."""
+        tasks = self._worker_tasks
+        self._worker_tasks = []
+        for t in tasks:
+            if not t.done():
+                t.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     def submit_run(self, req: Any) -> str:
         """Queue a single engine run.  Returns the job_id."""
@@ -240,10 +259,17 @@ class BacktestJobManager:
         return asyncio.run(grid.run())
 
     def _persist(self, result: Any, job: dict[str, Any]) -> None:
-        """Best-effort persist the result to disk (survives restarts)."""
+        """Best-effort persist the result to disk (survives restarts).
+
+        The run_id embeds the job_id so concurrent jobs (which may finish in
+        the same wall-clock second) never collide on a shared ``make_run_id``
+        timestamp.  ``save_result`` is called on the event loop (no ``await``
+        inside), so its comparison.csv read-modify-write is safe across the
+        concurrent worker tasks.
+        """
         try:
             ltf = str(getattr(getattr(result, "config", None), "timeframe", "") or "run")
-            run_id = make_run_id(ltf)
+            run_id = f"{make_run_id(ltf)}_{job['job_id'][:8]}"
             save_result(result, run_id=run_id)
             job["run_id"] = run_id
         except Exception as exc:  # noqa: BLE001 - persistence is best-effort

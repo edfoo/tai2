@@ -48,10 +48,9 @@ import sys
 from typing import Any
 
 from app.services.backtest.client import (
-    BacktestClientError,
     build_single_strategy_launcher,
     count_stop_outs,
-    submit_and_poll,
+    submit_many_and_poll,
     summary_row,
 )
 
@@ -78,7 +77,7 @@ GATE_CATALOGUE: dict[str, dict[str, dict[str, Any]]] = {
 }
 
 
-def _run_one(
+def _payload_for(
     *,
     base_url: str,
     symbol: str,
@@ -90,9 +89,8 @@ def _run_one(
     days: int,
     capital: float,
     warmup: int,
-    run_id: str,
 ) -> dict[str, Any]:
-    """Submit one gate configuration and return its summary row."""
+    """Build the payload for one gate configuration."""
     overrides: dict[str, Any] = {gate_cfg["switch"]: bool(switch_on)}
     if switch_on and gate_cfg["threshold_key"] and threshold is not None:
         overrides[gate_cfg["threshold_key"]] = threshold
@@ -100,7 +98,7 @@ def _run_one(
     launcher = build_single_strategy_launcher(
         strategy_name=strategy, capital=capital, overrides=overrides,
     )
-    payload = {
+    return {
         "symbols": [symbol],
         "timeframe": ltf,
         "strategy_names": [strategy],
@@ -109,7 +107,19 @@ def _run_one(
         "warmup": warmup,
         "launcher_config": launcher,
     }
-    envelope = submit_and_poll(base_url=base_url, payload=payload)
+
+
+def _row_from_envelope(
+    envelope: dict[str, Any],
+    *,
+    symbol: str,
+    ltf: str,
+    strategy: str,
+    gate_cfg: dict[str, Any],
+    threshold: Any,
+    switch_on: bool,
+    run_id: str,
+) -> dict[str, Any]:
     thr_str = "None" if threshold is None else str(threshold)
     return summary_row(
         envelope,
@@ -158,17 +168,22 @@ def _main(args: argparse.Namespace) -> int:
                 # ── 1. OFF baseline ──────────────────────────────────
                 off_tag = f"{symbol}_{ltf}_{gate_name}_off"
                 print(f"▶ [baseline OFF] [{symbol} {ltf}] {strategy}.{switch_key}=off")
-                try:
-                    base_row = _run_one(
-                        base_url=args.base_url, symbol=symbol, ltf=ltf, strategy=strategy,
-                        gate_cfg=gate_cfg, threshold=None, switch_on=False,
-                        days=args.days, capital=args.capital, warmup=args.warmup,
-                        run_id=off_tag,
-                    )
-                except BacktestClientError as exc:
-                    print(f"  ✗ errored: {exc}")
+                base_payload = _payload_for(
+                    base_url=args.base_url, symbol=symbol, ltf=ltf, strategy=strategy,
+                    gate_cfg=gate_cfg, threshold=None, switch_on=False,
+                    days=args.days, capital=args.capital, warmup=args.warmup,
+                )
+                ((base_env, base_err),) = submit_many_and_poll(
+                    base_url=args.base_url, payloads=[base_payload], max_workers=args.workers,
+                )
+                if base_err is not None:
+                    print(f"  ✗ errored: {base_err}")
                     exit_code = 1
                     continue
+                base_row = _row_from_envelope(
+                    base_env, symbol=symbol, ltf=ltf, strategy=strategy,
+                    gate_cfg=gate_cfg, threshold=None, switch_on=False, run_id=off_tag,
+                )
                 summaries.append(base_row)
                 base_trades = base_row.get("m_total_trades") or 0
                 print(f"  ✓ trades={base_row.get('m_total_trades')} "
@@ -185,22 +200,33 @@ def _main(args: argparse.Namespace) -> int:
                 if not thresholds:
                     on_variants.append((True, None))
 
+                # ── 3. Submit all ON variants concurrently ───────────
+                specs = []
                 for (switch_on, threshold) in on_variants:
                     thr_str = "None" if threshold is None else str(threshold)
                     tag = f"{symbol}_{ltf}_{gate_name}_on" + (f"_t{threshold}" if threshold is not None else "")
-                    print(f"▶ [ON] [{symbol} {ltf}] {strategy}.{switch_key}=on"
-                          + (f" @{gate_cfg['threshold_key']}={thr_str}" if gate_cfg["threshold_key"] else ""))
-                    try:
-                        row = _run_one(
-                            base_url=args.base_url, symbol=symbol, ltf=ltf, strategy=strategy,
-                            gate_cfg=gate_cfg, threshold=threshold, switch_on=True,
-                            days=args.days, capital=args.capital, warmup=args.warmup,
-                            run_id=tag,
-                        )
-                    except BacktestClientError as exc:
-                        print(f"  ✗ errored: {exc}")
+                    payload = _payload_for(
+                        base_url=args.base_url, symbol=symbol, ltf=ltf, strategy=strategy,
+                        gate_cfg=gate_cfg, threshold=threshold, switch_on=True,
+                        days=args.days, capital=args.capital, warmup=args.warmup,
+                    )
+                    specs.append((switch_on, threshold, thr_str, tag, payload))
+
+                results = submit_many_and_poll(
+                    base_url=args.base_url,
+                    payloads=[p for (_, _, _, _, p) in specs],
+                    max_workers=args.workers,
+                )
+                for (switch_on, threshold, thr_str, tag, _p), (envelope, err) in zip(specs, results):
+                    if err is not None:
+                        print(f"  ✗ errored: {err}")
                         exit_code = 1
                         continue
+                    row = _row_from_envelope(
+                        envelope, symbol=symbol, ltf=ltf, strategy=strategy,
+                        gate_cfg=gate_cfg, threshold=threshold, switch_on=switch_on,
+                        run_id=tag,
+                    )
                     summaries.append(row)
                     print(f"  ✓ trades={row.get('m_total_trades')} "
                           f"win={row.get('m_win_rate')} net={row.get('m_net_profit')} "
@@ -249,6 +275,8 @@ def main() -> int:
     parser.add_argument("--warmup", type=int, default=200, help="Warmup candles before start.")
     parser.add_argument("--min-trades", type=int, default=1,
                         help="Skip ON variants when the OFF baseline yields fewer than this many trades.")
+    parser.add_argument("--workers", type=int, default=8,
+                        help="Max concurrent submissions to the server (default 8).")
     parser.add_argument("--rank-by", default="m_sharpe_per_candle", help="Metric to print/sort by.")
     args = parser.parse_args()
 

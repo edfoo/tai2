@@ -27,6 +27,12 @@ for the result — the same single interface the UI uses. The server persists
 results via `app/services/backtest/persistence.py`, so a run produced by
 either path is viewable by the other.
 
+**Parallelism**: the server executes jobs concurrently across a pool of worker
+tasks (default `os.cpu_count()`; override with the `BACKTEST_WORKERS` env
+var), and the clients submit multiple variants at once (``--workers`` flag,
+default 8). A/B sweeps therefore run their variants in parallel rather than
+one-after-another.
+
 ---
 
 ## 0. UI persistence (Saved Runs)
@@ -85,6 +91,7 @@ done
 | `--warmup` | `200` | Warmup candles before `start_ts` for indicator stabilisation |
 | `--base-url` | `http://localhost:8000` | Server address |
 | `--evaluation-mode` / `--evaluation-timeframe` | `finer_ltf` / `1m` | Evaluation stepping |
+| `--workers` | `8` (A/B clients) | Max concurrent submissions to the server |
 
 ### Parameter sweep (`grid` subcommand)
 
