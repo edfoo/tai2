@@ -43,7 +43,7 @@ from app.services.backtest.client import (
     build_single_strategy_launcher,
     count_stop_outs,
     count_timeouts,
-    submit_many_and_poll,
+    submit_many_and_poll_timed,
     summary_row,
 )
 
@@ -159,9 +159,10 @@ def _main(args: argparse.Namespace) -> int:
 
             # ── Baseline first (synchronously) to gate variants ──────
             base_variant, base_tag, base_payload = specs[0]
-            results = submit_many_and_poll(
+            results = submit_many_and_poll_timed(
                 base_url=args.base_url,
                 payloads=[base_payload],
+                label=f"baseline {symbol} {ltf}",
                 max_workers=args.workers,
             )
             (envelope, err), = results
@@ -182,9 +183,10 @@ def _main(args: argparse.Namespace) -> int:
 
             # ── Variants concurrently ─────────────────────────────────
             variants = specs[1:]
-            results = submit_many_and_poll(
+            results = submit_many_and_poll_timed(
                 base_url=args.base_url,
                 payloads=[p for (_, _, p) in variants],
+                label=f"variants {symbol} {ltf}",
                 max_workers=args.workers,
             )
             for (variant, tag, _payload), (envelope, err) in zip(variants, results):

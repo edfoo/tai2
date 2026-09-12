@@ -65,9 +65,32 @@ def _trade_to_dict(t: SimPosition) -> dict[str, Any]:
     }
 
 
+def _sanitize(value: Any) -> Any:
+    """Recursively replace non-finite floats with ``None`` (JSON-safe).
+
+    ``compute_metrics`` emits ``float("inf")`` for profit_factor when there are
+    winning trades but zero losing trades (and ``-inf``/``nan`` are possible in
+    edge cases).  Standard ``json.dumps`` (and FastAPI's ``JSONResponse``, which
+    serialises with ``allow_nan=False``) reject non-finite floats, so we convert
+    them to ``None`` at the serialisation boundary.  ``None`` is semantically
+    "undefined/not applicable" and round-trips cleanly.
+    """
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if isinstance(value, dict):
+        return {k: _sanitize(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_sanitize(v) for v in value]
+    return value
+
+
 def result_to_dict(result: BacktestResult) -> dict[str, Any]:
-    """Convert a ``BacktestResult`` into a JSON-serialisable dict."""
-    return {
+    """Convert a ``BacktestResult`` into a JSON-serialisable dict.
+
+    All non-finite floats (``inf``/``-inf``/``nan``) are replaced with
+    ``None`` so the payload is always valid JSON.
+    """
+    return _sanitize({
         "config": {
             "timeframe": result.config.timeframe,
             "symbols": result.config.symbols,
@@ -87,7 +110,7 @@ def result_to_dict(result: BacktestResult) -> dict[str, Any]:
         "duration_seconds": result.duration_seconds,
         "candles_processed": result.candles_processed,
         "error": result.error,
-    }
+    })
 
 
 def _trade_from_dict(d: dict[str, Any]) -> SimPosition:

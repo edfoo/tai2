@@ -34,7 +34,7 @@ from app.services.backtest.client import (
     build_single_strategy_launcher,
     count_stop_outs,
     count_tp,
-    submit_many_and_poll,
+    submit_many_and_poll_timed,
     summary_row,
 )
 
@@ -113,8 +113,9 @@ def _main(args: argparse.Namespace) -> int:
             )
 
         def submit(label: str, overrides: dict[str, Any]) -> dict[str, Any] | None:
-            ((envelope, err),) = submit_many_and_poll(
-                base_url=args.base_url, payloads=[make_payload(overrides)], max_workers=args.workers,
+            ((envelope, err),) = submit_many_and_poll_timed(
+                base_url=args.base_url, payloads=[make_payload(overrides)],
+                label=f"baseline {symbol}", max_workers=args.workers,
             )
             if err is not None:
                 print(f"    ✗ {label} errored: {err}")
@@ -151,9 +152,10 @@ def _main(args: argparse.Namespace) -> int:
         ]
         all_variants = phase1 + phase2 + phase3
 
-        results = submit_many_and_poll(
+        results = submit_many_and_poll_timed(
             base_url=args.base_url,
             payloads=[make_payload(ov) for (_, ov) in all_variants],
+            label=f"variants {symbol}",
             max_workers=args.workers,
         )
         for (label, _ov), (envelope, err) in zip(all_variants, results):

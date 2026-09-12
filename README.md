@@ -33,9 +33,17 @@
 ## Running the App
 
 ```bash
-uv run uvicorn app.main:app
+uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 Visit http://localhost:8000/ to see the NiceGUI landing page.
+
+> **Bind to `0.0.0.0`, not a single IP.** Binding `--host 0.0.0.0` listens on
+> every interface, so both `http://localhost:8000` and the machine's LAN
+> address (e.g. `http://192.168.2.13:8000`) work. Binding a specific IP
+> (e.g. `--host 192.168.2.13`) makes `localhost` unreachable — the two are
+> different interfaces. The headless backtest clients default to
+> `--base-url http://localhost:8000`, so `0.0.0.0` keeps them working
+> out-of-the-box.
 
 > **Do not run with `--reload` in production.** Uvicorn's `--reload`
 > restarts the *entire* worker on every `.py` file save. Each restart wipes the

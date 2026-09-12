@@ -64,6 +64,11 @@ def submit_and_poll(
     base = base_url.rstrip("/")
     try:
         resp = httpx.post(f"{base}/backtest/run", json=payload, timeout=60.0)
+    except httpx.ConnectError as exc:
+        raise BacktestClientError(
+            f"could not connect to {base} — is the tai2 server running there? "
+            f"(use --base-url to point at the server's host:port)"
+        ) from exc
     except httpx.HTTPError as exc:
         raise BacktestClientError(f"request failed: {exc}") from exc
     if resp.status_code not in (200, 202):
@@ -75,6 +80,10 @@ def submit_and_poll(
     while True:
         try:
             status_resp = httpx.get(f"{base}/backtest/status/{job_id}", timeout=60.0)
+        except httpx.ConnectError as exc:
+            raise BacktestClientError(
+                f"lost connection to {base} while polling — is the server still running?"
+            ) from exc
         except httpx.HTTPError as exc:
             raise BacktestClientError(f"status poll failed: {exc}") from exc
         if status_resp.status_code == 404:
@@ -125,6 +134,37 @@ def submit_many_and_poll(
     workers = max_workers or len(payloads)
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
         return list(ex.map(_one, payloads))
+
+
+def submit_many_and_poll_timed(
+    *,
+    base_url: str,
+    payloads: list[dict[str, Any]],
+    label: str = "",
+    max_workers: int | None = None,
+    poll_interval: float = 1.5,
+) -> list[tuple[dict[str, Any], BaseException | None]]:
+    """Like :func:`submit_many_and_poll`, but prints wall-clock timing.
+
+    Emits a line like ``▶ <label>: N job(s) in X.XXs (M workers)`` after the
+    batch completes.  Used by the A/B clients so the user can measure speedup
+    by re-running with a different ``--workers`` value and comparing the
+    elapsed seconds.
+    """
+    if not payloads:
+        return []
+    started = time.monotonic()
+    results = submit_many_and_poll(
+        base_url=base_url,
+        payloads=payloads,
+        max_workers=max_workers,
+        poll_interval=poll_interval,
+    )
+    elapsed = time.monotonic() - started
+    workers = max_workers or len(payloads)
+    prefix = f"{label}: " if label else ""
+    print(f"▶ {prefix}{len(payloads)} job(s) in {elapsed:.2f}s ({max(1, workers)} workers)")
+    return results
 
 
 def summary_row(

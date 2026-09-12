@@ -50,7 +50,7 @@ from typing import Any
 from app.services.backtest.client import (
     build_single_strategy_launcher,
     count_stop_outs,
-    submit_many_and_poll,
+    submit_many_and_poll_timed,
     summary_row,
 )
 
@@ -173,8 +173,10 @@ def _main(args: argparse.Namespace) -> int:
                     gate_cfg=gate_cfg, threshold=None, switch_on=False,
                     days=args.days, capital=args.capital, warmup=args.warmup,
                 )
-                ((base_env, base_err),) = submit_many_and_poll(
-                    base_url=args.base_url, payloads=[base_payload], max_workers=args.workers,
+                ((base_env, base_err),) = submit_many_and_poll_timed(
+                    base_url=args.base_url, payloads=[base_payload],
+                    label=f"baseline {symbol} {ltf} {gate_name}",
+                    max_workers=args.workers,
                 )
                 if base_err is not None:
                     print(f"  ✗ errored: {base_err}")
@@ -212,9 +214,10 @@ def _main(args: argparse.Namespace) -> int:
                     )
                     specs.append((switch_on, threshold, thr_str, tag, payload))
 
-                results = submit_many_and_poll(
+                results = submit_many_and_poll_timed(
                     base_url=args.base_url,
                     payloads=[p for (_, _, _, _, p) in specs],
+                    label=f"ON variants {symbol} {ltf} {gate_name}",
                     max_workers=args.workers,
                 )
                 for (switch_on, threshold, thr_str, tag, _p), (envelope, err) in zip(specs, results):
