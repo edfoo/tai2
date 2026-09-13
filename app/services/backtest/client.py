@@ -13,6 +13,7 @@ and the config/summary plumbing.
 from __future__ import annotations
 
 import concurrent.futures
+import math
 import time
 from typing import Any, Callable
 
@@ -23,6 +24,24 @@ from app.services.strategies.defaults import strategy_defaults
 
 class BacktestClientError(RuntimeError):
     """Raised when the server rejects a request or a job fails."""
+
+
+def fmt_cell(value: Any, width: int) -> str:
+    """Right-aligned, display-safe metric cell; ``None``/``inf``/``nan`` safe.
+
+    The serialised ``m_profit_factor`` is ``None`` when the engine computed
+    ``inf`` (wins with no losses); ``f"{None:>5}"`` raises ``TypeError``.  This
+    helper renders those as ``—`` / ``inf`` / ``nan`` and right-justifies
+    everything to ``width`` so it can be concatenated in table-like output.
+    """
+    if value is None:
+        return "—".rjust(width)
+    if isinstance(value, float):
+        if math.isinf(value):
+            return ("inf" if value > 0 else "-inf").rjust(width)
+        if math.isnan(value):
+            return "nan".rjust(width)
+    return f"{value}".rjust(width)
 
 
 def build_single_strategy_launcher(

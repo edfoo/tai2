@@ -36,6 +36,7 @@ Exit code 0 on success, 1 on error.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from typing import Any
 
@@ -241,8 +242,8 @@ def main() -> int:
     parser.add_argument("--warmup", type=int, default=200, help="Warmup candles before start.")
     parser.add_argument("--min-trades", type=int, default=1,
                         help="Skip variants when baseline yields fewer than this many trades.")
-    parser.add_argument("--workers", type=int, default=8,
-                        help="Max concurrent submissions to the server (default 8).")
+    parser.add_argument("--workers", type=int, default=os.cpu_count() or 1,
+                        help="Max concurrent submissions to the server (default = CPU count).")
     parser.add_argument("--fast-atr-lengths", default="3,4,5", help="Comma-separated fast ATR lengths to sweep.")
     parser.add_argument("--decel-ratios", default="0.6,0.7,0.8", help="Comma-separated min decel ratios to sweep.")
     args = parser.parse_args()

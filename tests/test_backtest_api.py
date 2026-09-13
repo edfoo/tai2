@@ -79,14 +79,20 @@ class _State:
 
 @pytest.mark.asyncio
 async def test_job_manager_lifecycle(monkeypatch):
-    """Submit a run and confirm it reaches completed with a result."""
-    # Stub the engine execution so we don't hit the exchange.
-    async def _fake_run(self):
-        return _FakeResult({"total_trades": 5, "win_rate": 60.0, "net_profit": 2.0})
+    """Submit a run and confirm it reaches completed with a result.
+
+    The executor now dispatches to subprocesses; for a fast in-process test we
+    stub the worker function and swap the process pool for a thread pool so no
+    subprocess is actually spawned.
+    """
+    from concurrent.futures import ThreadPoolExecutor
 
     monkeypatch.setattr(
-        "app.services.backtest.job_manager.BacktestEngine",
-        lambda config: type("E", (), {"run": _fake_run})(),
+        "app.services.backtest.job_manager.ProcessPoolExecutor", ThreadPoolExecutor
+    )
+    monkeypatch.setattr(
+        "app.services.backtest.job_manager._execute_run_worker",
+        lambda config: _FakeResult({"total_trades": 5, "win_rate": 60.0, "net_profit": 2.0}),
     )
 
     state = _State()
@@ -122,12 +128,14 @@ async def test_job_manager_lifecycle(monkeypatch):
 @pytest.mark.asyncio
 async def test_job_manager_grid_lifecycle(monkeypatch):
     """Submit a grid and confirm it reaches completed."""
-    async def _fake_grid_run(self):
-        return _FakeResult({"total_trades": 2, "win_rate": 50.0})
+    from concurrent.futures import ThreadPoolExecutor
 
     monkeypatch.setattr(
-        "app.services.backtest.job_manager.BacktestGrid",
-        lambda config: type("G", (), {"run": _fake_grid_run})(),
+        "app.services.backtest.job_manager.ProcessPoolExecutor", ThreadPoolExecutor
+    )
+    monkeypatch.setattr(
+        "app.services.backtest.job_manager._execute_grid_worker",
+        lambda config: _FakeResult({"total_trades": 2, "win_rate": 50.0}),
     )
 
     state = _State()
@@ -190,15 +198,14 @@ def test_status_unknown_job_returns_404():
 @pytest.mark.asyncio
 async def test_job_manager_runs_jobs_concurrently(monkeypatch):
     """Multiple submitted runs complete, exercising the parallel worker pool."""
-    import asyncio as _asyncio
-
-    async def _fake_run(self):
-        await _asyncio.sleep(0.05)
-        return _FakeResult({"total_trades": 1, "win_rate": 100.0})
+    from concurrent.futures import ThreadPoolExecutor
 
     monkeypatch.setattr(
-        "app.services.backtest.job_manager.BacktestEngine",
-        lambda config: type("E", (), {"run": _fake_run})(),
+        "app.services.backtest.job_manager.ProcessPoolExecutor", ThreadPoolExecutor
+    )
+    monkeypatch.setattr(
+        "app.services.backtest.job_manager._execute_run_worker",
+        lambda config: _FakeResult({"total_trades": 1, "win_rate": 100.0}),
     )
 
     state = _State()
@@ -231,8 +238,9 @@ async def test_job_manager_custom_worker_count(monkeypatch):
     state = _State()
     manager = BacktestJobManager(state, max_workers=2)
     assert manager._max_workers == 2
-    # No workers started → no tasks yet.
+    # No workers started → no tasks and no pool yet.
     assert manager._worker_tasks == []
+    assert manager._process_pool is None
 
 
 def test_result_unknown_job_returns_404():

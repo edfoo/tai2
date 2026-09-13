@@ -144,7 +144,14 @@ logs/
 - `GET /backtest/status/{job_id}` → queued/running/completed/failed
 - `GET /backtest/result/{job_id}` → full `result_to_dict` payload (409 until completed)
 - Job registry lives on `app.state.backtest_jobs` (`BacktestJobManager`), started in lifespan, cancelled on shutdown
-- Jobs execute **concurrently** across a pool of worker tasks; default pool size = `os.cpu_count()`, overridable via `BACKTEST_WORKERS` env var
+- Jobs execute **concurrently** across a `ProcessPoolExecutor` (true multi-core
+  parallelism — thread-level measured no speedup because pandas-ta + pure-Python
+  strategy eval hold the GIL).  Default pool size = `os.cpu_count()`, overridable
+  via `BACKTEST_WORKERS` env var.  Only the picklable `BacktestConfig`/`GridConfig`
+  crosses the process boundary; the engine/strategies are constructed in-worker.
+- `BacktestGrid` additionally parallelises its own Cartesian-product combinations
+  in-subprocess (each parameter combination = one process), so `POST /backtest/grid`
+  and the UI Parameter Sweep use all cores — not just the job-level pool.
 - Request body mirrors `BacktestConfig`; guardrails passed via `guardrails_config` (separate from `launcher_config`/`strategy_config`, matching live `runtime_config` split)
 - CLI scripts (`scripts/backtest_client.py`, `run_gate_ab_sweep.py`, `run_trend_pullback_ab.py`, `run_vwap_ab_sweep.py`) are thin REST clients using `app/services/backtest/client.py` — they do NOT import `BacktestEngine` directly
 

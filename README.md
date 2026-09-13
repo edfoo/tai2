@@ -518,8 +518,10 @@ The request body mirrors `BacktestConfig`: `symbols`, `timeframe`,
 `capital`, `warmup`, `evaluation_mode`, plus the live `launcher_config` /
 `strategy_config` / `guardrails_config` dicts.
 
-Jobs run **concurrently** across a pool of worker tasks (default
-`os.cpu_count()`; override with the `BACKTEST_WORKERS` env var). The CLI
+Jobs run **concurrently** across a `ProcessPoolExecutor` (true multi-core
+parallelism; thread-level parallelism is not effective here because pandas-ta
+and pure-Python strategy evaluation hold the GIL).  Default pool size is
+`os.cpu_count()`, overridable with the `BACKTEST_WORKERS` env var.  The CLI
 clients submit multiple variants at once via their `--workers` flag, so
 sweeps execute in parallel.
 

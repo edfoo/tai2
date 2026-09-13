@@ -27,6 +27,7 @@ Exit code 0 on success, 1 on error.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from typing import Any
 
@@ -34,6 +35,7 @@ from app.services.backtest.client import (
     build_single_strategy_launcher,
     count_stop_outs,
     count_tp,
+    fmt_cell,
     submit_many_and_poll_timed,
     summary_row,
 )
@@ -92,10 +94,14 @@ def _row_from_envelope(
 
 def _fmt(summary: dict[str, Any]) -> str:
     return (
-        f"trades={summary.get('m_total_trades'):>3}  win={summary.get('m_win_rate'):>5}%  "
-        f"PF={summary.get('m_profit_factor'):>5}  net={summary.get('m_net_profit'):>8}  "
-        f"avg_trade={summary.get('m_average_trade'):>7}  stop_out={summary.get('stop_out_count'):>3}  "
-        f"tp={summary.get('tp_count'):>3}  sharpe={summary.get('m_sharpe_per_candle'):>7}"
+        f"trades={fmt_cell(summary.get('m_total_trades'), 3)}  "
+        f"win={fmt_cell(summary.get('m_win_rate'), 5)}%  "
+        f"PF={fmt_cell(summary.get('m_profit_factor'), 5)}  "
+        f"net={fmt_cell(summary.get('m_net_profit'), 8)}  "
+        f"avg_trade={fmt_cell(summary.get('m_average_trade'), 7)}  "
+        f"stop_out={fmt_cell(summary.get('stop_out_count'), 3)}  "
+        f"tp={fmt_cell(summary.get('tp_count'), 3)}  "
+        f"sharpe={fmt_cell(summary.get('m_sharpe_per_candle'), 7)}"
     )
 
 
@@ -178,8 +184,8 @@ def main() -> int:
     parser.add_argument("--days", type=int, default=60, help="Trailing window in days (default 60).")
     parser.add_argument("--capital", type=float, default=1000.0, help="Initial capital / notional (default 1000).")
     parser.add_argument("--warmup", type=int, default=200, help="Warmup candles (default 200).")
-    parser.add_argument("--workers", type=int, default=8,
-                        help="Max concurrent submissions to the server (default 8).")
+    parser.add_argument("--workers", type=int, default=os.cpu_count() or 1,
+                        help="Max concurrent submissions to the server (default = CPU count).")
     args = parser.parse_args()
 
     args.symbols = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]

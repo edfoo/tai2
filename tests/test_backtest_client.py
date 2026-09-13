@@ -12,6 +12,7 @@ from app.services.backtest.client import (
     count_stop_outs,
     count_timeouts,
     count_tp,
+    fmt_cell,
     submit_many_and_poll,
     summary_row,
 )
@@ -83,6 +84,18 @@ def test_count_helpers_handle_empty_trades():
     assert count_tp(env) == 0
     assert count_stop_outs(env) == 0
     assert count_timeouts(env) == 0
+
+
+def test_fmt_cell_handles_none_and_nonfinite():
+    # None (the sanitised inf/nan) must not raise on format.
+    assert fmt_cell(None, 5) == "—".rjust(5)
+    assert fmt_cell(float("inf"), 5) == "inf".rjust(5)
+    assert fmt_cell(float("-inf"), 5) == "-inf".rjust(5)
+    assert fmt_cell(float("nan"), 5) == "nan".rjust(5)
+    # Finite numbers and values right-justify normally.
+    assert fmt_cell(12, 5) == "   12"
+    assert fmt_cell(1.5, 5) == "  1.5"
+    assert fmt_cell("x", 3) == "  x"
 
 
 def test_submit_many_and_poll_empty():

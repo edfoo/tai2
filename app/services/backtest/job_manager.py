@@ -1,27 +1,35 @@
 """In-process backtest job manager.
 
-A registry that runs backtest jobs (single engine runs and grid sweeps) as
-detached asyncio tasks and exposes their status/results by ``job_id``.
+A registry that runs backtest jobs (single engine runs and grid sweeps) and
+exposes their status/results by ``job_id``.
 
-The engine is CPU-bound (recomputes pandas-ta indicators per step), so each
-job's run is delegated to ``asyncio.to_thread``.  Jobs are executed
-**concurrently** across a pool of ``max_workers`` worker tasks (a FIFO queue
-feeds them); the default worker count is ``os.cpu_count()``, overridable via
-the ``BACKTEST_WORKERS`` environment variable.  The engine releases the GIL
-during indicator computation and its per-step ``time.sleep(0)`` yields, so
-concurrent jobs overlap their fetch (I/O) and indicator phases.
+The engine is CPU-bound (recomputes pandas-ta indicators per step) AND does a
+significant amount of pure-Python strategy evaluation that holds the GIL, so
+thread-level parallelism measured **no speedup** and even starved the server's
+event loop (``status poll failed: timed out``).  Jobs are therefore dispatched
+to a :class:`concurrent.futures.ProcessPoolExecutor` — each job runs in its own
+process, giving true multi-core parallelism.  Only the picklable
+``BacktestConfig`` / ``GridConfig`` is sent across the process boundary; the
+engine and strategy instances are constructed *inside* the worker so no
+lambdas/bound methods are pickled.
 
 Jobs are stored in-memory on ``app.state``; completed results are additionally
 persisted to disk via :func:`save_result` so they survive restarts and appear
 in the UI's Saved Runs browser (same ``backtest_cache/cli/`` tree).
+
+The process pool size defaults to ``os.cpu_count()``, overridable via the
+``BACKTEST_WORKERS`` environment variable.
 """
 
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import logging
 import os
+import signal
 import uuid
+from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime, timezone
 from typing import Any
 
@@ -69,6 +77,44 @@ def _resolve_window(req: Any) -> tuple[int, int]:
     return now_ms - days * 86_400_000, now_ms
 
 
+def _worker_initializer() -> None:
+    """Run in each freshly-forked worker to die with the parent process.
+
+    ``prctl(PR_SET_PDEATHSIG, SIGTERM)`` makes the kernel deliver SIGTERM to the
+    worker the moment its parent (the uvicorn server) dies — even if the parent
+    is SIGKILLed.  Without this, a hard-killed server strands its forked workers
+    as orphans (reparented to PID 1) that keep burning CPU on stale jobs.  The
+    follow-up ``getppid()`` guard covers the (Linux-only) race where prctl is set
+    right as the parent already died.
+    """
+    parent_pid = os.getppid()
+    try:
+        _libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        # PR_SET_PDEATHSIG = 1
+        _libc.prctl(1, signal.SIGTERM)
+    except (AttributeError, OSError):
+        # Non-Linux or libc unavailable — degrade to the getppid check only.
+        pass
+    if os.getppid() != parent_pid:
+        # Parent already gone between fork and this init — exit immediately.
+        os._exit(0)
+
+
+def _execute_run_worker(config: BacktestConfig) -> Any:
+    """Run a single backtest **in a subprocess** and return its result.
+
+    Module-level (not a bound method) so it pickles by qualified name for the
+    ``ProcessPoolExecutor``.  The engine is constructed here, inside the worker,
+    so no asyncio event loop or bound-method state crosses the process boundary.
+    """
+    return asyncio.run(BacktestEngine(config).run())
+
+
+def _execute_grid_worker(config: GridConfig) -> Any:
+    """Run a parameter sweep **in a subprocess** and return its result."""
+    return asyncio.run(BacktestGrid(config).run())
+
+
 class BacktestJobManager:
     """Registry + executor for backtest jobs (single-run and grid)."""
 
@@ -78,19 +124,29 @@ class BacktestJobManager:
         self._queue: asyncio.Queue[str] = asyncio.Queue()
         self._max_workers = max_workers if max_workers and max_workers > 0 else _default_workers()
         self._worker_tasks: list[asyncio.Task] = []
+        self._process_pool: ProcessPoolExecutor | None = None
         self._lock = asyncio.Lock()
 
     # ── Public API ────────────────────────────────────────────────────
 
     def start(self) -> None:
-        """Start the background worker pool (idempotent)."""
+        """Start the process pool + queued worker coroutines (idempotent)."""
+        if self._process_pool is None:
+            self._process_pool = ProcessPoolExecutor(
+                max_workers=self._max_workers,
+                initializer=_worker_initializer,
+            )
+            logger.info(
+                "Backtest job pool started: %d worker process(es)",
+                self._max_workers,
+            )
         if not self._worker_tasks:
             self._worker_tasks = [
                 asyncio.create_task(self._worker()) for _ in range(self._max_workers)
             ]
 
     async def shutdown(self) -> None:
-        """Cancel the worker tasks (called on app shutdown)."""
+        """Cancel workers and shut down the process pool (called on app shutdown)."""
         tasks = self._worker_tasks
         self._worker_tasks = []
         for t in tasks:
@@ -98,6 +154,9 @@ class BacktestJobManager:
                 t.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        if self._process_pool is not None:
+            self._process_pool.shutdown(wait=False, cancel_futures=True)
+            self._process_pool = None
 
     def submit_run(self, req: Any) -> str:
         """Queue a single engine run.  Returns the job_id."""
@@ -233,10 +292,14 @@ class BacktestJobManager:
         job = self._jobs[job_id]
         job["status"] = RUNNING
         try:
+            loop = asyncio.get_running_loop()
+            pool = self._process_pool
+            if pool is None:
+                raise RuntimeError("backtest process pool not started")
             if job["kind"] == "run":
-                result = await asyncio.to_thread(self._execute_run, job["config"])
+                result = await loop.run_in_executor(pool, _execute_run_worker, job["config"])
             else:
-                result = await asyncio.to_thread(self._execute_grid, job["config"])
+                result = await loop.run_in_executor(pool, _execute_grid_worker, job["config"])
             job["result"] = result
             job["status"] = COMPLETED
             if result is not None and not getattr(result, "is_error", False):
@@ -247,16 +310,6 @@ class BacktestJobManager:
             logger.exception("Backtest job %s failed", job_id)
         finally:
             job["finished_at"] = datetime.now(timezone.utc).isoformat()
-
-    @staticmethod
-    def _execute_run(config: BacktestConfig) -> Any:
-        engine = BacktestEngine(config)
-        return asyncio.run(engine.run())
-
-    @staticmethod
-    def _execute_grid(config: GridConfig) -> Any:
-        grid = BacktestGrid(config)
-        return asyncio.run(grid.run())
 
     def _persist(self, result: Any, job: dict[str, Any]) -> None:
         """Best-effort persist the result to disk (survives restarts).

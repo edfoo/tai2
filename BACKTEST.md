@@ -27,11 +27,13 @@ for the result — the same single interface the UI uses. The server persists
 results via `app/services/backtest/persistence.py`, so a run produced by
 either path is viewable by the other.
 
-**Parallelism**: the server executes jobs concurrently across a pool of worker
-tasks (default `os.cpu_count()`; override with the `BACKTEST_WORKERS` env
-var), and the clients submit multiple variants at once (``--workers`` flag,
-default 8). A/B sweeps therefore run their variants in parallel rather than
-one-after-another.
+**Parallelism**: the server executes jobs concurrently across a
+`ProcessPoolExecutor` (default `os.cpu_count()`; override with the
+`BACKTEST_WORKERS` env var), and the clients submit multiple variants at once
+(``--workers`` flag, default 8). A/B sweeps therefore run their variants in
+parallel rather than one-after-another. Process-based parallelism is required
+here — threads give no speedup because the indicator computation and strategy
+evaluation hold the GIL.
 
 ---
 

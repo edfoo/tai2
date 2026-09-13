@@ -991,6 +991,21 @@ def test_handle_llm_prefers_explicit_position_size(monkeypatch: pytest.MonkeyPat
 
         monkeypatch.setattr(service, "_fetch_positions", MethodType(fake_fetch_positions, service))
 
+        # handle_llm_decision performs a live account-balance refresh when an
+        # account API is present, which would overwrite the context's equity
+        # with real exchange values.  Stub it so the test's declared
+        # 1000-USDT equity is what sizing actually sees.
+        async def fake_fetch_account_balance(self) -> dict[str, Any]:
+            return {
+                "total_eq_usd": 1000.0,
+                "available_eq_usd": 1000.0,
+                "available_balances": {
+                    "USDT": {"available_usd": 1000.0, "cash": 1000.0}
+                },
+            }
+
+        monkeypatch.setattr(service, "_fetch_account_balance", MethodType(fake_fetch_account_balance, service))
+
         captured: dict[str, float | None] = {"size_hint": None, "submitted": None}
 
         def fake_leverage_adjust(**kwargs: Any) -> float | None:
@@ -1082,6 +1097,20 @@ def test_handle_llm_emits_feedback_for_size_conflict(monkeypatch: pytest.MonkeyP
             return []
 
         monkeypatch.setattr(service, "_fetch_positions", MethodType(fake_fetch_positions, service))
+
+        # See test_handle_llm_prefers_explicit_position_size: handle_llm_decision
+        # refreshes the live balance when an account API exists; stub it so the
+        # declared 1000-USDT equity is what sizing sees (not real exchange data).
+        async def fake_fetch_account_balance(self) -> dict[str, Any]:
+            return {
+                "total_eq_usd": 1000.0,
+                "available_eq_usd": 1000.0,
+                "available_balances": {
+                    "USDT": {"available_usd": 1000.0, "cash": 1000.0}
+                },
+            }
+
+        monkeypatch.setattr(service, "_fetch_account_balance", MethodType(fake_fetch_account_balance, service))
 
         monkeypatch.setattr(
             service,
