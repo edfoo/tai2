@@ -9151,7 +9151,7 @@ def register_pages(app: FastAPI) -> None:
         backtest using the current strategy config values.  Results show an
         equity curve, trade table, and summary metrics.
         """
-        from app.services.backtest.engine import BacktestEngine, available_strategy_names
+        from app.services.backtest.engine import available_strategy_names
         from app.services.backtest.runner import build_backtest_config, resolve_evaluation
 
         navigation("BACKTEST")
@@ -9653,7 +9653,22 @@ def register_pages(app: FastAPI) -> None:
                     app.state.backtest_progress["text"] = text
                     app.state.backtest_progress["phase"] = phase
 
-            engine = BacktestEngine(bt_config)
+            # Route the single run through the shared process pool so the
+            # CPU-bound engine executes in a forked worker instead of inside
+            # the uvicorn process (which would starve the event loop /
+            # websocket keepalive, exactly what the REST/job-manager path was
+            # built to avoid).  ``run_single`` returns the result across the
+            # process boundary, so per-candle progress is NOT emitted; we show
+            # a coarse "running" state instead.
+            manager = getattr(app.state, "backtest_jobs", None)
+            if manager is None:
+                ui.notify("Backtest service unavailable", color="negative")
+                app.state.backtest_running["flag"] = False
+                run_button.enable()
+                return
+
+            app.state.backtest_progress["text"] = "Running backtest…"
+            app.state.backtest_progress["phase"] = "backtest"
 
             # Run the backtest as a detached background task that is NOT
             # tied to this NiceGUI client's lifecycle.  If the client
@@ -9670,7 +9685,7 @@ def register_pages(app: FastAPI) -> None:
                 timer to pick up.
                 """
                 try:
-                    result = await engine.run(progress_cb=progress_cb)
+                    result = await manager.run_single(bt_config)
                     app.state.backtest_result = result
                     # Persist the result to disk (survives app restarts) and
                     # refresh the Saved Runs browser.

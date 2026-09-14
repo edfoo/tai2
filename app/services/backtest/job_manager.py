@@ -270,6 +270,22 @@ class BacktestJobManager:
             "result": payload,
         }
 
+    async def run_single(self, config: BacktestConfig) -> Any:
+        """Run a single backtest config in the process pool; return its result.
+
+        Used by the UI single-run path so a long CPU-bound backtest is isolated
+        in a forked worker (the same model as the REST/job-manager path) rather
+        than running inside the server process and starving the event loop /
+        websocket keepalive.  Returns the ``BacktestResult`` (the worker returns
+        it across the process boundary), so granular per-candle progress is NOT
+        available — callers should render a coarse "running" state.
+        """
+        pool = self._process_pool
+        if pool is None:
+            raise RuntimeError("backtest process pool not started")
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(pool, _execute_run_worker, config)
+
     # ── Worker ────────────────────────────────────────────────────────
 
     async def _worker(self) -> None:
