@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import logging
 import time
+import uuid as _uuid
 from datetime import datetime, timezone
 from typing import Any, Callable
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
@@ -55,6 +57,8 @@ from app.services.openrouter_service import (
 from app.services.prompt_utils import sanitize_prompt_text
 from app.services.strategies.defaults import strategy_defaults, trade_management_defaults
 from app.ui.components import SnapshotStore, badge_stat
+
+logger = logging.getLogger(__name__)
 
 NAV_LINKS = [
     ("LIVE", "/live"),
@@ -9626,40 +9630,13 @@ def register_pages(app: FastAPI) -> None:
             # Clear any stale result from a previous run.
             app.state.backtest_progress.pop("result", None)
 
-            def progress_cb(progress: Any) -> None:
-                """Record progress into app.state (polled by the UI timer).
-
-                Deliberately does NOT touch any UI element directly — the
-                engine coroutine runs in a worker thread and may outlive a
-                NiceGUI client that disconnects mid-run.
-                """
-                phase = getattr(progress, "phase", "")
-                current = getattr(progress, "current", 0)
-                total = getattr(progress, "total", 0)
-                msg = getattr(progress, "message", "")
-                text = ""
-                if phase == "fetch":
-                    text = f"Fetching data: {msg}"
-                elif phase == "backtest":
-                    pct = (current / total * 100) if total > 0 else 0
-                    text = f"Backtest: {pct:.0f}% ({current}/{total} candles)"
-                elif phase == "metrics":
-                    text = "Computing metrics..."
-                elif phase == "done":
-                    text = "Done"
-                elif phase == "error":
-                    text = f"Error: {msg}"
-                if text:
-                    app.state.backtest_progress["text"] = text
-                    app.state.backtest_progress["phase"] = phase
-
             # Route the single run through the shared process pool so the
             # CPU-bound engine executes in a forked worker instead of inside
             # the uvicorn process (which would starve the event loop /
             # websocket keepalive, exactly what the REST/job-manager path was
-            # built to avoid).  ``run_single`` returns the result across the
-            # process boundary, so per-candle progress is NOT emitted; we show
-            # a coarse "running" state instead.
+            # built to avoid).  ``run_single`` publishes granular progress to
+            # the manager's sink under a ``job_id`` — the polling timer below
+            # reads it via ``manager.get_progress``.
             manager = getattr(app.state, "backtest_jobs", None)
             if manager is None:
                 ui.notify("Backtest service unavailable", color="negative")
@@ -9669,6 +9646,13 @@ def register_pages(app: FastAPI) -> None:
 
             app.state.backtest_progress["text"] = "Running backtest…"
             app.state.backtest_progress["phase"] = "backtest"
+
+            # Generate the job id up-front so the polling timer can read
+            # granular per-candle progress from the manager's sink *while*
+            # the run is in progress (rather than only the coarse in-memory
+            # text set here).
+            _job_id = _uuid.uuid4().hex
+            app.state.backtest_progress["job_id"] = _job_id
 
             # Run the backtest as a detached background task that is NOT
             # tied to this NiceGUI client's lifecycle.  If the client
@@ -9685,7 +9669,7 @@ def register_pages(app: FastAPI) -> None:
                 timer to pick up.
                 """
                 try:
-                    result = await manager.run_single(bt_config)
+                    _job_id, result = await manager.run_single(bt_config, job_id=_job_id)
                     app.state.backtest_result = result
                     # Persist the result to disk (survives app restarts) and
                     # refresh the Saved Runs browser.
@@ -9702,6 +9686,9 @@ def register_pages(app: FastAPI) -> None:
                     app.state.backtest_progress["phase"] = "error"
                     app.state.backtest_progress["result"] = None
                 finally:
+                    # Drop the active job id + its heartbeats once finished.
+                    app.state.backtest_progress["job_id"] = None
+                    manager._progress_sink.clear(_job_id)
                     app.state.backtest_running["flag"] = False
 
             # Create the task on the event loop — it runs independently.
@@ -9712,7 +9699,6 @@ def register_pages(app: FastAPI) -> None:
 
         async def run_sweep() -> None:
             """Run a parameter-sweep grid backtest."""
-            from app.services.backtest.grid import BacktestGrid
             from app.services.backtest.models import GridConfig, GridParamDef
 
             if app.state.backtest_running.get("flag"):
@@ -9785,35 +9771,29 @@ def register_pages(app: FastAPI) -> None:
             )
 
             # ── Run the sweep ───────────────────────────────────────────
+            # Route the sweep through the shared process pool (same as the
+            # single-run path) so the grid orchestration runs in a forked
+            # worker rather than on the event loop, and progress flows through
+            # the manager's sink under a job_id the polling timer can read.
+            manager = getattr(app.state, "backtest_jobs", None)
+            if manager is None:
+                ui.notify("Backtest service unavailable", color="negative")
+                return
+
             app.state.backtest_running["flag"] = True
             sweep_run_button.disable()
             run_button.disable()
             sweep_progress_label.set_text("Starting sweep...")
             sweep_results_container.clear()
 
-            grid = BacktestGrid(grid_cfg)
-
-            def grid_progress_cb(progress: Any) -> None:
-                """Record sweep progress into app.state (polled by UI timer)."""
-                phase = getattr(progress, "phase", "")
-                current = getattr(progress, "current", 0)
-                total = getattr(progress, "total", 0)
-                msg = getattr(progress, "message", "")
-                if phase == "grid":
-                    text = f"Sweep: {current + 1}/{total} — {msg}"
-                elif phase == "done":
-                    text = "Sweep complete"
-                elif phase == "error":
-                    text = f"Sweep error: {msg}"
-                else:
-                    text = msg
-                app.state.backtest_progress["text"] = text
-                app.state.backtest_progress["phase"] = phase
+            _job_id = _uuid.uuid4().hex
+            app.state.backtest_progress["job_id"] = _job_id
+            app.state.backtest_progress["sweep_job_id"] = _job_id
 
             async def _run_sweep_and_store() -> None:
                 """Execute the sweep and render results when done."""
                 try:
-                    result = await grid.run(progress_cb=grid_progress_cb)
+                    _jid, result = await manager.run_single_grid(grid_cfg, job_id=_job_id)
                     app.state.sweep_result = result
                     app.state.backtest_progress["text"] = "Sweep complete"
                     app.state.backtest_progress["phase"] = "sweep_done"
@@ -9824,6 +9804,9 @@ def register_pages(app: FastAPI) -> None:
                     app.state.backtest_progress["phase"] = "error"
                     app.state.backtest_progress["sweep_result"] = None
                 finally:
+                    app.state.backtest_progress["job_id"] = None
+                    app.state.backtest_progress.pop("sweep_job_id", None)
+                    manager._progress_sink.clear(_job_id)
                     app.state.backtest_running["flag"] = False
 
             sweep_task = asyncio.create_task(_run_sweep_and_store())
@@ -10119,8 +10102,48 @@ def register_pages(app: FastAPI) -> None:
         # worker thread and may outlive a disconnected client) and renders
         # results when the run completes.  Because state lives on app.state,
         # a reconnected client picks up right where the previous one left off.
+        def _format_progress(prog: dict[str, Any] | None) -> str:
+            """Render a sink progress dict into a user-facing label."""
+            if not prog:
+                return ""
+            phase = prog.get("phase", "")
+            current = int(prog.get("current", 0) or 0)
+            total = int(prog.get("total", 0) or 0)
+            msg = prog.get("message", "")
+            if phase == "fetch":
+                return f"Fetching data: {msg}"
+            if phase == "backtest":
+                pct = (current / total * 100) if total > 0 else 0
+                return f"Backtest: {pct:.0f}% ({current}/{total} candles)"
+            if phase == "metrics":
+                return "Computing metrics..."
+            if phase == "grid":
+                return f"Sweep: {current}/{total} — {msg}"
+            if phase == "done":
+                return "Done"
+            if phase == "error":
+                return f"Error: {msg}"
+            return msg or phase
+
         def _poll_progress() -> None:
             bp = app.state.backtest_progress
+            # Read granular progress straight from the manager's sink while a
+            # run/sweep job is active (the worker publishes to Redis/file
+            # independently of this process).  This yields per-candle progress
+            # (single run) or per-combination progress (sweep) rather than the
+            # coarse "Running backtest…"/"Starting sweep..." placeholders.
+            active_job_id = bp.get("job_id")
+            manager = getattr(app.state, "backtest_jobs", None)
+            if active_job_id and manager is not None:
+                phase_now = bp.get("phase", "")
+                if phase_now not in ("done", "error", "sweep_done"):
+                    live_text = _format_progress(manager.get_progress(active_job_id))
+                    if live_text:
+                        if bp.get("sweep_job_id"):
+                            sweep_progress_label.set_text(live_text)
+                        else:
+                            progress_label.set_text(live_text)
+
             text = bp.get("text", "")
             if text:
                 progress_label.set_text(text)

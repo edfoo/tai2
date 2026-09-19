@@ -92,7 +92,7 @@ async def test_job_manager_lifecycle(monkeypatch):
     )
     monkeypatch.setattr(
         "app.services.backtest.job_manager._execute_run_worker",
-        lambda config: _FakeResult({"total_trades": 5, "win_rate": 60.0, "net_profit": 2.0}),
+        lambda config, job_id, redis_url: _FakeResult({"total_trades": 5, "win_rate": 60.0, "net_profit": 2.0}),
     )
 
     state = _State()
@@ -135,7 +135,7 @@ async def test_job_manager_grid_lifecycle(monkeypatch):
     )
     monkeypatch.setattr(
         "app.services.backtest.job_manager._execute_grid_worker",
-        lambda config: _FakeResult({"total_trades": 2, "win_rate": 50.0}),
+        lambda config, job_id, redis_url: _FakeResult({"total_trades": 2, "win_rate": 50.0}),
     )
 
     state = _State()
@@ -205,7 +205,7 @@ async def test_job_manager_runs_jobs_concurrently(monkeypatch):
     )
     monkeypatch.setattr(
         "app.services.backtest.job_manager._execute_run_worker",
-        lambda config: _FakeResult({"total_trades": 1, "win_rate": 100.0}),
+        lambda config, job_id, redis_url: _FakeResult({"total_trades": 1, "win_rate": 100.0}),
     )
 
     state = _State()

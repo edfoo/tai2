@@ -33,10 +33,12 @@ from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime, timezone
 from typing import Any
 
+from app.core.config import get_settings
 from app.services.backtest.engine import BacktestEngine, available_strategy_names
 from app.services.backtest.grid import BacktestGrid
 from app.services.backtest.models import BacktestConfig, GridConfig, GridParamDef
 from app.services.backtest.persistence import make_run_id, save_result
+from app.services.backtest.progress import ProgressSink, make_progress_cb
 from app.services.backtest.runner import build_backtest_config
 
 logger = logging.getLogger(__name__)
@@ -100,19 +102,41 @@ def _worker_initializer() -> None:
         os._exit(0)
 
 
-def _execute_run_worker(config: BacktestConfig) -> Any:
+def _execute_run_worker(
+    config: BacktestConfig,
+    job_id: str,
+    redis_url: str | None,
+) -> Any:
     """Run a single backtest **in a subprocess** and return its result.
 
     Module-level (not a bound method) so it pickles by qualified name for the
     ``ProcessPoolExecutor``.  The engine is constructed here, inside the worker,
     so no asyncio event loop or bound-method state crosses the process boundary.
+
+    Progress is published through a :class:`ProgressSink` constructed *inside*
+    the worker from ``redis_url`` (never pickling a live client across the fork
+    boundary) and keyed by ``job_id``.
     """
-    return asyncio.run(BacktestEngine(config).run())
+    sink = ProgressSink(redis_url=redis_url)
+    progress_cb = make_progress_cb(sink, job_id)
+    return asyncio.run(BacktestEngine(config).run(progress_cb=progress_cb))
 
 
-def _execute_grid_worker(config: GridConfig) -> Any:
-    """Run a parameter sweep **in a subprocess** and return its result."""
-    return asyncio.run(BacktestGrid(config).run())
+def _execute_grid_worker(
+    config: GridConfig,
+    job_id: str,
+    redis_url: str | None,
+) -> Any:
+    """Run a parameter sweep **in a subprocess** and return its result.
+
+    The grid's own nested combination pool does not emit progress; the
+    ``GridProgress`` "Run X/Y" markers come from the grid's ``as_completed``
+    loop, which runs in *this* worker process, so a single sink keyed by
+    ``job_id`` captures the whole sweep.
+    """
+    sink = ProgressSink(redis_url=redis_url)
+    progress_cb = make_progress_cb(sink, job_id)
+    return asyncio.run(BacktestGrid(config).run(progress_cb=progress_cb))
 
 
 class BacktestJobManager:
@@ -126,6 +150,10 @@ class BacktestJobManager:
         self._worker_tasks: list[asyncio.Task] = []
         self._process_pool: ProcessPoolExecutor | None = None
         self._lock = asyncio.Lock()
+        # Progress publishing.  The manager keeps its own sink for reading /
+        # clearing; workers rebuild sinks from ``_redis_url`` inside the fork.
+        self._redis_url = get_settings().redis_url
+        self._progress_sink = ProgressSink(redis_url=self._redis_url)
 
     # ── Public API ────────────────────────────────────────────────────
 
@@ -250,7 +278,17 @@ class BacktestJobManager:
             "finished_at": job["finished_at"],
             "run_id": job["run_id"],
             "error": job["error"],
+            "progress": self.get_progress(job_id),
         }
+
+    def get_progress(self, job_id: str) -> dict[str, Any] | None:
+        """Return the latest progress record for ``job_id``, or None.
+
+        Reads fresh from the sink each call (the worker publishes to Redis/file
+        independently of this process), so polling always sees the newest
+        heartbeat for a running job.
+        """
+        return self._progress_sink.read(job_id)
 
     def get_result(self, job_id: str) -> dict[str, Any] | None:
         """Return the serialised result payload, or None if not completed."""
@@ -270,21 +308,52 @@ class BacktestJobManager:
             "result": payload,
         }
 
-    async def run_single(self, config: BacktestConfig) -> Any:
-        """Run a single backtest config in the process pool; return its result.
+    async def run_single(
+        self, config: BacktestConfig, *, job_id: str | None = None
+    ) -> tuple[str, Any]:
+        """Run a single backtest config in the process pool; return (job_id, result).
 
         Used by the UI single-run path so a long CPU-bound backtest is isolated
         in a forked worker (the same model as the REST/job-manager path) rather
         than running inside the server process and starving the event loop /
-        websocket keepalive.  Returns the ``BacktestResult`` (the worker returns
-        it across the process boundary), so granular per-candle progress is NOT
-        available — callers should render a coarse "running" state.
+        websocket keepalive.  The worker publishes granular progress to the
+        sink under ``job_id``; the caller polls it via :meth:`get_progress`.
+
+        ``job_id`` may be supplied by the caller so it is known *before* the
+        run completes (enabling the UI to poll granular progress inline); if
+        omitted, one is generated.
         """
         pool = self._process_pool
         if pool is None:
             raise RuntimeError("backtest process pool not started")
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(pool, _execute_run_worker, config)
+        if job_id is None:
+            job_id = uuid.uuid4().hex
+        result = await loop.run_in_executor(
+            pool, _execute_run_worker, config, job_id, self._redis_url
+        )
+        return job_id, result
+
+    async def run_single_grid(
+        self, config: GridConfig, *, job_id: str | None = None
+    ) -> tuple[str, Any]:
+        """Run a parameter sweep in the process pool; return (job_id, result).
+
+        The UI sweep path's counterpart to :meth:`run_single`: isolates the
+        grid orchestration in a forked worker (instead of running the
+        ``BacktestGrid`` object on the event loop) and publishes granular
+        ``GridProgress`` to the sink under ``job_id``.
+        """
+        pool = self._process_pool
+        if pool is None:
+            raise RuntimeError("backtest process pool not started")
+        loop = asyncio.get_running_loop()
+        if job_id is None:
+            job_id = uuid.uuid4().hex
+        result = await loop.run_in_executor(
+            pool, _execute_grid_worker, config, job_id, self._redis_url
+        )
+        return job_id, result
 
     # ── Worker ────────────────────────────────────────────────────────
 
@@ -313,9 +382,13 @@ class BacktestJobManager:
             if pool is None:
                 raise RuntimeError("backtest process pool not started")
             if job["kind"] == "run":
-                result = await loop.run_in_executor(pool, _execute_run_worker, job["config"])
+                result = await loop.run_in_executor(
+                    pool, _execute_run_worker, job["config"], job_id, self._redis_url
+                )
             else:
-                result = await loop.run_in_executor(pool, _execute_grid_worker, job["config"])
+                result = await loop.run_in_executor(
+                    pool, _execute_grid_worker, job["config"], job_id, self._redis_url
+                )
             job["result"] = result
             job["status"] = COMPLETED
             if result is not None and not getattr(result, "is_error", False):
@@ -326,6 +399,8 @@ class BacktestJobManager:
             logger.exception("Backtest job %s failed", job_id)
         finally:
             job["finished_at"] = datetime.now(timezone.utc).isoformat()
+            # Drop the job's progress heartbeats (Redis key and/or file).
+            self._progress_sink.clear(job_id)
 
     def _persist(self, result: Any, job: dict[str, Any]) -> None:
         """Best-effort persist the result to disk (survives restarts).
