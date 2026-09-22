@@ -188,6 +188,8 @@ class BacktestResult:
     equity_curve: list[EquityPoint] = field(default_factory=list)
     # Per-strategy breakdown
     per_strategy: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Per-symbol (token) breakdown
+    per_symbol: dict[str, dict[str, Any]] = field(default_factory=dict)
     # Aggregate metrics
     metrics: dict[str, Any] = field(default_factory=dict)
     # Execution metadata

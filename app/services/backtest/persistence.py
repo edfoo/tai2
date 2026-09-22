@@ -102,6 +102,7 @@ def result_to_dict(result: BacktestResult) -> dict[str, Any]:
         },
         "metrics": result.metrics,
         "per_strategy": result.per_strategy,
+        "per_symbol": getattr(result, "per_symbol", {}) or {},
         "trades_count": len(result.trades),
         "trades": [_trade_to_dict(t) for t in result.trades],
         "equity_curve": [
@@ -165,6 +166,7 @@ def result_from_dict(data: dict[str, Any]) -> BacktestResult | None:
             ),
             metrics=dict(data.get("metrics") or {}),
             per_strategy=dict(data.get("per_strategy") or {}),
+            per_symbol=dict(data.get("per_symbol") or {}),
             trades=[
                 _trade_from_dict(t) for t in (data.get("trades") or [])
                 if isinstance(t, dict)
@@ -309,7 +311,9 @@ def save_result(
 
     breakdown = out_dir / f"{run_id}_per_strategy.json"
     breakdown.write_text(
-        json.dumps({"per_strategy": result.per_strategy, "metrics": result.metrics},
+        json.dumps({"per_strategy": result.per_strategy,
+                    "per_symbol": result.per_symbol,
+                    "metrics": result.metrics},
                    indent=2, default=str)
     )
 

@@ -31,6 +31,7 @@ from app.services.backtest.metrics import (
     compute_buy_and_hold,
     compute_metrics,
     compute_per_strategy_metrics,
+    compute_per_symbol_metrics,
 )
 from app.services.backtest.models import (
     BacktestConfig,
@@ -361,6 +362,7 @@ class BacktestEngine:
                 candles_per_year=cpy,
             )
             result.per_strategy = compute_per_strategy_metrics(all_trades)
+            result.per_symbol = compute_per_symbol_metrics(all_trades)
             # Buy-and-hold benchmark on the first symbol's LTF candles.
             _benchmark = self._compute_benchmark(symbol_candles)
             if _benchmark is not None:

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict
-from typing import Any
+from typing import Any, Callable
 
 from app.services.backtest.models import EquityPoint, SimPosition
 
@@ -261,15 +261,33 @@ def compute_buy_and_hold(
     }
 
 
-def compute_per_strategy_metrics(trades: list[SimPosition]) -> dict[str, dict[str, Any]]:
-    """Compute metrics broken down by strategy name."""
-    by_strategy: dict[str, list[SimPosition]] = defaultdict(list)
+def compute_group_metrics(
+    trades: list[SimPosition],
+    key_fn: Callable[[SimPosition], str],
+) -> dict[str, dict[str, Any]]:
+    """Group trades by ``key_fn`` and compute per-group aggregate metrics.
+
+    Shared by the per-strategy and per-symbol breakdowns so both rollups stay
+    consistent.  Each group's value is the full ``compute_metrics`` output plus
+    a ``trades`` count (``initial_capital`` is 0 so return/Drawdown fields are
+    not meaningful per group — they are aggregate-only).
+    """
+    groups: dict[str, list[SimPosition]] = defaultdict(list)
     for t in trades:
-        name = t.strategy_name or "unknown"
-        by_strategy[name].append(t)
+        groups[key_fn(t) or "unknown"].append(t)
 
     result: dict[str, dict[str, Any]] = {}
-    for name, strat_trades in by_strategy.items():
-        result[name] = compute_metrics(strat_trades, [], 0.0)
-        result[name]["trades"] = len(strat_trades)
+    for name, group_trades in groups.items():
+        result[name] = compute_metrics(group_trades, [], 0.0)
+        result[name]["trades"] = len(group_trades)
     return result
+
+
+def compute_per_strategy_metrics(trades: list[SimPosition]) -> dict[str, dict[str, Any]]:
+    """Compute metrics broken down by strategy name."""
+    return compute_group_metrics(trades, key_fn=lambda t: t.strategy_name)
+
+
+def compute_per_symbol_metrics(trades: list[SimPosition]) -> dict[str, dict[str, Any]]:
+    """Compute metrics broken down by symbol (token)."""
+    return compute_group_metrics(trades, key_fn=lambda t: t.symbol)

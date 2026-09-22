@@ -9669,7 +9669,7 @@ def register_pages(app: FastAPI) -> None:
                 timer to pick up.
                 """
                 try:
-                    _job_id, result = await manager.run_single(bt_config, job_id=_job_id)
+                    _, result = await manager.run_single(bt_config, job_id=_job_id)
                     app.state.backtest_result = result
                     # Persist the result to disk (survives app restarts) and
                     # refresh the Saved Runs browser.
@@ -9979,10 +9979,117 @@ def register_pages(app: FastAPI) -> None:
                     with ui.table(columns=sens_columns, rows=sens_rows).classes("w-full"):
                         pass
 
+        def _fmt(value: Any, spec: str = ".2f", dash: str = "—") -> str:
+            """None-safe numeric format (metrics store `None` for inf/NaN)."""
+            if value is None or value == "":
+                return dash
+            try:
+                return format(float(value), spec)
+            except (TypeError, ValueError):
+                return str(value)
+
+        def _metric_card(label: str, value: str, sub: str) -> None:
+            """Render a small metric card."""
+            with ui.column().classes("bg-slate-50 rounded-lg px-4 py-2 min-w-[120px]"):
+                ui.label(label).classes("text-xs text-slate-500")
+                ui.label(value).classes("text-lg font-bold")
+                if sub:
+                    ui.label(sub).classes("text-xs text-slate-400")
+
+        _TRADE_COLUMNS = [
+            {"name": "symbol", "label": "Symbol", "field": "symbol", "align": "left"},
+            {"name": "direction", "label": "Dir", "field": "direction", "align": "left"},
+            {"name": "strategy", "label": "Strategy", "field": "strategy", "align": "left"},
+            {"name": "entry", "label": "Entry", "field": "entry", "align": "right"},
+            {"name": "close", "label": "Close", "field": "close", "align": "right"},
+            {"name": "reason", "label": "Reason", "field": "reason", "align": "left"},
+            {"name": "pnl", "label": "PnL", "field": "pnl", "align": "right"},
+            {"name": "net_pnl", "label": "Net PnL", "field": "net_pnl", "align": "right"},
+            {"name": "fee", "label": "Fees", "field": "fee", "align": "right"},
+            {"name": "mfee", "label": "MFE %", "field": "mfee", "align": "right"},
+            {"name": "mae", "label": "MAE %", "field": "mae", "align": "right"},
+            {"name": "rmult", "label": "R", "field": "rmult", "align": "right"},
+            {"name": "held", "label": "Bars", "field": "held", "align": "right"},
+        ]
+
+        def _trade_rows(trades: list[Any]) -> list[dict[str, Any]]:
+            """Build table rows for a list of SimPosition objects."""
+            rows: list[dict[str, Any]] = []
+            for t in trades:
+                r_mult: Any = None
+                if t.sl_price is not None and t.entry_price > 0:
+                    risk_pct = abs(t.entry_price - t.sl_price) / t.entry_price * 100.0
+                    if risk_pct > 0:
+                        r_mult = t.pnl_pct / risk_pct
+                rows.append({
+                    "symbol": t.symbol,
+                    "direction": t.direction,
+                    "strategy": t.strategy_name,
+                    "entry": f"{t.entry_price:.4f}",
+                    "close": f"{t.close_price:.4f}" if t.close_price else "—",
+                    "reason": t.close_reason,
+                    "pnl": f"{t.pnl:.2f}",
+                    "net_pnl": f"{t.net_pnl:.2f}" if t.net_pnl else "—",
+                    "fee": f"{t.fee_and_funding_cost:.2f}" if t.fee_and_funding_cost else "—",
+                    "mfee": f"{t.max_favorable_pct:.2f}%" if t.max_favorable_pct else "—",
+                    "mae": f"{t.max_adverse_pct:.2f}%" if t.max_adverse_pct else "—",
+                    "rmult": f"{r_mult:.2f}" if r_mult is not None else "—",
+                    "held": str(t.candles_held),
+                })
+            return rows
+
+        def _render_trade_table(trades: list[Any], label: str) -> None:
+            """Render the per-trade drilldown table (level 3)."""
+            if not trades:
+                return
+            with ui.card().classes("w-full rounded-lg border border-slate-100 bg-slate-50/40"):
+                ui.label(label).classes("text-sm font-semibold mb-1")
+                with ui.table(columns=_TRADE_COLUMNS, rows=_trade_rows(trades)).classes(
+                    "w-full"
+                ):
+                    pass
+
+        def _render_symbol_card(symbol: str, trades: list[Any]) -> None:
+            """Render a per-token (level 2) collapsible card + trade table."""
+            wins = [t for t in trades if t.pnl > 0]
+            net = sum(t.pnl for t in trades)
+            wr = (len(wins) / len(trades) * 100.0) if trades else 0.0
+            header = (
+                f"{symbol}  ·  {len(trades)} trades · {net:+.2f} USDT · {wr:.1f}% wr"
+            )
+            with ui.expansion(header).classes("w-full rounded-lg border border-slate-200 bg-white"):
+                _render_trade_table(trades, f"{symbol} — {len(trades)} trades")
+
+        def _render_strategy_card(name: str, trades: list[Any]) -> None:
+            """Render a per-strategy (level 1) card with a per-token drilldown."""
+            wins = [t for t in trades if t.pnl > 0]
+            losses = [t for t in trades if t.pnl < 0]
+            net = sum(t.pnl for t in trades)
+            wr = (len(wins) / len(trades) * 100.0) if trades else 0.0
+            gross_profit = sum(t.pnl for t in wins)
+            gross_loss = abs(sum(t.pnl for t in losses))
+            pf = (gross_profit / gross_loss) if gross_loss > 0 else None
+            header = (
+                f"{name}  ·  {len(trades)} trades · {net:+.2f} USDT · "
+                f"{wr:.1f}% wr · PF {_fmt(pf)}"
+            )
+            with ui.expansion(header).classes("w-full rounded-lg border border-slate-200 bg-white mb-1"):
+                # Per-token drilldown under this strategy.
+                by_symbol: dict[str, list[Any]] = {}
+                for t in trades:
+                    by_symbol.setdefault(t.symbol or "unknown", []).append(t)
+                for sym, sym_trades in sorted(by_symbol.items(),
+                                              key=lambda kv: -sum(t.pnl for t in kv[1])):
+                    _render_symbol_card(sym, sym_trades)
+
         def _render_results(result: Any, container: ui.column) -> None:
-            """Render the backtest results into the results container."""
+            """Render the backtest results into the results container.
+
+            Uses a 4-level drilldown: run-total summary cards → per-strategy
+            expansion cards → per-token expansion cards → per-trade table.
+            """
             with container:
-                # ── Summary metrics ──────────────────────────────────────
+                # ── Summary metrics (level 0) ────────────────────────────
                 with ui.card().classes("w-full rounded-lg border border-slate-200 mb-2"):
                     ui.label("Summary").classes("text-lg font-semibold mb-2")
                     m = result.metrics
@@ -9990,38 +10097,13 @@ def register_pages(app: FastAPI) -> None:
                         _metric_card("Net Profit", f"{m.get('net_profit', 0):.2f} USDT", f"{m.get('net_profit_pct', 0):.1f}%")
                         _metric_card("Total Trades", str(m.get("total_trades", 0)), "")
                         _metric_card("Win Rate", f"{m.get('win_rate', 0):.1f}%", "")
-                        _metric_card("Profit Factor", f"{m.get('profit_factor', 0):.2f}", "")
+                        _metric_card("Profit Factor", _fmt(m.get("profit_factor")), "")
                         _metric_card("Max Drawdown", f"{m.get('max_drawdown', 0):.2f} USDT", f"{m.get('max_drawdown_pct', 0):.1f}%")
                         _metric_card("Final Equity", f"{m.get('final_equity', 0):.2f} USDT", "")
                         _metric_card("Sharpe/Candle", f"{m.get('sharpe_per_candle', 0):.4f}", "")
                         _metric_card("Avg Win", f"{m.get('average_win', 0):.2f}", "")
                         _metric_card("Avg Loss", f"{m.get('average_loss', 0):.2f}", "")
                         _metric_card("Expectancy", f"{m.get('expectancy', 0):.4f}", "")
-
-                # ── Per-strategy breakdown ────────────────────────────────
-                if result.per_strategy:
-                    with ui.card().classes("w-full rounded-lg border border-slate-200 mb-2"):
-                        ui.label("Per-Strategy Breakdown").classes("text-lg font-semibold mb-2")
-                        with ui.table(
-                            columns=[
-                                {"name": "strategy", "label": "Strategy", "field": "strategy", "align": "left"},
-                                {"name": "trades", "label": "Trades", "field": "trades", "align": "right"},
-                                {"name": "win_rate", "label": "Win Rate", "field": "win_rate", "align": "right"},
-                                {"name": "net_profit", "label": "Net Profit", "field": "net_profit", "align": "right"},
-                                {"name": "profit_factor", "label": "PF", "field": "profit_factor", "align": "right"},
-                            ],
-                            rows=[
-                                {
-                                    "strategy": name,
-                                    "trades": sm.get("trades", 0),
-                                    "win_rate": f"{sm.get('win_rate', 0):.1f}%",
-                                    "net_profit": f"{sm.get('net_profit', 0):.2f}",
-                                    "profit_factor": f"{sm.get('profit_factor', 0):.2f}",
-                                }
-                                for name, sm in result.per_strategy.items()
-                            ],
-                        ).classes("w-full"):
-                            pass
 
                 # ── Equity curve ──────────────────────────────────────────
                 if result.equity_curve:
@@ -10038,44 +10120,18 @@ def register_pages(app: FastAPI) -> None:
                             "series": [{"data": [p["y"] for p in eq_data], "type": "line", "smooth": True}],
                         }).classes("w-full h-64")
 
-                # ── Trade table ───────────────────────────────────────────
+                # ── Per-strategy → per-token → per-trade drilldown ──────
                 if result.trades:
                     with ui.card().classes("w-full rounded-lg border border-slate-200"):
-                        ui.label(f"Trades ({len(result.trades)})").classes("text-lg font-semibold mb-2")
-                        with ui.table(
-                            columns=[
-                                {"name": "symbol", "label": "Symbol", "field": "symbol", "align": "left"},
-                                {"name": "direction", "label": "Dir", "field": "direction", "align": "left"},
-                                {"name": "strategy", "label": "Strategy", "field": "strategy", "align": "left"},
-                                {"name": "entry", "label": "Entry", "field": "entry", "align": "right"},
-                                {"name": "close", "label": "Close", "field": "close", "align": "right"},
-                                {"name": "reason", "label": "Reason", "field": "reason", "align": "left"},
-                                {"name": "pnl", "label": "PnL", "field": "pnl", "align": "right"},
-                                {"name": "pnl_pct", "label": "PnL %", "field": "pnl_pct", "align": "right"},
-                            ],
-                            rows=[
-                                {
-                                    "symbol": t.symbol,
-                                    "direction": t.direction,
-                                    "strategy": t.strategy_name,
-                                    "entry": f"{t.entry_price:.4f}",
-                                    "close": f"{t.close_price:.4f}" if t.close_price else "—",
-                                    "reason": t.close_reason,
-                                    "pnl": f"{t.pnl:.2f}",
-                                    "pnl_pct": f"{t.pnl_pct:.2f}%",
-                                }
-                                for t in result.trades
-                            ],
-                        ).classes("w-full"):
-                            pass
-
-        def _metric_card(label: str, value: str, sub: str) -> None:
-            """Render a small metric card."""
-            with ui.column().classes("bg-slate-50 rounded-lg px-4 py-2 min-w-[120px]"):
-                ui.label(label).classes("text-xs text-slate-500")
-                ui.label(value).classes("text-lg font-bold")
-                if sub:
-                    ui.label(sub).classes("text-xs text-slate-400")
+                        ui.label("Trade Drilldown").classes("text-lg font-semibold mb-2")
+                        by_strategy: dict[str, list[Any]] = {}
+                        for t in result.trades:
+                            by_strategy.setdefault(t.strategy_name or "unknown", []).append(t)
+                        for name, strat_trades in sorted(
+                            by_strategy.items(),
+                            key=lambda kv: -sum(t.pnl for t in kv[1]),
+                        ):
+                            _render_strategy_card(name, strat_trades)
 
         # Render any previously stored backtest result (survives page reload).
         _stored_result = getattr(app.state, "backtest_result", None)
