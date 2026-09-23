@@ -10190,20 +10190,26 @@ def register_pages(app: FastAPI) -> None:
             # coarse "Running backtest…"/"Starting sweep..." placeholders.
             active_job_id = bp.get("job_id")
             manager = getattr(app.state, "backtest_jobs", None)
+            live_text = ""
             if active_job_id and manager is not None:
                 phase_now = bp.get("phase", "")
                 if phase_now not in ("done", "error", "sweep_done"):
                     live_text = _format_progress(manager.get_progress(active_job_id))
-                    if live_text:
-                        if bp.get("sweep_job_id"):
-                            sweep_progress_label.set_text(live_text)
-                        else:
-                            progress_label.set_text(live_text)
 
-            text = bp.get("text", "")
-            if text:
-                progress_label.set_text(text)
-                sweep_progress_label.set_text(text)
+            # Granular Redis/file progress takes precedence over the coarse
+            # in-memory placeholder ("Running backtest…"/"Starting sweep...").
+            # The coarse text is only a fallback for the brief window before
+            # the worker publishes its first heartbeat.
+            if live_text:
+                if bp.get("sweep_job_id"):
+                    sweep_progress_label.set_text(live_text)
+                else:
+                    progress_label.set_text(live_text)
+            else:
+                text = bp.get("text", "")
+                if text:
+                    progress_label.set_text(text)
+                    sweep_progress_label.set_text(text)
             phase = bp.get("phase", "")
             if phase in ("done", "error"):
                 result = bp.pop("result", None)
