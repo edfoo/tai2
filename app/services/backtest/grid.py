@@ -37,7 +37,9 @@ import copy
 import ctypes
 import itertools
 import logging
+import math
 import os
+import random
 import signal
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -45,14 +47,17 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 from app.services.backtest.engine import BacktestEngine
+from app.services.backtest.data_fetcher import timeframe_ms
 from app.services.backtest.models import (
     BacktestConfig,
     BacktestResult,
+    EquityPoint,
     GridConfig,
     GridProgress,
     GridResult,
     GridRunResult,
 )
+from app.services.backtest.runner import walk_forward_splits
 
 logger = logging.getLogger(__name__)
 
@@ -126,8 +131,22 @@ class BacktestGrid:
             param_keys = [p.key for p in self._config.params]
             param_labels = [p.label or p.key for p in self._config.params]
             value_lists = [p.values for p in self._config.params]
-            combinations = list(itertools.product(*value_lists))
+            if self._config.search_mode not in {"exhaustive", "random"}:
+                result.error = f"Unsupported search mode: {self._config.search_mode}"
+                result.finished_at = datetime.now(timezone.utc).isoformat()
+                result.duration_seconds = round(time.monotonic() - t0, 3)
+                return result
+            combinations, total_combinations = _build_combinations(
+                value_lists,
+                search_mode=self._config.search_mode,
+                budget=self._config.combination_budget,
+                seed=self._config.random_seed,
+            )
+            result.total_combinations = total_combinations
+            result.search_mode = self._config.search_mode
+            result.random_seed = self._config.random_seed
             total = len(combinations)
+            result.attempted_combinations = total
 
             if total == 0:
                 result.error = "No parameter combinations — add at least one GridParamDef with values."
@@ -155,19 +174,40 @@ class BacktestGrid:
                 _apply_params(bt_config, param_values)
                 jobs.append((param_values, label_values, bt_config))
 
+            validation_windows: list[tuple[int, int]] = []
+            if self._config.validation_folds:
+                splits = walk_forward_splits(
+                    start_ts=self._config.base_config.start_ts,
+                    end_ts=self._config.base_config.end_ts,
+                    folds=self._config.validation_folds,
+                    train_ratio=self._config.validation_train_ratio,
+                )
+                if len(splits) != self._config.validation_folds:
+                    result.error = "Validation folds do not fit the requested date range."
+                    result.finished_at = datetime.now(timezone.utc).isoformat()
+                    result.duration_seconds = round(time.monotonic() - t0, 3)
+                    return result
+                validation_windows = [(split[2], split[3]) for split in splits]
+            fold_count = len(validation_windows) or 1
+
             workers = self._workers if self._workers and self._workers > 0 else _default_workers()
             workers = min(workers, total)
 
             completed = 0
-            ordered_results: dict[int, tuple[GridRunResult | None, str | None]] = {}
+            ordered_results: dict[int, dict[int, tuple[BacktestResult | None, str | None]]] = {}
 
             with ProcessPoolExecutor(max_workers=workers, initializer=_worker_initializer) as ex:
-                future_to_idx: dict[Any, int] = {
-                    ex.submit(_run_combination, cfg): idx
-                    for idx, (_pv, _lv, cfg) in enumerate(jobs)
-                }
-                for fut in as_completed(future_to_idx):
-                    idx = future_to_idx[fut]
+                future_to_job: dict[Any, tuple[int, int]] = {}
+                for idx, (_pv, _lv, cfg) in enumerate(jobs):
+                    windows = validation_windows or [(cfg.start_ts, cfg.end_ts)]
+                    for fold_idx, (test_start, test_end) in enumerate(windows):
+                        fold_config = copy.deepcopy(cfg)
+                        fold_config.start_ts = test_start
+                        fold_config.end_ts = test_end
+                        future_to_job[ex.submit(_run_combination, fold_config)] = (idx, fold_idx)
+
+                for fut in as_completed(future_to_job):
+                    idx, fold_idx = future_to_job[fut]
                     param_values, label_values, _cfg = jobs[idx]
                     try:
                         bt_result = fut.result()
@@ -177,43 +217,66 @@ class BacktestGrid:
                         bt_result = None
                         bt_error = str(exc)
 
-                    rank_score: float | None = None
-                    below_min = False
-                    if bt_result is not None and not bt_result.is_error:
-                        rank_score = _extract_metric(bt_result, self._config.rank_by)
-                        total_trades = bt_result.metrics.get("total_trades", 0)
-                        below_min = total_trades < self._config.min_trades
-                    elif bt_result is not None and bt_result.is_error:
+                    if bt_result is not None and bt_result.is_error:
                         logger.warning(
-                            "BacktestGrid: combination %d errored: %s",
-                            idx + 1, bt_result.error,
+                            "BacktestGrid: combination %d fold %d errored: %s",
+                            idx + 1, fold_idx + 1, bt_result.error,
                         )
                         bt_error = bt_result.error
                         bt_result = None
-
-                    run_result = GridRunResult(
-                        params=label_values,
-                        result=bt_result,
-                        rank_score=rank_score,
-                        below_min_trades=below_min,
-                    )
-                    ordered_results[idx] = (run_result, bt_error)
+                    ordered_results.setdefault(idx, {})[fold_idx] = (bt_result, bt_error)
 
                     completed += 1
                     if progress_cb:
                         combo_str = ", ".join(f"{k}={v}" for k, v in label_values.items())
+                        fold_note = f", fold {fold_idx + 1}/{fold_count}" if fold_count > 1 else ""
                         progress_cb(GridProgress(
                             phase="grid",
                             current=completed,
-                            total=total,
-                            message=f"Run {completed}/{total}: {combo_str}",
+                            total=total * fold_count,
+                            message=f"Run {completed}/{total * fold_count}{fold_note}: {combo_str}",
                         ))
 
             # ── Assemble in deterministic (submission) order ────────────
             for idx in range(total):
-                run_result, _err = ordered_results.get(idx, (None, None))
-                if run_result is not None:
-                    result.runs.append(run_result)
+                fold_rows = ordered_results.get(idx, {})
+                successful = [
+                    (fold_idx, row[0]) for fold_idx, row in sorted(fold_rows.items())
+                    if row[0] is not None
+                ]
+                if not successful:
+                    continue
+                fold_results = [bt for _fold_idx, bt in successful]
+                fold_metrics = [
+                    {
+                        "fold": fold_idx + 1,
+                        "start_ts": validation_windows[fold_idx][0] if validation_windows else jobs[idx][2].start_ts,
+                        "end_ts": validation_windows[fold_idx][1] if validation_windows else jobs[idx][2].end_ts,
+                        "metrics": dict(bt.metrics or {}),
+                    }
+                    for fold_idx, bt in successful
+                ]
+                fold_scores = [
+                    _extract_metric(bt, self._config.rank_by)
+                    for bt in fold_results
+                ]
+                valid_scores = [score for score in fold_scores if score is not None]
+                rank_score = (
+                    sum(valid_scores) / len(valid_scores)
+                    if valid_scores and len(successful) == fold_count and len(valid_scores) == fold_count
+                    else None
+                )
+                aggregate = _aggregate_fold_results(fold_results)
+                aggregate.config = jobs[idx][2]
+                total_trades = sum(int(bt.metrics.get("total_trades", 0)) for bt in fold_results)
+                below_min = total_trades < self._config.min_trades
+                result.runs.append(GridRunResult(
+                    params=jobs[idx][1],
+                    result=aggregate,
+                    rank_score=rank_score,
+                    below_min_trades=below_min or len(successful) != fold_count,
+                    fold_metrics=fold_metrics,
+                ))
 
             # ── Rank results ────────────────────────────────────────────
             # Sort by rank_score descending.  Runs with None score or
@@ -226,7 +289,10 @@ class BacktestGrid:
             result.ranked = sorted(result.runs, key=_sort_key, reverse=True)
 
             if progress_cb:
-                progress_cb(GridProgress(phase="done", current=total, total=total, message="Sweep complete"))
+                progress_cb(GridProgress(
+                    phase="done", current=total * fold_count, total=total * fold_count,
+                    message="Sweep complete",
+                ))
 
         except Exception as exc:
             logger.exception("BacktestGrid failed")
@@ -290,3 +356,75 @@ def _extract_metric(result: Any, key: str) -> float | None:
             if best is None or sv > best:
                 best = float(sv)
     return best
+
+
+def _aggregate_fold_results(results: list[BacktestResult]) -> BacktestResult:
+    """Combine chronological fold trades/equity while preserving per-fold scoring separately."""
+    if len(results) == 1:
+        return results[0]
+
+    aggregate = BacktestResult(config=results[0].config)
+    aggregate.trades = [trade for fold in results for trade in fold.trades]
+    offset = 0.0
+    for fold in results:
+        for point in fold.equity_curve:
+            aggregate.equity_curve.append(EquityPoint(
+                ts=point.ts,
+                equity=point.equity + offset,
+                open_positions=point.open_positions,
+            ))
+        if fold.equity_curve:
+            offset += fold.equity_curve[-1].equity - fold.config.initial_capital
+    from app.services.backtest.metrics import compute_metrics, compute_per_strategy_metrics, compute_per_symbol_metrics
+
+    aggregate.metrics = compute_metrics(
+        aggregate.trades,
+        aggregate.equity_curve,
+        results[0].config.initial_capital,
+        candles_per_year=_candles_per_year(results[0].config),
+    )
+    aggregate.per_strategy = compute_per_strategy_metrics(aggregate.trades)
+    aggregate.per_symbol = compute_per_symbol_metrics(aggregate.trades)
+    aggregate.candles_processed = sum(fold.candles_processed for fold in results)
+    aggregate.duration_seconds = sum(fold.duration_seconds for fold in results)
+    return aggregate
+
+
+def _candles_per_year(config: BacktestConfig) -> int:
+    timeframe = (
+        config.evaluation_timeframe
+        if config.evaluation_mode == "finer_ltf"
+        else config.timeframe
+    )
+    interval_ms = timeframe_ms(timeframe)
+    if interval_ms <= 0:
+        return 0
+    return int(round(365.0 * 24 * 60 * 60 * 1000 / interval_ms))
+
+
+def _combination_at_index(value_lists: list[list[Any]], index: int) -> tuple[Any, ...]:
+    """Decode a row-major Cartesian-product index without materializing the product."""
+    values: list[Any] = [None] * len(value_lists)
+    for position in range(len(value_lists) - 1, -1, -1):
+        radix = len(value_lists[position])
+        index, digit = divmod(index, radix)
+        values[position] = value_lists[position][digit]
+    return tuple(values)
+
+
+def _build_combinations(
+    value_lists: list[list[Any]],
+    *,
+    search_mode: str,
+    budget: int,
+    seed: int,
+) -> tuple[list[tuple[Any, ...]], int]:
+    """Build all combinations or a reproducible bounded random sample."""
+    total = math.prod(len(values) for values in value_lists)
+    if search_mode == "random" and budget > 0 and budget < total:
+        rng = random.Random(seed)
+        indices: set[int] = set()
+        while len(indices) < budget:
+            indices.add(rng.randrange(total))
+        return [_combination_at_index(value_lists, idx) for idx in sorted(indices)], total
+    return list(itertools.product(*value_lists)), total

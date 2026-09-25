@@ -36,6 +36,28 @@ def test_set_nested_creates_intermediate_dicts() -> None:
     assert d["strategies"]["mean_reversion"]["rsi_oversold"] == 25
 
 
+def test_combination_at_index_matches_cartesian_order() -> None:
+    values = [["a", "b"], [1, 2, 3]]
+    assert [G._combination_at_index(values, i) for i in range(6)] == list(
+        __import__("itertools").product(*values)
+    )
+
+
+def test_random_search_obeys_budget_and_seed() -> None:
+    values = [list(range(10)), list(range(8))]
+    first, total = G._build_combinations(
+        values, search_mode="random", budget=7, seed=42
+    )
+    second, second_total = G._build_combinations(
+        values, search_mode="random", budget=7, seed=42
+    )
+
+    assert total == second_total == 80
+    assert len(first) == 7
+    assert first == second
+    assert len(set(first)) == 7
+
+
 def test_default_workers_positive(monkeypatch) -> None:
     monkeypatch.delenv("BACKTEST_WORKERS", raising=False)
     assert G._default_workers() >= 1
@@ -84,3 +106,45 @@ async def test_grid_runs_combinations_in_parallel(monkeypatch) -> None:
     # Ranked by sharpe desc → 35, 30, 25.
     rankings = [r.params["strategies.mean_reversion.rsi_oversold"] for r in result.ranked]
     assert rankings == [35, 30, 25], rankings
+
+
+@pytest.mark.asyncio
+async def test_grid_validation_ranks_mean_oos_score_and_preserves_folds(monkeypatch) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    monkeypatch.setattr(G, "ProcessPoolExecutor", ThreadPoolExecutor)
+
+    def _fake_combination(config: BacktestConfig) -> BacktestResult:
+        rsi = config.launcher_config["strategies"]["mean_reversion"]["rsi_oversold"]
+        result = BacktestResult(config=config)
+        result.metrics = {
+            "total_trades": 2,
+            "net_profit_pct": (
+                90.0 if rsi == 20 else 0.0
+            ) if config.start_ts == 500 else (
+                0.0 if rsi == 20 else 80.0
+            ),
+        }
+        return result
+
+    monkeypatch.setattr(G, "_run_combination", _fake_combination)
+    config = _base_config()
+    config.start_ts = 0
+    config.end_ts = 1000
+    sweep = GridConfig(
+        base_config=config,
+        params=[GridParamDef("strategies.mean_reversion.rsi_oversold", [20, 30])],
+        rank_by="net_profit_pct",
+        min_trades=1,
+        validation_folds=2,
+        validation_train_ratio=0.5,
+    )
+
+    result = await G.BacktestGrid(sweep, workers=2).run()
+
+    assert result.is_error is False
+    assert result.total_combinations == result.attempted_combinations == 2
+    assert len(result.ranked) == 2
+    assert result.ranked[0].params["strategies.mean_reversion.rsi_oversold"] == 20
+    assert result.ranked[0].rank_score == pytest.approx(45.0)
+    assert len(result.ranked[0].fold_metrics) == 2

@@ -459,6 +459,8 @@ class Simulator:
                 # This position is for a different symbol — skip TP/SL check
                 # (multi-symbol backtests pass candles for each symbol).
                 continue
+            if candle.ts <= position.entry_ts:
+                continue
             position.candles_held += 1
             self._track_excursion(position, candle)
             if self._check_tp_sl(position, candle):
@@ -499,6 +501,8 @@ class Simulator:
         for position in list(self._open_positions):
             candle = prices.get(position.symbol)
             if candle is None:
+                continue
+            if candle.ts <= position.entry_ts:
                 continue
             position.candles_held += 1
             self._track_excursion(position, candle)
@@ -721,6 +725,8 @@ class Simulator:
         for position in list(self._open_positions):
             candle = prices.get(position.symbol)
             if candle is None:
+                continue
+            if candle.ts <= position.entry_ts:
                 continue
             snapshot = symbol_snapshots.get(position.symbol)
             if not snapshot:

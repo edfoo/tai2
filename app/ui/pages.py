@@ -9412,6 +9412,41 @@ def register_pages(app: FastAPI) -> None:
                             precision=0,
                         ).classes("w-32")
 
+                    with ui.row().classes("w-full gap-4 items-center mt-2"):
+                        validation_folds_input = ui.number(
+                            label="Validation folds (0 = full range)",
+                            value=0,
+                            min=0,
+                            step=1,
+                            precision=0,
+                        ).classes("w-56")
+                        validation_train_ratio_input = ui.number(
+                            label="Unscored prefix fraction",
+                            value=0.7,
+                            min=0.1,
+                            max=0.95,
+                            step=0.05,
+                            precision=2,
+                        ).classes("w-40")
+                        search_mode_select = ui.select(
+                            options={"exhaustive": "Exhaustive", "random": "Random"},
+                            value="exhaustive",
+                            label="Search mode",
+                        ).classes("w-40")
+                        combination_budget_input = ui.number(
+                            label="Random run budget (0 = all)",
+                            value=0,
+                            min=0,
+                            step=1,
+                            precision=0,
+                        ).classes("w-56")
+                        random_seed_input = ui.number(
+                            label="Random seed",
+                            value=42,
+                            step=1,
+                            precision=0,
+                        ).classes("w-32")
+
                     # ── Sweep run button + progress ─────────────────────
                     with ui.row().classes("w-full items-center gap-4 mt-2"):
                         sweep_run_button = ui.button("Run Sweep", icon="grid_view", color="secondary")
@@ -9768,6 +9803,11 @@ def register_pages(app: FastAPI) -> None:
                 params=params,
                 rank_by=rank_by_select.value or "sharpe_per_candle",
                 min_trades=int(min_trades_input.value or 5),
+                validation_folds=int(validation_folds_input.value or 0),
+                validation_train_ratio=float(validation_train_ratio_input.value or 0.7),
+                search_mode=search_mode_select.value or "exhaustive",
+                combination_budget=int(combination_budget_input.value or 0),
+                random_seed=int(random_seed_input.value or 0),
             )
 
             # ── Run the sweep ───────────────────────────────────────────

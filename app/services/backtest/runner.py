@@ -105,24 +105,28 @@ def walk_forward_splits(
     folds: int,
     train_ratio: float = 0.7,
 ) -> list[tuple[int, int, int, int]]:
-    """Return ``(train_start, train_end, test_start, test_end)`` walk-forward folds.
+    """Return expanding-history folds as ``(train_start, train_end, test_start, test_end)``.
 
-    Splits ``[start_ts, end_ts]`` into ``folds`` equally-spaced test segments;
-    each fold's train window runs from ``start_ts`` to ``train_end`` (a
-    ``train_ratio`` fraction of the way to the test start), so later folds
-    train on progressively more history (expanding window).  Returns an empty
-    list when ``folds <= 1`` or the range is invalid.
+    The initial ``train_ratio`` portion is excluded from scoring. The remaining
+    range is split into ``folds`` contiguous, non-overlapping test windows.
+    The expanding training bounds are metadata only; this helper does not fit
+    strategy parameters or prepare candle warmup data.
+    Returns an empty list for invalid bounds, ratios, or windows.
     """
-    if folds <= 1 or end_ts <= start_ts:
+    if folds <= 0 or end_ts <= start_ts or not 0.0 < train_ratio < 1.0:
         return []
     span = end_ts - start_ts
-    fold_span = span // folds
+    validation_start = start_ts + int(span * train_ratio)
+    validation_span = end_ts - validation_start
+    if validation_span < folds:
+        return []
     splits: list[tuple[int, int, int, int]] = []
     for i in range(folds):
-        test_start = start_ts + (i + 1) * fold_span
-        test_end = min(test_start + fold_span, end_ts)
-        train_end = start_ts + int((test_start - start_ts) * train_ratio)
-        splits.append((start_ts, train_end, test_start, test_end))
+        test_start = validation_start + (validation_span * i) // folds
+        test_end = validation_start + (validation_span * (i + 1)) // folds
+        if test_end <= test_start:
+            return []
+        splits.append((start_ts, test_start, test_start, test_end))
     return splits
 
 

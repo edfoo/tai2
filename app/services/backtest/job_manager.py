@@ -249,6 +249,11 @@ class BacktestJobManager:
             params=params,
             rank_by=req.rank_by,
             min_trades=req.min_trades,
+            validation_folds=req.validation_folds,
+            validation_train_ratio=req.validation_train_ratio,
+            search_mode=req.search_mode,
+            combination_budget=req.combination_budget,
+            random_seed=req.random_seed,
         )
         self._jobs[job_id] = {
             "job_id": job_id,

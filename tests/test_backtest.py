@@ -39,6 +39,65 @@ from app.services.backtest.snapshot_builder import SnapshotBuilder
 class TestSimulatorTPSL:
     """Test the simulated broker's TP/SL close logic."""
 
+    @pytest.mark.parametrize(
+        ("direction", "tp_price", "sl_price", "high", "low"),
+        [
+            ("long", 51000.0, 49500.0, 51200.0, 49400.0),
+            ("short", 49000.0, 50500.0, 50600.0, 48800.0),
+        ],
+    )
+    def test_entry_candle_cannot_trigger_exit(
+        self,
+        direction: str,
+        tp_price: float,
+        sl_price: float,
+        high: float,
+        low: float,
+    ) -> None:
+        sim = Simulator(initial_capital=1000.0, notional_per_trade=100.0)
+        sim.open_position(
+            symbol="BTC-USDT-SWAP",
+            direction=direction,
+            entry_price=50000.0,
+            entry_ts=1000,
+            tp_price=tp_price,
+            sl_price=sl_price,
+            strategy_name="test",
+        )
+
+        sim.update_multi({
+            "BTC-USDT-SWAP": Candle(
+                ts=1000, open=50000.0, high=high, low=low, close=50000.0, volume=1.0
+            )
+        })
+
+        assert len(sim.open_positions) == 1
+        assert sim.closed_positions == []
+        assert sim.open_positions[0].candles_held == 0
+        assert sim.open_positions[0].max_favorable_pct == 0.0
+        assert sim.open_positions[0].max_adverse_pct == 0.0
+
+    def test_first_candle_after_entry_still_triggers_tp(self) -> None:
+        sim = Simulator(initial_capital=1000.0, notional_per_trade=100.0)
+        sim.open_position(
+            symbol="BTC-USDT-SWAP",
+            direction="long",
+            entry_price=50000.0,
+            entry_ts=1000,
+            tp_price=51000.0,
+            sl_price=49500.0,
+            strategy_name="test",
+        )
+
+        sim.update_multi({
+            "BTC-USDT-SWAP": Candle(
+                ts=2000, open=50500.0, high=51100.0, low=50400.0, close=51050.0, volume=1.0
+            )
+        })
+
+        assert sim.open_positions == []
+        assert sim.closed_positions[0].close_reason == "tp"
+
     def test_long_position_hits_tp(self) -> None:
         """A long position should close at tp_price when candle high reaches it."""
         sim = Simulator(initial_capital=1000.0, notional_per_trade=100.0)

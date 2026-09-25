@@ -261,6 +261,16 @@ class GridConfig:
         Metric key to rank results by (descending).  Common choices:
         ``"sharpe_per_candle"``, ``"profit_factor"``, ``"net_profit"``,
         ``"win_rate"``, ``"total_trades"``.
+    validation_folds:
+        Number of chronological forward-validation windows.  Zero preserves
+        the legacy single-window sweep.  Positive values reserve the initial
+        ``validation_train_ratio`` portion of the date range as warmup/history
+        and split the remainder into non-overlapping validation windows.
+    validation_train_ratio:
+        Fraction of the date range preceding validation; defaults to 0.7.
+    search_mode:
+        ``"exhaustive"`` enumerates every combination; ``"random"`` samples
+        up to ``combination_budget`` combinations reproducibly.
     min_trades:
         Minimum number of trades for a result to be included in the
         ranking.  Results with fewer trades are still reported but
@@ -271,6 +281,11 @@ class GridConfig:
     params: list[GridParamDef] = field(default_factory=list)
     rank_by: str = "sharpe_per_candle"
     min_trades: int = 5
+    validation_folds: int = 0
+    validation_train_ratio: float = 0.7
+    search_mode: str = "exhaustive"
+    combination_budget: int = 0
+    random_seed: int = 0
 
 
 @dataclass(slots=True)
@@ -294,6 +309,7 @@ class GridRunResult:
     result: BacktestResult | None
     rank_score: float | None
     below_min_trades: bool
+    fold_metrics: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -317,6 +333,10 @@ class GridResult:
     started_at: str = ""
     finished_at: str = ""
     duration_seconds: float = 0.0
+    total_combinations: int = 0
+    attempted_combinations: int = 0
+    search_mode: str = "exhaustive"
+    random_seed: int = 0
     error: str | None = None
 
     @property

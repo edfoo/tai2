@@ -49,6 +49,11 @@ class BacktestGridRequest(BaseModel):
     params: list[GridParamRequest] = Field(default_factory=list)
     rank_by: str = "sharpe_per_candle"
     min_trades: int = 5
+    validation_folds: int = Field(default=0, ge=0)
+    validation_train_ratio: float = Field(default=0.7, gt=0.0, lt=1.0)
+    search_mode: str = Field(default="exhaustive", pattern="^(exhaustive|random)$")
+    combination_budget: int = Field(default=0, ge=0)
+    random_seed: int = 0
 
 
 class BacktestJobAccepted(BaseModel):
