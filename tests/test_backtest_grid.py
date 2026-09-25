@@ -148,3 +148,135 @@ async def test_grid_validation_ranks_mean_oos_score_and_preserves_folds(monkeypa
     assert result.ranked[0].params["strategies.mean_reversion.rsi_oversold"] == 20
     assert result.ranked[0].rank_score == pytest.approx(45.0)
     assert len(result.ranked[0].fold_metrics) == 2
+
+
+@pytest.mark.asyncio
+async def test_grid_keeps_failed_validation_fold_in_result(monkeypatch) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    monkeypatch.setattr(G, "ProcessPoolExecutor", ThreadPoolExecutor)
+
+    def _fake_combination(config: BacktestConfig) -> BacktestResult:
+        if config.start_ts == 750:
+            raise RuntimeError("synthetic validation failure")
+        result = BacktestResult(config=config)
+        result.metrics = {"total_trades": 2, "net_profit_pct": 1.0}
+        return result
+
+    monkeypatch.setattr(G, "_run_combination", _fake_combination)
+    config = _base_config()
+    config.start_ts = 0
+    config.end_ts = 1000
+    sweep = GridConfig(
+        base_config=config,
+        params=[GridParamDef("strategies.mean_reversion.rsi_oversold", [30])],
+        rank_by="net_profit_pct",
+        min_trades=1,
+        validation_folds=2,
+        validation_train_ratio=0.5,
+    )
+
+    result = await G.BacktestGrid(sweep, workers=2).run()
+
+    assert result.is_error is False
+    candidate = result.runs[0]
+    assert [fold["status"] for fold in candidate.fold_metrics] == ["completed", "failed"]
+    assert candidate.fold_metrics[1]["error"] == "synthetic validation failure"
+    assert candidate.rank_score is None
+    assert candidate.below_min_trades is True
+
+
+@pytest.mark.asyncio
+async def test_grid_evaluates_selected_candidate_once_on_untouched_holdout(monkeypatch) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    monkeypatch.setattr(G, "ProcessPoolExecutor", ThreadPoolExecutor)
+    evaluated: list[tuple[float, int, int]] = []
+
+    def _fake_combination(config: BacktestConfig) -> BacktestResult:
+        rsi = config.launcher_config["strategies"]["mean_reversion"]["rsi_oversold"]
+        evaluated.append((rsi, config.start_ts, config.end_ts))
+        is_holdout = config.start_ts == 800
+        result = BacktestResult(config=config)
+        result.metrics = {
+            "total_trades": 3,
+            "net_profit_after_cost_pct": (
+                100.0 if rsi == 20 else -10.0
+            ) if is_holdout else (10.0 if rsi == 30 else 5.0),
+        }
+        return result
+
+    monkeypatch.setattr(G, "_run_combination", _fake_combination)
+    config = _base_config()
+    config.start_ts = 0
+    config.end_ts = 1000
+    sweep = GridConfig(
+        base_config=config,
+        params=[GridParamDef("strategies.mean_reversion.rsi_oversold", [20, 30])],
+        rank_by="net_profit_after_cost_pct",
+        min_trades=1,
+        validation_folds=2,
+        validation_train_ratio=0.5,
+        final_holdout_fraction=0.2,
+    )
+
+    result = await G.BacktestGrid(sweep, workers=2).run()
+
+    assert result.is_error is False
+    assert result.ranked[0].params["strategies.mean_reversion.rsi_oversold"] == 30
+    assert result.final_holdout is not None
+    assert result.final_holdout.params["strategies.mean_reversion.rsi_oversold"] == 30
+    assert result.final_holdout.result is not None
+    assert result.final_holdout.result.metrics["net_profit_after_cost_pct"] == -10.0
+    assert result.final_holdout.fold_metrics[0]["role"] == "final_holdout"
+    assert result.final_holdout.fold_metrics[0]["start_ts"] == 800
+    assert sum(start == 800 for _rsi, start, _end in evaluated) == 1
+    assert all(end <= 800 for _rsi, _start, end in evaluated if end != 1000)
+    assert (30, 400, 599) in evaluated
+    assert (30, 600, 799) in evaluated
+    assert (30, 800, 1000) in evaluated
+
+
+@pytest.mark.asyncio
+async def test_grid_requires_validation_folds_when_holdout_is_enabled() -> None:
+    config = _base_config()
+    sweep = GridConfig(
+        base_config=config,
+        params=[GridParamDef("strategies.mean_reversion.rsi_oversold", [30])],
+        final_holdout_fraction=0.2,
+    )
+
+    result = await G.BacktestGrid(sweep, workers=1).run()
+
+    assert result.is_error is True
+    assert "requires at least one validation fold" in result.error
+
+
+@pytest.mark.asyncio
+async def test_grid_marks_holdout_skipped_when_no_candidate_meets_minimum(monkeypatch) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    monkeypatch.setattr(G, "ProcessPoolExecutor", ThreadPoolExecutor)
+
+    def _fake_combination(config: BacktestConfig) -> BacktestResult:
+        result = BacktestResult(config=config)
+        result.metrics = {"total_trades": 0, "net_profit_after_cost_pct": 0.0}
+        return result
+
+    monkeypatch.setattr(G, "_run_combination", _fake_combination)
+    config = _base_config()
+    config.start_ts = 0
+    config.end_ts = 1000
+    sweep = GridConfig(
+        base_config=config,
+        params=[GridParamDef("strategies.mean_reversion.rsi_oversold", [30])],
+        min_trades=5,
+        validation_folds=1,
+        final_holdout_fraction=0.2,
+    )
+
+    result = await G.BacktestGrid(sweep, workers=1).run()
+
+    assert result.final_holdout is not None
+    assert result.final_holdout.fold_metrics[0]["status"] == "skipped"
+    assert "No complete validation candidate" in result.final_holdout.fold_metrics[0]["error"]

@@ -28,7 +28,7 @@ from app.services.backtest.data_fetcher import (
 )
 from app.services.backtest.costs import CostModel
 from app.services.backtest.metrics import (
-    compute_buy_and_hold,
+    compute_equal_weight_buy_and_hold,
     compute_metrics,
     compute_per_strategy_metrics,
     compute_per_symbol_metrics,
@@ -198,6 +198,12 @@ class BacktestEngine:
         started = datetime.now(timezone.utc)
         t0 = time.monotonic()
         result = BacktestResult(config=self._config, started_at=started.isoformat())
+        data_provenance: list[dict[str, Any]] = []
+
+        def _capture_fetch_provenance() -> None:
+            metadata = getattr(self._fetcher, "last_fetch_provenance", None)
+            if metadata:
+                data_provenance.append(dict(metadata))
 
         try:
             # ── Phase 1: Fetch historical data ────────────────────────
@@ -232,6 +238,7 @@ class BacktestEngine:
                         BacktestProgress(phase="fetch", current=idx, total=len(self._config.symbols), message=f"{symbol}: {msg}")
                     ) if progress_cb else None,
                 )
+                _capture_fetch_provenance()
                 symbol_candles[symbol] = candles
 
                 if htf_tf:
@@ -243,6 +250,7 @@ class BacktestEngine:
                         end_ts=self._config.end_ts,
                         warmup_candles=self._config.warmup_candles,
                     )
+                    _capture_fetch_provenance()
                     symbol_htf_candles[symbol] = htf_candles
 
                 # Fetch per-strategy analysis timeframe candles (and their
@@ -257,6 +265,7 @@ class BacktestEngine:
                         end_ts=self._config.end_ts,
                         warmup_candles=self._config.warmup_candles,
                     )
+                    _capture_fetch_provenance()
                     per_tf[bar] = tf_candles
                 symbol_tf_candles[symbol] = per_tf
 
@@ -271,6 +280,7 @@ class BacktestEngine:
                         end_ts=self._config.end_ts,
                         warmup_candles=self._config.warmup_candles,
                     )
+                    _capture_fetch_provenance()
                     symbol_eval_candles[symbol] = eval_candles
 
                 if progress_cb:
@@ -310,6 +320,7 @@ class BacktestEngine:
 
             if max_len == 0:
                 result.error = "No candles found in the specified date range."
+                result.data_provenance = data_provenance
                 result.finished_at = datetime.now(timezone.utc).isoformat()
                 result.duration_seconds = time.monotonic() - t0
                 return result
@@ -363,7 +374,8 @@ class BacktestEngine:
             )
             result.per_strategy = compute_per_strategy_metrics(all_trades)
             result.per_symbol = compute_per_symbol_metrics(all_trades)
-            # Buy-and-hold benchmark on the first symbol's LTF candles.
+            result.data_provenance = data_provenance
+            # Equal-weight buy-and-hold benchmark across the configured symbols.
             _benchmark = self._compute_benchmark(symbol_candles)
             if _benchmark is not None:
                 result.metrics["buy_and_hold"] = _benchmark
@@ -378,6 +390,7 @@ class BacktestEngine:
             if progress_cb:
                 progress_cb(BacktestProgress(phase="error", current=0, total=0, message=str(exc)))
 
+            result.data_provenance = data_provenance
         result.finished_at = datetime.now(timezone.utc).isoformat()
         result.duration_seconds = round(time.monotonic() - t0, 3)
         return result
@@ -690,14 +703,20 @@ class BacktestEngine:
         return self._current_prices.get(symbol)
 
     def _compute_benchmark(self, symbol_candles: dict[str, list[Candle]]) -> dict[str, Any] | None:
-        """Return a buy-and-hold benchmark for the first symbol, if available."""
+        """Return an equal-weight synchronized buy-and-hold portfolio benchmark."""
         if not symbol_candles:
             return None
-        first_symbol = self._config.symbols[0]
-        candles = symbol_candles.get(first_symbol)
-        if not candles:
+        candles_by_symbol = {
+            symbol: [
+                candle for candle in symbol_candles[symbol]
+                if self._config.start_ts <= candle.ts <= self._config.end_ts
+            ]
+            for symbol in self._config.symbols
+            if symbol in symbol_candles
+        }
+        if not candles_by_symbol:
             return None
-        return compute_buy_and_hold(candles, self._config.initial_capital)
+        return compute_equal_weight_buy_and_hold(candles_by_symbol, self._config.initial_capital)
 
     def _compute_tp_sl(
         self,

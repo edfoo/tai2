@@ -12,6 +12,7 @@ strategy parameters is instant.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -82,6 +83,12 @@ class HistoricalDataFetcher:
     ) -> None:
         self._cache_dir = cache_dir or _DEFAULT_CACHE_DIR
         self._api = _build_market_api(api_flag)
+        self._last_fetch_provenance: dict[str, Any] = {}
+
+    @property
+    def last_fetch_provenance(self) -> dict[str, Any]:
+        """Metadata and content digest for the most recent candle request."""
+        return dict(self._last_fetch_provenance)
 
     # ── Public API ────────────────────────────────────────────────────
 
@@ -104,14 +111,23 @@ class HistoricalDataFetcher:
         Candles are returned in ascending order (oldest first).
         """
         cache_key = self._cache_key(symbol, timeframe, start_ts, end_ts, warmup_candles)
+        self._last_fetch_provenance = {}
         cached = self._load_cache(cache_key)
         if cached is not None:
+            self._record_provenance(
+                cache_key, symbol, timeframe, start_ts, end_ts, warmup_candles,
+                cached, source="file_cache", cache_hit=True,
+            )
             if progress_cb:
                 progress_cb(len(cached), len(cached), "loaded from cache")
             return cached
 
         if self._api is None:
             logger.error("OKX MarketAPI unavailable — cannot fetch historical data")
+            self._record_provenance(
+                cache_key, symbol, timeframe, start_ts, end_ts, warmup_candles,
+                [], source="unavailable", cache_hit=False,
+            )
             return []
 
         # Walk backward from end_ts to start_ts using the ``after`` cursor.
@@ -134,7 +150,44 @@ class HistoricalDataFetcher:
             candles.append(c)
 
         self._save_cache(cache_key, candles)
+        self._record_provenance(
+            cache_key, symbol, timeframe, start_ts, end_ts, warmup_candles,
+            candles, source="okx_market_api", cache_hit=False,
+        )
         return candles
+
+    def _record_provenance(
+        self,
+        cache_key: str,
+        symbol: str,
+        timeframe: str,
+        start_ts: int,
+        end_ts: int,
+        warmup_candles: int,
+        candles: list[Candle],
+        *,
+        source: str,
+        cache_hit: bool,
+    ) -> None:
+        rows = [
+            [c.ts, c.open, c.high, c.low, c.close, c.volume]
+            for c in candles
+        ]
+        payload = json.dumps(rows, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+        self._last_fetch_provenance = {
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "requested_start_ts": start_ts,
+            "requested_end_ts": end_ts,
+            "warmup_candles": warmup_candles,
+            "source": source,
+            "cache_hit": cache_hit,
+            "cache_key": cache_key,
+            "candle_count": len(candles),
+            "first_candle_ts": candles[0].ts if candles else None,
+            "last_candle_ts": candles[-1].ts if candles else None,
+            "content_sha256": hashlib.sha256(payload).hexdigest(),
+        }
 
     async def fetch_htf_candles(
         self,

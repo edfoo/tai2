@@ -24,6 +24,7 @@ from app.services.backtest.engine import (
 from app.services.launcher_tp_sl import LauncherTpSl
 from app.services.backtest.metrics import (
     compute_buy_and_hold,
+    compute_equal_weight_buy_and_hold,
     compute_metrics,
     compute_per_strategy_metrics,
 )
@@ -838,6 +839,51 @@ class TestAdvancedMetrics:
         assert raw["sharpe_per_candle"] > 0
         assert ann["sharpe_annualized"] > raw["sharpe_per_candle"]
 
+    def test_reports_net_costs_and_expectancy_uncertainty(self) -> None:
+        trades = [
+            self._trade(pnl=2.0, entry_fee=0.1, exit_fee=0.1, funding=0.05, slippage_cost=0.2),
+            self._trade(pnl=-1.0, entry_fee=0.1, exit_fee=0.1, funding=0.0, slippage_cost=0.1),
+        ]
+
+        metrics = compute_metrics(trades, [], 100.0)
+
+        assert metrics["gross_pnl_before_costs"] == pytest.approx(1.3)
+        assert metrics["pnl_after_slippage_before_fees_funding"] == pytest.approx(1.0)
+        assert metrics["total_slippage_cost"] == pytest.approx(0.3)
+        assert metrics["total_fees"] == pytest.approx(0.4)
+        assert metrics["net_profit_after_cost"] == pytest.approx(0.55)
+        assert metrics["net_profit_after_cost_pct"] == pytest.approx(0.55)
+        assert metrics["net_profit_factor_after_cost"] == pytest.approx(1.4583)
+        assert metrics["net_expectancy_after_cost"] == pytest.approx(0.275)
+        assert metrics["net_expectancy_ci95_low_normal_approx"] < 0.275
+        assert metrics["net_expectancy_ci95_high_normal_approx"] > 0.275
+        assert metrics["sharpe_basis"] == "mark_to_market_equity_returns_per_evaluation_bar"
+
+    def test_one_trade_does_not_claim_expectancy_confidence_interval(self) -> None:
+        metrics = compute_metrics([self._trade()], [], 1000.0)
+
+        assert metrics["net_expectancy_after_cost"] is not None
+        assert metrics["net_expectancy_standard_error"] is None
+        assert metrics["net_expectancy_ci95_low_normal_approx"] is None
+        assert metrics["net_expectancy_ci95_high_normal_approx"] is None
+
+    def test_drawdown_duration_and_exposure_metrics(self) -> None:
+        curve = [
+            EquityPoint(ts=1000, equity=1000.0, open_positions=0),
+            EquityPoint(ts=2000, equity=1100.0, open_positions=1),
+            EquityPoint(ts=3000, equity=1050.0, open_positions=1),
+            EquityPoint(ts=4000, equity=1080.0, open_positions=0),
+            EquityPoint(ts=5000, equity=1100.0, open_positions=0),
+        ]
+
+        metrics = compute_metrics([], curve, 1000.0)
+
+        assert metrics["max_drawdown_duration_ms"] == 3000
+        assert metrics["max_drawdown_duration_bars"] == 3
+        assert metrics["time_in_market_pct"] == pytest.approx(40.0)
+        assert metrics["average_concurrent_positions"] == pytest.approx(0.4)
+        assert metrics["max_concurrent_positions"] == 1
+
 
 class TestBuyAndHold:
     def test_flat_returns_zero(self) -> None:
@@ -860,6 +906,25 @@ class TestBuyAndHold:
     def test_empty_returns_initial(self) -> None:
         m = compute_buy_and_hold([], 1000.0)
         assert m["final_equity"] == 1000.0
+
+    def test_equal_weight_portfolio_benchmark_uses_all_symbols(self) -> None:
+        candles = {
+            "A-USDT-SWAP": [
+                Candle(ts=0, open=100, high=100, low=100, close=100, volume=1),
+                Candle(ts=1, open=200, high=200, low=200, close=200, volume=1),
+            ],
+            "B-USDT-SWAP": [
+                Candle(ts=0, open=100, high=100, low=100, close=100, volume=1),
+                Candle(ts=1, open=100, high=100, low=100, close=100, volume=1),
+            ],
+        }
+
+        metrics = compute_equal_weight_buy_and_hold(candles, 1000.0)
+
+        assert metrics["total_return_pct"] == pytest.approx(50.0)
+        assert metrics["final_equity"] == pytest.approx(1500.0)
+        assert metrics["symbols"] == ["A-USDT-SWAP", "B-USDT-SWAP"]
+        assert metrics["costs_included"] is False
 
 
 # ── SnapshotBuilder tests ────────────────────────────────────────────────────
@@ -1195,14 +1260,28 @@ class TestFinerLtfEngineLoop:
         # We need a fake fetcher that returns our candles.  Patch the engine's
         # _fetcher to return the right candles per symbol/timeframe.
         class _FakeFetcher:
+            def __init__(self):
+                self.last_fetch_provenance = {}
+
+            def _mark_fetch(self, symbol, timeframe, start_ts, end_ts):
+                self.last_fetch_provenance = {
+                    "symbol": symbol,
+                    "timeframe": timeframe,
+                    "requested_start_ts": start_ts,
+                    "requested_end_ts": end_ts,
+                    "content_sha256": f"{timeframe}-fingerprint",
+                }
+
             async def fetch_candles(self, *, symbol, timeframe, start_ts, end_ts,
                                     warmup_candles=0, progress_cb=None):
+                self._mark_fetch(symbol, timeframe, start_ts, end_ts)
                 if timeframe == "15m":
                     return ltf_candles
                 return eval_candles
 
             async def fetch_htf_candles(self, *, symbol, ltf_timeframe, htf_timeframe,
                                         start_ts, end_ts, warmup_candles=0, progress_cb=None):
+                self._mark_fetch(symbol, htf_timeframe, start_ts, end_ts)
                 return []
 
         launcher_config = {
@@ -1284,6 +1363,11 @@ class TestFinerLtfEngineLoop:
         assert len(result_closed.trades) == 0, (
             f"Closed mode should have opened 0 trades (RSI recovered by close), "
             f"but got {len(result_closed.trades)} trades."
+        )
+        assert any(
+            item.get("timeframe") == "1m"
+            and item.get("content_sha256") == "1m-fingerprint"
+            for item in result_finer.data_provenance
         )
 
     def test_legacy_closed_mode_unchanged(self) -> None:

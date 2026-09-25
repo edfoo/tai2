@@ -159,9 +159,6 @@ class BacktestGrid:
                 total, len(param_keys), param_keys,
             )
 
-            if progress_cb:
-                progress_cb(GridProgress(phase="grid", current=0, total=total, message="Starting sweep"))
-
             # ── Run each combination in parallel across a process pool ──
             # Each combination is an independent engine run, so it can run on
             # its own core (one process per combination, bounded by ``workers``).
@@ -175,10 +172,28 @@ class BacktestGrid:
                 jobs.append((param_values, label_values, bt_config))
 
             validation_windows: list[tuple[int, int]] = []
+            holdout_start: int | None = None
+            holdout_fraction = self._config.final_holdout_fraction
+            if not 0.0 <= holdout_fraction < 0.5:
+                result.error = "Final holdout fraction must be between 0 and 0.5."
+                result.finished_at = datetime.now(timezone.utc).isoformat()
+                result.duration_seconds = round(time.monotonic() - t0, 3)
+                return result
+            if holdout_fraction and not self._config.validation_folds:
+                result.error = "Final holdout requires at least one validation fold."
+                result.finished_at = datetime.now(timezone.utc).isoformat()
+                result.duration_seconds = round(time.monotonic() - t0, 3)
+                return result
+            validation_end = self._config.base_config.end_ts
+            if holdout_fraction:
+                span = self._config.base_config.end_ts - self._config.base_config.start_ts
+                holdout_span = max(1, int(span * holdout_fraction))
+                holdout_start = self._config.base_config.end_ts - holdout_span
+                validation_end = holdout_start
             if self._config.validation_folds:
                 splits = walk_forward_splits(
                     start_ts=self._config.base_config.start_ts,
-                    end_ts=self._config.base_config.end_ts,
+                    end_ts=validation_end,
                     folds=self._config.validation_folds,
                     train_ratio=self._config.validation_train_ratio,
                 )
@@ -189,6 +204,12 @@ class BacktestGrid:
                     return result
                 validation_windows = [(split[2], split[3]) for split in splits]
             fold_count = len(validation_windows) or 1
+            total_work = total * fold_count + int(holdout_start is not None)
+            if progress_cb:
+                progress_cb(GridProgress(
+                    phase="grid", current=0, total=total_work,
+                    message="Starting sweep",
+                ))
 
             workers = self._workers if self._workers and self._workers > 0 else _default_workers()
             workers = min(workers, total)
@@ -203,7 +224,7 @@ class BacktestGrid:
                     for fold_idx, (test_start, test_end) in enumerate(windows):
                         fold_config = copy.deepcopy(cfg)
                         fold_config.start_ts = test_start
-                        fold_config.end_ts = test_end
+                        fold_config.end_ts = test_end - 1 if validation_windows else test_end
                         future_to_job[ex.submit(_run_combination, fold_config)] = (idx, fold_idx)
 
                 for fut in as_completed(future_to_job):
@@ -233,29 +254,39 @@ class BacktestGrid:
                         progress_cb(GridProgress(
                             phase="grid",
                             current=completed,
-                            total=total * fold_count,
-                            message=f"Run {completed}/{total * fold_count}{fold_note}: {combo_str}",
+                            total=total_work,
+                            message=f"Run {completed}/{total_work}{fold_note}: {combo_str}",
                         ))
 
             # ── Assemble in deterministic (submission) order ────────────
             for idx in range(total):
                 fold_rows = ordered_results.get(idx, {})
+                fold_metrics: list[dict[str, Any]] = []
+                for fold_idx in range(fold_count):
+                    bt_result, bt_error = fold_rows.get(fold_idx, (None, "Fold result missing"))
+                    window_start, window_end = (
+                        validation_windows[fold_idx]
+                        if validation_windows
+                        else (jobs[idx][2].start_ts, jobs[idx][2].end_ts)
+                    )
+                    metrics = dict(bt_result.metrics or {}) if bt_result is not None else {}
+                    fold_metrics.append({
+                        "fold": fold_idx + 1,
+                        "start_ts": window_start,
+                        "end_ts": window_end,
+                        "end_exclusive": bool(validation_windows),
+                        "status": "completed" if bt_result is not None else "failed",
+                        "error": bt_error,
+                        "trade_count": int(metrics.get("total_trades", 0)),
+                        "rank_score": _extract_metric(bt_result, self._config.rank_by)
+                        if bt_result is not None else None,
+                        "metrics": metrics,
+                    })
                 successful = [
                     (fold_idx, row[0]) for fold_idx, row in sorted(fold_rows.items())
                     if row[0] is not None
                 ]
-                if not successful:
-                    continue
                 fold_results = [bt for _fold_idx, bt in successful]
-                fold_metrics = [
-                    {
-                        "fold": fold_idx + 1,
-                        "start_ts": validation_windows[fold_idx][0] if validation_windows else jobs[idx][2].start_ts,
-                        "end_ts": validation_windows[fold_idx][1] if validation_windows else jobs[idx][2].end_ts,
-                        "metrics": dict(bt.metrics or {}),
-                    }
-                    for fold_idx, bt in successful
-                ]
                 fold_scores = [
                     _extract_metric(bt, self._config.rank_by)
                     for bt in fold_results
@@ -266,8 +297,9 @@ class BacktestGrid:
                     if valid_scores and len(successful) == fold_count and len(valid_scores) == fold_count
                     else None
                 )
-                aggregate = _aggregate_fold_results(fold_results)
-                aggregate.config = jobs[idx][2]
+                aggregate = _aggregate_fold_results(fold_results) if fold_results else None
+                if aggregate is not None:
+                    aggregate.config = jobs[idx][2]
                 total_trades = sum(int(bt.metrics.get("total_trades", 0)) for bt in fold_results)
                 below_min = total_trades < self._config.min_trades
                 result.runs.append(GridRunResult(
@@ -287,10 +319,111 @@ class BacktestGrid:
                 return (1, r.rank_score)
 
             result.ranked = sorted(result.runs, key=_sort_key, reverse=True)
+            result.assumptions = {
+                "validation_protocol": (
+                    "Candidates are selected using validation folds only; the initial prefix is unscored."
+                    if self._config.validation_folds else "Full requested window used for candidate scoring."
+                ),
+                "final_holdout_fraction": holdout_fraction,
+                "final_holdout_is_used_for_ranking": False,
+            }
+
+            if holdout_start is not None:
+                selected = next((
+                    run for run in result.ranked
+                    if run.rank_score is not None
+                    and not run.below_min_trades
+                    and run.result is not None
+                ), None)
+                if selected is not None:
+                    selected_idx = next(
+                        idx for idx, run in enumerate(result.runs) if run is selected
+                    )
+                    holdout_config = copy.deepcopy(jobs[selected_idx][2])
+                    holdout_config.start_ts = holdout_start
+                    holdout_config.end_ts = self._config.base_config.end_ts
+                    holdout_error: str | None = None
+                    try:
+                        with ProcessPoolExecutor(
+                            max_workers=1, initializer=_worker_initializer
+                        ) as holdout_pool:
+                            holdout_future = holdout_pool.submit(_run_combination, holdout_config)
+                            holdout_result = holdout_future.result()
+                        if holdout_result.is_error:
+                            holdout_error = holdout_result.error
+                            holdout_result = None
+                    except Exception as exc:  # noqa: BLE001
+                        logger.exception("BacktestGrid: final holdout evaluation failed")
+                        holdout_result = None
+                        holdout_error = str(exc)
+                    holdout_metrics = dict(holdout_result.metrics or {}) if holdout_result else {}
+                    holdout_score = (
+                        _extract_metric(holdout_result, self._config.rank_by)
+                        if holdout_result is not None else None
+                    )
+                    result.final_holdout = GridRunResult(
+                        params=dict(selected.params),
+                        result=holdout_result,
+                        rank_score=holdout_score,
+                        below_min_trades=(
+                            holdout_result is None
+                            or int(holdout_metrics.get("total_trades", 0)) < self._config.min_trades
+                        ),
+                        fold_metrics=[{
+                            "fold": 1,
+                            "role": "final_holdout",
+                            "start_ts": holdout_start,
+                            "end_ts": self._config.base_config.end_ts,
+                            "end_exclusive": False,
+                            "status": "completed" if holdout_result is not None else "failed",
+                            "error": holdout_error,
+                            "trade_count": int(holdout_metrics.get("total_trades", 0)),
+                            "rank_metric": self._config.rank_by,
+                            "rank_score": holdout_score,
+                            "metrics": holdout_metrics,
+                        }],
+                    )
+                    if progress_cb:
+                        progress_cb(GridProgress(
+                            phase="grid",
+                            current=total_work,
+                            total=total_work,
+                            message="Final untouched holdout complete",
+                        ))
+                else:
+                    result.final_holdout = GridRunResult(
+                        params={},
+                        result=None,
+                        rank_score=None,
+                        below_min_trades=True,
+                        fold_metrics=[{
+                            "fold": 1,
+                            "role": "final_holdout",
+                            "start_ts": holdout_start,
+                            "end_ts": self._config.base_config.end_ts,
+                            "end_exclusive": False,
+                            "status": "skipped",
+                            "error": "No complete validation candidate met the minimum trade requirement.",
+                            "trade_count": 0,
+                            "rank_metric": self._config.rank_by,
+                            "rank_score": None,
+                            "metrics": {},
+                        }],
+                    )
+
+            result.data_provenance = _merge_data_provenance(
+                [
+                    run.result.data_provenance
+                    for run in result.runs
+                    if run.result is not None
+                ]
+                + ([result.final_holdout.result.data_provenance]
+                   if result.final_holdout and result.final_holdout.result else [])
+            )
 
             if progress_cb:
                 progress_cb(GridProgress(
-                    phase="done", current=total * fold_count, total=total * fold_count,
+                    phase="done", current=total_work, total=total_work,
                     message="Sweep complete",
                 ))
 
@@ -365,6 +498,9 @@ def _aggregate_fold_results(results: list[BacktestResult]) -> BacktestResult:
 
     aggregate = BacktestResult(config=results[0].config)
     aggregate.trades = [trade for fold in results for trade in fold.trades]
+    aggregate.data_provenance = _merge_data_provenance(
+        [fold.data_provenance for fold in results]
+    )
     offset = 0.0
     for fold in results:
         for point in fold.equity_curve:
@@ -400,6 +536,20 @@ def _candles_per_year(config: BacktestConfig) -> int:
     if interval_ms <= 0:
         return 0
     return int(round(365.0 * 24 * 60 * 60 * 1000 / interval_ms))
+
+
+def _merge_data_provenance(records: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    """Deduplicate identical source series fetched for separate candidates."""
+    unique: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for group in records:
+        for record in group:
+            key = (
+                record.get("symbol"), record.get("timeframe"),
+                record.get("requested_start_ts"), record.get("requested_end_ts"),
+                record.get("warmup_candles"), record.get("content_sha256"),
+            )
+            unique.setdefault(key, dict(record))
+    return list(unique.values())
 
 
 def _combination_at_index(value_lists: list[list[Any]], index: int) -> tuple[Any, ...]:

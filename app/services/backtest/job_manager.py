@@ -251,6 +251,7 @@ class BacktestJobManager:
             min_trades=req.min_trades,
             validation_folds=req.validation_folds,
             validation_train_ratio=req.validation_train_ratio,
+            final_holdout_fraction=req.final_holdout_fraction,
             search_mode=req.search_mode,
             combination_budget=req.combination_budget,
             random_seed=req.random_seed,
@@ -417,7 +418,10 @@ class BacktestJobManager:
         concurrent worker tasks.
         """
         try:
-            ltf = str(getattr(getattr(result, "config", None), "timeframe", "") or "run")
+            config = getattr(result, "config", None)
+            if hasattr(config, "base_config"):
+                config = config.base_config
+            ltf = str(getattr(config, "timeframe", "") or "run")
             run_id = f"{make_run_id(ltf)}_{job['job_id'][:8]}"
             save_result(result, run_id=run_id)
             job["run_id"] = run_id

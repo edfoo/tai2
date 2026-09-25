@@ -122,3 +122,36 @@ def test_submit_many_and_poll_collects_errors(monkeypatch):
     assert results[0][0]["result"]["metrics"]["total_trades"] == 1
     assert results[1][0] is None and isinstance(results[1][1], RuntimeError)
     assert results[2][0] is not None
+
+
+def test_grid_cli_forwards_validation_holdout_and_search_options(monkeypatch):
+    from scripts import backtest_client as cli
+
+    captured = {}
+    monkeypatch.setattr(
+        cli,
+        "_post",
+        lambda _url, _path, payload: captured.update(payload) or {"job_id": "job"},
+    )
+    monkeypatch.setattr(cli, "_poll", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(cli, "_print_result", lambda *_args: None)
+    args = cli._build_parser().parse_args([
+        "grid",
+        "--symbols", "BTC-USDT-SWAP",
+        "--params", "strategies.mean_reversion.rsi_oversold=25,30",
+        "--validation-folds", "3",
+        "--validation-train-ratio", "0.6",
+        "--final-holdout-fraction", "0.15",
+        "--search-mode", "random",
+        "--combination-budget", "12",
+        "--random-seed", "7",
+    ])
+
+    assert cli._cmd_grid(args) == 0
+    assert captured["rank_by"] == "net_profit_after_cost_pct"
+    assert captured["validation_folds"] == 3
+    assert captured["validation_train_ratio"] == 0.6
+    assert captured["final_holdout_fraction"] == 0.15
+    assert captured["search_mode"] == "random"
+    assert captured["combination_budget"] == 12
+    assert captured["random_seed"] == 7

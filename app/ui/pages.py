@@ -9395,13 +9395,15 @@ def register_pages(app: FastAPI) -> None:
                             options={
                                 "sharpe_per_candle": "Sharpe / candle",
                                 "profit_factor": "Profit factor",
-                                "net_profit": "Net profit (USDT)",
-                                "net_profit_pct": "Net profit (%)",
+                                "net_profit": "PnL after slippage (USDT)",
+                                "net_profit_pct": "Return after slippage (%)",
+                                "net_profit_after_cost_pct": "Net return after costs (%)",
+                                "net_profit_after_cost_pct": "Net return after costs (%)",
                                 "win_rate": "Win rate",
                                 "total_trades": "Total trades",
                                 "expectancy": "Expectancy",
                             },
-                            value="sharpe_per_candle",
+                            value="net_profit_after_cost_pct",
                             label="Rank by",
                         ).classes("w-48")
                         min_trades_input = ui.number(
@@ -9428,6 +9430,14 @@ def register_pages(app: FastAPI) -> None:
                             step=0.05,
                             precision=2,
                         ).classes("w-40")
+                        final_holdout_fraction_input = ui.number(
+                            label="Untouched final holdout fraction (0 = off)",
+                            value=0.0,
+                            min=0.0,
+                            max=0.49,
+                            step=0.05,
+                            precision=2,
+                        ).classes("w-64")
                         search_mode_select = ui.select(
                             options={"exhaustive": "Exhaustive", "random": "Random"},
                             value="exhaustive",
@@ -9515,20 +9525,30 @@ def register_pages(app: FastAPI) -> None:
                     from app.services.backtest.persistence import load_result, delete_result
                     for f in files:
                         result = load_result(f)
-                        m = result.metrics if result else {}
+                        is_grid = bool(result and hasattr(result.config, "base_config"))
+                        base_config = result.config.base_config if is_grid else (result.config if result else None)
+                        best_run = next((
+                            run for run in result.ranked
+                            if run.result is not None and not run.below_min_trades
+                        ), None) if is_grid else None
+                        m = (
+                            best_run.result.metrics
+                            if best_run is not None and best_run.result is not None
+                            else (result.metrics if result and not is_grid else {})
+                        )
                         name = f.name.replace("_results.json", "")
                         path_for_delete = f
                         with ui.row().classes(
                             "w-full items-center gap-3 border-t border-slate-100 py-2"
                         ):
                             ui.label(_fmt_ts(f.stat().st_mtime)).classes("text-xs text-slate-400 w-36")
-                            ui.label(result.config.timeframe).classes("text-sm font-medium w-12"
+                            ui.label(base_config.timeframe if base_config else "?").classes("text-sm font-medium w-12"
                                                                      if result else "text-sm w-12")
-                            strat_str = ",".join(result.config.strategy_names) if result else "?"
+                            strat_str = ",".join(base_config.strategy_names) if base_config else "?"
                             ui.label(strat_str).classes("text-sm text-slate-600 flex-1")
                             if m:
-                                ui.label(f"{m.get('net_profit', 0):.2f} USDT · "
-                                         f"{m.get('win_rate', 0):.1f}% · "
+                                ui.label(f"{m.get('net_profit_after_cost', m.get('net_profit', 0)):.2f} USDT after costs · "
+                                         f"{m.get('net_win_rate_after_cost_pct', m.get('win_rate', 0)):.1f}% net wins · "
                                          f"{m.get('total_trades', 0)} trades").classes(
                                     "text-xs text-slate-500 w-48")
                             with ui.row().classes("gap-1"):
@@ -9600,6 +9620,12 @@ def register_pages(app: FastAPI) -> None:
             """Load a saved result into the main results view."""
             if result is None or result.is_error:
                 ui.notify("Saved result could not be loaded.", color="negative")
+                return
+            if hasattr(result.config, "base_config"):
+                sweep_results_container.clear()
+                app.state.backtest_progress["sweep_result"] = result
+                _render_sweep_results(result, sweep_results_container)
+                ui.notify(f"Loaded saved sweep: {len(result.runs)} combinations", color="positive")
                 return
             backtest_result["value"] = result
             app.state.backtest_result = result
@@ -9801,10 +9827,11 @@ def register_pages(app: FastAPI) -> None:
             grid_cfg = GridConfig(
                 base_config=base_config,
                 params=params,
-                rank_by=rank_by_select.value or "sharpe_per_candle",
+                rank_by=rank_by_select.value or "net_profit_after_cost_pct",
                 min_trades=int(min_trades_input.value or 5),
                 validation_folds=int(validation_folds_input.value or 0),
                 validation_train_ratio=float(validation_train_ratio_input.value or 0.7),
+                final_holdout_fraction=float(final_holdout_fraction_input.value or 0.0),
                 search_mode=search_mode_select.value or "exhaustive",
                 combination_budget=int(combination_budget_input.value or 0),
                 random_seed=int(random_seed_input.value or 0),
@@ -9834,6 +9861,8 @@ def register_pages(app: FastAPI) -> None:
                 """Execute the sweep and render results when done."""
                 try:
                     _jid, result = await manager.run_single_grid(grid_cfg, job_id=_job_id)
+                    if result is not None and not result.is_error:
+                        _persist_result(result, grid_cfg.base_config.timeframe)
                     app.state.sweep_result = result
                     app.state.backtest_progress["text"] = "Sweep complete"
                     app.state.backtest_progress["phase"] = "sweep_done"
@@ -9859,9 +9888,59 @@ def register_pages(app: FastAPI) -> None:
                     ui.label("Parameter Sweep Results").classes("text-lg font-semibold mb-2")
                     rank_by = result.config.rank_by
                     ui.label(
-                        f"{len(result.runs)} combinations run in {result.duration_seconds:.1f}s — "
-                        f"ranked by {rank_by} (min {result.config.min_trades} trades)"
+                        f"{result.attempted_combinations}/{result.total_combinations} combinations "
+                        f"({result.search_mode}, seed {result.random_seed}) in {result.duration_seconds:.1f}s — "
+                        f"ranked by {rank_by} (min {result.config.min_trades} trades); "
+                        f"{result.config.validation_folds} validation folds"
+                        if result.config.validation_folds
+                        else f"{result.attempted_combinations}/{result.total_combinations} combinations "
+                        f"({result.search_mode}, seed {result.random_seed}) in {result.duration_seconds:.1f}s — "
+                        f"ranked by {rank_by} (min {result.config.min_trades} trades); full-window scoring"
                     ).classes("text-xs text-slate-500 mb-2")
+
+                    from app.services.backtest.persistence import _backtest_assumptions
+                    assumptions = {
+                        **_backtest_assumptions(result.config.base_config),
+                        **(result.assumptions or {}),
+                    }
+                    with ui.expansion("Simulation assumptions", icon="info").classes("w-full mb-2"):
+                        ui.label(assumptions.get("historical_market_data", "")).classes("text-xs")
+                        ui.label(assumptions.get("entry_fill", "")).classes("text-xs")
+                        ui.label(assumptions.get("intrabar_barrier_order", "")).classes("text-xs")
+                        ui.label(assumptions.get("validation_protocol", "")).classes("text-xs")
+                        ui.label(
+                            "Final holdout fraction: "
+                            f"{assumptions.get('final_holdout_fraction', 0)}; "
+                            "holdout is not used to rank candidates."
+                        ).classes("text-xs")
+                        cost_model = assumptions.get("cost_model") or {}
+                        ui.label(
+                            "Costs: taker "
+                            f"{cost_model.get('taker_fee_bps_per_fill', 0)} bps/fill, "
+                            f"slippage {cost_model.get('slippage_bps_per_fill', 0)} bps/fill, "
+                            f"funding {cost_model.get('funding_rate_pct_per_interval', 0)}%/interval "
+                            f"({cost_model.get('funding_source', 'unspecified')})"
+                        ).classes("text-xs")
+                        enabled_unavailable = assumptions.get("enabled_gates_with_unavailable_inputs") or []
+                        if enabled_unavailable:
+                            ui.label("Enabled gates with unavailable inputs:").classes("text-xs font-semibold mt-1")
+                            for gate in enabled_unavailable:
+                                ui.label(
+                                    f"{gate['strategy']}.{gate['gate']}: {gate['backtest_behavior']} "
+                                    f"({gate['unavailable_input']})"
+                                ).classes("text-xs text-amber-800")
+                        else:
+                            ui.label("No configured unavailable-input gates detected.").classes("text-xs")
+
+                    if result.data_provenance:
+                        with ui.expansion("Sweep source-data fingerprints", icon="fingerprint").classes("w-full mb-2"):
+                            for item in result.data_provenance:
+                                ui.label(
+                                    f"{item.get('symbol')} {item.get('timeframe')}: "
+                                    f"{item.get('candle_count')} candles, "
+                                    f"{item.get('source')} (cache hit={item.get('cache_hit')}), "
+                                    f"SHA-256 {str(item.get('content_sha256', ''))[:16]}"
+                                ).classes("text-xs font-mono")
 
                     # ── Ranked results table ────────────────────────────
                     if result.ranked:
@@ -9878,18 +9957,20 @@ def register_pages(app: FastAPI) -> None:
                             })
                         _rank_labels = {
                             "sharpe_per_candle": "Sharpe/candle",
-                            "profit_factor": "Profit factor",
-                            "net_profit": "Net PnL",
-                            "net_profit_pct": "Net PnL %",
+                            "net_profit_after_cost_pct": "Net return after costs %",
+                            "profit_factor": "Profit factor before fees/funding",
+                            "net_profit": "PnL after slippage",
+                            "net_profit_pct": "Return after slippage %",
                             "win_rate": "Win %",
                             "total_trades": "Trades",
                             "expectancy": "Expectancy",
                         }
                         columns.extend([
                             {"name": "trades", "label": "Trades", "field": "trades", "align": "right", "sortable": True},
-                            {"name": "win_rate", "label": "Win %", "field": "win_rate", "align": "right", "sortable": True},
-                            {"name": "net_profit", "label": "Net PnL", "field": "net_profit", "align": "right", "sortable": True},
-                            {"name": "profit_factor", "label": "PF", "field": "profit_factor", "align": "right", "sortable": True},
+                            {"name": "win_rate", "label": "Net Win %", "field": "win_rate", "align": "right", "sortable": True},
+                            {"name": "net_profit", "label": "After-slippage PnL", "field": "net_profit", "align": "right", "sortable": True},
+                            {"name": "net_after_cost", "label": "Net after costs", "field": "net_after_cost", "align": "right", "sortable": True},
+                            {"name": "profit_factor", "label": "Net PF", "field": "profit_factor", "align": "right", "sortable": True},
                             {"name": "sharpe", "label": "Sharpe", "field": "sharpe", "align": "right", "sortable": True},
                             {"name": "max_dd", "label": "Max DD %", "field": "max_dd", "align": "right", "sortable": True},
                             {"name": "rank_score", "label": _rank_labels.get(rank_by, rank_by), "field": "rank_score", "align": "right", "sortable": True},
@@ -9903,15 +9984,17 @@ def register_pages(app: FastAPI) -> None:
                             if run.result is not None and not run.result.is_error:
                                 m = run.result.metrics
                                 r["trades"] = m.get("total_trades", 0)
-                                r["win_rate"] = f"{m.get('win_rate', 0):.1f}%"
+                                r["win_rate"] = f"{m.get('net_win_rate_after_cost_pct', 0):.1f}%"
                                 r["net_profit"] = f"{m.get('net_profit', 0):.2f}"
-                                r["profit_factor"] = f"{m.get('profit_factor', 0):.2f}"
+                                r["net_after_cost"] = f"{m.get('net_profit_after_cost', 0):.2f}"
+                                r["profit_factor"] = f"{m.get('net_profit_factor_after_cost', 0):.2f}"
                                 r["sharpe"] = f"{m.get('sharpe_per_candle', 0):.4f}"
                                 r["max_dd"] = f"{m.get('max_drawdown_pct', 0):.1f}%"
                             else:
                                 r["trades"] = 0
                                 r["win_rate"] = "—"
                                 r["net_profit"] = "—"
+                                r["net_after_cost"] = "—"
                                 r["profit_factor"] = "—"
                                 r["sharpe"] = "—"
                                 r["max_dd"] = "—"
@@ -9926,6 +10009,70 @@ def register_pages(app: FastAPI) -> None:
                         ui.label("* = below min trades (not ranked)").classes("text-xs text-slate-400 mt-1")
                     else:
                         ui.label("No valid results to rank.").classes("text-sm text-slate-500")
+
+                    fold_rows = []
+                    for run in result.runs:
+                        parameter_label = ", ".join(
+                            f"{key.split('.')[-1]}={value}"
+                            for key, value in run.params.items()
+                        )
+                        for fold in run.fold_metrics:
+                            metrics = fold.get("metrics") or {}
+                            fold_rows.append({
+                                "parameters": parameter_label,
+                                "fold": fold.get("fold", "?"),
+                                "period": (
+                                    f"{_fmt_ts(fold.get('start_ts'))} – "
+                                    f"{'< ' if fold.get('end_exclusive') else ''}{_fmt_ts(fold.get('end_ts'))}"
+                                ),
+                                "status": fold.get("status", "unknown"),
+                                "trades": fold.get("trade_count", metrics.get("total_trades", 0)),
+                                "rank_score": _fmt(fold.get("rank_score"), ".4f"),
+                                "net_pnl": _fmt(metrics.get("net_profit_after_cost")),
+                                "net_return": f"{_fmt(metrics.get('net_profit_after_cost_pct'))}%",
+                                "max_drawdown": f"{_fmt(metrics.get('max_drawdown_pct'))}%",
+                                "error": fold.get("error") or "",
+                            })
+                    if fold_rows:
+                        fold_columns = [
+                            {"name": key, "label": label, "field": key, "align": "left" if key in {"parameters", "period", "status", "error"} else "right", "sortable": True}
+                            for key, label in (
+                                ("parameters", "Parameters"), ("fold", "Fold"),
+                                ("period", "Period"), ("status", "Status"),
+                                ("trades", "Trades"), ("rank_score", "Fold score"),
+                                ("net_pnl", "Net PnL after costs"), ("net_return", "Net return after costs"),
+                                ("max_drawdown", "Max DD"), ("error", "Error"),
+                            )
+                        ]
+                        with ui.expansion("Validation fold details", icon="table_view").classes("w-full"):
+                            with ui.table(columns=fold_columns, rows=fold_rows).classes("w-full"):
+                                pass
+
+                    holdout = result.final_holdout
+                    if holdout is not None:
+                        with ui.card().classes("w-full rounded-lg border border-amber-300 bg-amber-50 mt-2"):
+                            ui.label("Untouched Final Holdout (not used to rank parameters)").classes(
+                                "text-base font-semibold text-amber-900"
+                            )
+                            ui.label(
+                                ", ".join(f"{key.split('.')[-1]}={value}" for key, value in holdout.params.items())
+                            ).classes("text-sm font-mono")
+                            holdout_fold = (holdout.fold_metrics or [{}])[0]
+                            ui.label(
+                                f"{_fmt_ts(holdout_fold.get('start_ts'))} to "
+                                f"{_fmt_ts(holdout_fold.get('end_ts'))} · "
+                                f"{holdout_fold.get('status', 'unknown')} · "
+                                f"{holdout_fold.get('trade_count', 0)} trades"
+                            ).classes("text-xs")
+                            if holdout.result is not None:
+                                holdout_metrics = holdout.result.metrics or {}
+                                ui.label(
+                                    f"Net after costs: {_fmt(holdout_metrics.get('net_profit_after_cost'))} USDT "
+                                    f"({_fmt(holdout_metrics.get('net_profit_after_cost_pct'))}%) · "
+                                    f"Max drawdown: {_fmt(holdout_metrics.get('max_drawdown_pct'))}%"
+                                ).classes("text-sm")
+                            if holdout_fold.get("error"):
+                                ui.label(str(holdout_fold["error"])).classes("text-xs text-red-700")
 
                 # ── Best combination + per-parameter sensitivity ───────
                 _render_sweep_analysis(result)
@@ -9957,10 +10104,10 @@ def register_pages(app: FastAPI) -> None:
 
             # Rank sensitivity on a profitability metric by default, unless
             # the user explicitly ranked on a profitability metric already.
-            rank_by = getattr(result.config, "rank_by", "sharpe_per_candle")
-            profit_keys = {"net_profit_pct", "net_profit", "profit_factor",
+            rank_by = getattr(result.config, "rank_by", "net_profit_after_cost_pct")
+            profit_keys = {"net_profit_after_cost_pct", "net_profit_pct", "net_profit", "profit_factor",
                            "expectancy", "win_rate"}
-            sens_rank = rank_by if rank_by in profit_keys else "net_profit_pct"
+            sens_rank = rank_by if rank_by in profit_keys else "net_profit_after_cost_pct"
 
             analysis = analyze_sweep(
                 entries,
@@ -9979,9 +10126,9 @@ def register_pages(app: FastAPI) -> None:
                     with ui.row().classes("w-full flex-wrap gap-3"):
                         ui.label(f"Trades: {bm.get('total_trades', 0)}").classes("text-xs")
                         ui.label(f"Win %: {bm.get('win_rate', 0):.1f}%").classes("text-xs")
-                        ui.label(f"PF: {bm.get('profit_factor', 0):.2f}").classes("text-xs")
-                        ui.label(f"Net %: {bm.get('net_profit_pct', 0):.1f}%").classes("text-xs")
-                        ui.label(f"Expectancy: {bm.get('expectancy', 0):.3f}").classes("text-xs")
+                        ui.label(f"Net PF: {_fmt(bm.get('net_profit_factor_after_cost'))}").classes("text-xs")
+                        ui.label(f"Net after costs %: {bm.get('net_profit_after_cost_pct', 0):.2f}%").classes("text-xs")
+                        ui.label(f"Net expectancy: {_fmt(bm.get('net_expectancy_after_cost'), '.3f')}").classes("text-xs")
                         ui.label(f"MaxDD %: {bm.get('max_drawdown_pct', 0):.1f}%").classes("text-xs")
                     ui.label(robustness.get("note", "")).classes(
                         "text-xs text-amber-700 mt-1" if robustness.get("single_point_optimum")
@@ -9997,8 +10144,8 @@ def register_pages(app: FastAPI) -> None:
                         {"name": "param", "label": "Parameter", "field": "param", "align": "left", "sortable": True},
                         {"name": "best", "label": "Best Value", "field": "best", "align": "right", "sortable": True},
                         {"name": "best_avg", "label": f"Avg {sens_rank}", "field": "best_avg", "align": "right", "sortable": True},
-                        {"name": "best_pf", "label": "Avg PF", "field": "best_pf", "align": "right", "sortable": True},
-                        {"name": "best_wr", "label": "Avg Win%", "field": "best_wr", "align": "right", "sortable": True},
+                        {"name": "best_pf", "label": "Avg net PF", "field": "best_pf", "align": "right", "sortable": True},
+                        {"name": "best_wr", "label": "Avg net Win%", "field": "best_wr", "align": "right", "sortable": True},
                         {"name": "n", "label": "Runs", "field": "n", "align": "right", "sortable": True},
                         {"name": "all", "label": "All values (value → avg)", "field": "all", "align": "left"},
                     ]
@@ -10009,8 +10156,8 @@ def register_pages(app: FastAPI) -> None:
                             "param": s["key"].split(".")[-1],
                             "best": s["best_value"],
                             "best_avg": f"{bv.get('avg_rank', 0):.4f}",
-                            "best_pf": f"{bv.get('avg_profit_factor', 0):.3f}",
-                            "best_wr": f"{bv.get('avg_win_rate', 0):.1f}",
+                            "best_pf": f"{bv.get('avg_net_profit_factor_after_cost', 0):.3f}",
+                            "best_wr": f"{bv.get('avg_net_win_rate_after_cost', 0):.1f}",
                             "n": bv.get("n", 0),
                             "all": "  ".join(
                                 f"{v['value']}→{v['avg_rank']:.4f}"
@@ -10043,9 +10190,10 @@ def register_pages(app: FastAPI) -> None:
             {"name": "entry", "label": "Entry", "field": "entry", "align": "right"},
             {"name": "close", "label": "Close", "field": "close", "align": "right"},
             {"name": "reason", "label": "Reason", "field": "reason", "align": "left"},
-            {"name": "pnl", "label": "PnL", "field": "pnl", "align": "right"},
-            {"name": "net_pnl", "label": "Net PnL", "field": "net_pnl", "align": "right"},
-            {"name": "fee", "label": "Fees", "field": "fee", "align": "right"},
+            {"name": "pnl", "label": "After-slippage PnL", "field": "pnl", "align": "right"},
+            {"name": "net_pnl", "label": "Net after costs", "field": "net_pnl", "align": "right"},
+            {"name": "fee", "label": "Fees/funding", "field": "fee", "align": "right"},
+            {"name": "slippage", "label": "Slippage cost", "field": "slippage", "align": "right"},
             {"name": "mfee", "label": "MFE %", "field": "mfee", "align": "right"},
             {"name": "mae", "label": "MAE %", "field": "mae", "align": "right"},
             {"name": "rmult", "label": "R", "field": "rmult", "align": "right"},
@@ -10071,6 +10219,7 @@ def register_pages(app: FastAPI) -> None:
                     "pnl": f"{t.pnl:.2f}",
                     "net_pnl": f"{t.net_pnl:.2f}" if t.net_pnl else "—",
                     "fee": f"{t.fee_and_funding_cost:.2f}" if t.fee_and_funding_cost else "—",
+                    "slippage": f"{t.slippage_cost:.2f}" if t.slippage_cost else "—",
                     "mfee": f"{t.max_favorable_pct:.2f}%" if t.max_favorable_pct else "—",
                     "mae": f"{t.max_adverse_pct:.2f}%" if t.max_adverse_pct else "—",
                     "rmult": f"{r_mult:.2f}" if r_mult is not None else "—",
@@ -10091,8 +10240,8 @@ def register_pages(app: FastAPI) -> None:
 
         def _render_symbol_card(symbol: str, trades: list[Any]) -> None:
             """Render a per-token (level 2) collapsible card + trade table."""
-            wins = [t for t in trades if t.pnl > 0]
-            net = sum(t.pnl for t in trades)
+            wins = [t for t in trades if t.net_pnl > 0]
+            net = sum(t.net_pnl for t in trades)
             wr = (len(wins) / len(trades) * 100.0) if trades else 0.0
             header = (
                 f"{symbol}  ·  {len(trades)} trades · {net:+.2f} USDT · {wr:.1f}% wr"
@@ -10102,12 +10251,12 @@ def register_pages(app: FastAPI) -> None:
 
         def _render_strategy_card(name: str, trades: list[Any]) -> None:
             """Render a per-strategy (level 1) card with a per-token drilldown."""
-            wins = [t for t in trades if t.pnl > 0]
-            losses = [t for t in trades if t.pnl < 0]
-            net = sum(t.pnl for t in trades)
+            wins = [t for t in trades if t.net_pnl > 0]
+            losses = [t for t in trades if t.net_pnl < 0]
+            net = sum(t.net_pnl for t in trades)
             wr = (len(wins) / len(trades) * 100.0) if trades else 0.0
-            gross_profit = sum(t.pnl for t in wins)
-            gross_loss = abs(sum(t.pnl for t in losses))
+            gross_profit = sum(t.net_pnl for t in wins)
+            gross_loss = abs(sum(t.net_pnl for t in losses))
             pf = (gross_profit / gross_loss) if gross_loss > 0 else None
             header = (
                 f"{name}  ·  {len(trades)} trades · {net:+.2f} USDT · "
@@ -10119,7 +10268,7 @@ def register_pages(app: FastAPI) -> None:
                 for t in trades:
                     by_symbol.setdefault(t.symbol or "unknown", []).append(t)
                 for sym, sym_trades in sorted(by_symbol.items(),
-                                              key=lambda kv: -sum(t.pnl for t in kv[1])):
+                                              key=lambda kv: -sum(t.net_pnl for t in kv[1])):
                     _render_symbol_card(sym, sym_trades)
 
         def _render_results(result: Any, container: ui.column) -> None:
@@ -10134,16 +10283,66 @@ def register_pages(app: FastAPI) -> None:
                     ui.label("Summary").classes("text-lg font-semibold mb-2")
                     m = result.metrics
                     with ui.row().classes("w-full flex-wrap gap-4"):
-                        _metric_card("Net Profit", f"{m.get('net_profit', 0):.2f} USDT", f"{m.get('net_profit_pct', 0):.1f}%")
+                        _metric_card("Gross before costs", f"{m.get('gross_pnl_before_costs', 0):.2f} USDT", "excludes fees, funding, slippage")
+                        _metric_card("PnL after slippage", f"{m.get('net_profit', 0):.2f} USDT", f"{m.get('net_profit_pct', 0):.1f}%")
+                        _metric_card("Net after costs", f"{m.get('net_profit_after_cost', 0):.2f} USDT", f"{m.get('net_profit_after_cost_pct', 0):.2f}%")
+                        _metric_card("Total modeled costs", f"{m.get('total_cost', 0):.2f} USDT", "fees + funding + slippage")
                         _metric_card("Total Trades", str(m.get("total_trades", 0)), "")
-                        _metric_card("Win Rate", f"{m.get('win_rate', 0):.1f}%", "")
-                        _metric_card("Profit Factor", _fmt(m.get("profit_factor")), "")
+                        _metric_card("Net Win Rate", f"{m.get('net_win_rate_after_cost_pct', 0):.1f}%", "after all modeled costs")
+                        _metric_card("Net Profit Factor", _fmt(m.get("net_profit_factor_after_cost")), "after all modeled costs")
+                        _metric_card(
+                            "Net Expectancy",
+                            f"{_fmt(m.get('net_expectancy_after_cost'), '.4f')} USDT/trade",
+                            f"95% normal approx [{_fmt(m.get('net_expectancy_ci95_low_normal_approx'), '.4f')}, {_fmt(m.get('net_expectancy_ci95_high_normal_approx'), '.4f')}]",
+                        )
                         _metric_card("Max Drawdown", f"{m.get('max_drawdown', 0):.2f} USDT", f"{m.get('max_drawdown_pct', 0):.1f}%")
+                        _metric_card("Max DD Duration", f"{m.get('max_drawdown_duration_bars', 0)} bars", f"{m.get('max_drawdown_duration_ms', 0) / 3_600_000:.1f} hours")
+                        _metric_card("Time in Market", f"{m.get('time_in_market_pct', 0):.1f}%", f"avg {m.get('average_concurrent_positions', 0):.2f} positions")
                         _metric_card("Final Equity", f"{m.get('final_equity', 0):.2f} USDT", "")
                         _metric_card("Sharpe/Candle", f"{m.get('sharpe_per_candle', 0):.4f}", "")
                         _metric_card("Avg Win", f"{m.get('average_win', 0):.2f}", "")
                         _metric_card("Avg Loss", f"{m.get('average_loss', 0):.2f}", "")
                         _metric_card("Expectancy", f"{m.get('expectancy', 0):.4f}", "")
+                    ui.label(
+                        f"Sharpe basis: {m.get('sharpe_basis', 'unspecified')}; "
+                        f"annualization: {m.get('sharpe_annualization_candles_per_year', 0)} bars/year. "
+                        f"{m.get('sharpe_serial_correlation_caveat', '')}"
+                    ).classes("text-xs text-slate-500 mt-1")
+                    benchmark = m.get("buy_and_hold") or {}
+                    if benchmark:
+                        if benchmark.get("error"):
+                            ui.label(f"Buy-and-hold benchmark unavailable: {benchmark['error']}").classes("text-xs text-amber-800")
+                        else:
+                            ui.label(
+                                "Equal-weight buy-and-hold portfolio across "
+                                f"{', '.join(benchmark.get('symbols') or [])}: "
+                                f"{_fmt(benchmark.get('total_return_pct'))}% return, "
+                                f"{_fmt(benchmark.get('max_drawdown_pct'))}% max drawdown; "
+                                "unlevered spot-style benchmark; no trading costs included."
+                            ).classes("text-xs text-slate-500 mt-1")
+                    provenance = getattr(result, "data_provenance", []) or []
+                    if provenance:
+                        with ui.expansion("Historical data provenance", icon="fingerprint").classes("w-full mt-2"):
+                            provenance_rows = [{
+                                "symbol": item.get("symbol", ""),
+                                "timeframe": item.get("timeframe", ""),
+                                "source": item.get("source", "unknown"),
+                                "cache": "hit" if item.get("cache_hit") else "miss",
+                                "candles": item.get("candle_count", 0),
+                                "range": f"{_fmt_ts(item.get('first_candle_ts'))} – {_fmt_ts(item.get('last_candle_ts'))}",
+                                "sha256": str(item.get("content_sha256", ""))[:16],
+                            } for item in provenance]
+                            provenance_columns = [
+                                {"name": key, "label": label, "field": key, "align": "left"}
+                                for key, label in (
+                                    ("symbol", "Symbol"), ("timeframe", "Bar"),
+                                    ("source", "Source"), ("cache", "Cache"),
+                                    ("candles", "Candles"), ("range", "Returned range"),
+                                    ("sha256", "SHA-256 prefix"),
+                                )
+                            ]
+                            with ui.table(columns=provenance_columns, rows=provenance_rows).classes("w-full"):
+                                pass
 
                 # ── Equity curve ──────────────────────────────────────────
                 if result.equity_curve:

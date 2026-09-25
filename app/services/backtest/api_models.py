@@ -47,10 +47,11 @@ class BacktestGridRequest(BaseModel):
 
     base: BacktestRunRequest
     params: list[GridParamRequest] = Field(default_factory=list)
-    rank_by: str = "sharpe_per_candle"
+    rank_by: str = "net_profit_after_cost_pct"
     min_trades: int = 5
     validation_folds: int = Field(default=0, ge=0)
     validation_train_ratio: float = Field(default=0.7, gt=0.0, lt=1.0)
+    final_holdout_fraction: float = Field(default=0.0, ge=0.0, lt=0.5)
     search_mode: str = Field(default="exhaustive", pattern="^(exhaustive|random)$")
     combination_budget: int = Field(default=0, ge=0)
     random_seed: int = 0

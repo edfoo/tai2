@@ -46,6 +46,7 @@ class SimPosition:
     size: float  # base-token units
     entry_price: float
     entry_ts: int  # ms epoch
+    trade_id: str = ""
     tp_price: float | None = None
     sl_price: float | None = None
     strategy_name: str = ""
@@ -192,6 +193,8 @@ class BacktestResult:
     per_symbol: dict[str, dict[str, Any]] = field(default_factory=dict)
     # Aggregate metrics
     metrics: dict[str, Any] = field(default_factory=dict)
+    assumptions: dict[str, Any] = field(default_factory=dict)
+    data_provenance: list[dict[str, Any]] = field(default_factory=list)
     # Execution metadata
     started_at: str = ""
     finished_at: str = ""
@@ -259,8 +262,8 @@ class GridConfig:
         Cartesian product of all ``param.values``.
     rank_by:
         Metric key to rank results by (descending).  Common choices:
-        ``"sharpe_per_candle"``, ``"profit_factor"``, ``"net_profit"``,
-        ``"win_rate"``, ``"total_trades"``.
+        ``"net_profit_after_cost_pct"``, ``"sharpe_per_candle"``,
+        ``"profit_factor"``, ``"win_rate"``, ``"total_trades"``.
     validation_folds:
         Number of chronological forward-validation windows.  Zero preserves
         the legacy single-window sweep.  Positive values reserve the initial
@@ -279,10 +282,11 @@ class GridConfig:
 
     base_config: BacktestConfig
     params: list[GridParamDef] = field(default_factory=list)
-    rank_by: str = "sharpe_per_candle"
+    rank_by: str = "net_profit_after_cost_pct"
     min_trades: int = 5
     validation_folds: int = 0
     validation_train_ratio: float = 0.7
+    final_holdout_fraction: float = 0.0
     search_mode: str = "exhaustive"
     combination_budget: int = 0
     random_seed: int = 0
@@ -337,6 +341,9 @@ class GridResult:
     attempted_combinations: int = 0
     search_mode: str = "exhaustive"
     random_seed: int = 0
+    assumptions: dict[str, Any] = field(default_factory=dict)
+    data_provenance: list[dict[str, Any]] = field(default_factory=list)
+    final_holdout: GridRunResult | None = None
     error: str | None = None
 
     @property

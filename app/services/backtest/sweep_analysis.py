@@ -28,7 +28,7 @@ from typing import Any, Iterable
 
 # When ranking "most profitable", prefer size-normalised / risk-adjusted fields
 # over absolute PnL (absolute PnL is dominated by swept ``notional_usd``).
-DEFAULT_RANK_BY = "net_profit_pct"
+DEFAULT_RANK_BY = "net_profit_after_cost_pct"
 
 # Fields copied onto the "best" entry for display.
 _BEST_METRIC_FIELDS = (
@@ -36,6 +36,11 @@ _BEST_METRIC_FIELDS = (
     "win_rate",
     "net_profit",
     "net_profit_pct",
+    "net_profit_after_cost",
+    "net_profit_after_cost_pct",
+    "net_profit_factor_after_cost",
+    "net_win_rate_after_cost_pct",
+    "net_expectancy_after_cost",
     "profit_factor",
     "expectancy",
     "max_drawdown_pct",
@@ -164,10 +169,16 @@ def analyze_sweep(
                 "avg_rank": round(_avg(_num(r["metrics"].get(rank_by)) for r in group), 4),
                 "avg_net_profit_pct": round(
                     _avg(_num(r["metrics"].get("net_profit_pct")) for r in group), 2),
+                "avg_net_profit_after_cost_pct": round(
+                    _avg(_num(r["metrics"].get("net_profit_after_cost_pct")) for r in group), 2),
                 "avg_profit_factor": round(
                     _avg(_num(r["metrics"].get("profit_factor")) for r in group), 3),
                 "avg_win_rate": round(
                     _avg(_num(r["metrics"].get("win_rate")) for r in group), 1),
+                "avg_net_profit_factor_after_cost": round(
+                    _avg(_num(r["metrics"].get("net_profit_factor_after_cost")) for r in group), 3),
+                "avg_net_win_rate_after_cost": round(
+                    _avg(_num(r["metrics"].get("net_win_rate_after_cost_pct")) for r in group), 1),
             })
         value_rows.sort(key=lambda x: x["avg_rank"], reverse=True)
         sensitivity.append({

@@ -21,7 +21,7 @@ import csv
 import json
 import math
 import os
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, fields, is_dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -32,6 +32,10 @@ from app.services.backtest.models import (
     BacktestConfig,
     BacktestResult,
     EquityPoint,
+    GridConfig,
+    GridParamDef,
+    GridResult,
+    GridRunResult,
     SimPosition,
 )
 
@@ -53,6 +57,9 @@ def _trade_to_dict(t: SimPosition) -> dict[str, Any]:
         "symbol": t.symbol,
         "direction": t.direction,
         "strategy": t.strategy_name,
+        "size": t.size,
+        "initial_size": t.initial_size,
+        "trade_id": t.trade_id,
         "entry_ts": t.entry_ts,
         "entry_price": t.entry_price,
         "tp_price": t.tp_price,
@@ -62,7 +69,15 @@ def _trade_to_dict(t: SimPosition) -> dict[str, Any]:
         "close_ts": t.close_ts,
         "pnl": t.pnl,
         "pnl_pct": t.pnl_pct,
+        "entry_fee": t.entry_fee,
+        "exit_fee": t.exit_fee,
+        "funding": t.funding,
+        "slippage_cost": t.slippage_cost,
+        "max_favorable_pct": t.max_favorable_pct,
+        "max_adverse_pct": t.max_adverse_pct,
         "candles_held": t.candles_held,
+        "breakeven_done": t.breakeven_done,
+        "partial_done": t.partial_done,
     }
 
 
@@ -85,21 +100,22 @@ def _sanitize(value: Any) -> Any:
     return value
 
 
-def result_to_dict(result: BacktestResult) -> dict[str, Any]:
+def result_to_dict(result: BacktestResult | GridResult) -> dict[str, Any]:
     """Convert a ``BacktestResult`` into a JSON-serialisable dict.
 
     All non-finite floats (``inf``/``-inf``/``nan``) are replaced with
     ``None`` so the payload is always valid JSON.
     """
+    if isinstance(result, GridResult):
+        return grid_result_to_dict(result)
     return _sanitize({
-        "config": {
-            "timeframe": result.config.timeframe,
-            "symbols": result.config.symbols,
-            "start_ts": result.config.start_ts,
-            "end_ts": result.config.end_ts,
-            "strategy_names": result.config.strategy_names,
-            "initial_capital": result.config.initial_capital,
-        },
+        "schema_version": 2,
+        "result_type": "backtest",
+        "config": _backtest_config_data(result.config),
+        "assumptions": getattr(result, "assumptions", {}) or _backtest_assumptions(
+            BacktestConfig(**_backtest_config_kwargs(_config_values(result.config)))
+        ),
+        "data_provenance": getattr(result, "data_provenance", []) or [],
         "metrics": result.metrics,
         "per_strategy": result.per_strategy,
         "per_symbol": getattr(result, "per_symbol", {}) or {},
@@ -110,9 +126,128 @@ def result_to_dict(result: BacktestResult) -> dict[str, Any]:
             for p in result.equity_curve
         ],
         "duration_seconds": result.duration_seconds,
+        "started_at": getattr(result, "started_at", ""),
+        "finished_at": getattr(result, "finished_at", ""),
         "candles_processed": result.candles_processed,
         "error": result.error,
     })
+
+
+def grid_result_to_dict(result: GridResult) -> dict[str, Any]:
+    """Convert a grid result to JSON, storing each candidate once."""
+    run_indexes = {id(run): idx for idx, run in enumerate(result.runs)}
+    return _sanitize({
+        "schema_version": 2,
+        "result_type": "grid",
+        "config": {
+            "base_config": _backtest_config_data(result.config.base_config),
+            "params": [asdict(param) for param in result.config.params],
+            "rank_by": result.config.rank_by,
+            "min_trades": result.config.min_trades,
+            "validation_folds": result.config.validation_folds,
+            "validation_train_ratio": result.config.validation_train_ratio,
+            "final_holdout_fraction": result.config.final_holdout_fraction,
+            "search_mode": result.config.search_mode,
+            "combination_budget": result.config.combination_budget,
+            "random_seed": result.config.random_seed,
+        },
+        "assumptions": {
+            **_backtest_assumptions(result.config.base_config),
+            **(result.assumptions or {}),
+        },
+        "data_provenance": result.data_provenance,
+        "started_at": result.started_at,
+        "finished_at": result.finished_at,
+        "duration_seconds": result.duration_seconds,
+        "total_combinations": result.total_combinations,
+        "attempted_combinations": result.attempted_combinations,
+        "search_mode": result.search_mode,
+        "random_seed": result.random_seed,
+        "error": result.error,
+        "runs": [
+            {
+                "params": run.params,
+                "result": result_to_dict(run.result) if run.result is not None else None,
+                "rank_score": run.rank_score,
+                "below_min_trades": run.below_min_trades,
+                "fold_metrics": run.fold_metrics,
+            }
+            for run in result.runs
+        ],
+        "final_holdout": (
+            {
+                "params": result.final_holdout.params,
+                "result": result_to_dict(result.final_holdout.result)
+                if result.final_holdout.result is not None else None,
+                "rank_score": result.final_holdout.rank_score,
+                "below_min_trades": result.final_holdout.below_min_trades,
+                "fold_metrics": result.final_holdout.fold_metrics,
+            }
+            if result.final_holdout is not None else None
+        ),
+        "ranked_indexes": [run_indexes[id(run)] for run in result.ranked if id(run) in run_indexes],
+    })
+
+
+def _backtest_assumptions(config: BacktestConfig) -> dict[str, Any]:
+    """Describe modeled execution/cost inputs and gates using absent live data."""
+    strategies = (getattr(config, "launcher_config", None) or {}).get("strategies") or {}
+    unavailable_gates = {
+        "require_footprint_delta": ("footprint trade tape", "not evaluated when footprint data is absent"),
+        "require_book_imbalance": ("live order book", "passes neutrally when order-book data is absent"),
+        "require_balanced_book": ("live order book", "passes neutrally when order-book data is absent"),
+        "require_oi_confirmation": ("historical open interest", "passes neutrally when open-interest data is absent"),
+        "require_no_extreme_funding": ("historical funding metadata", "cannot be evaluated without funding metadata"),
+        "require_no_funding_bias": ("historical funding metadata", "cannot be evaluated without funding metadata"),
+    }
+    enabled_gates = [
+        {
+            "strategy": strategy_name,
+            "gate": gate_name,
+            "unavailable_input": missing_input,
+            "backtest_behavior": behavior,
+        }
+        for strategy_name, strategy_config in strategies.items()
+        if isinstance(strategy_config, dict)
+        for gate_name, (missing_input, behavior) in unavailable_gates.items()
+        if bool(strategy_config.get(gate_name, False))
+    ]
+    return {
+        "historical_market_data": "OKX OHLCV candles; live trade tape and order-book snapshots are not available.",
+        "entry_fill": "Signal evaluated at candle close and filled at that close; entry candle excluded from post-entry management.",
+        "intrabar_barrier_order": "If stop-loss and take-profit are both crossed within a candle, stop-loss is assumed first.",
+        "cost_model": {
+            "taker_fee_bps_per_fill": getattr(config, "taker_fee_bps", 5.0),
+            "maker_fee_bps_per_fill": getattr(config, "maker_fee_bps", 0.0),
+            "slippage_bps_per_fill": getattr(config, "slippage_bps", 0.0),
+            "funding_rate_pct_per_interval": getattr(config, "funding_rate_pct", 0.0),
+            "funding_interval_ms": getattr(config, "funding_interval_ms", 28_800_000),
+            "funding_source": "constant configured rate; not historical per-symbol funding data",
+        },
+        "unavailable_live_inputs": [
+            "footprint / trade-tape delta",
+            "live order-book depth and imbalance",
+            "historical open-interest series",
+            "historical funding-rate series",
+        ],
+        "enabled_gates_with_unavailable_inputs": enabled_gates,
+    }
+
+
+def _config_values(config: Any) -> dict[str, Any]:
+    """Return available config attributes for a dataclass or legacy object."""
+    if is_dataclass(config):
+        return asdict(config)
+    return {
+        field.name: getattr(config, field.name)
+        for field in fields(BacktestConfig)
+        if hasattr(config, field.name)
+    }
+
+
+def _backtest_config_data(config: Any) -> dict[str, Any]:
+    """Serialize a supported BacktestConfig with defaults filled in."""
+    return asdict(BacktestConfig(**_backtest_config_kwargs(_config_values(config))))
 
 
 def _trade_from_dict(d: dict[str, Any]) -> SimPosition:
@@ -122,15 +257,25 @@ def _trade_from_dict(d: dict[str, Any]) -> SimPosition:
         size=d.get("size", 0.0),
         entry_price=d.get("entry_price", 0.0),
         entry_ts=d.get("entry_ts", 0),
+        trade_id=d.get("trade_id", ""),
         tp_price=d.get("tp_price"),
         sl_price=d.get("sl_price"),
         strategy_name=d.get("strategy", ""),
+        initial_size=d.get("initial_size"),
         close_price=d.get("close_price"),
         close_ts=d.get("close_ts"),
         close_reason=d.get("close_reason", ""),
         pnl=d.get("pnl", 0.0),
         pnl_pct=d.get("pnl_pct", 0.0),
+        entry_fee=d.get("entry_fee", 0.0),
+        exit_fee=d.get("exit_fee", 0.0),
+        funding=d.get("funding", 0.0),
+        slippage_cost=d.get("slippage_cost", 0.0),
+        max_favorable_pct=d.get("max_favorable_pct", 0.0),
+        max_adverse_pct=d.get("max_adverse_pct", 0.0),
         candles_held=d.get("candles_held", 0),
+        breakeven_done=bool(d.get("breakeven_done", False)),
+        partial_done=bool(d.get("partial_done", False)),
     )
 
 
@@ -142,7 +287,7 @@ def _eq_from_dict(d: dict[str, Any]) -> EquityPoint:
     )
 
 
-def result_from_dict(data: dict[str, Any]) -> BacktestResult | None:
+def result_from_dict(data: dict[str, Any]) -> BacktestResult | GridResult | None:
     """Rebuild a ``BacktestResult`` from the dict produced by ``result_to_dict``.
 
     Returns ``None`` if the payload doesn't look like a stored result (so the
@@ -150,6 +295,8 @@ def result_from_dict(data: dict[str, Any]) -> BacktestResult | None:
     """
     if not isinstance(data, dict):
         return None
+    if data.get("result_type") == "grid":
+        return grid_result_from_dict(data)
     cfg = data.get("config")
     if not isinstance(cfg, dict):
         return None
@@ -157,12 +304,7 @@ def result_from_dict(data: dict[str, Any]) -> BacktestResult | None:
     try:
         result = BacktestResult(
             config=BacktestConfig(
-                symbols=list(cfg.get("symbols") or []),
-                timeframe=str(cfg.get("timeframe") or ""),
-                start_ts=int(cfg.get("start_ts") or 0),
-                end_ts=int(cfg.get("end_ts") or 0),
-                initial_capital=float(cfg.get("initial_capital") or 0.0),
-                strategy_names=list(cfg.get("strategy_names") or []),
+                **_backtest_config_kwargs(cfg),
             ),
             metrics=dict(data.get("metrics") or {}),
             per_strategy=dict(data.get("per_strategy") or {}),
@@ -176,12 +318,123 @@ def result_from_dict(data: dict[str, Any]) -> BacktestResult | None:
                 if isinstance(p, dict)
             ],
             duration_seconds=float(data.get("duration_seconds") or 0.0),
+            started_at=str(data.get("started_at") or ""),
+            finished_at=str(data.get("finished_at") or ""),
+            assumptions=dict(data.get("assumptions") or {}),
+            data_provenance=[
+                dict(item) for item in data.get("data_provenance") or []
+                if isinstance(item, dict)
+            ],
             candles_processed=int(data.get("candles_processed") or 0),
             error=data.get("error"),
         )
         return result
     except (TypeError, ValueError, KeyError):
         return None
+
+
+def grid_result_from_dict(data: dict[str, Any]) -> GridResult | None:
+    """Rebuild a ``GridResult`` from a saved or API grid-result payload."""
+    if not isinstance(data, dict) or not isinstance(data.get("config"), dict):
+        return None
+    try:
+        config_data = data["config"]
+        base_data = config_data.get("base_config") or {}
+        grid_config = GridConfig(
+            base_config=BacktestConfig(**_backtest_config_kwargs(base_data)),
+            params=[
+                GridParamDef(
+                    key=str(param.get("key") or ""),
+                    values=list(param.get("values") or []),
+                    label=str(param.get("label") or ""),
+                )
+                for param in config_data.get("params") or []
+                if isinstance(param, dict)
+            ],
+            rank_by=str(config_data.get("rank_by") or "net_profit_after_cost_pct"),
+            min_trades=int(config_data.get("min_trades") or 0),
+            validation_folds=int(config_data.get("validation_folds") or 0),
+            validation_train_ratio=float(config_data.get("validation_train_ratio") or 0.7),
+            final_holdout_fraction=float(config_data.get("final_holdout_fraction") or 0.0),
+            search_mode=str(config_data.get("search_mode") or "exhaustive"),
+            combination_budget=int(config_data.get("combination_budget") or 0),
+            random_seed=int(config_data.get("random_seed") or 0),
+        )
+        runs: list[GridRunResult] = []
+        for row in data.get("runs") or []:
+            if not isinstance(row, dict):
+                continue
+            bt_data = row.get("result")
+            bt_result = result_from_dict(bt_data) if isinstance(bt_data, dict) else None
+            if isinstance(bt_result, GridResult):
+                continue
+            runs.append(GridRunResult(
+                params=dict(row.get("params") or {}),
+                result=bt_result,
+                rank_score=row.get("rank_score"),
+                below_min_trades=bool(row.get("below_min_trades", False)),
+                fold_metrics=[
+                    dict(fold) for fold in row.get("fold_metrics") or []
+                    if isinstance(fold, dict)
+                ],
+            ))
+        result = GridResult(
+            config=grid_config,
+            runs=runs,
+            ranked=[],
+            started_at=str(data.get("started_at") or ""),
+            finished_at=str(data.get("finished_at") or ""),
+            duration_seconds=float(data.get("duration_seconds") or 0.0),
+            total_combinations=int(data.get("total_combinations") or 0),
+            attempted_combinations=int(data.get("attempted_combinations") or 0),
+            search_mode=str(data.get("search_mode") or grid_config.search_mode),
+            random_seed=int(data.get("random_seed") or grid_config.random_seed),
+            assumptions=dict(data.get("assumptions") or _backtest_assumptions(grid_config.base_config)),
+            data_provenance=[
+                dict(item) for item in data.get("data_provenance") or []
+                if isinstance(item, dict)
+            ],
+            final_holdout=(
+                _grid_run_from_dict(data["final_holdout"])
+                if isinstance(data.get("final_holdout"), dict) else None
+            ),
+            error=data.get("error"),
+        )
+        indexes = data.get("ranked_indexes") or []
+        result.ranked = [runs[idx] for idx in indexes if isinstance(idx, int) and 0 <= idx < len(runs)]
+        return result
+    except (TypeError, ValueError, KeyError):
+        return None
+
+
+def _backtest_config_kwargs(config_data: dict[str, Any]) -> dict[str, Any]:
+    """Select known config fields and apply defaults for legacy result files."""
+    allowed = {field.name for field in fields(BacktestConfig)}
+    values = {key: value for key, value in config_data.items() if key in allowed}
+    values["symbols"] = list(values.get("symbols") or [])
+    values["timeframe"] = str(values.get("timeframe") or "")
+    values["start_ts"] = int(values.get("start_ts") or 0)
+    values["end_ts"] = int(values.get("end_ts") or 0)
+    values["initial_capital"] = float(values.get("initial_capital") or 0.0)
+    values["strategy_names"] = list(values.get("strategy_names") or [])
+    return values
+
+
+def _grid_run_from_dict(row: dict[str, Any]) -> GridRunResult | None:
+    bt_data = row.get("result")
+    bt_result = result_from_dict(bt_data) if isinstance(bt_data, dict) else None
+    if isinstance(bt_result, GridResult):
+        return None
+    return GridRunResult(
+        params=dict(row.get("params") or {}),
+        result=bt_result,
+        rank_score=row.get("rank_score"),
+        below_min_trades=bool(row.get("below_min_trades", False)),
+        fold_metrics=[
+            dict(fold) for fold in row.get("fold_metrics") or []
+            if isinstance(fold, dict)
+        ],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -295,7 +548,7 @@ def iter_result_files(output_dir: Path | None = None):
 
 
 def save_result(
-    result: BacktestResult,
+    result: BacktestResult | GridResult,
     *,
     run_id: str,
     output_dir: Path | None = None,
@@ -309,25 +562,39 @@ def save_result(
     path = out_dir / f"{run_id}_results.json"
     path.write_text(json.dumps(result_to_dict(result), indent=2, default=str))
 
-    breakdown = out_dir / f"{run_id}_per_strategy.json"
-    breakdown.write_text(
-        json.dumps({"per_strategy": result.per_strategy,
-                    "per_symbol": result.per_symbol,
-                    "metrics": result.metrics},
-                   indent=2, default=str)
-    )
-
-    write_comparison_csv(
-        [result_summary_row(result, run_id=run_id)],
-        output_dir=out_dir,
-        append=True,
-    )
+    if isinstance(result, BacktestResult):
+        breakdown = out_dir / f"{run_id}_per_strategy.json"
+        breakdown.write_text(
+            json.dumps({"per_strategy": result.per_strategy,
+                        "per_symbol": result.per_symbol,
+                        "metrics": result.metrics},
+                       indent=2, default=str)
+        )
+        write_comparison_csv(
+            [result_summary_row(result, run_id=run_id)],
+            output_dir=out_dir,
+            append=True,
+        )
+    elif result.ranked:
+        best_run = next((
+            run for run in result.ranked
+            if run.rank_score is not None
+            and not run.below_min_trades
+            and run.result is not None
+        ), None)
+        best_result = best_run.result if best_run is not None else None
+        if best_result is not None:
+            write_comparison_csv(
+                [result_summary_row(best_result, run_id=run_id)],
+                output_dir=out_dir,
+                append=True,
+            )
     return path
 
 
 def load_result(
     path: Path,
-) -> BacktestResult | None:
+) -> BacktestResult | GridResult | None:
     """Load a ``*_results.json`` file into a ``BacktestResult``."""
     try:
         data = json.loads(Path(path).read_text())

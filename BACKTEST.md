@@ -94,6 +94,12 @@ done
 | `--base-url` | `http://localhost:8000` | Server address |
 | `--evaluation-mode` / `--evaluation-timeframe` | `finer_ltf` / `1m` | Evaluation stepping |
 | `--workers` | `8` (A/B clients) | Max concurrent submissions to the server |
+| `--validation-folds` | `0` | Chronological validation folds; 0 scores the full requested interval |
+| `--validation-train-ratio` | `0.7` | Unscored prefix fraction of the interval before any final holdout; it does not fit parameters |
+| `--final-holdout-fraction` | `0` | Reserve a terminal fraction for one evaluation of the selected validation candidate; requires validation folds |
+| `--search-mode` | `exhaustive` | `exhaustive` or seeded `random` candidate sampling |
+| `--combination-budget` | `0` | Maximum random candidates; 0 means use all combinations |
+| `--random-seed` | `42` | Seed for reproducible random sampling |
 
 ### Parameter sweep (`grid` subcommand)
 
@@ -103,8 +109,18 @@ done
     --days 60 --capital 1000 \
     --params strategies.mean_reversion.rsi_oversold=25,30,35 \
     --params strategies.mean_reversion.max_adx=20,25,30 \
-    --rank-by sharpe_per_candle
+    --rank-by net_profit_after_cost_pct \
+    --validation-folds 4 --validation-train-ratio 0.6 \
+    --final-holdout-fraction 0.15 \
+    --search-mode random --combination-budget 64 --random-seed 7
 ```
+
+  The initial prefix is excluded from candidate scoring; it is **not** a training
+  period. Validation folds are non-overlapping, and a requested final holdout is
+  reserved at the end of the date range. The best eligible candidate is chosen
+  using validation scores first, then evaluated once on the holdout. Holdout
+  results are reported separately and never reorder the validation ranking. Keep
+  that holdout untouched when making parameter choices.
 
 ### Strategy-specific A/B sweeps
 
@@ -146,7 +162,7 @@ All output is persisted under `backtest_cache/cli/`:
 
 | Path | Content |
 |---|---|
-| `<timestamp>_<ltf>_results.json` | Full result: metrics + every trade (symbol, direction, entry/TP/SL, close reason, PnL) |
+| `<timestamp>_<ltf>_results.json` | Full result/config, cost assumptions, data-source fingerprints, metrics, every trade with fees/funding/slippage, and grid fold/holdout evidence when applicable |
 | `<timestamp>_<ltf>_per_strategy.json` | Per-strategy breakdown |
 | `comparison.csv` | **One row per run**, cumulative across runs — easy to diff in a spreadsheet |
 | `overview.json` | Machine-readable list of all run summaries |

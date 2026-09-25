@@ -140,6 +140,7 @@ class Simulator:
         self._strategy_config = strategy_config or {}
         self._cost_model = cost_model or CostModel()
         self._open_positions: list[SimPosition] = []
+        self._position_sequence = 0
         self._closed_positions: list[SimPosition] = []
         self._equity_curve: list[EquityPoint] = []
         self._cash = initial_capital
@@ -314,13 +315,16 @@ class Simulator:
         if size <= 0:
             return None
 
+        self._position_sequence += 1
+        trade_id = f"{symbol}:{entry_ts}:{strategy_name}:{self._position_sequence}"
+
         # Effective entry fill price after slippage (slippage is baked into
         # fill_price, so it is already reflected in the position's PnL).
         fill_price = self._cost_model.entry_price_for(entry_price, direction == "long")
         notional = size * fill_price
         entry_fee = self._cost_model.fee_for(notional, taker=True)
-        # Informational only — entry slippage cost (already in fill_price).
-        entry_slippage = size * (fill_price - entry_price)
+        # Positive informational cost; the adverse fill is also reflected in PnL.
+        entry_slippage = abs(size * (fill_price - entry_price))
 
         position = SimPosition(
             symbol=symbol,
@@ -328,6 +332,7 @@ class Simulator:
             size=size,
             entry_price=fill_price,
             entry_ts=entry_ts,
+            trade_id=trade_id,
             tp_price=tp_price,
             sl_price=sl_price,
             strategy_name=strategy_name,
@@ -380,7 +385,7 @@ class Simulator:
             position.close_reason = reason
             position.exit_fee = exit_fee
             position.funding = funding
-            # Accumulate exit slippage into the informational total.
+            # Slippage is tracked as a positive cost, separate from fill PnL.
             position.slippage_cost += position.size * abs(exit_px - close_price)
             position.pnl = position.unrealised_pnl(exit_px)
             if position.entry_price > 0:
@@ -399,7 +404,18 @@ class Simulator:
         else:
             partial_pnl = (position.entry_price - exit_px) * closed_size
         partial_fee = self._cost_model.fee_for(closed_size * exit_px, taker=True)
-        self._cash += partial_pnl - partial_fee
+        close_fraction = closed_size / position.size
+        allocated_entry_fee = position.entry_fee * close_fraction
+        allocated_entry_slippage = position.slippage_cost * close_fraction
+        partial_slippage = allocated_entry_slippage + closed_size * abs(exit_px - close_price)
+        held_ms = max(close_ts - position.entry_ts, 0)
+        intervals = held_ms // self._cost_model.funding_interval_ms
+        partial_funding = self._cost_model.funding_payment(
+            closed_size * position.entry_price,
+            is_long=position.is_long,
+            intervals=intervals,
+        )
+        self._cash += partial_pnl - partial_fee - partial_funding
         # Record a closed leg for metrics.
         closed_leg = SimPosition(
             symbol=position.symbol,
@@ -407,6 +423,7 @@ class Simulator:
             size=closed_size,
             entry_price=position.entry_price,
             entry_ts=position.entry_ts,
+            trade_id=position.trade_id,
             tp_price=position.tp_price,
             sl_price=position.sl_price,
             strategy_name=position.strategy_name,
@@ -423,7 +440,10 @@ class Simulator:
                     else 0.0
                 )
             ),
+            entry_fee=allocated_entry_fee,
             exit_fee=partial_fee,
+            slippage_cost=partial_slippage,
+            funding=partial_funding,
             candles_held=position.candles_held,
             initial_size=position.initial_size,
             breakeven_done=position.breakeven_done,
@@ -431,6 +451,8 @@ class Simulator:
         )
         self._closed_positions.append(closed_leg)
         position.size = position.size - closed_size
+        position.entry_fee -= allocated_entry_fee
+        position.slippage_cost -= allocated_entry_slippage
         position.partial_done = True
 
     # ── Per-candle update ────────────────────────────────────────────

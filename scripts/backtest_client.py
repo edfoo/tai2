@@ -93,13 +93,63 @@ def _print_result(base_url: str, job_id: str) -> None:
         raise SystemExit(f"result fetch returned {resp.status_code}: {resp.text}")
     payload = resp.json()
     result = payload.get("result") or {}
+    if result.get("result_type") == "grid":
+        config = result.get("config") or {}
+        print("\n── Grid Result ──")
+        print(f"  rank_by:       {config.get('rank_by')}")
+        print(f"  search:        {result.get('search_mode')} seed={result.get('random_seed')}")
+        print(
+            f"  combinations:  {result.get('attempted_combinations')}/"
+            f"{result.get('total_combinations')}"
+        )
+        print(f"  validation:    {config.get('validation_folds')} folds")
+        runs = result.get("runs", [])
+        ranked_indexes = result.get("ranked_indexes") or []
+        top = next((
+            runs[idx] for idx in ranked_indexes
+            if isinstance(idx, int)
+            and 0 <= idx < len(runs)
+            and runs[idx].get("rank_score") is not None
+            and not runs[idx].get("below_min_trades")
+        ), None)
+        if top:
+            print(f"  best params:   {json.dumps(top.get('params') or {}, sort_keys=True)}")
+            print(f"  validation:    score={top.get('rank_score')}")
+            for fold in top.get("fold_metrics") or []:
+                metrics = fold.get("metrics") or {}
+                print(
+                    f"  fold {fold.get('fold')}: {fold.get('status')} "
+                    f"trades={fold.get('trade_count')} "
+                    f"net_after_cost={metrics.get('net_profit_after_cost')} "
+                    f"drawdown={metrics.get('max_drawdown_pct')}%"
+                )
+        holdout = result.get("final_holdout")
+        if holdout:
+            holdout_fold = (holdout.get("fold_metrics") or [{}])[0]
+            holdout_metrics = (holdout.get("result") or {}).get("metrics") or {}
+            print("  untouched final holdout (not used for ranking):")
+            print(
+                f"    {holdout_fold.get('status')} trades={holdout_fold.get('trade_count')} "
+                f"net_after_cost={holdout_metrics.get('net_profit_after_cost')} "
+                f"return={holdout_metrics.get('net_profit_after_cost_pct')}%"
+            )
+        for source in result.get("data_provenance") or []:
+            print(
+                f"  source:        {source.get('symbol')} {source.get('timeframe')} "
+                f"{source.get('source')} sha256={str(source.get('content_sha256', ''))[:16]}"
+            )
+        if result.get("error"):
+            print(f"  error:         {result['error']}")
+        return
     metrics = result.get("metrics") or {}
     print("\n── Result ──")
     print(f"  run_id:       {payload.get('run_id')}")
     print(f"  trades:       {metrics.get('total_trades')}")
-    print(f"  win_rate:     {metrics.get('win_rate')}")
-    print(f"  net_profit:   {metrics.get('net_profit')}")
-    print(f"  profit_factor:{metrics.get('profit_factor')}")
+    print(f"  net_win_rate: {metrics.get('net_win_rate_after_cost_pct')}")
+    print(f"  pnl_slippage: {metrics.get('pnl_after_slippage_before_fees_funding')}")
+    print(f"  net_after_costs: {metrics.get('net_profit_after_cost')} "
+          f"({metrics.get('net_profit_after_cost_pct')}%)")
+    print(f"  net_pf:       {metrics.get('net_profit_factor_after_cost')}")
     print(f"  max_drawdown: {metrics.get('max_drawdown_pct')}")
     print(f"  sharpe_ann:   {metrics.get('sharpe_annualized')}")
     print(f"  exit_reasons: {json.dumps(metrics.get('exit_reasons'))}")
@@ -139,6 +189,12 @@ def _cmd_grid(args: argparse.Namespace) -> int:
         "params": params,
         "rank_by": args.rank_by,
         "min_trades": args.min_trades,
+        "validation_folds": args.validation_folds,
+        "validation_train_ratio": args.validation_train_ratio,
+        "final_holdout_fraction": args.final_holdout_fraction,
+        "search_mode": args.search_mode,
+        "combination_budget": args.combination_budget,
+        "random_seed": args.random_seed,
     }
     accepted = _post(args.base_url, "/backtest/grid", payload)
     job_id = accepted["job_id"]
@@ -180,8 +236,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "--params", action="append", default=[],
         help="dotted key=a,b,c (repeatable)",
     )
-    grid_p.add_argument("--rank-by", default="sharpe_per_candle")
+    grid_p.add_argument("--rank-by", default="net_profit_after_cost_pct")
     grid_p.add_argument("--min-trades", type=int, default=5)
+    grid_p.add_argument("--validation-folds", type=int, default=0)
+    grid_p.add_argument("--validation-train-ratio", type=float, default=0.7)
+    grid_p.add_argument("--final-holdout-fraction", type=float, default=0.0)
+    grid_p.add_argument("--search-mode", choices=("exhaustive", "random"), default="exhaustive")
+    grid_p.add_argument("--combination-budget", type=int, default=0)
+    grid_p.add_argument("--random-seed", type=int, default=42)
     grid_p.set_defaults(func=_cmd_grid)
 
     return parser

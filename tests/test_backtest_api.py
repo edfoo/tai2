@@ -28,6 +28,7 @@ from app.services.backtest.job_manager import (
     BacktestJobManager,
     _resolve_window,
 )
+from app.services.backtest.models import BacktestResult, GridResult, GridRunResult
 
 
 class _FakeResult:
@@ -162,6 +163,104 @@ async def test_job_manager_grid_lifecycle(monkeypatch):
         await __import__("asyncio").sleep(0.05)
 
     assert manager.get_status(job_id)["status"] == COMPLETED
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_grid_job_result_contains_reproducible_config_and_fold_metrics(monkeypatch, tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from app.services.backtest.persistence import load_result, save_result
+
+    monkeypatch.setattr(
+        "app.services.backtest.job_manager.ProcessPoolExecutor", ThreadPoolExecutor
+    )
+    persisted = []
+
+    def _persist_result(result, **kwargs):
+        kwargs["output_dir"] = tmp_path
+        path = save_result(result, **kwargs)
+        persisted.append(path)
+
+    monkeypatch.setattr(
+        "app.services.backtest.job_manager.save_result",
+        _persist_result,
+    )
+
+    def _grid_worker(config, job_id, redis_url):
+        candidate_config = config.base_config
+        candidate = BacktestResult(config=candidate_config)
+        candidate.metrics = {"total_trades": 2, "net_profit_pct": 1.5}
+        run = GridRunResult(
+            params={"strategies.mean_reversion.rsi_oversold": 30.0},
+            result=candidate,
+            rank_score=1.5,
+            below_min_trades=False,
+            fold_metrics=[{
+                "fold": 1,
+                "start_ts": 100,
+                "end_ts": 200,
+                "status": "completed",
+                "trade_count": 2,
+                "rank_score": 1.5,
+                "metrics": {"total_trades": 2, "net_profit_pct": 1.5},
+            }],
+        )
+        return GridResult(
+            config=config,
+            runs=[run],
+            ranked=[run],
+            total_combinations=4,
+            attempted_combinations=2,
+            search_mode="random",
+            random_seed=12,
+        )
+
+    monkeypatch.setattr(
+        "app.services.backtest.job_manager._execute_grid_worker", _grid_worker
+    )
+    manager = BacktestJobManager(_State())
+    manager.start()
+    request = BacktestGridRequest(
+        base=BacktestRunRequest(
+            symbols=["BTC-USDT-SWAP"],
+            timeframe="15m",
+            strategy_names=["mean_reversion"],
+            days=10,
+            launcher_config={"notional_usd": 75.0},
+            guardrails_config={"max_position_pct": 0.25},
+        ),
+        params=[GridParamRequest(
+            key="strategies.mean_reversion.rsi_oversold", values=[25, 30]
+        )],
+        rank_by="net_profit_pct",
+        min_trades=1,
+        validation_folds=1,
+        final_holdout_fraction=0.2,
+        search_mode="random",
+        combination_budget=2,
+        random_seed=12,
+    )
+    job_id = manager.submit_grid(request)
+
+    deadline = time.time() + 5.0
+    while time.time() < deadline and manager.get_status(job_id)["status"] not in (COMPLETED, FAILED):
+        await __import__("asyncio").sleep(0.05)
+
+    payload = manager.get_result(job_id)["result"]
+    assert payload["result_type"] == "grid"
+    assert payload["config"]["base_config"]["launcher_config"] == {"notional_usd": 75.0}
+    assert payload["config"]["base_config"]["guardrails_config"] == {"max_position_pct": 0.25}
+    assert payload["config"]["search_mode"] == "random"
+    assert payload["config"]["final_holdout_fraction"] == 0.2
+    assert payload["attempted_combinations"] == 2
+    assert payload["runs"][0]["fold_metrics"][0]["status"] == "completed"
+    assert persisted and persisted[0].exists()
+    assert manager.get_status(job_id)["run_id"].split("_")[-2] == "15m"
+    restored = load_result(persisted[0])
+    assert isinstance(restored, GridResult)
+    assert restored.config.base_config.guardrails_config == {"max_position_pct": 0.25}
+    assert restored.config.final_holdout_fraction == 0.2
+    assert restored.ranked[0].fold_metrics[0]["trade_count"] == 2
     await manager.shutdown()
 
 

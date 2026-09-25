@@ -6,6 +6,7 @@ import pytest
 
 from app.services.backtest.costs import CostModel
 from app.services.backtest.models import Candle
+from app.services.backtest.metrics import compute_metrics
 from app.services.backtest.simulator import Simulator
 
 
@@ -107,3 +108,37 @@ class TestCostAwareSimulator:
         trade = sim.open_positions[0]
         assert trade.entry_price == pytest.approx(101.0)
         assert trade.slippage_cost == pytest.approx(1.0 * trade.size)
+
+    def test_partial_close_allocates_entry_fee_slippage_and_funding(self) -> None:
+        sim = Simulator(
+            initial_capital=1000.0,
+            notional_per_trade=100.0,
+            cost_model=CostModel(
+                taker_fee_bps=5.0,
+                slippage_bps=100.0,
+                funding_rate_pct=0.01,
+                funding_interval_ms=8,
+            ),
+        )
+        position = sim.open_position(
+            symbol="BTC-USDT-SWAP",
+            direction="long",
+            entry_price=100.0,
+            entry_ts=0,
+            strategy_name="test",
+        )
+        assert position is not None
+
+        sim._close_position(position, 110.0, 8, "partial", size_fraction=0.5)
+        sim._close_position(position, 110.0, 16, "final")
+        trades = sim.closed_positions
+
+        assert len(trades) == 2
+        assert all(trade.entry_fee > 0 for trade in trades)
+        assert all(trade.slippage_cost > 0 for trade in trades)
+        assert all(trade.funding > 0 for trade in trades)
+        assert sum(trade.net_pnl for trade in trades) == pytest.approx(sim.cash - 1000.0)
+        metrics = compute_metrics(trades, [], 1000.0)
+        assert metrics["total_trades"] == 1
+        assert metrics["closed_trade_legs"] == 2
+        assert metrics["net_expectancy_standard_error"] is None
