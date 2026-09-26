@@ -39,7 +39,7 @@ async def submit_run(request: Request, body: BacktestRunRequest) -> JSONResponse
     manager = _manager(request.app.state)
     if manager is None:
         return JSONResponse({"detail": "backtest service unavailable"}, status_code=503)
-    if not body.symbols:
+    if not body.symbols and body.universe_mode != "screener":
         return JSONResponse({"detail": "at least one symbol is required"}, status_code=422)
     job_id = manager.submit_run(body)
     return JSONResponse(BacktestJobAccepted(job_id=job_id).model_dump(), status_code=202)
@@ -50,7 +50,7 @@ async def submit_grid(request: Request, body: BacktestGridRequest) -> JSONRespon
     manager = _manager(request.app.state)
     if manager is None:
         return JSONResponse({"detail": "backtest service unavailable"}, status_code=503)
-    if not body.base.symbols:
+    if not body.base.symbols and body.base.universe_mode != "screener":
         return JSONResponse({"detail": "at least one symbol is required"}, status_code=422)
     if not body.params:
         return JSONResponse({"detail": "at least one parameter is required"}, status_code=422)

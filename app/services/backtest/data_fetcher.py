@@ -56,10 +56,19 @@ def _safe_data(response: Any) -> list[list[Any]]:
 
 
 def _parse_candle(row: list[Any]) -> Candle | None:
-    """Convert a raw OKX candle row to a :class:`Candle`."""
+    """Convert a raw OKX candle row to a :class:`Candle`.
+
+    OKX candle rows are ``[ts, o, h, l, c, vol, volCcy, volCcyQuote, confirm]``.
+    ``vol`` is in contracts, ``volCcy`` in base currency, and ``volCcyQuote``
+    in quote currency (USDT) — the latter is what the live screener's
+    ``volCcy24h`` filter uses, so we preserve it for faithful reconstruction.
+    """
     if not row or len(row) < 6:
         return None
     try:
+        quote_volume = 0.0
+        if len(row) >= 8 and row[7] not in (None, ""):
+            quote_volume = float(row[7])
         return Candle(
             ts=int(float(row[0])),
             open=float(row[1]),
@@ -67,6 +76,7 @@ def _parse_candle(row: list[Any]) -> Candle | None:
             low=float(row[3]),
             close=float(row[4]),
             volume=float(row[5]),
+            quote_volume=quote_volume,
         )
     except (TypeError, ValueError):
         return None
@@ -87,6 +97,7 @@ class HistoricalDataFetcher:
         self._last_funding_provenance: dict[str, Any] = {}
         self._last_instrument_provenance: dict[str, Any] = {}
         self._last_tape_provenance: dict[str, Any] = {}
+        self._last_universe_provenance: dict[str, Any] = {}
 
     @property
     def last_fetch_provenance(self) -> dict[str, Any]:
@@ -213,6 +224,58 @@ class HistoricalDataFetcher:
             "content_sha256": hashlib.sha256(payload).hexdigest(),
         }
         return records
+
+    async def fetch_swap_universe(self, *, force: bool = False) -> list[str]:
+        """Fetch/cache the full list of live OKX SWAP instrument ids.
+
+        Used by the screener-universe mode to reconstruct the same candidate
+        pool live screens over.  Cached to a single file (the instrument list
+        changes rarely) so repeated backtests don't re-hit the API.
+        """
+        path = self._cache_dir / "swap_universe.json"
+        symbols: list[str] | None = None
+        if path.exists() and not force:
+            try:
+                cached = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(cached, list):
+                    symbols = [str(s).upper() for s in cached if s]
+            except (OSError, ValueError):
+                symbols = None
+        source = "file_cache" if symbols is not None else "okx_public_api"
+        if symbols is None:
+            from app.services.okx_metrics import _get
+
+            try:
+                rows = await _get("/api/v5/public/instruments", {"instType": "SWAP"})
+            except Exception as exc:
+                logger.warning("Swap-universe fetch failed: %s", exc)
+                rows = []
+            symbols = sorted({
+                str(row.get("instId") or "").upper()
+                for row in rows
+                if str(row.get("instId") or "").upper().endswith("-USDT-SWAP")
+            })
+            if symbols:
+                try:
+                    self._cache_dir.mkdir(parents=True, exist_ok=True)
+                    path.write_text(json.dumps(symbols), encoding="utf-8")
+                except OSError as exc:
+                    logger.warning("Failed to cache swap universe: %s", exc)
+            else:
+                source = "unavailable"
+        payload = json.dumps(symbols, separators=(",", ":")).encode("ascii")
+        self._last_universe_provenance = {
+            "source": source,
+            "cache_hit": source == "file_cache",
+            "cache_key": "swap_universe",
+            "symbol_count": len(symbols),
+            "content_sha256": hashlib.sha256(payload).hexdigest(),
+        }
+        return symbols
+
+    @property
+    def last_universe_provenance(self) -> dict[str, Any]:
+        return dict(self._last_universe_provenance)
 
     async def fetch_instrument_specs(self, symbols: list[str]) -> dict[str, dict[str, Any]]:
         """Fetch/cache OKX contract value and size increments for requested swaps."""
@@ -376,7 +439,7 @@ class HistoricalDataFetcher:
         cache_hit: bool,
     ) -> None:
         rows = [
-            [c.ts, c.open, c.high, c.low, c.close, c.volume]
+            [c.ts, c.open, c.high, c.low, c.close, c.volume, c.quote_volume]
             for c in candles
         ]
         payload = json.dumps(rows, separators=(",", ":"), ensure_ascii=True).encode("ascii")
@@ -519,7 +582,7 @@ class HistoricalDataFetcher:
             self._cache_dir.mkdir(parents=True, exist_ok=True)
             path = self._cache_dir / f"{key}.json"
             data = [
-                {"ts": c.ts, "open": c.open, "high": c.high, "low": c.low, "close": c.close, "volume": c.volume}
+                {"ts": c.ts, "open": c.open, "high": c.high, "low": c.low, "close": c.close, "volume": c.volume, "quote_volume": c.quote_volume}
                 for c in candles
             ]
             with open(path, "w", encoding="utf-8") as f:

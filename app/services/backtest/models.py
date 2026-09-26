@@ -19,6 +19,13 @@ class Candle:
     """Normalised OHLCV candle.
 
     ``ts`` is millisecond epoch (matching OKX's native format).
+
+    ``quote_volume`` is OKX's ``volCcyQuote`` (trading volume in quote
+    currency, e.g. USDT).  It is required to reconstruct the live screener's
+    ``volCcy24h`` input faithfully; ``volume`` alone is in contracts and would
+    mis-scale the volume filter by ``ct_val``.  Older cache files predate this
+    field and load with ``0.0`` — callers should fall back to
+    ``volume * close`` when it is zero.
     """
 
     ts: int
@@ -27,11 +34,25 @@ class Candle:
     low: float
     close: float
     volume: float
+    quote_volume: float = 0.0
 
     @property
     def dt(self) -> datetime:
         """UTC datetime of the candle open."""
         return datetime.fromtimestamp(self.ts / 1000.0, tz=timezone.utc)
+
+    @property
+    def effective_quote_volume(self) -> float:
+        """Quote-currency volume, falling back to ``volume * close``.
+
+        The fallback is an approximation (contracts × price, ignoring
+        ``ct_val``) used only for legacy cache entries that lack
+        ``volCcyQuote``.
+        """
+        if self.quote_volume > 0:
+            return self.quote_volume
+        return max(self.volume, 0.0) * self.close
+
 
 
 # ── Simulated position ──────────────────────────────────────────────────
@@ -201,6 +222,19 @@ class BacktestConfig:
     funding_mode: str = "historical"
     # Funding cadence in milliseconds (default 8h).
     funding_interval_ms: int = 8 * 60 * 60 * 1000
+    # ── Universe selection ────────────────────────────────────────────
+    # "explicit" (default) — trade exactly ``symbols``.
+    # "screener"           — reconstruct the live dual-universe screener from
+    #                        historical candles and trade the symbols it would
+    #                        have selected at each interval.  ``symbols`` is
+    #                        then treated as the fallback list used before the
+    #                        first screener interval.
+    universe_mode: str = "explicit"
+    # Live ``runtime_config["screener"]`` snapshot (filters, caps, interval).
+    screener_config: dict[str, Any] = field(default_factory=dict)
+    # Optional explicit candidate pool for the screener to rank over.  Empty →
+    # fetch the full OKX SWAP universe (matches live, slower first fetch).
+    universe_candidate_symbols: list[str] = field(default_factory=list)
 
 
 # ── Backtest result ─────────────────────────────────────────────────────
@@ -221,6 +255,10 @@ class BacktestResult:
     metrics: dict[str, Any] = field(default_factory=dict)
     assumptions: dict[str, Any] = field(default_factory=dict)
     data_provenance: list[dict[str, Any]] = field(default_factory=list)
+    # Reconstructed screener universe (only populated in universe_mode="screener").
+    # Stored as a JSON-safe dict (see UniverseSchedule.to_dict) so it survives
+    # persistence without importing the universe module here.
+    universe_schedule: dict[str, Any] | None = None
     # Execution metadata
     started_at: str = ""
     finished_at: str = ""

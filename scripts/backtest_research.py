@@ -95,6 +95,8 @@ def _base_payload(args: argparse.Namespace, *, strategy: str) -> dict[str, Any]:
         "funding_mode": args.funding_mode,
         "funding_rate_pct": args.funding_rate_pct,
         "launcher_config": launcher,
+        "universe_mode": getattr(args, "universe_mode", "explicit"),
+        "universe_candidate_symbols": _split_csv(getattr(args, "universe_candidates", "") or ""),
     }
 
 
@@ -311,6 +313,16 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--combination-budget", type=int, default=64)
     parser.add_argument("--random-seed", type=int, default=42)
     parser.add_argument("--skip-stress", action="store_true")
+    parser.add_argument(
+        "--universe-mode", choices=("explicit", "screener"), default="explicit",
+        help="'screener' reconstructs the live dual-universe screener from "
+             "historical candles and trades the symbols it would have selected.",
+    )
+    parser.add_argument(
+        "--universe-candidates", default="",
+        help="Optional comma-separated candidate pool for the screener to rank "
+             "over. Empty → full OKX SWAP universe (matches live).",
+    )
     parser.add_argument("--out-dir", default="backtest_research")
     parser.set_defaults(func=_cmd_research)
     return parser

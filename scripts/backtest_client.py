@@ -181,6 +181,8 @@ def _build_run_payload(args: argparse.Namespace) -> dict[str, Any]:
         "funding_rate_pct": args.funding_rate_pct,
         "funding_mode": args.funding_mode,
         "allow_concurrent_strategies_per_symbol": args.allow_concurrent_strategies_per_symbol,
+        "universe_mode": getattr(args, "universe_mode", "explicit"),
+        "universe_candidate_symbols": _split_csv(getattr(args, "universe_candidates", "") or ""),
     }
 
 
@@ -255,6 +257,16 @@ def _build_parser() -> argparse.ArgumentParser:
         p.add_argument("--funding-rate-pct", type=float, default=0.0,
                    help="Fallback rate per funding interval; 0.01 means 0.01%%")
         p.add_argument("--allow-concurrent-strategies-per-symbol", action="store_true")
+        p.add_argument(
+            "--universe-mode", choices=("explicit", "screener"), default="explicit",
+            help="'screener' reconstructs the live dual-universe screener from "
+                 "historical candles and trades the symbols it would have selected.",
+        )
+        p.add_argument(
+            "--universe-candidates", default="",
+            help="Optional comma-separated candidate pool for the screener to rank "
+                 "over. Empty → full OKX SWAP universe (matches live).",
+        )
 
     run_p = sub.add_parser("run", help="run a single backtest")
     _add_common(run_p)

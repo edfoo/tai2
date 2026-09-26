@@ -159,6 +159,9 @@ def build_backtest_config(
     funding_mode: str = "historical",
     allow_concurrent_strategies_per_symbol: bool = False,
     margin_mode: str = "isolated",
+    universe_mode: str = "explicit",
+    screener_config: dict[str, Any] | None = None,
+    universe_candidate_symbols: list[str] | None = None,
 ) -> BacktestConfig:
     """Build a :class:`BacktestConfig` — the single config constructor.
 
@@ -166,6 +169,11 @@ def build_backtest_config(
     verbatim (the UI passes its live runtime config).  When omitted (headless
     CLI), a launcher config is seeded from canonical strategy defaults with
     ``notional_usd`` = ``capital``.
+
+    ``universe_mode="screener"`` reconstructs the live dual-universe screener
+    from historical candles (see ``app/services/backtest/universe.py``) and
+    trades the symbols it would have selected; ``symbols`` then acts as the
+    fallback list used before the first screener interval.
     """
     if launcher_config is None:
         launcher_config = {
@@ -203,6 +211,9 @@ def build_backtest_config(
         funding_mode=funding_mode,
         allow_concurrent_strategies_per_symbol=allow_concurrent_strategies_per_symbol,
         margin_mode=margin_mode,
+        universe_mode=universe_mode,
+        screener_config=dict(screener_config or {}),
+        universe_candidate_symbols=list(universe_candidate_symbols or []),
     )
 
 

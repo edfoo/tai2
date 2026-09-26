@@ -9241,6 +9241,28 @@ def register_pages(app: FastAPI) -> None:
                         "replicate live intra-candle behaviour."
                     ).classes("text-xs text-slate-500")
 
+                # ── Universe selection ─────────────────────────────────
+                with ui.row().classes("w-full gap-4 items-center mt-2"):
+                    universe_mode_select = ui.select(
+                        options={
+                            "explicit": "Explicit symbols (as selected above)",
+                            "screener": "Screener-selected universe (matches live)",
+                        },
+                        value="explicit",
+                        label="Universe mode",
+                    ).classes("w-72")
+                    universe_candidate_input = ui.input(
+                        label="Screener candidate pool (optional, comma-sep)",
+                        value="",
+                    ).classes("w-96").props("dense")
+                    ui.label(
+                        "Screener mode reconstructs the live dual-universe screener from "
+                        "historical candles and trades the symbols it would have selected at "
+                        "each interval. Leave the candidate pool empty to screen the full OKX "
+                        "SWAP universe (matches live; slower first fetch). The live bid/ask "
+                        "spread filter cannot be reproduced from OHLCV and is skipped."
+                    ).classes("text-xs text-slate-500")
+
                 with ui.row().classes("w-full gap-4 items-center mt-2"):
                     funding_mode_input = ui.select(
                         options={
@@ -9711,9 +9733,15 @@ def register_pages(app: FastAPI) -> None:
             if isinstance(symbols, str):
                 symbols = [symbols]
             symbols = [s.upper() for s in symbols if s]
-            if not symbols:
+            universe_mode = universe_mode_select.value or "explicit"
+            if not symbols and universe_mode != "screener":
                 ui.notify("Select at least one symbol", color="negative")
                 return
+            universe_candidates = [
+                s.strip().upper()
+                for s in str(universe_candidate_input.value or "").split(",")
+                if s.strip()
+            ]
 
             selected_strategies = [
                 name for name, toggle in strategy_toggles.items() if toggle.value
@@ -9758,6 +9786,9 @@ def register_pages(app: FastAPI) -> None:
                 allow_concurrent_strategies_per_symbol=bool(
                     allow_concurrent_strategies_input.value
                 ),
+                universe_mode=universe_mode,
+                screener_config=copy.deepcopy(config.get("screener") or {}),
+                universe_candidate_symbols=universe_candidates,
             )
 
             app.state.backtest_running["flag"] = True
@@ -9849,9 +9880,15 @@ def register_pages(app: FastAPI) -> None:
             if isinstance(symbols, str):
                 symbols = [symbols]
             symbols = [s.upper() for s in symbols if s]
-            if not symbols:
+            universe_mode = universe_mode_select.value or "explicit"
+            if not symbols and universe_mode != "screener":
                 ui.notify("Select at least one symbol", color="negative")
                 return
+            universe_candidates = [
+                s.strip().upper()
+                for s in str(universe_candidate_input.value or "").split(",")
+                if s.strip()
+            ]
 
             selected_strategies = [
                 name for name, toggle in strategy_toggles.items() if toggle.value
@@ -9911,6 +9948,9 @@ def register_pages(app: FastAPI) -> None:
                 allow_concurrent_strategies_per_symbol=bool(
                     allow_concurrent_strategies_input.value
                 ),
+                universe_mode=universe_mode,
+                screener_config=copy.deepcopy(config.get("screener") or {}),
+                universe_candidate_symbols=universe_candidates,
             )
 
             grid_cfg = GridConfig(
@@ -10364,6 +10404,48 @@ def register_pages(app: FastAPI) -> None:
                                               key=lambda kv: -sum(t.net_pnl for t in kv[1])):
                     _render_symbol_card(sym, sym_trades)
 
+        def _render_universe_schedule(result: Any) -> None:
+            """Render the reconstructed screener universe (screener mode only)."""
+            schedule = getattr(result, "universe_schedule", None)
+            if not schedule:
+                return
+            intervals = schedule.get("intervals") or []
+            with ui.expansion(
+                f"Screener universe ({len(intervals)} intervals, "
+                f"{len(schedule.get('all_symbols') or [])} symbols)",
+                icon="filter_alt",
+            ).classes("w-full mt-2"):
+                provenance = schedule.get("provenance") or {}
+                ui.label(
+                    f"Source: {provenance.get('universe_source', '?')}; "
+                    f"timeframe {provenance.get('timeframe', '?')}; "
+                    f"lookback {provenance.get('lookback_hours', '?')}h; "
+                    f"interval {schedule.get('interval_minutes', '?')}min; "
+                    f"dual={schedule.get('dual_universe')}. "
+                    f"Spread filter: {provenance.get('spread_filter', '?')}."
+                ).classes("text-xs text-slate-500")
+                for line in schedule.get("diagnostics") or []:
+                    ui.label(line).classes("text-xs text-slate-500")
+                if intervals:
+                    rows = [
+                        {
+                            "ts": _fmt_ts(i.get("ts")),
+                            "sc": ", ".join(i.get("sc") or []),
+                            "mr": ", ".join(i.get("mr") or []),
+                        }
+                        for i in intervals
+                    ]
+                    with ui.table(
+                        columns=[
+                            {"name": "ts", "label": "Interval", "field": "ts", "align": "left"},
+                            {"name": "sc", "label": "SC (trending)", "field": "sc", "align": "left"},
+                            {"name": "mr", "label": "MR (chop)", "field": "mr", "align": "left"},
+                        ],
+                        rows=rows,
+                        pagination=10,
+                    ).classes("w-full"):
+                        pass
+
         def _render_results(result: Any, container: ui.column) -> None:
             """Render the backtest results into the results container.
 
@@ -10418,6 +10500,7 @@ def register_pages(app: FastAPI) -> None:
                         ).classes("text-xs")
                         for limitation in run_assumptions.get("execution_model_limitations") or []:
                             ui.label(limitation).classes("text-xs text-amber-800")
+                    _render_universe_schedule(result)
                     benchmark = m.get("buy_and_hold") or {}
                     if benchmark:
                         if benchmark.get("error"):

@@ -47,6 +47,14 @@ class BacktestRunRequest(BaseModel):
     funding_mode: str = Field(default="historical", pattern="^(historical|constant|off)$")
     allow_concurrent_strategies_per_symbol: bool = False
     margin_mode: str = Field(default="isolated", pattern="^(isolated|cross)$")
+    # ── Universe selection ────────────────────────────────────────────
+    # "explicit" trades exactly ``symbols``; "screener" reconstructs the live
+    # dual-universe screener from historical candles and trades the symbols it
+    # would have selected (``symbols`` then acts as the pre-first-interval
+    # fallback list and may be empty).
+    universe_mode: str = Field(default="explicit", pattern="^(explicit|screener)$")
+    screener_config: dict[str, Any] | None = None
+    universe_candidate_symbols: list[str] | None = None
 
 
 class GridParamRequest(BaseModel):

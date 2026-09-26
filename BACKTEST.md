@@ -110,6 +110,33 @@ done
 | `--liquidation-fee-bps` | `0` | Extra fee charged on a liquidation fill, in bps |
 | `--margin-mode` | `isolated` | `isolated` (per-position margin) or `cross` (shared account equity) |
 | `--allow-concurrent-strategies-per-symbol` | off | Permit separate strategies to hold the same symbol simultaneously |
+| `--universe-mode` | `explicit` | `explicit` trades `--symbols`; `screener` reconstructs the live dual-universe screener from historical candles and trades the symbols it would have selected |
+| `--universe-candidates` | empty | Optional comma-separated candidate pool for the screener to rank over; empty screens the full OKX SWAP universe (matches live) |
+
+### Screener-selected universe (live parity)
+
+Live trading does not trade a fixed list — the dual-universe screener re-ranks
+the whole OKX SWAP universe every `interval_minutes` and routes each strategy
+to its SC (trending) or MR (chop) list. `--universe-mode screener` reproduces
+this from historical candles:
+
+```bash
+.venv/bin/python scripts/backtest_client.py run \
+    --universe-mode screener --timeframe 15m --days 90 \
+    --strategies mean_reversion,spike_continuation
+```
+
+The screener's inputs are reconstructed per interval from 1H candles
+(`last`/`open24h`/`high24h`/`low24h`/`volCcy24h`), and scoring is delegated to
+the **same** `app/services/screener.py` core live uses, so the two cannot
+drift. `--symbols` then acts as the fallback list used before the first
+screener interval. The reconstructed schedule (per-interval SC/MR lists) is
+stored on the result and shown in the BACKTEST UI.
+
+**Data limitation:** the live `max_spread_pct` filter reads live bid/ask, which
+OHLCV cannot reproduce. When enabled it is skipped and recorded in the
+schedule provenance, so the reconstructed universe may be slightly larger than
+live's.
 
 ### Parameter sweep (`grid` subcommand)
 

@@ -125,6 +125,7 @@ def result_to_dict(result: BacktestResult | GridResult) -> dict[str, Any]:
             BacktestConfig(**_backtest_config_kwargs(_config_values(result.config)))
         ),
         "data_provenance": getattr(result, "data_provenance", []) or [],
+        "universe_schedule": getattr(result, "universe_schedule", None),
         "metrics": result.metrics,
         "per_strategy": result.per_strategy,
         "per_symbol": getattr(result, "per_symbol", {}) or {},
@@ -396,6 +397,10 @@ def result_from_dict(data: dict[str, Any]) -> BacktestResult | GridResult | None
                 dict(item) for item in data.get("data_provenance") or []
                 if isinstance(item, dict)
             ],
+            universe_schedule=(
+                dict(data["universe_schedule"])
+                if isinstance(data.get("universe_schedule"), dict) else None
+            ),
             candles_processed=int(data.get("candles_processed") or 0),
             error=data.get("error"),
         )

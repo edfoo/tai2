@@ -74,11 +74,13 @@ app/
       costs.py          # Fees / slippage / funding model
       runner.py         # Single build_backtest_config constructor (CLI + UI + API)
       grid.py           # BacktestGrid parameter sweep
+      universe.py       # Historical screener-universe reconstruction (live parity)
       persistence.py    # JSON/CSV result serialisation (result_to_dict/from_dict)
       api.py            # FastAPI router: /backtest/run|grid|status|result
       api_models.py     # Pydantic request models (BacktestRunRequest/GridRequest)
       job_manager.py    # In-process FIFO job queue + executor (app.state.backtest_jobs)
       client.py         # Shared REST client helpers for CLI scripts
+    screener.py         # Shared symbol-screener scoring core (live + backtest)
   ui/
     pages.py            # All NiceGUI page renderers (LIVE, TA, STRATEGY, HISTORY, DEBUG, PROMPT, CFG)
     components.py
@@ -154,6 +156,12 @@ logs/
   and the UI Parameter Sweep use all cores — not just the job-level pool.
 - Request body mirrors `BacktestConfig`; guardrails passed via `guardrails_config` (separate from `launcher_config`/`strategy_config`, matching live `runtime_config` split)
 - CLI scripts (`scripts/backtest_client.py`, `run_gate_ab_sweep.py`, `run_trend_pullback_ab.py`, `run_vwap_ab_sweep.py`) are thin REST clients using `app/services/backtest/client.py` — they do NOT import `BacktestEngine` directly
+
+## Screener universe parity (backtest ↔ live)
+- Screener scoring lives in `app/services/screener.py` (`score_universe`, `universe_for_strategy`) — **one** implementation shared by live `MarketService` and the backtest. Never re-implement scoring in the backtest.
+- `universe_mode="screener"` reconstructs per-interval tickers from 1H candles (`app/services/backtest/universe.py`) and gates each strategy per step via `BacktestEngine._symbol_in_universe` (SC strategies → SC list, MR strategies → MR list). `symbols` becomes the pre-first-interval fallback.
+- `Candle.quote_volume` (OKX `volCcyQuote`) is required for the volume filter; legacy caches fall back to `volume × close`.
+- The live `max_spread_pct` filter is **skipped** historically (no bid/ask in OHLCV) and recorded in the schedule provenance.
 
 ---
 

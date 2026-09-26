@@ -42,6 +42,7 @@ from app.services.backtest.models import (
 from app.services.backtest.simulator import Simulator
 from app.services.backtest.snapshot_builder import SnapshotBuilder
 from app.services.backtest.spread import estimate_spread_series, roll_spread_bps
+from app.services.backtest.universe import UniverseSchedule, build_universe_schedule
 from app.services.launcher_tp_sl import LauncherTpSl, resolve_launcher_tp_sl
 from app.services.strategies import Strategy, StrategyHelpers
 from app.services.strategies.liquidity_sweep import LiquiditySweepStrategy
@@ -173,6 +174,12 @@ class BacktestEngine:
         )
         self._current_prices: dict[str, float] = {}
         self._last_candle_ts: int = 0
+        # Effective symbol list for this run.  In "explicit" mode this equals
+        # ``config.symbols``; in "screener" mode it is the union of every
+        # symbol the reconstructed screener selects across the window (plus
+        # the configured fallback list), resolved in ``run()``.
+        self._symbols: list[str] = list(config.symbols)
+        self._universe_schedule: UniverseSchedule | None = None
 
         # ── Finer-LTF evaluation mode ─────────────────────────────────
         # Resolve the effective evaluation mode.  If the user requested
@@ -220,9 +227,58 @@ class BacktestEngine:
                 data_provenance.append(dict(metadata))
 
         try:
+            # ── Phase 0: Resolve the trading universe ─────────────────
+            # In "screener" mode, reconstruct the live dual-universe screener
+            # from historical candles and trade the symbols it would have
+            # selected.  The configured ``symbols`` become the fallback list
+            # used before the first screener interval.
+            if self._config.universe_mode == "screener":
+                if progress_cb:
+                    progress_cb(BacktestProgress(
+                        phase="fetch", current=0, total=1,
+                        message="Reconstructing screener universe",
+                    ))
+                self._universe_schedule = await build_universe_schedule(
+                    fetcher=self._fetcher,
+                    start_ts=self._config.start_ts,
+                    end_ts=self._config.end_ts,
+                    screener_config=self._config.screener_config,
+                    candidate_symbols=self._config.universe_candidate_symbols or None,
+                    progress_cb=lambda done, total, msg: progress_cb(
+                        BacktestProgress(phase="fetch", current=done, total=total, message=msg)
+                    ) if progress_cb else None,
+                )
+                universe_provenance = getattr(self._fetcher, "last_universe_provenance", None)
+                if universe_provenance:
+                    data_provenance.append({
+                        "timeframe": "screener_universe",
+                        **dict(universe_provenance),
+                    })
+                # Union of every selected symbol + the configured fallback.
+                selected_union = self._universe_schedule.all_symbols
+                merged: list[str] = []
+                for sym in [*self._config.symbols, *selected_union]:
+                    if sym and sym not in merged:
+                        merged.append(sym)
+                self._symbols = merged
+                if not selected_union:
+                    logger.warning(
+                        "Screener universe selected no symbols over the window; "
+                        "falling back to the configured symbol list."
+                    )
+                if not self._symbols:
+                    result.error = (
+                        "Screener universe mode selected no symbols and no "
+                        "fallback symbols were configured."
+                    )
+                    result.data_provenance = data_provenance
+                    result.finished_at = datetime.now(timezone.utc).isoformat()
+                    result.duration_seconds = time.monotonic() - t0
+                    return result
+
             # ── Phase 1: Fetch historical data ────────────────────────
             if progress_cb:
-                progress_cb(BacktestProgress(phase="fetch", current=0, total=len(self._config.symbols), message="Fetching historical data"))
+                progress_cb(BacktestProgress(phase="fetch", current=0, total=len(self._symbols), message="Fetching historical data"))
 
             symbol_candles: dict[str, list[Candle]] = {}
             symbol_htf_candles: dict[str, list[Candle]] = {}
@@ -241,7 +297,7 @@ class BacktestEngine:
                 if tf_htf and tf_htf not in all_tf_bars:
                     all_tf_bars.append(tf_htf)
 
-            for idx, symbol in enumerate(self._config.symbols):
+            for idx, symbol in enumerate(self._symbols):
                 candles = await self._fetcher.fetch_candles(
                     symbol=symbol,
                     timeframe=self._config.timeframe,
@@ -249,7 +305,7 @@ class BacktestEngine:
                     end_ts=self._config.end_ts,
                     warmup_candles=self._config.warmup_candles,
                     progress_cb=lambda done, total, msg: progress_cb(
-                        BacktestProgress(phase="fetch", current=idx, total=len(self._config.symbols), message=f"{symbol}: {msg}")
+                        BacktestProgress(phase="fetch", current=idx, total=len(self._symbols), message=f"{symbol}: {msg}")
                     ) if progress_cb else None,
                 )
                 _capture_fetch_provenance()
@@ -298,11 +354,11 @@ class BacktestEngine:
                     symbol_eval_candles[symbol] = eval_candles
 
                 if progress_cb:
-                    progress_cb(BacktestProgress(phase="fetch", current=idx + 1, total=len(self._config.symbols), message=f"{symbol}: {len(candles)} candles"))
+                    progress_cb(BacktestProgress(phase="fetch", current=idx + 1, total=len(self._symbols), message=f"{symbol}: {len(candles)} candles"))
 
             if self._config.funding_mode == "historical":
                 historical_rates: dict[str, list[dict[str, float | int]]] = {}
-                for symbol in self._config.symbols:
+                for symbol in self._symbols:
                     fetch_funding_rates = getattr(self._fetcher, "fetch_funding_rates", None)
                     rates = (
                         await fetch_funding_rates(
@@ -318,7 +374,7 @@ class BacktestEngine:
 
             if self._config.slippage_mode == "tape_spread":
                 spread_series: dict[str, list[dict[str, float | int]]] = {}
-                for symbol in self._config.symbols:
+                for symbol in self._symbols:
                     candles = symbol_candles.get(symbol) or []
                     if self._config.spread_estimator == "roll":
                         fetch_tape = getattr(self._fetcher, "fetch_trade_tape", None)
@@ -341,7 +397,7 @@ class BacktestEngine:
 
             fetch_instrument_specs = getattr(self._fetcher, "fetch_instrument_specs", None)
             instrument_specs = (
-                await fetch_instrument_specs(self._config.symbols)
+                await fetch_instrument_specs(self._symbols)
                 if fetch_instrument_specs is not None else {}
             )
             self._config.instrument_specs = instrument_specs
@@ -355,7 +411,7 @@ class BacktestEngine:
 
             # ── Phase 2: Build snapshot builders ──────────────────────
             snapshot_builders: dict[str, SnapshotBuilder] = {}
-            for symbol in self._config.symbols:
+            for symbol in self._symbols:
                 snapshot_builders[symbol] = SnapshotBuilder(
                     symbol=symbol,
                     ltf_candles=symbol_candles[symbol],
@@ -369,7 +425,7 @@ class BacktestEngine:
             # each symbol (after warmup).
             stepping_candles = symbol_eval_candles if use_finer_ltf else symbol_candles
             start_indices: dict[str, int] = {}
-            for symbol in self._config.symbols:
+            for symbol in self._symbols:
                 candles = stepping_candles[symbol]
                 start_idx = 0
                 for i, c in enumerate(candles):
@@ -381,9 +437,9 @@ class BacktestEngine:
             # Total candles to process = max length across symbols.
             max_len = max(
                 len(stepping_candles[s]) - start_indices[s]
-                for s in self._config.symbols
+                for s in self._symbols
                 if stepping_candles[s]
-            ) if self._config.symbols else 0
+            ) if self._symbols else 0
 
             if max_len == 0:
                 result.error = "No candles found in the specified date range."
@@ -442,6 +498,8 @@ class BacktestEngine:
             result.per_strategy = compute_per_strategy_metrics(all_trades)
             result.per_symbol = compute_per_symbol_metrics(all_trades)
             result.data_provenance = data_provenance
+            if self._universe_schedule is not None:
+                result.universe_schedule = self._universe_schedule.to_dict()
             # Equal-weight buy-and-hold benchmark across the configured symbols.
             _benchmark = self._compute_benchmark(symbol_candles)
             if _benchmark is not None:
@@ -485,7 +543,7 @@ class BacktestEngine:
         for step in range(max_len):
             # Build the set of candles at this time-step across symbols.
             step_candles: dict[str, Candle] = {}
-            for symbol in self._config.symbols:
+            for symbol in self._symbols:
                 candles = symbol_candles[symbol]
                 idx = start_indices[symbol] + step
                 if idx < len(candles):
@@ -513,6 +571,10 @@ class BacktestEngine:
                 for strategy in self._strategies:
                     strat_cfg = strategies_cfg.get(strategy.name) or {}
                     if not strat_cfg.get("enabled", False):
+                        continue
+                    # Screener-universe gate: only evaluate a strategy on
+                    # symbols the reconstructed screener assigned to it.
+                    if not self._symbol_in_universe(symbol, strategy.name, candle.ts):
                         continue
                     # Per-strategy position guard: skip if already in position.
                     if (
@@ -603,13 +665,13 @@ class BacktestEngine:
         # Per-symbol state for the in-progress LTF bucket.
         # closed_window[symbol]  → list of fully-closed LTF candles (grows).
         # acc[symbol]             → current in-progress LTF accumulator, or None.
-        closed_window: dict[str, list[Candle]] = {s: [] for s in self._config.symbols}
-        acc: dict[str, dict[str, Any] | None] = {s: None for s in self._config.symbols}
+        closed_window: dict[str, list[Candle]] = {s: [] for s in self._symbols}
+        acc: dict[str, dict[str, Any] | None] = {s: None for s in self._symbols}
 
         # Pre-seed closed_window with LTF candles whose ts < the first eval
         # candle's LTF bucket.  This gives indicators enough warmup history
         # on the first step (the LTF fetch already includes warmup_candles).
-        for symbol in self._config.symbols:
+        for symbol in self._symbols:
             ltf_candles = symbol_candles[symbol]
             eval_candles = symbol_eval_candles[symbol]
             start_idx = start_indices[symbol]
@@ -627,7 +689,7 @@ class BacktestEngine:
         for step in range(max_len):
             # Build the set of eval candles at this time-step across symbols.
             step_candles: dict[str, Candle] = {}
-            for symbol in self._config.symbols:
+            for symbol in self._symbols:
                 eval_candles = symbol_eval_candles[symbol]
                 idx = start_indices[symbol] + step
                 if idx < len(eval_candles):
@@ -709,6 +771,10 @@ class BacktestEngine:
                     strat_cfg = strategies_cfg.get(strategy.name) or {}
                     if not strat_cfg.get("enabled", False):
                         continue
+                    # Screener-universe gate: only evaluate a strategy on
+                    # symbols the reconstructed screener assigned to it.
+                    if not self._symbol_in_universe(symbol, strategy.name, eval_candle.ts):
+                        continue
                     # Per-strategy position guard: skip if already in position.
                     if (
                         self._has_blocking_position(symbol, strategy.name)
@@ -773,6 +839,24 @@ class BacktestEngine:
             and self._simulator.has_open_position(symbol)
         )
 
+    def _symbol_in_universe(self, symbol: str, strategy_name: str, ts: int) -> bool:
+        """Return whether *strategy_name* may evaluate *symbol* at time *ts*.
+
+        In "explicit" mode every configured symbol is always allowed.  In
+        "screener" mode the reconstructed schedule decides: a strategy may only
+        evaluate symbols in its SC/MR list for the interval active at *ts*.
+        Before the first interval (or when the schedule is empty) the
+        configured fallback list is used, matching live's behaviour of trading
+        the configured pairs until the first screener run.
+        """
+        if self._config.universe_mode != "screener" or self._universe_schedule is None:
+            return True
+        universe = self._universe_schedule.universe_at(ts, strategy_name)
+        if universe is None:
+            # No screener selection yet — fall back to the configured list.
+            return symbol in self._config.symbols
+        return symbol in universe
+
     def _get_last_price(self, symbol: str) -> float | None:
         """Return the current price for a symbol (from the backtest window)."""
         return self._current_prices.get(symbol)
@@ -786,7 +870,7 @@ class BacktestEngine:
                 candle for candle in symbol_candles[symbol]
                 if self._config.start_ts <= candle.ts <= self._config.end_ts
             ]
-            for symbol in self._config.symbols
+            for symbol in self._symbols
             if symbol in symbol_candles
         }
         if not candles_by_symbol:

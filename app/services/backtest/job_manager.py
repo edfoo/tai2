@@ -219,6 +219,9 @@ class BacktestJobManager:
             funding_mode=req.funding_mode,
             allow_concurrent_strategies_per_symbol=req.allow_concurrent_strategies_per_symbol,
             margin_mode=req.margin_mode,
+            universe_mode=getattr(req, "universe_mode", "explicit"),
+            screener_config=getattr(req, "screener_config", None),
+            universe_candidate_symbols=getattr(req, "universe_candidate_symbols", None),
         )
         self._jobs[job_id] = {
             "job_id": job_id,
@@ -269,6 +272,9 @@ class BacktestJobManager:
             funding_mode=base_req.funding_mode,
             allow_concurrent_strategies_per_symbol=base_req.allow_concurrent_strategies_per_symbol,
             margin_mode=base_req.margin_mode,
+            universe_mode=getattr(base_req, "universe_mode", "explicit"),
+            screener_config=getattr(base_req, "screener_config", None),
+            universe_candidate_symbols=getattr(base_req, "universe_candidate_symbols", None),
         )
         params = [
             GridParamDef(key=p.key, values=list(p.values), label=p.label)
