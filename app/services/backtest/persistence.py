@@ -60,6 +60,12 @@ def _trade_to_dict(t: SimPosition) -> dict[str, Any]:
         "size": t.size,
         "initial_size": t.initial_size,
         "trade_id": t.trade_id,
+        "margin_mode": t.margin_mode,
+        "leverage": t.leverage,
+        "initial_margin": t.initial_margin,
+        "maintenance_margin_ratio": t.maintenance_margin_ratio,
+        "maintenance_margin_deduction": t.maintenance_margin_deduction,
+        "liquidation_price": t.liquidation_price,
         "entry_ts": t.entry_ts,
         "entry_price": t.entry_price,
         "tp_price": t.tp_price,
@@ -72,6 +78,9 @@ def _trade_to_dict(t: SimPosition) -> dict[str, Any]:
         "entry_fee": t.entry_fee,
         "exit_fee": t.exit_fee,
         "funding": t.funding,
+        "funding_settled_through_ts": t.funding_settled_through_ts,
+        "funding_intervals_paid": t.funding_intervals_paid,
+        "maintenance_margin_deduction": t.maintenance_margin_deduction,
         "slippage_cost": t.slippage_cost,
         "max_favorable_pct": t.max_favorable_pct,
         "max_adverse_pct": t.max_adverse_pct,
@@ -220,9 +229,27 @@ def _backtest_assumptions(config: BacktestConfig) -> dict[str, Any]:
             "taker_fee_bps_per_fill": getattr(config, "taker_fee_bps", 5.0),
             "maker_fee_bps_per_fill": getattr(config, "maker_fee_bps", 0.0),
             "slippage_bps_per_fill": getattr(config, "slippage_bps", 0.0),
+            "slippage_mode": getattr(config, "slippage_mode", "fixed"),
+            "slippage_source": (
+                "fixed configured bps per fill"
+                if getattr(config, "slippage_mode", "fixed") == "fixed"
+                else "fixed base plus prior-bar OHLCV range and quote-turnover proxy"
+            ),
+            "liquidity_impact_coefficient": getattr(config, "liquidity_impact_coefficient", 0.05),
+            "candle_range_slippage_fraction": getattr(config, "candle_range_slippage_fraction", 0.1),
+            "max_liquidity_slippage_bps": getattr(config, "max_liquidity_slippage_bps", 500.0),
+            "slippage_stress_multiplier": getattr(config, "slippage_stress_multiplier", 1.0),
+            "liquidation_fee_bps": getattr(config, "liquidation_fee_bps", 0.0),
             "funding_rate_pct_per_interval": getattr(config, "funding_rate_pct", 0.0),
             "funding_interval_ms": getattr(config, "funding_interval_ms", 28_800_000),
-            "funding_source": "constant configured rate; not historical per-symbol funding data",
+            "funding_mode": getattr(config, "funding_mode", "historical"),
+            "funding_source": (
+                "timestamped OKX historical rates when available; configured constant-rate fallback otherwise"
+                if getattr(config, "funding_mode", "historical") == "historical"
+                else "configured constant-rate fallback"
+                if getattr(config, "funding_mode", "historical") == "constant"
+                else "funding disabled"
+            ),
         },
         "unavailable_live_inputs": [
             "footprint / trade-tape delta",
@@ -230,6 +257,25 @@ def _backtest_assumptions(config: BacktestConfig) -> dict[str, Any]:
             "historical open-interest series",
             "historical funding-rate series",
         ],
+        "execution_model_limitations": [
+            "OHLCV range and contract-adjusted turnover are slippage proxies, not historical bid-ask spread/order-book impact; estimates use only completed bars before each fill.",
+            "Slippage coefficients are stress-test knobs, not fitted market-impact parameters; the slippage_stress_multiplier scales the estimate for adverse scenarios.",
+            "Isolated liquidation is an approximation using tier IMR/MMR and maintenance deduction; funding accrued in the liquidation equation and exchange-specific risk adjustments are omitted.",
+            "Cross-margin portfolio liquidation and maintenance-margin offsets are not simulated; configured mode is isolated only.",
+            "Exchange tick-size rounding is applied conservatively to TP/SL levels, but other exchange-specific algo-order price rules may differ.",
+        ],
+        "sizing_model": {
+            "instrument_specs_source": "OKX public SWAP instrument and isolated position-tier metadata when available; ct_val fallback is 1.0 and missing lot/min-size constraints are not enforced.",
+            "margin_mode": "isolated",
+            "leverage_source": "configured guardrail max_leverage capped by the selected OKX tier maxLever",
+            "initial_margin_source": "max(tier IMR, reciprocal effective leverage)",
+            "liquidation_model": "isolated approximation using initial margin, tier MMR, and maintenance deduction; adverse gap fills use candle open",
+            "cross_margin_supported": False,
+            "allow_concurrent_strategies_per_symbol": getattr(
+                config, "allow_concurrent_strategies_per_symbol", False
+            ),
+            "position_capital": "Isolated initial margin uses the selected tier IMR or reciprocal leverage floor; open positions reserve initial margin from portfolio free margin.",
+        },
         "enabled_gates_with_unavailable_inputs": enabled_gates,
     }
 
@@ -258,6 +304,12 @@ def _trade_from_dict(d: dict[str, Any]) -> SimPosition:
         entry_price=d.get("entry_price", 0.0),
         entry_ts=d.get("entry_ts", 0),
         trade_id=d.get("trade_id", ""),
+        margin_mode=d.get("margin_mode", "isolated"),
+        leverage=d.get("leverage", 1.0),
+        initial_margin=d.get("initial_margin", 0.0),
+        maintenance_margin_ratio=d.get("maintenance_margin_ratio", 0.0),
+        maintenance_margin_deduction=d.get("maintenance_margin_deduction", 0.0),
+        liquidation_price=d.get("liquidation_price"),
         tp_price=d.get("tp_price"),
         sl_price=d.get("sl_price"),
         strategy_name=d.get("strategy", ""),
@@ -270,6 +322,8 @@ def _trade_from_dict(d: dict[str, Any]) -> SimPosition:
         entry_fee=d.get("entry_fee", 0.0),
         exit_fee=d.get("exit_fee", 0.0),
         funding=d.get("funding", 0.0),
+        funding_settled_through_ts=d.get("funding_settled_through_ts", d.get("entry_ts", 0)),
+        funding_intervals_paid=d.get("funding_intervals_paid", 0),
         slippage_cost=d.get("slippage_cost", 0.0),
         max_favorable_pct=d.get("max_favorable_pct", 0.0),
         max_adverse_pct=d.get("max_adverse_pct", 0.0),

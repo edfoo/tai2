@@ -47,6 +47,12 @@ class SimPosition:
     entry_price: float
     entry_ts: int  # ms epoch
     trade_id: str = ""
+    margin_mode: str = "isolated"
+    leverage: float = 1.0
+    initial_margin: float = 0.0
+    maintenance_margin_ratio: float = 0.0
+    maintenance_margin_deduction: float = 0.0
+    liquidation_price: float | None = None
     tp_price: float | None = None
     sl_price: float | None = None
     strategy_name: str = ""
@@ -60,6 +66,8 @@ class SimPosition:
     entry_fee: float = 0.0
     exit_fee: float = 0.0
     funding: float = 0.0
+    funding_settled_through_ts: int = 0
+    funding_intervals_paid: int = 0
     slippage_cost: float = 0.0
     # Number of candles the position has been held through (incremented
     # by the simulator on each update_multi/update tick).
@@ -145,6 +153,9 @@ class BacktestConfig:
     # the backtest must be passed them explicitly or its sizing, daily-loss
     # lockout, leverage (PnL%-mode), and R:R guards silently diverge from live.
     guardrails_config: dict[str, Any] = field(default_factory=dict)
+    instrument_specs: dict[str, dict[str, Any]] = field(default_factory=dict)
+    allow_concurrent_strategies_per_symbol: bool = False
+    margin_mode: str = "isolated"
     # Warmup candles to fetch before start_ts (for indicator stabilisation).
     warmup_candles: int = 200
     # Whether to disable live execution during the backtest.
@@ -168,11 +179,22 @@ class BacktestConfig:
     # modeled by the launcher (market orders), so maker_fee_bps defaults to 0.
     taker_fee_bps: float = 5.0
     maker_fee_bps: float = 0.0
-    # Adverse price move on entry and exit, in basis points (0 = disabled).
+    # Base adverse entry/exit bps. The default OHLCV mode adds a prior-bar
+    # range/turnover impact proxy; it does not use the execution candle.
     slippage_bps: float = 0.0
-    # Assumed funding rate per interval (0 = disabled).  e.g. 0.01 = 0.01%
-    # of notional per funding interval (8h by default).
+    slippage_mode: str = "ohlcv_liquidity"
+    # Adverse-scenario multiplier applied to the estimated slippage (both
+    # modes). 1.0 = unmodified estimate; >1.0 stresses execution costs.
+    slippage_stress_multiplier: float = 1.0
+    liquidity_impact_coefficient: float = 0.05
+    candle_range_slippage_fraction: float = 0.1
+    max_liquidity_slippage_bps: float = 500.0
+    # Extra fee charged on a liquidation fill, in bps (OKX liquidation fee).
+    liquidation_fee_bps: float = 0.0
+    # Constant fallback funding rate per interval (0.01 = 0.01% of notional).
+    # Historical mode uses timestamped rates when fetched, then this fallback.
     funding_rate_pct: float = 0.0
+    funding_mode: str = "historical"
     # Funding cadence in milliseconds (default 8h).
     funding_interval_ms: int = 8 * 60 * 60 * 1000
 

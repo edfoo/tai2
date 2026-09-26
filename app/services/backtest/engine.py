@@ -100,6 +100,10 @@ class BacktestEngine:
     """
 
     def __init__(self, config: BacktestConfig) -> None:
+        if config.margin_mode != "isolated":
+            raise ValueError(
+                "Backtest currently supports isolated margin only; cross-margin liquidation is not modeled."
+            )
         self._config = config
         self._fetcher = HistoricalDataFetcher()
         # Merge launcher + strategy config so the simulator can read both
@@ -128,6 +132,20 @@ class BacktestEngine:
                 _timeframe_seconds = _tf_ms / 1000.0
         except Exception:
             _timeframe_seconds = None
+        self._cost_model = CostModel(
+            taker_fee_bps=config.taker_fee_bps,
+            maker_fee_bps=config.maker_fee_bps,
+            slippage_bps=config.slippage_bps,
+            slippage_mode=config.slippage_mode,
+            slippage_stress_multiplier=config.slippage_stress_multiplier,
+            liquidity_impact_coefficient=config.liquidity_impact_coefficient,
+            candle_range_slippage_fraction=config.candle_range_slippage_fraction,
+            max_liquidity_slippage_bps=config.max_liquidity_slippage_bps,
+            liquidation_fee_bps=config.liquidation_fee_bps,
+            funding_rate_pct=config.funding_rate_pct,
+            funding_interval_ms=config.funding_interval_ms,
+            funding_mode=config.funding_mode,
+        )
         self._simulator = Simulator(
             initial_capital=config.initial_capital,
             notional_per_trade=float(
@@ -135,13 +153,7 @@ class BacktestEngine:
             ),
             strategy_config=_sim_cfg,
             timeframe_seconds=_timeframe_seconds,
-            cost_model=CostModel(
-                taker_fee_bps=config.taker_fee_bps,
-                maker_fee_bps=config.maker_fee_bps,
-                slippage_bps=config.slippage_bps,
-                funding_rate_pct=config.funding_rate_pct,
-                funding_interval_ms=config.funding_interval_ms,
-            ),
+            cost_model=self._cost_model,
         )
         # Build the list of strategy instances to evaluate.
         self._strategies: list[Strategy] = [
@@ -285,6 +297,36 @@ class BacktestEngine:
 
                 if progress_cb:
                     progress_cb(BacktestProgress(phase="fetch", current=idx + 1, total=len(self._config.symbols), message=f"{symbol}: {len(candles)} candles"))
+
+            if self._config.funding_mode == "historical":
+                historical_rates: dict[str, list[dict[str, float | int]]] = {}
+                for symbol in self._config.symbols:
+                    fetch_funding_rates = getattr(self._fetcher, "fetch_funding_rates", None)
+                    rates = (
+                        await fetch_funding_rates(
+                            symbol, self._config.start_ts, self._config.end_ts
+                        )
+                        if fetch_funding_rates is not None else []
+                    )
+                    historical_rates[symbol] = rates
+                    funding_provenance = getattr(self._fetcher, "last_funding_provenance", None)
+                    if funding_provenance:
+                        data_provenance.append(dict(funding_provenance))
+                self._cost_model.historical_funding_rates = historical_rates
+
+            fetch_instrument_specs = getattr(self._fetcher, "fetch_instrument_specs", None)
+            instrument_specs = (
+                await fetch_instrument_specs(self._config.symbols)
+                if fetch_instrument_specs is not None else {}
+            )
+            self._config.instrument_specs = instrument_specs
+            self._simulator.set_instrument_specs(instrument_specs)
+            instrument_provenance = getattr(self._fetcher, "last_instrument_provenance", None)
+            if instrument_provenance:
+                data_provenance.append({
+                    "timeframe": "instrument_specs",
+                    **dict(instrument_provenance),
+                })
 
             # ── Phase 2: Build snapshot builders ──────────────────────
             snapshot_builders: dict[str, SnapshotBuilder] = {}
@@ -449,7 +491,7 @@ class BacktestEngine:
                         continue
                     # Per-strategy position guard: skip if already in position.
                     if (
-                        self._simulator.has_open_position(symbol, strategy.name)
+                        self._has_blocking_position(symbol, strategy.name)
                         or not self._simulator.can_enter(symbol, candle.ts)
                     ):
                         continue
@@ -644,7 +686,7 @@ class BacktestEngine:
                         continue
                     # Per-strategy position guard: skip if already in position.
                     if (
-                        self._simulator.has_open_position(symbol, strategy.name)
+                        self._has_blocking_position(symbol, strategy.name)
                         or not self._simulator.can_enter(symbol, eval_candle.ts)
                     ):
                         continue
@@ -697,6 +739,14 @@ class BacktestEngine:
                 time.sleep(0)
 
         return candles_processed
+
+    def _has_blocking_position(self, symbol: str, strategy_name: str) -> bool:
+        if self._simulator.has_open_position(symbol, strategy_name):
+            return True
+        return (
+            not self._config.allow_concurrent_strategies_per_symbol
+            and self._simulator.has_open_position(symbol)
+        )
 
     def _get_last_price(self, symbol: str) -> float | None:
         """Return the current price for a symbol (from the backtest window)."""

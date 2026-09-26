@@ -228,6 +228,11 @@ async def test_grid_job_result_contains_reproducible_config_and_fold_metrics(mon
             days=10,
             launcher_config={"notional_usd": 75.0},
             guardrails_config={"max_position_pct": 0.25},
+            funding_mode="constant",
+            funding_rate_pct=0.0125,
+            slippage_mode="fixed",
+            slippage_bps=3.0,
+            allow_concurrent_strategies_per_symbol=True,
         ),
         params=[GridParamRequest(
             key="strategies.mean_reversion.rsi_oversold", values=[25, 30]
@@ -250,6 +255,11 @@ async def test_grid_job_result_contains_reproducible_config_and_fold_metrics(mon
     assert payload["result_type"] == "grid"
     assert payload["config"]["base_config"]["launcher_config"] == {"notional_usd": 75.0}
     assert payload["config"]["base_config"]["guardrails_config"] == {"max_position_pct": 0.25}
+    assert payload["config"]["base_config"]["funding_mode"] == "constant"
+    assert payload["config"]["base_config"]["funding_rate_pct"] == 0.0125
+    assert payload["config"]["base_config"]["slippage_mode"] == "fixed"
+    assert payload["config"]["base_config"]["slippage_bps"] == 3.0
+    assert payload["config"]["base_config"]["allow_concurrent_strategies_per_symbol"] is True
     assert payload["config"]["search_mode"] == "random"
     assert payload["config"]["final_holdout_fraction"] == 0.2
     assert payload["attempted_combinations"] == 2

@@ -9241,6 +9241,56 @@ def register_pages(app: FastAPI) -> None:
                         "replicate live intra-candle behaviour."
                     ).classes("text-xs text-slate-500")
 
+                with ui.row().classes("w-full gap-4 items-center mt-2"):
+                    funding_mode_input = ui.select(
+                        options={
+                            "historical": "Historical OKX rates (constant fallback)",
+                            "constant": "Constant fallback rate",
+                            "off": "Funding off",
+                        },
+                        value="historical",
+                        label="Funding model",
+                    ).classes("w-80")
+                    funding_fallback_input = ui.number(
+                        label="Fallback rate (% / interval)",
+                        value=0.0,
+                        step=0.005,
+                        precision=4,
+                    ).classes("w-48")
+                    slippage_mode_input = ui.select(
+                        options={
+                            "ohlcv_liquidity": "OHLCV liquidity proxy",
+                            "fixed": "Fixed bps",
+                        },
+                        value="ohlcv_liquidity",
+                        label="Slippage model",
+                    ).classes("w-56")
+                    slippage_bps_input = ui.number(
+                        label="Base slippage (bps / fill)",
+                        value=0.0,
+                        min=0.0,
+                        step=1.0,
+                        precision=2,
+                    ).classes("w-48")
+                    slippage_stress_input = ui.number(
+                        label="Slippage stress ×",
+                        value=1.0,
+                        min=0.0,
+                        step=0.25,
+                        precision=2,
+                    ).classes("w-40")
+                    liquidation_fee_input = ui.number(
+                        label="Liquidation fee (bps)",
+                        value=0.0,
+                        min=0.0,
+                        step=1.0,
+                        precision=2,
+                    ).classes("w-48")
+                    allow_concurrent_strategies_input = ui.checkbox(
+                        "Allow multiple strategies per symbol",
+                        value=False,
+                    )
+
                 # Strategy selection
                 with ui.row().classes("w-full gap-4 items-center mt-2"):
                     ui.label("Strategies:").classes("text-sm font-medium")
@@ -9680,6 +9730,15 @@ def register_pages(app: FastAPI) -> None:
                 launcher_config=dict(launcher_config),
                 strategy_config=dict(strategy_config),
                 guardrails_config=copy.deepcopy(config.get("guardrails") or {}),
+                funding_mode=funding_mode_input.value or "historical",
+                funding_rate_pct=float(funding_fallback_input.value or 0.0),
+                slippage_mode=slippage_mode_input.value or "ohlcv_liquidity",
+                slippage_bps=float(slippage_bps_input.value or 0.0),
+                slippage_stress_multiplier=float(slippage_stress_input.value or 1.0),
+                liquidation_fee_bps=float(liquidation_fee_input.value or 0.0),
+                allow_concurrent_strategies_per_symbol=bool(
+                    allow_concurrent_strategies_input.value
+                ),
             )
 
             app.state.backtest_running["flag"] = True
@@ -9822,6 +9881,15 @@ def register_pages(app: FastAPI) -> None:
                 launcher_config=copy.deepcopy(launcher_config),
                 strategy_config=dict(strategy_config),
                 guardrails_config=copy.deepcopy(config.get("guardrails") or {}),
+                funding_mode=funding_mode_input.value or "historical",
+                funding_rate_pct=float(funding_fallback_input.value or 0.0),
+                slippage_mode=slippage_mode_input.value or "ohlcv_liquidity",
+                slippage_bps=float(slippage_bps_input.value or 0.0),
+                slippage_stress_multiplier=float(slippage_stress_input.value or 1.0),
+                liquidation_fee_bps=float(liquidation_fee_input.value or 0.0),
+                allow_concurrent_strategies_per_symbol=bool(
+                    allow_concurrent_strategies_input.value
+                ),
             )
 
             grid_cfg = GridConfig(
@@ -9917,8 +9985,12 @@ def register_pages(app: FastAPI) -> None:
                         ui.label(
                             "Costs: taker "
                             f"{cost_model.get('taker_fee_bps_per_fill', 0)} bps/fill, "
-                            f"slippage {cost_model.get('slippage_bps_per_fill', 0)} bps/fill, "
-                            f"funding {cost_model.get('funding_rate_pct_per_interval', 0)}%/interval "
+                            f"slippage={cost_model.get('slippage_mode', 'fixed')} "
+                            f"base {cost_model.get('slippage_bps_per_fill', 0)} bps/fill "
+                            f"×{cost_model.get('slippage_stress_multiplier', 1.0)}, "
+                            f"liquidation fee {cost_model.get('liquidation_fee_bps', 0)} bps, "
+                            f"funding={cost_model.get('funding_mode', 'historical')} "
+                            f"fallback {cost_model.get('funding_rate_pct_per_interval', 0)}%/interval "
                             f"({cost_model.get('funding_source', 'unspecified')})"
                         ).classes("text-xs")
                         enabled_unavailable = assumptions.get("enabled_gates_with_unavailable_inputs") or []
@@ -10308,6 +10380,23 @@ def register_pages(app: FastAPI) -> None:
                         f"annualization: {m.get('sharpe_annualization_candles_per_year', 0)} bars/year. "
                         f"{m.get('sharpe_serial_correlation_caveat', '')}"
                     ).classes("text-xs text-slate-500 mt-1")
+                    from app.services.backtest.persistence import _backtest_assumptions
+                    run_assumptions = result.assumptions or _backtest_assumptions(result.config)
+                    with ui.expansion("Execution model assumptions and limitations", icon="info").classes("w-full mt-2"):
+                        ui.label(run_assumptions.get("entry_fill", "")).classes("text-xs")
+                        ui.label(run_assumptions.get("intrabar_barrier_order", "")).classes("text-xs")
+                        cost_model = run_assumptions.get("cost_model") or {}
+                        ui.label(
+                            f"Funding: {cost_model.get('funding_mode', 'historical')}; "
+                            f"fallback {cost_model.get('funding_rate_pct_per_interval', 0)}%/interval. "
+                            f"Slippage: {cost_model.get('slippage_mode', 'fixed')}; "
+                            f"{cost_model.get('slippage_source', '')}; "
+                            f"{cost_model.get('slippage_bps_per_fill', 0)} bps/fill "
+                            f"×{cost_model.get('slippage_stress_multiplier', 1.0)} stress; "
+                            f"liquidation fee {cost_model.get('liquidation_fee_bps', 0)} bps."
+                        ).classes("text-xs")
+                        for limitation in run_assumptions.get("execution_model_limitations") or []:
+                            ui.label(limitation).classes("text-xs text-amber-800")
                     benchmark = m.get("buy_and_hold") or {}
                     if benchmark:
                         if benchmark.get("error"):

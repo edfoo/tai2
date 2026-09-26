@@ -99,6 +99,37 @@ class TestSimulatorTPSL:
         assert sim.open_positions == []
         assert sim.closed_positions[0].close_reason == "tp"
 
+    @pytest.mark.parametrize(
+        ("direction", "tp_price", "sl_price", "open_price", "high", "low", "reason", "expected"),
+        [
+            ("long", 120.0, 90.0, 80.0, 85.0, 75.0, "sl", 80.0),
+            ("short", 80.0, 110.0, 120.0, 125.0, 115.0, "sl", 120.0),
+            ("long", 110.0, 90.0, 115.0, 120.0, 112.0, "tp", 115.0),
+            ("short", 90.0, 110.0, 85.0, 88.0, 80.0, "tp", 85.0),
+        ],
+    )
+    def test_gap_fills_use_open_when_more_favorable_or_adverse_as_appropriate(
+        self, direction, tp_price, sl_price, open_price, high, low, reason, expected
+    ) -> None:
+        sim = Simulator(initial_capital=1000.0, notional_per_trade=100.0)
+        sim.open_position(
+            symbol="BTC-USDT-SWAP",
+            direction=direction,
+            entry_price=100.0,
+            entry_ts=1000,
+            tp_price=tp_price,
+            sl_price=sl_price,
+            strategy_name="test",
+        )
+        sim.update_multi({
+            "BTC-USDT-SWAP": Candle(
+                ts=2000, open=open_price, high=high, low=low, close=open_price, volume=1.0
+            )
+        })
+
+        assert sim.closed_positions[0].close_reason == reason
+        assert sim.closed_positions[0].close_price == pytest.approx(expected)
+
     def test_long_position_hits_tp(self) -> None:
         """A long position should close at tp_price when candle high reaches it."""
         sim = Simulator(initial_capital=1000.0, notional_per_trade=100.0)
@@ -400,6 +431,17 @@ class TestSizing:
         assert base_units == 0.0
         assert notional == 0.0
 
+    def test_size_below_exchange_minimum_is_blocked(self) -> None:
+        base_units, notional = compute_order_size(
+            requested_notional=20.0,
+            entry_price=100.0,
+            equity=1000.0,
+            instrument={"ct_val": 1.0, "lot_size": 1.0, "min_size": 1.0},
+        )
+
+        assert base_units == 0.0
+        assert notional == 0.0
+
 
 class TestRewardRiskGuard:
     """Test the live-compatible launcher reward-to-risk entry gate."""
@@ -501,10 +543,8 @@ class TestDailyLossGuard:
         assert sim.is_daily_loss_locked(1000)
 
     def test_reference_uses_window_start_not_peak(self) -> None:
-        # Reference is the first equity in the 24h window, matching live.
         sim = self._make_sim(0.03)
         sim._equity_history = [(0, 900.0), (1000, 1000.0), (2000, 960.0)]
-        # Reference 900 → 960 is a gain, so no lock.
         assert not sim.is_daily_loss_locked(2000)
 
     def test_blocks_open_position_when_locked(self) -> None:
@@ -522,6 +562,69 @@ class TestDailyLossGuard:
         assert result is None
         assert len(sim.open_positions) == 0
 
+
+class TestBacktestSymbolConcurrency:
+    def test_cross_margin_request_fails_explicitly(self) -> None:
+        from app.services.backtest.engine import BacktestEngine
+        from app.services.backtest.models import BacktestConfig
+
+        config = BacktestConfig(
+            symbols=["BTC-USDT-SWAP"],
+            timeframe="15m",
+            start_ts=0,
+            end_ts=1000,
+            margin_mode="cross",
+        )
+
+        with pytest.raises(ValueError, match="supports isolated margin only"):
+            BacktestEngine(config)
+
+    def test_cross_strategy_same_symbol_is_blocked_by_default(self) -> None:
+        from app.services.backtest.engine import BacktestEngine
+        from app.services.backtest.models import BacktestConfig
+
+        config = BacktestConfig(
+            symbols=["BTC-USDT-SWAP"],
+            timeframe="15m",
+            start_ts=0,
+            end_ts=1000,
+            strategy_names=["mean_reversion", "trend_pullback"],
+        )
+        engine = BacktestEngine(config)
+        engine._simulator.open_position(
+            symbol="BTC-USDT-SWAP",
+            direction="long",
+            entry_price=100.0,
+            entry_ts=100,
+            strategy_name="mean_reversion",
+        )
+
+        assert engine._has_blocking_position("BTC-USDT-SWAP", "trend_pullback")
+        assert engine._has_blocking_position("BTC-USDT-SWAP", "mean_reversion")
+
+    def test_cross_strategy_same_symbol_can_be_opted_in(self) -> None:
+        from app.services.backtest.engine import BacktestEngine
+        from app.services.backtest.models import BacktestConfig
+
+        config = BacktestConfig(
+            symbols=["BTC-USDT-SWAP"],
+            timeframe="15m",
+            start_ts=0,
+            end_ts=1000,
+            strategy_names=["mean_reversion", "trend_pullback"],
+            allow_concurrent_strategies_per_symbol=True,
+        )
+        engine = BacktestEngine(config)
+        engine._simulator.open_position(
+            symbol="BTC-USDT-SWAP",
+            direction="long",
+            entry_price=100.0,
+            entry_ts=100,
+            strategy_name="mean_reversion",
+        )
+
+        assert not engine._has_blocking_position("BTC-USDT-SWAP", "trend_pullback")
+        assert engine._has_blocking_position("BTC-USDT-SWAP", "mean_reversion")
 
 class TestPortfolioCap:
     """Test the live-compatible portfolio free-equity cap."""

@@ -47,3 +47,68 @@ async def test_unavailable_fetch_records_empty_source_provenance(tmp_path) -> No
     assert candles == []
     assert fetcher.last_fetch_provenance["source"] == "unavailable"
     assert fetcher.last_fetch_provenance["candle_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_funding_and_instrument_specs_are_cached_and_fingerprinted(tmp_path, monkeypatch) -> None:
+    import app.services.okx_metrics as okx_metrics
+
+    async def fake_funding(_symbol, _start, _end):
+        return [{"ts": 100, "rate": 0.0001}]
+
+    async def fake_get(path, _params):
+        if path.endswith("/position-tiers"):
+            return [{
+                "minSz": "0",
+                "maxSz": "100",
+                "imr": "0.2",
+                "mmr": "0.1",
+                "maxLever": "5",
+                "mmrDeduction": "0",
+            }]
+        return [{
+            "instId": "BTC-USDT-SWAP",
+            "ctVal": "0.01",
+            "lotSz": "1",
+            "minSz": "1",
+            "tickSz": "0.1",
+            "maxMktSz": "1000",
+            "maxLmtSz": "2000",
+            "ctType": "linear",
+        }]
+
+    monkeypatch.setattr(okx_metrics, "fetch_funding_history_records", fake_funding)
+    monkeypatch.setattr(okx_metrics, "_get", fake_get)
+    fetcher = HistoricalDataFetcher(cache_dir=tmp_path)
+
+    rates = await fetcher.fetch_funding_rates("BTC-USDT-SWAP", 0, 200)
+    funding_source = fetcher.last_funding_provenance
+    specs = await fetcher.fetch_instrument_specs(["BTC-USDT-SWAP"])
+    instrument_source = fetcher.last_instrument_provenance
+
+    assert rates == [{"ts": 100, "rate": 0.0001}]
+    assert funding_source["source"] == "okx_public_api"
+    assert len(funding_source["content_sha256"]) == 64
+    assert specs["BTC-USDT-SWAP"] == {
+        "ct_val": 0.01,
+        "lot_size": 1.0,
+        "min_size": 1.0,
+        "tick_size": 0.1,
+        "max_market_size": 1000.0,
+        "max_limit_size": 2000.0,
+        "contract_type": "linear",
+        "position_tiers": [{
+            "min_size": 0.0,
+            "max_size": 100.0,
+            "initial_margin_ratio": 0.2,
+            "maintenance_margin_ratio": 0.1,
+            "max_leverage": 5.0,
+            "maintenance_deduction": 0.0,
+        }],
+    }
+    assert instrument_source["source"] == "okx_public_api"
+    cached = HistoricalDataFetcher(cache_dir=tmp_path)
+    assert await cached.fetch_funding_rates("BTC-USDT-SWAP", 0, 200) == rates
+    assert cached.last_funding_provenance["source"] == "file_cache"
+    assert await cached.fetch_instrument_specs(["BTC-USDT-SWAP"]) == specs
+    assert cached.last_instrument_provenance["source"] == "file_cache"

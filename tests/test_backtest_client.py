@@ -145,6 +145,11 @@ def test_grid_cli_forwards_validation_holdout_and_search_options(monkeypatch):
         "--search-mode", "random",
         "--combination-budget", "12",
         "--random-seed", "7",
+        "--funding-mode", "constant",
+        "--funding-rate-pct", "0.01",
+        "--slippage-mode", "fixed",
+        "--slippage-bps", "3",
+        "--allow-concurrent-strategies-per-symbol",
     ])
 
     assert cli._cmd_grid(args) == 0
@@ -155,3 +160,8 @@ def test_grid_cli_forwards_validation_holdout_and_search_options(monkeypatch):
     assert captured["search_mode"] == "random"
     assert captured["combination_budget"] == 12
     assert captured["random_seed"] == 7
+    assert captured["base"]["funding_mode"] == "constant"
+    assert captured["base"]["funding_rate_pct"] == 0.01
+    assert captured["base"]["slippage_mode"] == "fixed"
+    assert captured["base"]["slippage_bps"] == 3.0
+    assert captured["base"]["allow_concurrent_strategies_per_symbol"] is True

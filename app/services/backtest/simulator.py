@@ -64,6 +64,52 @@ def _to_float(value: Any) -> float | None:
         return None
 
 
+def _quantize_price(price: float | None, tick_size: float, rounding: str) -> float | None:
+    if price is None or price <= 0 or tick_size <= 0:
+        return price
+    units = price / tick_size
+    if rounding == "up":
+        return math.ceil(units - 1e-12) * tick_size
+    return math.floor(units + 1e-12) * tick_size
+
+
+def compute_isolated_liquidation_price(
+    *,
+    direction: str,
+    size: float,
+    entry_price: float,
+    initial_margin: float,
+    maintenance_margin_ratio: float,
+    maintenance_margin_deduction: float = 0.0,
+) -> float | None:
+    """Estimate the isolated-margin liquidation price for a linear swap.
+
+    OKX liquidates an isolated position when its margin ratio reaches the
+    maintenance-margin requirement.  For a linear (USDT-margined) contract the
+    maintenance amount is ``size * price * mmr - mmrDeduction`` and the
+    position equity is ``initial_margin + unrealised_pnl``.  Solving
+    ``equity == maintenance`` for price gives:
+
+        long :  price = (entry*size - initial_margin - deduction) / (size*(1 - mmr))
+        short:  price = (entry*size + initial_margin + deduction) / (size*(1 + mmr))
+
+    This is an approximation: it ignores fees, funding accrued in the
+    liquidation equation, and exchange-specific risk adjustments.  Returns
+    ``None`` when the inputs cannot produce a positive price.
+    """
+    if size <= 0 or entry_price <= 0:
+        return None
+    if direction == "long":
+        denominator = size * max(1.0 - maintenance_margin_ratio, 1e-9)
+        price = (entry_price * size - initial_margin - maintenance_margin_deduction) / denominator
+    else:
+        denominator = size * (1.0 + maintenance_margin_ratio)
+        price = (
+            entry_price * size + initial_margin + maintenance_margin_deduction
+        ) / denominator
+    return price if price > 0 else None
+
+
 # ── Position-management strategy protocol (future phase) ───────────────
 
 
@@ -236,12 +282,60 @@ class Simulator:
     def _guardrails(self) -> dict[str, Any]:
         return self._strategy_config.get("guardrails") or {}
 
+    def set_instrument_specs(self, specs: dict[str, dict[str, Any]]) -> None:
+        """Install exchange contract rules fetched for this backtest run."""
+        self._strategy_config["instrument_specs"] = specs
+
+    def _slippage_bps(
+        self, symbol: str, order_notional: float, execution_ts: int | None = None
+    ) -> float:
+        """Estimate adverse slippage from recent OHLCV range and quote turnover."""
+        model = self._cost_model
+        base_bps = model.slippage_bps
+        if model.slippage_mode != "ohlcv_liquidity":
+            return model.stressed_slippage_bps(base_bps)
+        candles = self._recent_candles.get(symbol, [])
+        if execution_ts is not None:
+            candles = [candle for candle in candles if candle.ts < execution_ts]
+        if not candles or order_notional <= 0:
+            return model.stressed_slippage_bps(base_bps)
+        specs = self._strategy_config.get("instrument_specs") or {}
+        spec = specs.get(symbol) or specs.get(symbol.upper()) or {}
+        contract_value = _to_positive_float(spec.get("ct_val")) or 1.0
+        quote_turnovers = sorted(
+            max(c.volume, 0.0) * c.close * contract_value
+            for c in candles if c.close > 0
+        )
+        range_bps = sorted(
+            (c.high - c.low) / c.close * 10_000.0
+            for c in candles if c.close > 0 and c.high >= c.low
+        )
+        if not quote_turnovers or not range_bps:
+            return model.stressed_slippage_bps(base_bps)
+        median_volume = quote_turnovers[len(quote_turnovers) // 2]
+        median_range = range_bps[len(range_bps) // 2]
+        impact_bps = (
+            model.liquidity_impact_coefficient
+            * math.sqrt(order_notional / max(median_volume, 1e-12))
+            * 10_000.0
+        )
+        estimated = (
+            base_bps
+            + impact_bps
+            + median_range * model.candle_range_slippage_fraction
+        )
+        capped = min(max(estimated, 0.0), model.max_liquidity_slippage_bps)
+        return model.stressed_slippage_bps(capped)
+
     def open_position_notional(self) -> float:
         """Sum of entry notional across all currently-open positions."""
         total = 0.0
         for pos in self._open_positions:
             total += pos.entry_price * pos.size
         return total
+
+    def used_initial_margin(self) -> float:
+        return sum(position.initial_margin for position in self._open_positions)
 
     def is_daily_loss_locked(self, current_ts: int) -> bool:
         """Return whether the live daily-loss guardrail would block new entries.
@@ -298,10 +392,22 @@ class Simulator:
         # Portfolio free-equity cap — clip (or block) the requested notional
         # so total deployed notional never exceeds account equity.
         current_equity = self._equity_history[-1][1] if self._equity_history else self._cash
-        free_equity = max(current_equity - self.open_position_notional(), 0.0)
-        if free_equity <= 0:
+        free_margin = max(current_equity - self.used_initial_margin(), 0.0)
+        if free_margin <= 0:
             return None
-        requested_notional = min(self._notional_per_trade, free_equity)
+        max_leverage = _to_positive_float(guardrails.get("max_leverage")) or 1.0
+        instrument_tiers = [
+            tier for tier in instrument.get("position_tiers", [])
+            if isinstance(tier, dict)
+        ]
+        tier_leverage_caps = [
+            value for tier in instrument_tiers
+            if (value := _to_positive_float(tier.get("max_leverage"))) is not None
+        ]
+        if tier_leverage_caps:
+            max_leverage = min(max_leverage, max(tier_leverage_caps))
+        max_leverage = max(max_leverage, 1.0)
+        requested_notional = min(self._notional_per_trade, free_margin * max_leverage)
 
         size, _actual_notional = compute_order_size(
             requested_notional=requested_notional,
@@ -315,16 +421,82 @@ class Simulator:
         if size <= 0:
             return None
 
+        contract_value = _to_positive_float(instrument.get("ct_val")) or 1.0
+        contracts = size / contract_value
+        selected_tier = next((
+            tier for tier in instrument_tiers
+            if contracts <= (_to_positive_float(tier.get("max_size")) or float("inf"))
+        ), instrument_tiers[-1] if instrument_tiers else {})
+        tier_leverage = _to_positive_float(selected_tier.get("max_leverage"))
+        effective_leverage = min(max_leverage, tier_leverage) if tier_leverage else max_leverage
+        effective_leverage = max(effective_leverage, 1.0)
+        tier_imr = _to_positive_float(selected_tier.get("initial_margin_ratio"))
+        margin_ratio = max(tier_imr or (1.0 / effective_leverage), 1.0 / effective_leverage)
+        if effective_leverage < max_leverage:
+            requested_notional = min(self._notional_per_trade, free_margin * effective_leverage)
+            size, _actual_notional = compute_order_size(
+                requested_notional=requested_notional,
+                entry_price=entry_price,
+                equity=self._cash,
+                stop_price=sl_price,
+                guardrails=guardrails,
+                instrument=instrument,
+                symbol=symbol,
+            )
+            if size <= 0:
+                return None
+            contracts = size / contract_value
+            selected_tier = next((
+                tier for tier in instrument_tiers
+                if contracts <= (_to_positive_float(tier.get("max_size")) or float("inf"))
+            ), selected_tier)
+            tier_leverage = _to_positive_float(selected_tier.get("max_leverage"))
+            if tier_leverage:
+                effective_leverage = min(effective_leverage, tier_leverage)
+            tier_imr = _to_positive_float(selected_tier.get("initial_margin_ratio"))
+            margin_ratio = max(tier_imr or (1.0 / effective_leverage), 1.0 / effective_leverage)
+
         self._position_sequence += 1
         trade_id = f"{symbol}:{entry_ts}:{strategy_name}:{self._position_sequence}"
 
         # Effective entry fill price after slippage (slippage is baked into
         # fill_price, so it is already reflected in the position's PnL).
-        fill_price = self._cost_model.entry_price_for(entry_price, direction == "long")
+        fill_price = self._cost_model.entry_price_for(
+            entry_price,
+            direction == "long",
+            slippage_bps=self._slippage_bps(symbol, requested_notional, entry_ts),
+        )
         notional = size * fill_price
         entry_fee = self._cost_model.fee_for(notional, taker=True)
         # Positive informational cost; the adverse fill is also reflected in PnL.
         entry_slippage = abs(size * (fill_price - entry_price))
+        tick_size = _to_positive_float(instrument.get("tick_size")) or 0.0
+        if tick_size > 0:
+            if direction == "long":
+                tp_price = _quantize_price(tp_price, tick_size, "down")
+                sl_price = _quantize_price(sl_price, tick_size, "up")
+            else:
+                tp_price = _quantize_price(tp_price, tick_size, "up")
+                sl_price = _quantize_price(sl_price, tick_size, "down")
+        maintenance_ratio = (
+            _to_positive_float(selected_tier.get("maintenance_margin_ratio"))
+            or _to_positive_float(instrument.get("fallback_maintenance_margin_ratio"))
+            or 0.005
+        )
+        maintenance_deduction = (
+            _to_positive_float(selected_tier.get("maintenance_deduction")) or 0.0
+        )
+        initial_margin = size * fill_price * margin_ratio
+        liquidation_price = None
+        if effective_leverage > 1.0:
+            liquidation_price = compute_isolated_liquidation_price(
+                direction=direction,
+                size=size,
+                entry_price=fill_price,
+                initial_margin=initial_margin,
+                maintenance_margin_ratio=maintenance_ratio,
+                maintenance_margin_deduction=maintenance_deduction,
+            )
 
         position = SimPosition(
             symbol=symbol,
@@ -333,6 +505,13 @@ class Simulator:
             entry_price=fill_price,
             entry_ts=entry_ts,
             trade_id=trade_id,
+            funding_settled_through_ts=entry_ts,
+            margin_mode="isolated",
+            leverage=effective_leverage,
+            initial_margin=size * fill_price * margin_ratio,
+            maintenance_margin_ratio=maintenance_ratio,
+            maintenance_margin_deduction=maintenance_deduction,
+            liquidation_price=liquidation_price,
             tp_price=tp_price,
             sl_price=sl_price,
             strategy_name=strategy_name,
@@ -367,38 +546,44 @@ class Simulator:
         if size_fraction <= 0:
             return
         if size_fraction >= 1.0:
+            self._settle_funding(position, close_ts)
             # Effective exit fill after slippage.
-            exit_px = self._cost_model.exit_price_for(close_price, position.is_long)
+            exit_px = self._cost_model.exit_price_for(
+                close_price,
+                position.is_long,
+                slippage_bps=self._slippage_bps(
+                    position.symbol, position.size * close_price, close_ts
+                ),
+            )
             exit_notional = position.size * exit_px
             exit_fee = self._cost_model.fee_for(exit_notional, taker=True)
-            # Funding accrued over the holding period (settles every interval).
-            held_ms = max(close_ts - position.entry_ts, 0)
-            intervals = held_ms // self._cost_model.funding_interval_ms
-            funding = self._cost_model.funding_payment(
-                position.size * position.entry_price,
-                is_long=position.is_long,
-                intervals=intervals,
-            )
-
+            if reason == "liquidation":
+                exit_fee += self._cost_model.liquidation_fee_for(exit_notional)
             position.close_price = exit_px
             position.close_ts = close_ts
             position.close_reason = reason
             position.exit_fee = exit_fee
-            position.funding = funding
             # Slippage is tracked as a positive cost, separate from fill PnL.
             position.slippage_cost += position.size * abs(exit_px - close_price)
             position.pnl = position.unrealised_pnl(exit_px)
             if position.entry_price > 0:
                 position.pnl_pct = position.unrealised_pnl_pct(exit_px)
-            self._cash += position.pnl - exit_fee - funding
+            self._cash += position.pnl - exit_fee
             self._open_positions.remove(position)
             self._closed_positions.append(position)
             self._last_close_ts[position.symbol] = close_ts
             return
 
         # Partial close: realise PnL on the closed fraction, keep remainder open.
+        self._settle_funding(position, close_ts)
         closed_size = position.size * size_fraction
-        exit_px = self._cost_model.exit_price_for(close_price, position.is_long)
+        exit_px = self._cost_model.exit_price_for(
+            close_price,
+            position.is_long,
+            slippage_bps=self._slippage_bps(
+                position.symbol, position.size * close_price, close_ts
+            ),
+        )
         if position.is_long:
             partial_pnl = (exit_px - position.entry_price) * closed_size
         else:
@@ -407,15 +592,10 @@ class Simulator:
         close_fraction = closed_size / position.size
         allocated_entry_fee = position.entry_fee * close_fraction
         allocated_entry_slippage = position.slippage_cost * close_fraction
+        allocated_margin = position.initial_margin * close_fraction
         partial_slippage = allocated_entry_slippage + closed_size * abs(exit_px - close_price)
-        held_ms = max(close_ts - position.entry_ts, 0)
-        intervals = held_ms // self._cost_model.funding_interval_ms
-        partial_funding = self._cost_model.funding_payment(
-            closed_size * position.entry_price,
-            is_long=position.is_long,
-            intervals=intervals,
-        )
-        self._cash += partial_pnl - partial_fee - partial_funding
+        partial_funding = position.funding * close_fraction
+        self._cash += partial_pnl - partial_fee
         # Record a closed leg for metrics.
         closed_leg = SimPosition(
             symbol=position.symbol,
@@ -446,14 +626,55 @@ class Simulator:
             funding=partial_funding,
             candles_held=position.candles_held,
             initial_size=position.initial_size,
+            initial_margin=allocated_margin,
+            leverage=position.leverage,
+            maintenance_margin_ratio=position.maintenance_margin_ratio,
+            maintenance_margin_deduction=position.maintenance_margin_deduction,
+            liquidation_price=position.liquidation_price,
             breakeven_done=position.breakeven_done,
             partial_done=True,
         )
         self._closed_positions.append(closed_leg)
         position.size = position.size - closed_size
         position.entry_fee -= allocated_entry_fee
+        position.funding -= partial_funding
         position.slippage_cost -= allocated_entry_slippage
+        position.initial_margin -= allocated_margin
         position.partial_done = True
+
+    def _settle_funding(self, position: SimPosition, timestamp: int) -> None:
+        """Apply settlement events crossed since the previous simulator timestamp."""
+        model = self._cost_model
+        if model.funding_mode == "off" or timestamp <= position.entry_ts:
+            return
+        historical = (model.historical_funding_rates or {}).get(position.symbol) or []
+        if model.funding_mode == "historical" and historical:
+            rate_sum = sum(
+                float(record["rate"])
+                for record in historical
+                if position.entry_ts < int(record["ts"])
+                and position.funding_settled_through_ts < int(record["ts"]) <= timestamp
+            )
+            payment = position.size * position.entry_price * rate_sum
+            if not position.is_long:
+                payment = -payment
+        else:
+            interval_ms = model.funding_interval_ms
+            due_intervals = (
+                max(timestamp - position.entry_ts, 0) // interval_ms
+                if interval_ms > 0 else 0
+            )
+            new_intervals = max(due_intervals - position.funding_intervals_paid, 0)
+            payment = model.funding_payment(
+                position.size * position.entry_price,
+                is_long=position.is_long,
+                intervals=int(new_intervals),
+            )
+            position.funding_intervals_paid = int(due_intervals)
+        if payment:
+            position.funding += payment
+            self._cash -= payment
+        position.funding_settled_through_ts = timestamp
 
     # ── Per-candle update ────────────────────────────────────────────
 
@@ -483,6 +704,7 @@ class Simulator:
                 continue
             if candle.ts <= position.entry_ts:
                 continue
+            self._settle_funding(position, candle.ts)
             position.candles_held += 1
             self._track_excursion(position, candle)
             if self._check_tp_sl(position, candle):
@@ -516,8 +738,8 @@ class Simulator:
         for symbol, candle in prices.items():
             history = self._recent_candles.setdefault(symbol, [])
             history.append(candle)
-            if len(history) > 100:
-                del history[:-100]
+            if len(history) > 1440:
+                del history[:-1440]
 
         # 1. Check TP/SL for each open position against its symbol's candle.
         for position in list(self._open_positions):
@@ -526,6 +748,7 @@ class Simulator:
                 continue
             if candle.ts <= position.entry_ts:
                 continue
+            self._settle_funding(position, candle.ts)
             position.candles_held += 1
             self._track_excursion(position, candle)
             if self._check_tp_sl(position, candle):
@@ -689,23 +912,36 @@ class Simulator:
         Conservative: if both TP and SL are within the candle's range, SL
         is assumed to trigger first (pessimistic).
         """
+        if position.liquidation_price is not None:
+            liq = position.liquidation_price
+            if position.is_long and candle.low <= liq:
+                self._close_position(position, min(candle.open, liq), candle.ts, "liquidation")
+                return True
+            if not position.is_long and candle.high >= liq:
+                self._close_position(position, max(candle.open, liq), candle.ts, "liquidation")
+                return True
+
         if position.is_long:
             # Stop loss: price dropped to/below SL
             if position.sl_price is not None and candle.low <= position.sl_price:
-                self._close_position(position, position.sl_price, candle.ts, "sl")
+                stop_fill = min(candle.open, position.sl_price)
+                self._close_position(position, stop_fill, candle.ts, "sl")
                 return True
             # Take profit: price rose to/above TP
             if position.tp_price is not None and candle.high >= position.tp_price:
-                self._close_position(position, position.tp_price, candle.ts, "tp")
+                target_fill = max(candle.open, position.tp_price)
+                self._close_position(position, target_fill, candle.ts, "tp")
                 return True
         else:  # short
             # Stop loss: price rose to/above SL
             if position.sl_price is not None and candle.high >= position.sl_price:
-                self._close_position(position, position.sl_price, candle.ts, "sl")
+                stop_fill = max(candle.open, position.sl_price)
+                self._close_position(position, stop_fill, candle.ts, "sl")
                 return True
             # Take profit: price dropped to/below TP
             if position.tp_price is not None and candle.low <= position.tp_price:
-                self._close_position(position, position.tp_price, candle.ts, "tp")
+                target_fill = min(candle.open, position.tp_price)
+                self._close_position(position, target_fill, candle.ts, "tp")
                 return True
         return False
 

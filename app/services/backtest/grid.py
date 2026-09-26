@@ -300,6 +300,10 @@ class BacktestGrid:
                 aggregate = _aggregate_fold_results(fold_results) if fold_results else None
                 if aggregate is not None:
                     aggregate.config = jobs[idx][2]
+                    if fold_results:
+                        aggregate.config.instrument_specs = dict(
+                            fold_results[0].config.instrument_specs
+                        )
                 total_trades = sum(int(bt.metrics.get("total_trades", 0)) for bt in fold_results)
                 below_min = total_trades < self._config.min_trades
                 result.runs.append(GridRunResult(

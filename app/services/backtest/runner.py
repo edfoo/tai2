@@ -144,6 +144,19 @@ def build_backtest_config(
     launcher_config: dict[str, Any] | None = None,
     strategy_config: dict[str, Any] | None = None,
     guardrails_config: dict[str, Any] | None = None,
+    taker_fee_bps: float = 5.0,
+    maker_fee_bps: float = 0.0,
+    slippage_bps: float = 0.0,
+    slippage_mode: str = "ohlcv_liquidity",
+    slippage_stress_multiplier: float = 1.0,
+    liquidity_impact_coefficient: float = 0.05,
+    candle_range_slippage_fraction: float = 0.1,
+    max_liquidity_slippage_bps: float = 500.0,
+    liquidation_fee_bps: float = 0.0,
+    funding_rate_pct: float = 0.0,
+    funding_mode: str = "historical",
+    allow_concurrent_strategies_per_symbol: bool = False,
+    margin_mode: str = "isolated",
 ) -> BacktestConfig:
     """Build a :class:`BacktestConfig` — the single config constructor.
 
@@ -173,6 +186,19 @@ def build_backtest_config(
         disable_live_execution=True,
         evaluation_mode=evaluation_mode,
         evaluation_timeframe=evaluation_timeframe,
+        taker_fee_bps=taker_fee_bps,
+        maker_fee_bps=maker_fee_bps,
+        slippage_bps=slippage_bps,
+        slippage_mode=slippage_mode,
+        slippage_stress_multiplier=slippage_stress_multiplier,
+        liquidity_impact_coefficient=liquidity_impact_coefficient,
+        candle_range_slippage_fraction=candle_range_slippage_fraction,
+        max_liquidity_slippage_bps=max_liquidity_slippage_bps,
+        liquidation_fee_bps=liquidation_fee_bps,
+        funding_rate_pct=funding_rate_pct,
+        funding_mode=funding_mode,
+        allow_concurrent_strategies_per_symbol=allow_concurrent_strategies_per_symbol,
+        margin_mode=margin_mode,
     )
 
 
@@ -188,6 +214,19 @@ def build_single_strategy_config(
     overrides: dict[str, Any] | None = None,
     evaluation_mode: str = "finer_ltf",
     evaluation_timeframe: str = "1m",
+    taker_fee_bps: float = 5.0,
+    maker_fee_bps: float = 0.0,
+    slippage_bps: float = 0.0,
+    slippage_mode: str = "ohlcv_liquidity",
+    slippage_stress_multiplier: float = 1.0,
+    liquidity_impact_coefficient: float = 0.05,
+    candle_range_slippage_fraction: float = 0.1,
+    max_liquidity_slippage_bps: float = 500.0,
+    liquidation_fee_bps: float = 0.0,
+    funding_rate_pct: float = 0.0,
+    funding_mode: str = "historical",
+    allow_concurrent_strategies_per_symbol: bool = False,
+    margin_mode: str = "isolated",
 ) -> BacktestConfig:
     """Build a :class:`BacktestConfig` for a single strategy with overrides.
 
@@ -219,6 +258,19 @@ def build_single_strategy_config(
         evaluation_mode=evaluation_mode,
         evaluation_timeframe=evaluation_timeframe,
         launcher_config=launcher_config,
+        taker_fee_bps=taker_fee_bps,
+        maker_fee_bps=maker_fee_bps,
+        slippage_bps=slippage_bps,
+        slippage_mode=slippage_mode,
+        slippage_stress_multiplier=slippage_stress_multiplier,
+        liquidity_impact_coefficient=liquidity_impact_coefficient,
+        candle_range_slippage_fraction=candle_range_slippage_fraction,
+        max_liquidity_slippage_bps=max_liquidity_slippage_bps,
+        liquidation_fee_bps=liquidation_fee_bps,
+        funding_rate_pct=funding_rate_pct,
+        funding_mode=funding_mode,
+        allow_concurrent_strategies_per_symbol=allow_concurrent_strategies_per_symbol,
+        margin_mode=margin_mode,
     )
 
 

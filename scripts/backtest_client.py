@@ -169,6 +169,15 @@ def _build_run_payload(args: argparse.Namespace) -> dict[str, Any]:
         "warmup": args.warmup,
         "evaluation_mode": args.evaluation_mode,
         "evaluation_timeframe": args.evaluation_timeframe,
+        "taker_fee_bps": args.taker_fee_bps,
+        "maker_fee_bps": args.maker_fee_bps,
+        "slippage_bps": args.slippage_bps,
+        "slippage_mode": args.slippage_mode,
+        "slippage_stress_multiplier": args.slippage_stress_multiplier,
+        "liquidation_fee_bps": args.liquidation_fee_bps,
+        "funding_rate_pct": args.funding_rate_pct,
+        "funding_mode": args.funding_mode,
+        "allow_concurrent_strategies_per_symbol": args.allow_concurrent_strategies_per_symbol,
     }
 
 
@@ -225,6 +234,18 @@ def _build_parser() -> argparse.ArgumentParser:
         p.add_argument("--warmup", type=int, default=200)
         p.add_argument("--evaluation-mode", default="finer_ltf")
         p.add_argument("--evaluation-timeframe", default="1m")
+        p.add_argument("--taker-fee-bps", type=float, default=5.0)
+        p.add_argument("--maker-fee-bps", type=float, default=0.0)
+        p.add_argument("--slippage-bps", type=float, default=0.0)
+        p.add_argument("--slippage-mode", choices=("fixed", "ohlcv_liquidity"), default="ohlcv_liquidity")
+        p.add_argument("--slippage-stress-multiplier", type=float, default=1.0,
+                   help="Scale the estimated slippage for adverse stress tests (1.0 = unchanged)")
+        p.add_argument("--liquidation-fee-bps", type=float, default=0.0,
+                   help="Extra fee charged on a liquidation fill, in bps")
+        p.add_argument("--funding-mode", choices=("historical", "constant", "off"), default="historical")
+        p.add_argument("--funding-rate-pct", type=float, default=0.0,
+                   help="Fallback rate per funding interval; 0.01 means 0.01%%")
+        p.add_argument("--allow-concurrent-strategies-per-symbol", action="store_true")
 
     run_p = sub.add_parser("run", help="run a single backtest")
     _add_common(run_p)

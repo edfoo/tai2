@@ -32,6 +32,19 @@ class BacktestRunRequest(BaseModel):
     launcher_config: dict[str, Any] | None = None
     strategy_config: dict[str, Any] | None = None
     guardrails_config: dict[str, Any] | None = None
+    taker_fee_bps: float = Field(default=5.0, ge=0.0)
+    maker_fee_bps: float = Field(default=0.0, ge=0.0)
+    slippage_bps: float = Field(default=0.0, ge=0.0)
+    slippage_mode: str = Field(default="ohlcv_liquidity", pattern="^(fixed|ohlcv_liquidity)$")
+    slippage_stress_multiplier: float = Field(default=1.0, ge=0.0)
+    liquidity_impact_coefficient: float = Field(default=0.05, ge=0.0)
+    candle_range_slippage_fraction: float = Field(default=0.1, ge=0.0)
+    max_liquidity_slippage_bps: float = Field(default=500.0, ge=0.0)
+    liquidation_fee_bps: float = Field(default=0.0, ge=0.0)
+    funding_rate_pct: float = 0.0
+    funding_mode: str = Field(default="historical", pattern="^(historical|constant|off)$")
+    allow_concurrent_strategies_per_symbol: bool = False
+    margin_mode: str = Field(default="isolated", pattern="^isolated$")
 
 
 class GridParamRequest(BaseModel):

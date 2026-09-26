@@ -10,7 +10,11 @@ import math
 
 import pytest
 
-from app.services.okx_metrics import oi_delta_zscore, zscore_latest
+from app.services.okx_metrics import (
+    fetch_funding_history_records,
+    oi_delta_zscore,
+    zscore_latest,
+)
 
 
 class TestZscoreLatest:
@@ -101,3 +105,36 @@ class TestOIDeltaZscore:
         # 3 elements → 2 deltas; can compute z from 2 values.
         z = oi_delta_zscore([100.0, 105.0, 120.0])
         assert z is not None
+
+
+@pytest.mark.asyncio
+async def test_funding_history_records_are_paginated_and_range_filtered(monkeypatch) -> None:
+    import app.services.okx_metrics as module
+
+    pages = [
+        [
+            {"fundingTime": "300", "realizedRate": "0.0003"},
+            {"fundingTime": "200", "fundingRate": "-0.0002"},
+        ],
+        [
+            {"fundingTime": "200", "realizedRate": "-0.0002"},
+            {"fundingTime": "100", "realizedRate": "0.0001"},
+        ],
+    ]
+    calls = []
+
+    async def fake_get(path, params):
+        calls.append((path, params))
+        return pages.pop(0)
+
+    monkeypatch.setattr(module, "_get", fake_get)
+
+    result = await fetch_funding_history_records("BTC-USDT-SWAP", 150, 350)
+
+    assert result == [
+        {"ts": 200, "rate": -0.0002},
+        {"ts": 300, "rate": 0.0003},
+    ]
+    assert len(calls) == 2
+    assert calls[0][1]["after"] == "350"
+    assert calls[1][1]["after"] == "200"

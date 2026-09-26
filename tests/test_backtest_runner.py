@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from app.services.backtest.runner import walk_forward_splits
+from app.services.backtest.runner import build_backtest_config, walk_forward_splits
 
 
 def test_single_validation_fold_uses_the_reserved_tail() -> None:
@@ -37,3 +37,24 @@ def test_train_ratio_scales_train_end() -> None:
 def test_validation_folds_reject_invalid_ratio_or_empty_windows() -> None:
     assert walk_forward_splits(start_ts=0, end_ts=1000, folds=2, train_ratio=1.0) == []
     assert walk_forward_splits(start_ts=0, end_ts=1000, folds=20, train_ratio=0.99) == []
+
+
+def test_config_builder_preserves_p2_execution_settings() -> None:
+    config = build_backtest_config(
+        symbols=["BTC-USDT-SWAP"],
+        timeframe="15m",
+        strategy_names=["mean_reversion"],
+        start_ts=0,
+        end_ts=1000,
+        funding_mode="constant",
+        funding_rate_pct=0.01,
+        slippage_mode="fixed",
+        slippage_bps=4.0,
+        allow_concurrent_strategies_per_symbol=True,
+    )
+
+    assert config.funding_mode == "constant"
+    assert config.funding_rate_pct == 0.01
+    assert config.slippage_mode == "fixed"
+    assert config.slippage_bps == 4.0
+    assert config.allow_concurrent_strategies_per_symbol is True

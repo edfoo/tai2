@@ -55,8 +55,24 @@ def compute_order_size(
     contract_value = _positive_float(spec.get("ct_val")) or 1.0
     lot_size = _positive_float(spec.get("lot_size")) or 0.0
     contracts = notional / (entry_price * contract_value)
+    max_contracts = _positive_float(spec.get("max_market_size"))
+    tiers = spec.get("position_tiers") or []
+    valid_tiers = [tier for tier in tiers if isinstance(tier, dict)]
+    if valid_tiers:
+        tier = next((
+            tier for tier in valid_tiers
+            if contracts <= (_positive_float(tier.get("max_size")) or float("inf"))
+        ), valid_tiers[-1])
+        tier_max_size = _positive_float(tier.get("max_size"))
+        if tier_max_size:
+            max_contracts = min(max_contracts, tier_max_size) if max_contracts else tier_max_size
+    if max_contracts:
+        contracts = min(contracts, max_contracts)
     if lot_size > 0:
         contracts = math.floor(contracts / lot_size) * lot_size
+    min_size = _positive_float(spec.get("min_size")) or 0.0
+    if min_size > 0 and contracts + 1e-12 < min_size:
+        return 0.0, 0.0
     base_units = contracts * contract_value
     return base_units, contracts * contract_value * entry_price
 

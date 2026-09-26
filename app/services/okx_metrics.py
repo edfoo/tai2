@@ -179,6 +179,57 @@ async def fetch_funding_history(
     return rates
 
 
+async def fetch_funding_history_records(
+    symbol: str,
+    start_ts: int,
+    end_ts: int,
+    *,
+    limit: int = 100,
+    max_pages: int = 100,
+) -> list[dict[str, float | int]]:
+    """Return timestamped realized funding rates in ``[start_ts, end_ts]``.
+
+    OKX returns newest-first records. ``after`` is advanced to the oldest
+    timestamp from each page to fetch older settlements. Rates are decimal
+    fractions (``0.0001`` means 0.01%), matching OKX's funding-rate field.
+    """
+    if end_ts <= start_ts:
+        return []
+    cursor = int(end_ts)
+    records: dict[int, float] = {}
+    for _ in range(max(1, max_pages)):
+        try:
+            raw = await _get(
+                "/api/v5/public/funding-rate-history",
+                {"instId": symbol, "after": str(cursor), "limit": str(min(max(limit, 1), 100))},
+            )
+        except Exception as exc:
+            _log.warning("Funding history fetch failed for %s: %s", symbol, exc)
+            raise
+        if not raw:
+            break
+        timestamps: list[int] = []
+        for row in raw:
+            try:
+                timestamp = int(row["fundingTime"])
+                rate = float(row.get("realizedRate") or row.get("fundingRate"))
+            except (KeyError, TypeError, ValueError):
+                continue
+            timestamps.append(timestamp)
+            if start_ts <= timestamp <= end_ts:
+                records[timestamp] = rate
+        if not timestamps:
+            break
+        oldest = min(timestamps)
+        if oldest <= start_ts or oldest >= cursor:
+            break
+        cursor = oldest
+    return [
+        {"ts": timestamp, "rate": rate}
+        for timestamp, rate in sorted(records.items())
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Z-score helpers  (pure math – no I/O)
 # ---------------------------------------------------------------------------

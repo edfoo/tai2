@@ -54,6 +54,12 @@ def _sample_result() -> BacktestResult:
         entry_price=50_000.0,
         entry_ts=1_000_000_000,
         trade_id="trade-1",
+        margin_mode="isolated",
+        leverage=3.0,
+        initial_margin=16.6667,
+        maintenance_margin_ratio=0.1,
+        maintenance_margin_deduction=0.25,
+        liquidation_price=36_666.67,
         tp_price=52_000.0,
         sl_price=48_000.0,
         strategy_name="mean_reversion",
@@ -215,7 +221,7 @@ def test_round_trip_preserves_result() -> None:
     assert back.config.slippage_bps == 2.0
     assert back.config.funding_rate_pct == 0.01
     assert back.data_provenance[0]["content_sha256"] == "a" * 64
-    assert back.assumptions["cost_model"]["funding_source"].startswith("constant configured rate")
+    assert "historical rates" in back.assumptions["cost_model"]["funding_source"]
     assert back.assumptions["enabled_gates_with_unavailable_inputs"] == [{
         "strategy": "spike_continuation",
         "gate": "require_oi_confirmation",
@@ -227,6 +233,12 @@ def test_round_trip_preserves_result() -> None:
     assert t.direction == "long"
     assert t.entry_price == 50_000.0
     assert t.trade_id == "trade-1"
+    assert t.margin_mode == "isolated"
+    assert t.leverage == 3.0
+    assert t.initial_margin == pytest.approx(16.6667)
+    assert t.maintenance_margin_ratio == 0.1
+    assert t.maintenance_margin_deduction == 0.25
+    assert t.liquidation_price == pytest.approx(36_666.67)
     assert t.tp_price == 52_000.0
     assert t.close_reason == "tp"
     assert t.pnl == 200.0

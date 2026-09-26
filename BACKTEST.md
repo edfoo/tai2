@@ -100,6 +100,13 @@ done
 | `--search-mode` | `exhaustive` | `exhaustive` or seeded `random` candidate sampling |
 | `--combination-budget` | `0` | Maximum random candidates; 0 means use all combinations |
 | `--random-seed` | `42` | Seed for reproducible random sampling |
+| `--funding-mode` | `historical` | `historical` OKX settlement rates, `constant` fallback, or `off` |
+| `--funding-rate-pct` | `0` | Constant fallback rate per settlement interval; 0.01 means 0.01% |
+| `--slippage-mode` | `ohlcv_liquidity` | Fixed bps or OHLCV range/turnover proxy |
+| `--slippage-bps` | `0` | Base adverse bps per fill, added to proxy when liquidity mode is selected |
+| `--slippage-stress-multiplier` | `1.0` | Scale the estimated slippage (both modes) for adverse stress tests; 1.0 = unchanged |
+| `--liquidation-fee-bps` | `0` | Extra fee charged on a liquidation fill, in bps |
+| `--allow-concurrent-strategies-per-symbol` | off | Permit separate strategies to hold the same symbol simultaneously |
 
 ### Parameter sweep (`grid` subcommand)
 
@@ -121,6 +128,19 @@ done
   using validation scores first, then evaluated once on the holdout. Holdout
   results are reported separately and never reorder the validation ranking. Keep
   that holdout untouched when making parameter choices.
+
+  Historical funding is charged at returned OKX settlement timestamps and added
+  to equity as events occur; unavailable history falls back to the configured
+  constant rate and accrues it at settlement timestamps. The default slippage
+  mode estimates impact from prior completed OHLCV range and contract-adjusted
+  turnover. It is a proxy, not a historical spread/order-book model; the
+  `--slippage-stress-multiplier` scales the estimate for adverse scenarios.
+  Stop gaps fill at the opening price when that is worse than the stop trigger;
+  TP levels are conservatively tick-quantized. Isolated initial margin, tier
+  leverage caps, and approximate tier-based liquidation are simulated, with an
+  optional `--liquidation-fee-bps` charged on liquidation fills. Cross-margin
+  portfolio liquidation and exchange-exact liquidation adjustments are not
+  modeled.
 
 ### Strategy-specific A/B sweeps
 

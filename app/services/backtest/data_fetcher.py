@@ -84,11 +84,152 @@ class HistoricalDataFetcher:
         self._cache_dir = cache_dir or _DEFAULT_CACHE_DIR
         self._api = _build_market_api(api_flag)
         self._last_fetch_provenance: dict[str, Any] = {}
+        self._last_funding_provenance: dict[str, Any] = {}
+        self._last_instrument_provenance: dict[str, Any] = {}
 
     @property
     def last_fetch_provenance(self) -> dict[str, Any]:
         """Metadata and content digest for the most recent candle request."""
         return dict(self._last_fetch_provenance)
+
+    @property
+    def last_funding_provenance(self) -> dict[str, Any]:
+        return dict(self._last_funding_provenance)
+
+    @property
+    def last_instrument_provenance(self) -> dict[str, Any]:
+        return dict(self._last_instrument_provenance)
+
+    async def fetch_funding_rates(
+        self, symbol: str, start_ts: int, end_ts: int
+    ) -> list[dict[str, float | int]]:
+        """Fetch and cache timestamped OKX funding settlements for a symbol."""
+        key = f"{symbol}_funding_{start_ts}_{end_ts}"
+        path = self._cache_dir / f"{key}.json"
+        records: list[dict[str, float | int]] | None = None
+        if path.exists():
+            try:
+                loaded = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(loaded, list):
+                    records = [
+                        {"ts": int(row["ts"]), "rate": float(row["rate"])}
+                        for row in loaded if isinstance(row, dict)
+                    ]
+            except (OSError, ValueError, TypeError, KeyError):
+                records = None
+        source = "file_cache" if records is not None else "okx_public_api"
+        if records is None:
+            from app.services.okx_metrics import fetch_funding_history_records
+
+            try:
+                records = await fetch_funding_history_records(symbol, start_ts, end_ts)
+            except Exception as exc:
+                logger.warning("Historical funding unavailable for %s: %s", symbol, exc)
+                records = []
+                source = "unavailable"
+            if source != "unavailable":
+                try:
+                    self._cache_dir.mkdir(parents=True, exist_ok=True)
+                    path.write_text(json.dumps(records), encoding="utf-8")
+                except OSError as exc:
+                    logger.warning("Failed to cache funding history %s: %s", key, exc)
+        payload = json.dumps(records, separators=(",", ":"), sort_keys=True).encode("ascii")
+        self._last_funding_provenance = {
+            "symbol": symbol,
+            "timeframe": "funding",
+            "requested_start_ts": start_ts,
+            "requested_end_ts": end_ts,
+            "source": source,
+            "cache_hit": source == "file_cache",
+            "cache_key": key,
+            "candle_count": len(records),
+            "first_candle_ts": records[0]["ts"] if records else None,
+            "last_candle_ts": records[-1]["ts"] if records else None,
+            "content_sha256": hashlib.sha256(payload).hexdigest(),
+        }
+        return records
+
+    async def fetch_instrument_specs(self, symbols: list[str]) -> dict[str, dict[str, Any]]:
+        """Fetch/cache OKX contract value and size increments for requested swaps."""
+        normalized_symbols = sorted(set(symbol.upper() for symbol in symbols))
+        key = "swap_specs_" + "_".join(normalized_symbols)
+        path = self._cache_dir / f"{key}.json"
+        specs: dict[str, dict[str, Any]] | None = None
+        if path.exists():
+            try:
+                cached = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(cached, dict):
+                    specs = cached
+            except (OSError, ValueError):
+                specs = None
+        source = "file_cache" if specs is not None else "okx_public_api"
+        if specs is None:
+            from app.services.okx_metrics import _get
+
+            try:
+                rows = await _get("/api/v5/public/instruments", {"instType": "SWAP"})
+            except Exception as exc:
+                logger.warning("Instrument-spec fetch failed: %s", exc)
+                rows = []
+            specs = {}
+            requested = set(normalized_symbols)
+            for row in rows:
+                symbol = str(row.get("instId") or "").upper()
+                if symbol not in requested:
+                    continue
+                try:
+                    specs[symbol] = {
+                        "ct_val": float(row.get("ctVal") or 1.0),
+                        "lot_size": float(row.get("lotSz") or 0.0),
+                        "min_size": float(row.get("minSz") or 0.0),
+                        "tick_size": float(row.get("tickSz") or 0.0),
+                        "max_market_size": float(row.get("maxMktSz") or 0.0),
+                        "max_limit_size": float(row.get("maxLmtSz") or 0.0),
+                        "contract_type": str(row.get("ctType") or "linear"),
+                    }
+                except (TypeError, ValueError):
+                    continue
+            for symbol in normalized_symbols:
+                try:
+                    parts = symbol.split("-")
+                    params = {"instType": "SWAP", "tdMode": "isolated", "instId": symbol}
+                    if len(parts) >= 2:
+                        params["instFamily"] = "-".join(parts[:2])
+                    tier_rows = await _get("/api/v5/public/position-tiers", params)
+                    tiers = []
+                    for tier in tier_rows:
+                        try:
+                            tiers.append({
+                                "min_size": float(tier.get("minSz") or 0.0),
+                                "max_size": float(tier.get("maxSz") or 0.0),
+                                "initial_margin_ratio": float(tier.get("imr") or 0.0),
+                                "maintenance_margin_ratio": float(tier.get("mmr") or 0.0),
+                                "max_leverage": float(tier.get("maxLever") or 0.0),
+                                "maintenance_deduction": float(tier.get("mmrDeduction") or 0.0),
+                            })
+                        except (TypeError, ValueError):
+                            continue
+                    if symbol in specs and tiers:
+                        specs[symbol]["position_tiers"] = tiers
+                except Exception as exc:
+                    logger.warning("Position-tier fetch failed for %s: %s", symbol, exc)
+            if specs:
+                try:
+                    self._cache_dir.mkdir(parents=True, exist_ok=True)
+                    path.write_text(json.dumps(specs, sort_keys=True), encoding="utf-8")
+                except OSError as exc:
+                    logger.warning("Failed to cache instrument specs %s: %s", key, exc)
+            else:
+                source = "unavailable"
+        payload = json.dumps(specs, separators=(",", ":"), sort_keys=True).encode("ascii")
+        self._last_instrument_provenance = {
+            "source": source,
+            "cache_hit": source == "file_cache",
+            "cache_key": key,
+            "symbols": normalized_symbols,
+            "content_sha256": hashlib.sha256(payload).hexdigest(),
+        }
+        return specs
 
     # ── Public API ────────────────────────────────────────────────────
 

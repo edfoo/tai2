@@ -1,5 +1,11 @@
 # Change Log
 
+## 2026-09-26
+- Backtest P2 (microstructure realism) completion: added a `slippage_stress_multiplier` that scales the estimated slippage (both `fixed` and `ohlcv_liquidity` modes) for adverse-scenario stress tests, and a `liquidation_fee_bps` charged on liquidation fills.
+- Extracted the isolated-margin liquidation estimate into a single validated helper `compute_isolated_liquidation_price()` (long/short formulas with maintenance deduction), used by the simulator and covered by direct unit tests.
+- Threaded the new cost knobs through `BacktestConfig`, the engine `CostModel`, both `runner` builders, the REST API models, the job manager, the BACKTEST UI, and the REST CLI; documented them in `BACKTEST.md` and the simulation assumptions.
+- Noted the remaining P2 limitation explicitly: OKX historical candles carry no historical spread/order-book depth and the project only captures live order-book snapshots, so slippage coefficients remain stress-test knobs rather than fitted market-impact parameters; cross-margin liquidation stays deferred pending a portfolio-level collateral model.
+
 ## 2026-01-28
 - Cleaned up `GUARDRAILS.md` so the Mermaid sequence renders again (duplicate headers removed, ASCII arrows/messages only, no stray fences) and operators have a readable overview of the safety flow.
 - Introduced `sanitize_prompt_text()` and ran it through runtime config, prompt-version loading, prompt building, and the CFG UI so decision/system prompts are scrubbed of em/en dashes before reaching the LLM or the browser (fixes the `\u2014` artifacts in the UI and prompt payloads).
