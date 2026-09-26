@@ -58,6 +58,26 @@ def test_random_search_obeys_budget_and_seed() -> None:
     assert len(set(first)) == 7
 
 
+def test_universe_fields_survive_grid_combination_build() -> None:
+    """Grid combinations deep-copy the base config, so screener-universe
+    settings must propagate to every combination (and the final holdout)."""
+    import copy
+
+    base = _base_config()
+    base.universe_mode = "screener"
+    base.screener_config = {"enabled": True, "dual_universe": True, "max_symbols": 10}
+    base.universe_candidate_symbols = ["BTC-USDT-SWAP", "ETH-USDT-SWAP"]
+
+    combo = copy.deepcopy(base)
+    G._apply_params(combo, {"strategies.mean_reversion.rsi_oversold": 25})
+
+    assert combo.universe_mode == "screener"
+    assert combo.screener_config["max_symbols"] == 10
+    assert combo.universe_candidate_symbols == ["BTC-USDT-SWAP", "ETH-USDT-SWAP"]
+    # The swept param still applied without clobbering universe fields.
+    assert combo.launcher_config["strategies"]["mean_reversion"]["rsi_oversold"] == 25
+
+
 def test_default_workers_positive(monkeypatch) -> None:
     monkeypatch.delenv("BACKTEST_WORKERS", raising=False)
     assert G._default_workers() >= 1
