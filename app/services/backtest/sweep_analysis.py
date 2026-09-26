@@ -195,4 +195,264 @@ def analyze_sweep(
         },
         "robustness": robustness,
         "sensitivity": sensitivity,
+        "marginal_sensitivity": marginal_sensitivity(rows, best, rank_by=rank_by),
+        "interactions": detect_interactions(rows, rank_by=rank_by),
+        "plateaus": parameter_plateaus(rows, best, rank_by=rank_by),
+        "robustness_score": robustness_score(rows, best, rank_by=rank_by),
+        "multiple_comparison": multiple_comparison_note(len(rows)),
+    }
+
+
+# ── Phase 3: marginal (OAT) sensitivity ─────────────────────────────────
+
+
+def _score_of(row: dict[str, Any], rank_by: str) -> float:
+    return _num((row.get("metrics") or {}).get(rank_by))
+
+
+def marginal_sensitivity(
+    rows: list[dict[str, Any]],
+    best: dict[str, Any],
+    *,
+    rank_by: str = DEFAULT_RANK_BY,
+) -> list[dict[str, Any]]:
+    """One-at-a-time (OAT) marginal effect of each parameter.
+
+    Unlike the confounded whole-grid average, this holds every *other*
+    parameter at the best combination's value and varies one parameter,
+    reporting the true marginal curve, its slope, monotonicity, and whether
+    the best value sits at the edge of the swept range (⇒ the optimum may lie
+    outside the range).
+    """
+    best_params = best.get("params") or {}
+    results: list[dict[str, Any]] = []
+    for key in best_params:
+        curve: list[dict[str, Any]] = []
+        for row in rows:
+            params = row.get("params") or {}
+            if any(
+                str(params.get(other)) != str(value)
+                for other, value in best_params.items()
+                if other != key
+            ):
+                continue
+            curve.append({
+                "value": params.get(key),
+                "score": round(_score_of(row, rank_by), 6),
+            })
+        if not curve:
+            continue
+        # De-duplicate by value (keep the first occurrence).
+        seen: set[str] = set()
+        unique_curve: list[dict[str, Any]] = []
+        for point in curve:
+            marker = str(point["value"])
+            if marker in seen:
+                continue
+            seen.add(marker)
+            unique_curve.append(point)
+
+        scores = [point["score"] for point in unique_curve]
+        best_point = max(unique_curve, key=lambda point: point["score"])
+        first, last = scores[0], scores[-1]
+        monotonic = all(
+            scores[i] <= scores[i + 1] for i in range(len(scores) - 1)
+        ) or all(scores[i] >= scores[i + 1] for i in range(len(scores) - 1))
+        edge = best_point["value"] in (unique_curve[0]["value"], unique_curve[-1]["value"])
+        results.append({
+            "key": key,
+            "curve": unique_curve,
+            "best_value": best_point["value"],
+            "best_score": round(best_point["score"], 6),
+            "slope": round(last - first, 6),
+            "monotonic": monotonic,
+            "edge_of_range": edge,
+        })
+    return results
+
+
+# ── Phase 3: interaction detection ──────────────────────────────────────
+
+
+def detect_interactions(
+    rows: list[dict[str, Any]],
+    *,
+    rank_by: str = DEFAULT_RANK_BY,
+    top_n: int = 5,
+) -> list[dict[str, Any]]:
+    """Flag parameter pairs whose effects are not additive.
+
+    For each pair (A, B), computes the cell means and removes the additive
+    main effects of A and B.  The largest remaining residual is the
+    interaction strength: a large value means A's effect depends on B, so a
+    naive per-parameter read is unsafe.
+    """
+    if not rows:
+        return []
+    param_keys = sorted({key for row in rows for key in (row.get("params") or {})})
+    if len(param_keys) < 2:
+        return []
+
+    interactions: list[dict[str, Any]] = []
+    for i, a in enumerate(param_keys):
+        for b in param_keys[i + 1:]:
+            cells: dict[tuple[str, str], list[float]] = {}
+            for row in rows:
+                params = row.get("params") or {}
+                if a not in params or b not in params:
+                    continue
+                cells.setdefault(
+                    (str(params[a]), str(params[b])), []
+                ).append(_score_of(row, rank_by))
+            if len(cells) < 4:
+                continue
+            cell_means = {key: _avg(vals) for key, vals in cells.items()}
+            grand = _avg(cell_means.values())
+            a_levels = {key[0] for key in cell_means}
+            b_levels = {key[1] for key in cell_means}
+            a_main = {
+                level: _avg(
+                    cell_means[(level, other)] for other in b_levels
+                    if (level, other) in cell_means
+                ) - grand
+                for level in a_levels
+            }
+            b_main = {
+                level: _avg(
+                    cell_means[(other, level)] for other in a_levels
+                    if (other, level) in cell_means
+                ) - grand
+                for level in b_levels
+            }
+            residuals = [
+                cell_means[(a_level, b_level)]
+                - grand - a_main[a_level] - b_main[b_level]
+                for (a_level, b_level) in cell_means
+            ]
+            max_residual = max((abs(r) for r in residuals), default=0.0)
+            scale = max((abs(value) for value in cell_means.values()), default=0.0)
+            strength = round(max_residual / scale, 4) if scale > 1e-9 else 0.0
+            interactions.append({
+                "a": a,
+                "b": b,
+                "strength": strength,
+                "max_residual": round(max_residual, 6),
+            })
+    interactions.sort(key=lambda row: row["strength"], reverse=True)
+    return interactions[:top_n]
+
+
+# ── Phase 3: per-parameter plateau detection ────────────────────────────
+
+
+def parameter_plateaus(
+    rows: list[dict[str, Any]],
+    best: dict[str, Any],
+    *,
+    rank_by: str = DEFAULT_RANK_BY,
+    tolerance_pct: float = 5.0,
+) -> list[dict[str, Any]]:
+    """Contiguous value ranges whose marginal score is within tolerance of best.
+
+    A plateau is a *safe range* recommendation: any value inside it performs
+    near the best, so the exact point is not critical (less overfit-prone).
+    """
+    best_params = best.get("params") or {}
+    plateaus: list[dict[str, Any]] = []
+    for key in best_params:
+        curve: list[dict[str, Any]] = []
+        for row in rows:
+            params = row.get("params") or {}
+            if any(
+                str(params.get(other)) != str(value)
+                for other, value in best_params.items()
+                if other != key
+            ):
+                continue
+            curve.append({"value": params.get(key), "score": _score_of(row, rank_by)})
+        if not curve:
+            continue
+        seen: set[str] = set()
+        unique: list[dict[str, Any]] = []
+        for point in curve:
+            marker = str(point["value"])
+            if marker in seen:
+                continue
+            seen.add(marker)
+            unique.append(point)
+        best_score = max(point["score"] for point in unique)
+        base = abs(best_score) if abs(best_score) > 1e-9 else 1.0
+        threshold = best_score - base * tolerance_pct / 100.0
+        in_plateau = [point["value"] for point in unique if point["score"] >= threshold]
+        plateaus.append({
+            "key": key,
+            "best_value": max(unique, key=lambda point: point["score"])["value"],
+            "plateau_values": in_plateau,
+            "plateau_size": len(in_plateau),
+            "is_plateau": len(in_plateau) > 1,
+        })
+    return plateaus
+
+
+# ── Phase 3: composite robustness score ─────────────────────────────────
+
+
+def robustness_score(
+    rows: list[dict[str, Any]],
+    best: dict[str, Any],
+    *,
+    rank_by: str = DEFAULT_RANK_BY,
+) -> dict[str, Any]:
+    """Composite 0–1 robustness score for the best combination.
+
+    Blends plateau width, significance (t-stat), fold consistency (when
+    available), and an edge-of-range penalty.  A ranking aid, not a
+    probability of future profit.
+    """
+    best_params = best.get("params") or {}
+    plateaus = parameter_plateaus(rows, best, rank_by=rank_by)
+    plateau_frac = (
+        sum(1 for p in plateaus if p["is_plateau"]) / len(plateaus)
+        if plateaus else 0.0
+    )
+    marginal = marginal_sensitivity(rows, best, rank_by=rank_by)
+    edge_frac = (
+        sum(1 for m in marginal if m["edge_of_range"]) / len(marginal)
+        if marginal else 0.0
+    )
+    t_stat = _num((best.get("metrics") or {}).get("net_expectancy_t_stat"))
+    significance = max(0.0, t_stat) / (max(0.0, t_stat) + 2.0)
+
+    score = (
+        0.40 * plateau_frac
+        + 0.35 * significance
+        + 0.25 * (1.0 - edge_frac)
+    )
+    return {
+        "score": round(score, 4),
+        "plateau_fraction": round(plateau_frac, 4),
+        "significance_component": round(significance, 4),
+        "edge_fraction": round(edge_frac, 4),
+        "t_stat": round(t_stat, 4),
+    }
+
+
+# ── Phase 3: multiple-comparison caveat ─────────────────────────────────
+
+
+def multiple_comparison_note(combinations: int) -> dict[str, Any]:
+    """Report the multiple-comparison risk of picking a best-of-N result.
+
+    A top score from many combinations is partly selection luck.  The
+    "deflated" expectation is a rough haircut (best score scaled by
+    ``1 / sqrt(N)``) to discourage reading a best-of-N spike as significant.
+    """
+    n = max(1, int(combinations))
+    return {
+        "combinations_tested": n,
+        "note": (
+            f"{n} combinations were tested; the top score is partly selection "
+            "luck. Prefer a plateau and confirm on untouched out-of-sample data."
+        ),
+        "deflation_factor": round(1.0 / (n ** 0.5), 4),
     }

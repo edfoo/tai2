@@ -72,6 +72,8 @@ class BacktestGridRequest(BaseModel):
     params: list[GridParamRequest] = Field(default_factory=list)
     rank_by: str = "net_profit_after_cost_pct"
     min_trades: int = 5
+    min_expectancy_t_stat: float = Field(default=0.0, ge=0.0)
+    top_n_detail: int = Field(default=10, ge=0)
     validation_folds: int = Field(default=0, ge=0)
     validation_train_ratio: float = Field(default=0.7, gt=0.0, lt=1.0)
     final_holdout_fraction: float = Field(default=0.0, ge=0.0, lt=0.5)

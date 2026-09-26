@@ -122,6 +122,24 @@ class TestConcentration:
         assert result["max_symbol_share"] is None
         assert result["max_trade_share"] is None
 
+    def test_trade_share_uses_serialized_pnl_field(self) -> None:
+        """Regression: ``_trade_to_dict`` emits ``pnl``/``net_pnl``; the screen
+        must fire on a single-trade-dominated run (previously always None)."""
+        result = concentration(
+            per_symbol={"BTC-USDT-SWAP": {"net_profit_after_cost": 10.0, "trades": 3}},
+            trades=[{"pnl": 9.0}, {"pnl": 0.5}, {"pnl": 0.5}],
+            total_net_profit=10.0,
+        )
+        assert result["max_trade_share"] == 0.9
+
+    def test_trade_share_prefers_net_pnl_when_present(self) -> None:
+        result = concentration(
+            per_symbol={"BTC-USDT-SWAP": {"net_profit_after_cost": 10.0, "trades": 2}},
+            trades=[{"pnl": 9.0, "net_pnl": 6.0}, {"pnl": 1.0, "net_pnl": 4.0}],
+            total_net_profit=10.0,
+        )
+        assert result["max_trade_share"] == 0.6
+
 
 class TestStressComparison:
     def test_reports_delta_and_survival(self) -> None:

@@ -270,6 +270,29 @@ def _cmd_research(args: argparse.Namespace) -> int:
     json_path.write_text(json.dumps(bundle, indent=2, sort_keys=True), encoding="utf-8")
     md_path.write_text(render_bundle_markdown(bundle), encoding="utf-8")
 
+    if args.emit_report:
+        from app.services.backtest.sweep_report import (
+            build_sweep_report,
+            render_sweep_markdown,
+        )
+
+        report = build_sweep_report(
+            grid=grid,
+            baseline=baseline,
+            holdout=grid.get("final_holdout"),
+            stress_runs=stress_runs,
+            workflow=bundle.get("workflow") or {},
+            top_n=args.report_top_n,
+        )
+        report_json = out_dir / "sweep_report.json"
+        report_md = out_dir / "sweep_report.md"
+        report_json.write_text(
+            json.dumps(report, indent=2, sort_keys=True), encoding="utf-8"
+        )
+        report_md.write_text(render_sweep_markdown(report), encoding="utf-8")
+        print(f"  report:   {report_json}")
+        print(f"            {report_md}")
+
     verdict = bundle.get("verdict") or {}
     print("\n── Research bundle ──")
     print(f"  verdict:  {verdict.get('status')}")
@@ -324,6 +347,12 @@ def _build_parser() -> argparse.ArgumentParser:
              "over. Empty → full OKX SWAP universe (matches live).",
     )
     parser.add_argument("--out-dir", default="backtest_research")
+    parser.add_argument(
+        "--emit-report", action="store_true",
+        help="Also write a compact, bounded sweep report (JSON + Markdown) for "
+             "expert/LLM handoff.",
+    )
+    parser.add_argument("--report-top-n", type=int, default=10)
     parser.set_defaults(func=_cmd_research)
     return parser
 

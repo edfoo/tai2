@@ -285,6 +285,8 @@ class BacktestJobManager:
             params=params,
             rank_by=req.rank_by,
             min_trades=req.min_trades,
+            min_expectancy_t_stat=getattr(req, "min_expectancy_t_stat", 0.0),
+            top_n_detail=getattr(req, "top_n_detail", 10),
             validation_folds=req.validation_folds,
             validation_train_ratio=req.validation_train_ratio,
             final_holdout_fraction=req.final_holdout_fraction,

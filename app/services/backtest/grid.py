@@ -58,6 +58,7 @@ from app.services.backtest.models import (
     GridRunResult,
 )
 from app.services.backtest.runner import walk_forward_splits
+from app.services.backtest.summaries import build_run_evidence
 
 logger = logging.getLogger(__name__)
 
@@ -278,7 +279,7 @@ class BacktestGrid:
                         "status": "completed" if bt_result is not None else "failed",
                         "error": bt_error,
                         "trade_count": int(metrics.get("total_trades", 0)),
-                        "rank_score": _extract_metric(bt_result, self._config.rank_by)
+                        "rank_score": _score_result(bt_result, self._config.rank_by)
                         if bt_result is not None else None,
                         "metrics": metrics,
                     })
@@ -288,7 +289,7 @@ class BacktestGrid:
                 ]
                 fold_results = [bt for _fold_idx, bt in successful]
                 fold_scores = [
-                    _extract_metric(bt, self._config.rank_by)
+                    _score_result(bt, self._config.rank_by)
                     for bt in fold_results
                 ]
                 valid_scores = [score for score in fold_scores if score is not None]
@@ -304,25 +305,48 @@ class BacktestGrid:
                         aggregate.config.instrument_specs = dict(
                             fold_results[0].config.instrument_specs
                         )
+                # Record which scope produced the rank score so the ranking
+                # never silently disagrees with the displayed aggregate metrics.
+                rank_scope = "aggregate"
+                if aggregate is not None:
+                    _scoped_score, rank_scope = _extract_metric_scoped(
+                        aggregate, self._config.rank_by
+                    )
+                if self._config.rank_by == "robust_score" and aggregate is not None:
+                    rank_score = _robust_score(aggregate.metrics or {}, fold_metrics)
+                    rank_scope = "aggregate"
                 total_trades = sum(int(bt.metrics.get("total_trades", 0)) for bt in fold_results)
                 below_min = total_trades < self._config.min_trades
+                below_min_t_stat = _below_min_t_stat(
+                    aggregate.metrics if aggregate is not None else None,
+                    self._config.min_expectancy_t_stat,
+                )
+                evidence = build_run_evidence(
+                    aggregate.metrics if aggregate is not None else None,
+                    fold_metrics=fold_metrics,
+                    per_symbol=aggregate.per_symbol if aggregate is not None else None,
+                )
                 result.runs.append(GridRunResult(
                     params=jobs[idx][1],
                     result=aggregate,
                     rank_score=rank_score,
                     below_min_trades=below_min or len(successful) != fold_count,
                     fold_metrics=fold_metrics,
+                    rank_scope=rank_scope,
+                    below_min_t_stat=below_min_t_stat,
+                    evidence=evidence,
                 ))
 
             # ── Rank results ────────────────────────────────────────────
-            # Sort by rank_score descending.  Runs with None score or
-            # below_min_trades go to the bottom.
+            # Sort by rank_score descending.  Runs with None score,
+            # below_min_trades, or below_min_t_stat go to the bottom.
             def _sort_key(r: GridRunResult) -> tuple[int, float]:
-                if r.rank_score is None or r.below_min_trades:
+                if r.rank_score is None or r.below_min_trades or r.below_min_t_stat:
                     return (0, 0.0)
                 return (1, r.rank_score)
 
             result.ranked = sorted(result.runs, key=_sort_key, reverse=True)
+            _apply_detail_retention(result, self._config.top_n_detail)
             result.assumptions = {
                 "validation_protocol": (
                     "Candidates are selected using validation folds only; the initial prefix is unscored."
@@ -330,6 +354,8 @@ class BacktestGrid:
                 ),
                 "final_holdout_fraction": holdout_fraction,
                 "final_holdout_is_used_for_ranking": False,
+                "min_expectancy_t_stat": self._config.min_expectancy_t_stat,
+                "rank_by": self._config.rank_by,
             }
 
             if holdout_start is not None:
@@ -337,6 +363,7 @@ class BacktestGrid:
                     run for run in result.ranked
                     if run.rank_score is not None
                     and not run.below_min_trades
+                    and not run.below_min_t_stat
                     and run.result is not None
                 ), None)
                 if selected is not None:
@@ -362,7 +389,7 @@ class BacktestGrid:
                         holdout_error = str(exc)
                     holdout_metrics = dict(holdout_result.metrics or {}) if holdout_result else {}
                     holdout_score = (
-                        _extract_metric(holdout_result, self._config.rank_by)
+                        _score_result(holdout_result, self._config.rank_by)
                         if holdout_result is not None else None
                     )
                     result.final_holdout = GridRunResult(
@@ -372,6 +399,10 @@ class BacktestGrid:
                         below_min_trades=(
                             holdout_result is None
                             or int(holdout_metrics.get("total_trades", 0)) < self._config.min_trades
+                        ),
+                        evidence=build_run_evidence(
+                            holdout_metrics,
+                            per_symbol=holdout_result.per_symbol if holdout_result else None,
                         ),
                         fold_metrics=[{
                             "fold": 1,
@@ -475,24 +506,127 @@ def _set_nested(d: dict[str, Any], key: str, value: Any) -> None:
     cur[parts[-1]] = value
 
 
-def _extract_metric(result: Any, key: str) -> float | None:
-    """Extract a numeric metric from a BacktestResult.
+def _extract_metric_scoped(result: Any, key: str) -> tuple[float | None, str]:
+    """Extract a numeric metric and report which scope produced it.
 
-    Falls back to per_strategy metrics if the aggregate metric is missing
-    or zero (e.g. when only one strategy was enabled and the aggregate
-    is dominated by that strategy's numbers).
+    Returns ``(value, scope)`` where ``scope`` is ``"aggregate"`` when the
+    portfolio-level metric was present, or ``"per_strategy:<name>"`` when the
+    aggregate metric was absent and the best per-strategy value was used.
+    ``(None, "aggregate")`` when neither is available.
+
+    The scope is recorded on the run so a ranking that used a per-strategy
+    number is never silently presented alongside aggregate metrics.
     """
     val = result.metrics.get(key)
     if val is not None and isinstance(val, (int, float)) and val == val:  # NaN check
-        return float(val)
-    # Try per-strategy (take the best non-zero value).
+        return float(val), "aggregate"
+    # Fall back to per-strategy (take the best value) but record the scope.
     best: float | None = None
-    for _name, sm in (result.per_strategy or {}).items():
+    best_name: str | None = None
+    for name, sm in (result.per_strategy or {}).items():
         sv = sm.get(key)
         if sv is not None and isinstance(sv, (int, float)) and sv == sv:
             if best is None or sv > best:
                 best = float(sv)
-    return best
+                best_name = name
+    if best is None:
+        return None, "aggregate"
+    return best, f"per_strategy:{best_name}"
+
+
+def _extract_metric(result: Any, key: str) -> float | None:
+    """Extract a numeric metric from a BacktestResult (value only)."""
+    return _extract_metric_scoped(result, key)[0]
+
+
+def _score_result(result: Any, rank_by: str) -> float | None:
+    """Score a single result for ``rank_by`` (handles the composite score)."""
+    if rank_by == "robust_score":
+        return _robust_score(result.metrics or {}, [])
+    return _extract_metric(result, rank_by)
+
+
+def _apply_detail_retention(result: GridResult, top_n: int) -> None:
+    """Drop full trades/equity from all but the top-N ranked runs.
+
+    Keeps a large sweep's payload bounded: every run keeps its compact
+    ``evidence`` summary, but only the top ``top_n`` ranked runs retain the
+    full trade list and equity curve.  ``top_n <= 0`` retains detail for all.
+    """
+    if top_n <= 0:
+        return
+    keep = {id(run) for run in result.ranked[:top_n]}
+    for run in result.runs:
+        if id(run) in keep or run.result is None:
+            continue
+        run.result.trades = []
+        run.result.equity_curve = []
+        run.detail_retained = False
+
+
+def _below_min_t_stat(metrics: dict[str, Any] | None, threshold: float) -> bool:
+    """True when the after-cost expectancy t-stat is below ``threshold``.
+
+    A disabled gate (``threshold <= 0``) never flags.  When the gate is enabled
+    but the t-stat is unavailable (fewer than two positions), the run is
+    flagged — an unmeasurable edge is not eligible for ranking.
+    """
+    if threshold <= 0:
+        return False
+    if not metrics:
+        return True
+    t_stat = metrics.get("net_expectancy_t_stat")
+    if t_stat is None or not isinstance(t_stat, (int, float)) or t_stat != t_stat:
+        return True
+    return float(t_stat) < threshold
+
+
+def _robust_score(metrics: dict[str, Any], fold_metrics: list[dict[str, Any]]) -> float:
+    """Composite 0–1 robustness score blending return, significance, and risk.
+
+    Components (each clamped to 0–1):
+
+    * **return** — after-cost return % mapped through a soft cap (``x / (x + 10)``)
+      so a 10% return scores 0.5 and a 40% return scores 0.8.
+    * **significance** — after-cost expectancy t-stat mapped through
+      ``x / (x + 2)`` (t=2 → 0.5, t=4 → 0.67).
+    * **consistency** — fraction of completed folds with positive net PnL.
+    * **drawdown** — ``1 - min(1, max_dd_pct / 30)`` so a 30% drawdown scores 0.
+
+    The blend weights return and significance most heavily; the score is a
+    ranking aid, not a probability of future profit.
+    """
+    def _num(value: Any) -> float:
+        if value is None or isinstance(value, bool):
+            return 0.0
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return 0.0
+        return parsed if parsed == parsed else 0.0
+
+    ret = _num(metrics.get("net_profit_after_cost_pct"))
+    t_stat = _num(metrics.get("net_expectancy_t_stat"))
+    dd = _num(metrics.get("max_drawdown_pct"))
+
+    completed = [f for f in fold_metrics if f.get("status") == "completed"]
+    positive = sum(
+        1 for f in completed
+        if _num((f.get("metrics") or {}).get("net_profit_after_cost")) > 0
+    )
+    consistency = (positive / len(completed)) if completed else 0.0
+
+    return_component = max(0.0, ret) / (max(0.0, ret) + 10.0)
+    significance_component = max(0.0, t_stat) / (max(0.0, t_stat) + 2.0)
+    drawdown_component = 1.0 - min(1.0, max(0.0, dd) / 30.0)
+
+    score = (
+        0.35 * return_component
+        + 0.30 * significance_component
+        + 0.20 * consistency
+        + 0.15 * drawdown_component
+    )
+    return round(score, 6)
 
 
 def _aggregate_fold_results(results: list[BacktestResult]) -> BacktestResult:

@@ -35,6 +35,10 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Iterable
 
+from app.services.backtest.recommendations import (
+    build_recommendation,
+    render_recommendation_markdown,
+)
 from app.services.backtest.sweep_analysis import DEFAULT_RANK_BY, analyze_sweep
 
 BUNDLE_SCHEMA_VERSION = 1
@@ -139,10 +143,16 @@ def concentration(
             max_symbol_share = symbol_shares[0]["share"]
 
     trade_rows = [t for t in (trades or []) if isinstance(t, dict)]
-    gross_profit = sum(
-        _num(t.get("net_pnl")) for t in trade_rows if _num(t.get("net_pnl")) > 0
-    )
-    largest_win = max((_num(t.get("net_pnl")) for t in trade_rows), default=0.0)
+    # ``net_pnl`` is the after-fee/funding PnL emitted by
+    # ``persistence._trade_to_dict``; fall back to ``pnl`` (after-slippage)
+    # for legacy payloads that predate the ``net_pnl`` field.
+    def _trade_net(t: dict[str, Any]) -> float:
+        if t.get("net_pnl") is not None:
+            return _num(t.get("net_pnl"))
+        return _num(t.get("pnl"))
+
+    gross_profit = sum(_trade_net(t) for t in trade_rows if _trade_net(t) > 0)
+    largest_win = max((_trade_net(t) for t in trade_rows), default=0.0)
     max_trade_share: float | None = None
     if gross_profit > 0 and largest_win > 0:
         max_trade_share = round(largest_win / gross_profit, 4)
@@ -299,6 +309,11 @@ def build_research_bundle(
             "best_metrics": best_metrics,
             "robustness": analysis.get("robustness") or {},
             "sensitivity": analysis.get("sensitivity") or [],
+            "marginal_sensitivity": analysis.get("marginal_sensitivity") or [],
+            "interactions": analysis.get("interactions") or [],
+            "plateaus": analysis.get("plateaus") or [],
+            "robustness_score": analysis.get("robustness_score") or {},
+            "multiple_comparison": analysis.get("multiple_comparison") or {},
             "fold_consistency": fold,
             "concentration": conc,
         }
@@ -367,6 +382,28 @@ def build_research_bundle(
         status = "reject"
     else:
         status = "inconclusive"
+
+    # ── Recommendation (Phase 4) ──────────────────────────────────────
+    if grid and bundle.get("sweep"):
+        sweep = bundle["sweep"]
+        bundle["recommendation"] = build_recommendation(
+            analysis={
+                "best": sweep.get("best"),
+                "plateaus": sweep.get("plateaus"),
+                "marginal_sensitivity": sweep.get("marginal_sensitivity"),
+                "interactions": sweep.get("interactions"),
+                "robustness_score": sweep.get("robustness_score"),
+            },
+            baseline_metrics=baseline_metrics,
+            baseline_config=baseline_config,
+            fold_consistency=sweep.get("fold_consistency"),
+            concentration=sweep.get("concentration"),
+            stress_rows=stress_rows,
+            holdout_metrics=(bundle.get("holdout") or {}).get("metrics"),
+            min_fold_consistency=min_fold_consistency,
+        )
+    else:
+        bundle["recommendation"] = None
 
     caveats.extend([
         "Screening only: a 'candidate' verdict is a hypothesis, not a "
@@ -483,6 +520,11 @@ def render_bundle_markdown(bundle: dict[str, Any]) -> str:
                 f"(Δ {row['delta_net_profit_after_cost']}); "
                 f"survives={row['survives']}"
             )
+        lines.append("")
+
+    recommendation = bundle.get("recommendation")
+    if recommendation:
+        lines.append(render_recommendation_markdown(recommendation))
         lines.append("")
 
     if verdict.get("caveats"):

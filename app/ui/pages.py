@@ -10013,6 +10013,9 @@ def register_pages(app: FastAPI) -> None:
         def _render_sweep_results(result: Any, container: ui.column) -> None:
             """Render parameter-sweep results into the container."""
             with container:
+                # ── Decision-first banner (verdict + recommendation) ────
+                _render_sweep_decision_banner(result)
+
                 with ui.card().classes("w-full rounded-lg border border-slate-200 mb-2"):
                     ui.label("Parameter Sweep Results").classes("text-lg font-semibold mb-2")
                     rank_by = result.config.rank_by
@@ -10026,6 +10029,38 @@ def register_pages(app: FastAPI) -> None:
                         f"({result.search_mode}, seed {result.random_seed}) in {result.duration_seconds:.1f}s — "
                         f"ranked by {rank_by} (min {result.config.min_trades} trades); full-window scoring"
                     ).classes("text-xs text-slate-500 mb-2")
+
+                    def _copy_sweep_report() -> None:
+                        """Build the compact sweep report and copy it to the clipboard."""
+                        try:
+                            from app.services.backtest.persistence import grid_result_to_dict
+                            from app.services.backtest.sweep_report import (
+                                build_sweep_report,
+                                render_sweep_markdown,
+                            )
+
+                            grid_payload = grid_result_to_dict(result)
+                            report = build_sweep_report(
+                                grid=grid_payload,
+                                holdout=grid_payload.get("final_holdout"),
+                                workflow={
+                                    "symbols": list(result.config.base_config.symbols),
+                                    "timeframe": result.config.base_config.timeframe,
+                                },
+                            )
+                            ui.run_javascript(
+                                "navigator.clipboard.writeText("
+                                + __import__("json").dumps(render_sweep_markdown(report))
+                                + ")"
+                            )
+                            ui.notify("Sweep report copied to clipboard", color="positive")
+                        except Exception as exc:  # noqa: BLE001
+                            ui.notify(f"Could not build report: {exc}", color="negative")
+
+                    ui.button(
+                        "Copy for analysis", icon="content_copy",
+                        on_click=_copy_sweep_report,
+                    ).props("flat dense").classes("mb-2")
 
                     from app.services.backtest.persistence import _backtest_assumptions
                     assumptions = {
@@ -10104,6 +10139,8 @@ def register_pages(app: FastAPI) -> None:
                             {"name": "net_profit", "label": "After-slippage PnL", "field": "net_profit", "align": "right", "sortable": True},
                             {"name": "net_after_cost", "label": "Net after costs", "field": "net_after_cost", "align": "right", "sortable": True},
                             {"name": "profit_factor", "label": "Net PF", "field": "profit_factor", "align": "right", "sortable": True},
+                            {"name": "t_stat", "label": "t-stat", "field": "t_stat", "align": "right", "sortable": True},
+                            {"name": "ci95", "label": "CI95 (net exp.)", "field": "ci95", "align": "right", "sortable": True},
                             {"name": "sharpe", "label": "Sharpe", "field": "sharpe", "align": "right", "sortable": True},
                             {"name": "max_dd", "label": "Max DD %", "field": "max_dd", "align": "right", "sortable": True},
                             {"name": "rank_score", "label": _rank_labels.get(rank_by, rank_by), "field": "rank_score", "align": "right", "sortable": True},
@@ -10121,6 +10158,15 @@ def register_pages(app: FastAPI) -> None:
                                 r["net_profit"] = f"{m.get('net_profit', 0):.2f}"
                                 r["net_after_cost"] = f"{m.get('net_profit_after_cost', 0):.2f}"
                                 r["profit_factor"] = f"{m.get('net_profit_factor_after_cost', 0):.2f}"
+                                t_stat = m.get("net_expectancy_t_stat")
+                                r["t_stat"] = f"{t_stat:.2f}" if isinstance(t_stat, (int, float)) else "—"
+                                ci_low = m.get("net_expectancy_ci95_low_normal_approx")
+                                ci_high = m.get("net_expectancy_ci95_high_normal_approx")
+                                r["ci95"] = (
+                                    f"[{ci_low:.2f}, {ci_high:.2f}]"
+                                    if isinstance(ci_low, (int, float)) and isinstance(ci_high, (int, float))
+                                    else "—"
+                                )
                                 r["sharpe"] = f"{m.get('sharpe_per_candle', 0):.4f}"
                                 r["max_dd"] = f"{m.get('max_drawdown_pct', 0):.1f}%"
                             else:
@@ -10129,19 +10175,26 @@ def register_pages(app: FastAPI) -> None:
                                 r["net_profit"] = "—"
                                 r["net_after_cost"] = "—"
                                 r["profit_factor"] = "—"
+                                r["t_stat"] = "—"
+                                r["ci95"] = "—"
                                 r["sharpe"] = "—"
                                 r["max_dd"] = "—"
                             r["rank_score"] = f"{run.rank_score:.4f}" if run.rank_score is not None else "—"
                             if run.below_min_trades:
                                 r["trades"] = f"{r['trades']} *"
+                            if getattr(run, "below_min_t_stat", False):
+                                r["t_stat"] = f"{r['t_stat']} †"
                             rows.append(r)
 
                         with ui.table(columns=columns, rows=rows).classes("w-full"):
                             pass
 
                         ui.label("* = below min trades (not ranked)").classes("text-xs text-slate-400 mt-1")
+                        ui.label("† = below min expectancy t-stat (not ranked)").classes("text-xs text-slate-400")
                     else:
                         ui.label("No valid results to rank.").classes("text-sm text-slate-500")
+
+                    _render_sweep_charts(result)
 
                     fold_rows = []
                     for run in result.runs:
@@ -10209,6 +10262,122 @@ def register_pages(app: FastAPI) -> None:
 
                 # ── Best combination + per-parameter sensitivity ───────
                 _render_sweep_analysis(result)
+
+        def _render_sweep_decision_banner(result: Any) -> None:
+            """Render the decision-first banner: recommendation + confidence.
+
+            Uses the same deterministic recommendation layer as the CLI/bundle
+            so the UI, the CLI, and the handoff report never disagree.
+            """
+            try:
+                from app.services.backtest.persistence import grid_result_to_dict
+                from app.services.backtest.sweep_report import build_sweep_report
+            except Exception:  # noqa: BLE001
+                return
+            try:
+                grid_payload = grid_result_to_dict(result)
+                report = build_sweep_report(
+                    grid=grid_payload,
+                    holdout=grid_payload.get("final_holdout"),
+                    workflow={
+                        "symbols": list(result.config.base_config.symbols),
+                        "timeframe": result.config.base_config.timeframe,
+                    },
+                )
+            except Exception:  # noqa: BLE001
+                return
+
+            recommendation = report.get("recommendation") or {}
+            changes = [c for c in (recommendation.get("changes") or []) if c.get("changed")]
+            confidence = recommendation.get("confidence", "unknown")
+            colour = {
+                "high": "border-emerald-300 bg-emerald-50",
+                "medium": "border-amber-300 bg-amber-50",
+                "low": "border-rose-300 bg-rose-50",
+            }.get(confidence, "border-slate-300 bg-slate-50")
+
+            with ui.card().classes(f"w-full rounded-lg border {colour} mb-2"):
+                with ui.row().classes("items-center gap-3"):
+                    ui.label("Recommended changes").classes("text-base font-semibold")
+                    ui.badge(f"confidence: {confidence}").props("color=primary")
+                if changes:
+                    for change in changes:
+                        ui.label(
+                            f"{change['param']}: {change['from']} → {change['to']}  "
+                            f"({change['rationale']})"
+                        ).classes("text-sm font-mono")
+                else:
+                    ui.label(
+                        "No parameter change recommended — the current defaults "
+                        "are already at (or near) the best swept setting."
+                    ).classes("text-sm")
+                effect = (recommendation.get("expected_effect") or {}).get(
+                    "net_profit_after_cost_pct"
+                ) or {}
+                if effect:
+                    ui.label(
+                        f"In-sample net after cost %: {effect.get('baseline')} → "
+                        f"{effect.get('recommended')} (Δ {effect.get('delta')})"
+                    ).classes("text-xs text-slate-600 mt-1")
+                for risk in (recommendation.get("risks") or [])[:4]:
+                    ui.label(f"⚠ {risk}").classes("text-xs text-amber-800")
+
+        def _render_sweep_charts(result: Any) -> None:
+            """Render marginal-effect and fold charts for the sweep."""
+            try:
+                from app.services.backtest.sweep_analysis import analyze_sweep
+            except Exception:  # noqa: BLE001
+                return
+            entries: list[dict[str, Any]] = []
+            for run in result.runs:
+                if run.result is None or run.result.is_error:
+                    continue
+                entries.append({
+                    "params": dict(run.params),
+                    "metrics": dict(run.result.metrics or {}),
+                })
+            if not entries:
+                return
+            rank_by = getattr(result.config, "rank_by", "net_profit_after_cost_pct")
+            if rank_by == "robust_score":
+                rank_by = "net_profit_after_cost_pct"
+            analysis = analyze_sweep(
+                entries, rank_by=rank_by,
+                min_trades=int(getattr(result.config, "min_trades", 0) or 0),
+            )
+            marginal = analysis.get("marginal_sensitivity") or []
+            if not marginal:
+                return
+            with ui.card().classes("w-full rounded-lg border border-slate-200 mb-2"):
+                ui.label("Marginal effect per parameter (others held at best)").classes(
+                    "text-base font-semibold mb-2"
+                )
+                for item in marginal:
+                    curve = item.get("curve") or []
+                    if not curve:
+                        continue
+                    chart = ui.echart({
+                        "title": {
+                            "text": item["key"].split(".")[-1],
+                            "textStyle": {"fontSize": 12},
+                        },
+                        "tooltip": {"trigger": "axis"},
+                        "grid": {"left": 50, "right": 20, "top": 35, "bottom": 30},
+                        "xAxis": {
+                            "type": "category",
+                            "data": [str(point["value"]) for point in curve],
+                        },
+                        "yAxis": {"type": "value", "name": rank_by},
+                        "series": [{
+                            "type": "line",
+                            "data": [point["score"] for point in curve],
+                            "smooth": True,
+                            "markPoint": {
+                                "data": [{"type": "max", "name": "best"}],
+                            },
+                        }],
+                    }).classes("w-full h-48")
+                    chart.options["animation"] = False
 
         def _render_sweep_analysis(result: Any) -> None:
             """Render 'best combination' + per-parameter sensitivity analysis.

@@ -74,6 +74,7 @@ def _trade_to_dict(t: SimPosition) -> dict[str, Any]:
         "close_price": t.close_price,
         "close_ts": t.close_ts,
         "pnl": t.pnl,
+        "net_pnl": t.net_pnl,
         "pnl_pct": t.pnl_pct,
         "entry_fee": t.entry_fee,
         "exit_fee": t.exit_fee,
@@ -154,6 +155,8 @@ def grid_result_to_dict(result: GridResult) -> dict[str, Any]:
             "params": [asdict(param) for param in result.config.params],
             "rank_by": result.config.rank_by,
             "min_trades": result.config.min_trades,
+            "min_expectancy_t_stat": result.config.min_expectancy_t_stat,
+            "top_n_detail": result.config.top_n_detail,
             "validation_folds": result.config.validation_folds,
             "validation_train_ratio": result.config.validation_train_ratio,
             "final_holdout_fraction": result.config.final_holdout_fraction,
@@ -179,7 +182,11 @@ def grid_result_to_dict(result: GridResult) -> dict[str, Any]:
                 "params": run.params,
                 "result": result_to_dict(run.result) if run.result is not None else None,
                 "rank_score": run.rank_score,
+                "rank_scope": run.rank_scope,
                 "below_min_trades": run.below_min_trades,
+                "below_min_t_stat": run.below_min_t_stat,
+                "evidence": run.evidence,
+                "detail_retained": run.detail_retained,
                 "fold_metrics": run.fold_metrics,
             }
             for run in result.runs
@@ -190,7 +197,11 @@ def grid_result_to_dict(result: GridResult) -> dict[str, Any]:
                 "result": result_to_dict(result.final_holdout.result)
                 if result.final_holdout.result is not None else None,
                 "rank_score": result.final_holdout.rank_score,
+                "rank_scope": result.final_holdout.rank_scope,
                 "below_min_trades": result.final_holdout.below_min_trades,
+                "below_min_t_stat": result.final_holdout.below_min_t_stat,
+                "evidence": result.final_holdout.evidence,
+                "detail_retained": result.final_holdout.detail_retained,
                 "fold_metrics": result.final_holdout.fold_metrics,
             }
             if result.final_holdout is not None else None
@@ -429,6 +440,8 @@ def grid_result_from_dict(data: dict[str, Any]) -> GridResult | None:
             ],
             rank_by=str(config_data.get("rank_by") or "net_profit_after_cost_pct"),
             min_trades=int(config_data.get("min_trades") or 0),
+            min_expectancy_t_stat=float(config_data.get("min_expectancy_t_stat") or 0.0),
+            top_n_detail=int(config_data.get("top_n_detail", 10)),
             validation_folds=int(config_data.get("validation_folds") or 0),
             validation_train_ratio=float(config_data.get("validation_train_ratio") or 0.7),
             final_holdout_fraction=float(config_data.get("final_holdout_fraction") or 0.0),
@@ -453,6 +466,10 @@ def grid_result_from_dict(data: dict[str, Any]) -> GridResult | None:
                     dict(fold) for fold in row.get("fold_metrics") or []
                     if isinstance(fold, dict)
                 ],
+                rank_scope=str(row.get("rank_scope") or "aggregate"),
+                below_min_t_stat=bool(row.get("below_min_t_stat", False)),
+                evidence=dict(row.get("evidence") or {}),
+                detail_retained=bool(row.get("detail_retained", True)),
             ))
         result = GridResult(
             config=grid_config,
@@ -510,6 +527,10 @@ def _grid_run_from_dict(row: dict[str, Any]) -> GridRunResult | None:
             dict(fold) for fold in row.get("fold_metrics") or []
             if isinstance(fold, dict)
         ],
+        rank_scope=str(row.get("rank_scope") or "aggregate"),
+        below_min_t_stat=bool(row.get("below_min_t_stat", False)),
+        evidence=dict(row.get("evidence") or {}),
+        detail_retained=bool(row.get("detail_retained", True)),
     )
 
 

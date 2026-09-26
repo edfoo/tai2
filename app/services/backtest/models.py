@@ -342,12 +342,25 @@ class GridConfig:
         Minimum number of trades for a result to be included in the
         ranking.  Results with fewer trades are still reported but
         flagged as ``below_min_trades``.
+    min_expectancy_t_stat:
+        Minimum after-cost expectancy t-statistic for a result to be
+        eligible for ranking.  ``0.0`` disables the gate.  Results below
+        the threshold are still reported but flagged as
+        ``below_min_t_stat`` (a low-sample edge is not statistically
+        distinguishable from noise).
+    top_n_detail:
+        Number of top-ranked runs whose full trade list and equity curve are
+        retained in the result.  Runs outside the top N keep only their
+        compact evidence summary (``detail_retained=False``), which keeps a
+        large sweep's payload bounded.  ``0`` retains detail for every run.
     """
 
     base_config: BacktestConfig
     params: list[GridParamDef] = field(default_factory=list)
     rank_by: str = "net_profit_after_cost_pct"
     min_trades: int = 5
+    min_expectancy_t_stat: float = 0.0
+    top_n_detail: int = 10
     validation_folds: int = 0
     validation_train_ratio: float = 0.7
     final_holdout_fraction: float = 0.0
@@ -371,6 +384,24 @@ class GridRunResult:
         The value of the ``rank_by`` metric (or ``None`` if unavailable).
     below_min_trades:
         True if the run produced fewer than ``GridConfig.min_trades`` trades.
+    rank_scope:
+        Which metric scope produced ``rank_score``: ``"aggregate"`` for the
+        portfolio-level metric, or ``"per_strategy:<name>"`` when the
+        aggregate metric was absent and the best per-strategy value was used.
+        Recorded so the ranking never silently disagrees with the displayed
+        aggregate metrics.
+    below_min_t_stat:
+        True if the run's after-cost expectancy t-statistic is below
+        ``GridConfig.min_expectancy_t_stat`` (or unavailable when the gate is
+        enabled).
+    evidence:
+        Compact per-run evidence block (headline metrics, fold dispersion,
+        per-symbol shares, benchmark delta) built by
+        :mod:`app.services.backtest.summaries`.
+    detail_retained:
+        True when this run's full trade list and equity curve are retained;
+        False when only the compact evidence summary is kept (top-N detail
+        retention).
     """
 
     params: dict[str, Any]
@@ -378,6 +409,10 @@ class GridRunResult:
     rank_score: float | None
     below_min_trades: bool
     fold_metrics: list[dict[str, Any]] = field(default_factory=list)
+    rank_scope: str = "aggregate"
+    below_min_t_stat: bool = False
+    evidence: dict[str, Any] = field(default_factory=dict)
+    detail_retained: bool = True
 
 
 @dataclass(slots=True)

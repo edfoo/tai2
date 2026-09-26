@@ -300,3 +300,167 @@ async def test_grid_marks_holdout_skipped_when_no_candidate_meets_minimum(monkey
     assert result.final_holdout is not None
     assert result.final_holdout.fold_metrics[0]["status"] == "skipped"
     assert "No complete validation candidate" in result.final_holdout.fold_metrics[0]["error"]
+
+
+# ── Phase 1: ranking integrity ──────────────────────────────────────────
+
+
+def test_extract_metric_scoped_reports_scope() -> None:
+    """Aggregate metric → 'aggregate'; per-strategy fallback → named scope."""
+    result = BacktestResult(config=_base_config())
+    result.metrics = {"sharpe_per_candle": 1.5}
+    result.per_strategy = {"mean_reversion": {"sharpe_per_candle": 2.5}}
+
+    value, scope = G._extract_metric_scoped(result, "sharpe_per_candle")
+    assert value == 1.5
+    assert scope == "aggregate"
+
+    # Missing aggregate → per-strategy fallback, scope recorded.
+    value, scope = G._extract_metric_scoped(result, "net_profit_after_cost_pct")
+    assert value is None
+    assert scope == "aggregate"
+
+    result.metrics = {}
+    value, scope = G._extract_metric_scoped(result, "sharpe_per_candle")
+    assert value == 2.5
+    assert scope == "per_strategy:mean_reversion"
+
+
+def test_below_min_t_stat_gate() -> None:
+    assert G._below_min_t_stat({"net_expectancy_t_stat": 2.5}, 0.0) is False
+    assert G._below_min_t_stat({"net_expectancy_t_stat": 2.5}, 2.0) is False
+    assert G._below_min_t_stat({"net_expectancy_t_stat": 1.0}, 2.0) is True
+    # Enabled gate with no measurable t-stat → flagged.
+    assert G._below_min_t_stat({}, 2.0) is True
+    assert G._below_min_t_stat(None, 2.0) is True
+
+
+def test_robust_score_prefers_significant_consistent_returns() -> None:
+    strong = G._robust_score(
+        {
+            "net_profit_after_cost_pct": 20.0,
+            "net_expectancy_t_stat": 3.0,
+            "max_drawdown_pct": 5.0,
+        },
+        [{"status": "completed", "metrics": {"net_profit_after_cost": 10.0}}] * 4,
+    )
+    weak = G._robust_score(
+        {
+            "net_profit_after_cost_pct": 20.0,
+            "net_expectancy_t_stat": 0.2,
+            "max_drawdown_pct": 25.0,
+        },
+        [{"status": "completed", "metrics": {"net_profit_after_cost": -1.0}}] * 4,
+    )
+    assert 0.0 <= weak < strong <= 1.0
+
+
+@pytest.mark.asyncio
+async def test_grid_records_rank_scope_and_t_stat_gate(monkeypatch) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    monkeypatch.setattr(G, "ProcessPoolExecutor", ThreadPoolExecutor)
+
+    def _fake_combination(config: BacktestConfig) -> BacktestResult:
+        rsi = config.launcher_config["strategies"]["mean_reversion"]["rsi_oversold"]
+        result = BacktestResult(config=config)
+        result.metrics = {
+            "total_trades": 10,
+            "net_profit_after_cost_pct": float(rsi),
+            "net_expectancy_t_stat": 0.5 if rsi == 25 else 3.0,
+        }
+        return result
+
+    monkeypatch.setattr(G, "_run_combination", _fake_combination)
+    sweep = GridConfig(
+        base_config=_base_config(),
+        params=[GridParamDef("strategies.mean_reversion.rsi_oversold", [25, 30])],
+        rank_by="net_profit_after_cost_pct",
+        min_trades=1,
+        min_expectancy_t_stat=2.0,
+    )
+
+    result = await G.BacktestGrid(sweep, workers=2).run()
+
+    by_rsi = {r.params["strategies.mean_reversion.rsi_oversold"]: r for r in result.runs}
+    assert by_rsi[25].below_min_t_stat is True
+    assert by_rsi[30].below_min_t_stat is False
+    assert all(r.rank_scope == "aggregate" for r in result.runs)
+    # The low-t-stat run is excluded from the ranked head.
+    assert result.ranked[0].params["strategies.mean_reversion.rsi_oversold"] == 30
+
+
+@pytest.mark.asyncio
+async def test_grid_robust_score_ranking(monkeypatch) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    monkeypatch.setattr(G, "ProcessPoolExecutor", ThreadPoolExecutor)
+
+    def _fake_combination(config: BacktestConfig) -> BacktestResult:
+        rsi = config.launcher_config["strategies"]["mean_reversion"]["rsi_oversold"]
+        result = BacktestResult(config=config)
+        result.metrics = {
+            "total_trades": 10,
+            "net_profit_after_cost_pct": 30.0 if rsi == 25 else 10.0,
+            "net_expectancy_t_stat": 0.1 if rsi == 25 else 3.0,
+            "max_drawdown_pct": 5.0,
+        }
+        return result
+
+    monkeypatch.setattr(G, "_run_combination", _fake_combination)
+    sweep = GridConfig(
+        base_config=_base_config(),
+        params=[GridParamDef("strategies.mean_reversion.rsi_oversold", [25, 30])],
+        rank_by="robust_score",
+        min_trades=1,
+    )
+
+    result = await G.BacktestGrid(sweep, workers=2).run()
+
+    # rsi=25 has higher raw return but no significance → robust_score prefers 30.
+    assert result.ranked[0].params["strategies.mean_reversion.rsi_oversold"] == 30
+    assert all(0.0 <= r.rank_score <= 1.0 for r in result.runs if r.rank_score is not None)
+
+
+# ── Phase 2: per-run evidence ───────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_grid_builds_evidence_and_retains_top_n_detail(monkeypatch) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    monkeypatch.setattr(G, "ProcessPoolExecutor", ThreadPoolExecutor)
+
+    def _fake_combination(config: BacktestConfig) -> BacktestResult:
+        rsi = config.launcher_config["strategies"]["mean_reversion"]["rsi_oversold"]
+        result = BacktestResult(config=config)
+        result.metrics = {
+            "total_trades": 10,
+            "net_profit_after_cost_pct": float(rsi),
+            "net_expectancy_t_stat": 2.0,
+            "buy_and_hold": {"total_return_pct": 5.0, "symbols": ["BTC-USDT-SWAP"]},
+        }
+        result.per_symbol = {"BTC-USDT-SWAP": {"net_profit_after_cost": float(rsi), "trades": 10}}
+        result.trades = []
+        result.equity_curve = []
+        return result
+
+    monkeypatch.setattr(G, "_run_combination", _fake_combination)
+    sweep = GridConfig(
+        base_config=_base_config(),
+        params=[GridParamDef("strategies.mean_reversion.rsi_oversold", [25, 30, 35])],
+        rank_by="net_profit_after_cost_pct",
+        min_trades=1,
+        top_n_detail=1,
+    )
+
+    result = await G.BacktestGrid(sweep, workers=2).run()
+
+    # Every run carries an evidence block.
+    assert all(run.evidence for run in result.runs)
+    assert result.runs[0].evidence["summary"]["total_trades"] == 10
+    assert result.runs[0].evidence["benchmark_delta"]["beat_benchmark"] is True
+    # Only the top-ranked run retains full detail.
+    retained = [r for r in result.runs if r.detail_retained]
+    assert len(retained) == 1
+    assert retained[0] is result.ranked[0]
