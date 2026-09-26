@@ -10299,7 +10299,7 @@ def register_pages(app: FastAPI) -> None:
             with ui.card().classes(f"w-full rounded-lg border {colour} mb-2"):
                 with ui.row().classes("items-center gap-3"):
                     ui.label("Recommended changes").classes("text-base font-semibold")
-                    ui.badge(f"confidence: {confidence}").props("color=primary")
+                    ui.badge(f"confidence: {confidence}", color="primary")
                 if changes:
                     for change in changes:
                         ui.label(
