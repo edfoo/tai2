@@ -564,7 +564,7 @@ class TestDailyLossGuard:
 
 
 class TestBacktestSymbolConcurrency:
-    def test_cross_margin_request_fails_explicitly(self) -> None:
+    def test_cross_margin_request_is_accepted(self) -> None:
         from app.services.backtest.engine import BacktestEngine
         from app.services.backtest.models import BacktestConfig
 
@@ -576,7 +576,22 @@ class TestBacktestSymbolConcurrency:
             margin_mode="cross",
         )
 
-        with pytest.raises(ValueError, match="supports isolated margin only"):
+        engine = BacktestEngine(config)
+        assert engine._simulator.margin_mode == "cross"
+
+    def test_unknown_margin_mode_is_rejected(self) -> None:
+        from app.services.backtest.engine import BacktestEngine
+        from app.services.backtest.models import BacktestConfig
+
+        config = BacktestConfig(
+            symbols=["BTC-USDT-SWAP"],
+            timeframe="15m",
+            start_ts=0,
+            end_ts=1000,
+            margin_mode="portfolio",
+        )
+
+        with pytest.raises(ValueError, match="Unsupported margin_mode"):
             BacktestEngine(config)
 
     def test_cross_strategy_same_symbol_is_blocked_by_default(self) -> None:

@@ -86,6 +86,7 @@ class HistoricalDataFetcher:
         self._last_fetch_provenance: dict[str, Any] = {}
         self._last_funding_provenance: dict[str, Any] = {}
         self._last_instrument_provenance: dict[str, Any] = {}
+        self._last_tape_provenance: dict[str, Any] = {}
 
     @property
     def last_fetch_provenance(self) -> dict[str, Any]:
@@ -99,6 +100,10 @@ class HistoricalDataFetcher:
     @property
     def last_instrument_provenance(self) -> dict[str, Any]:
         return dict(self._last_instrument_provenance)
+
+    @property
+    def last_tape_provenance(self) -> dict[str, Any]:
+        return dict(self._last_tape_provenance)
 
     async def fetch_funding_rates(
         self, symbol: str, start_ts: int, end_ts: int
@@ -145,6 +150,66 @@ class HistoricalDataFetcher:
             "candle_count": len(records),
             "first_candle_ts": records[0]["ts"] if records else None,
             "last_candle_ts": records[-1]["ts"] if records else None,
+            "content_sha256": hashlib.sha256(payload).hexdigest(),
+        }
+        return records
+
+    async def fetch_trade_tape(
+        self, symbol: str, start_ts: int, end_ts: int
+    ) -> list[dict[str, float | int | str]]:
+        """Fetch and cache the public trade tape for a symbol.
+
+        Used to estimate the effective bid-ask spread (Roll estimator).  OKX
+        only exposes ~3 months of tape, so the returned range may be shorter
+        than requested; callers should treat a short/empty tape as "spread
+        unavailable" and fall back to the base bps.
+        """
+        key = f"{symbol}_tape_{start_ts}_{end_ts}"
+        path = self._cache_dir / f"{key}.json"
+        records: list[dict[str, float | int | str]] | None = None
+        if path.exists():
+            try:
+                loaded = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(loaded, list):
+                    records = [
+                        {
+                            "ts": int(row["ts"]),
+                            "px": float(row["px"]),
+                            "sz": float(row.get("sz") or 0.0),
+                            "side": str(row.get("side") or ""),
+                        }
+                        for row in loaded if isinstance(row, dict)
+                    ]
+            except (OSError, ValueError, TypeError, KeyError):
+                records = None
+        source = "file_cache" if records is not None else "okx_public_api"
+        if records is None:
+            from app.services.okx_metrics import fetch_trade_history_records
+
+            try:
+                records = await fetch_trade_history_records(symbol, start_ts, end_ts)
+            except Exception as exc:
+                logger.warning("Trade tape unavailable for %s: %s", symbol, exc)
+                records = []
+                source = "unavailable"
+            if source != "unavailable":
+                try:
+                    self._cache_dir.mkdir(parents=True, exist_ok=True)
+                    path.write_text(json.dumps(records), encoding="utf-8")
+                except OSError as exc:
+                    logger.warning("Failed to cache trade tape %s: %s", key, exc)
+        payload = json.dumps(records, separators=(",", ":"), sort_keys=True).encode("ascii")
+        self._last_tape_provenance = {
+            "symbol": symbol,
+            "timeframe": "trade_tape",
+            "requested_start_ts": start_ts,
+            "requested_end_ts": end_ts,
+            "source": source,
+            "cache_hit": source == "file_cache",
+            "cache_key": key,
+            "trade_count": len(records),
+            "first_trade_ts": records[0]["ts"] if records else None,
+            "last_trade_ts": records[-1]["ts"] if records else None,
             "content_sha256": hashlib.sha256(payload).hexdigest(),
         }
         return records

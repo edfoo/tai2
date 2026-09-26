@@ -102,10 +102,13 @@ done
 | `--random-seed` | `42` | Seed for reproducible random sampling |
 | `--funding-mode` | `historical` | `historical` OKX settlement rates, `constant` fallback, or `off` |
 | `--funding-rate-pct` | `0` | Constant fallback rate per settlement interval; 0.01 means 0.01% |
-| `--slippage-mode` | `ohlcv_liquidity` | Fixed bps or OHLCV range/turnover proxy |
-| `--slippage-bps` | `0` | Base adverse bps per fill, added to proxy when liquidity mode is selected |
-| `--slippage-stress-multiplier` | `1.0` | Scale the estimated slippage (both modes) for adverse stress tests; 1.0 = unchanged |
+| `--slippage-mode` | `ohlcv_liquidity` | `fixed`, `ohlcv_liquidity` (range/turnover proxy), or `tape_spread` (bid-ask spread estimate) |
+| `--slippage-bps` | `0` | Base adverse bps per fill, added to the estimate when a non-fixed mode is selected |
+| `--spread-estimator` | `corwin_schultz` | Spread estimator for `tape_spread`: `corwin_schultz` (OHLCV) or `roll` (trade tape) |
+| `--spread-window` | `20` | Rolling window (bars/trades) for the spread estimate |
+| `--slippage-stress-multiplier` | `1.0` | Scale the estimated slippage (all modes) for adverse stress tests; 1.0 = unchanged |
 | `--liquidation-fee-bps` | `0` | Extra fee charged on a liquidation fill, in bps |
+| `--margin-mode` | `isolated` | `isolated` (per-position margin) or `cross` (shared account equity) |
 | `--allow-concurrent-strategies-per-symbol` | off | Permit separate strategies to hold the same symbol simultaneously |
 
 ### Parameter sweep (`grid` subcommand)
@@ -133,14 +136,19 @@ done
   to equity as events occur; unavailable history falls back to the configured
   constant rate and accrues it at settlement timestamps. The default slippage
   mode estimates impact from prior completed OHLCV range and contract-adjusted
-  turnover. It is a proxy, not a historical spread/order-book model; the
-  `--slippage-stress-multiplier` scales the estimate for adverse scenarios.
+  turnover. The `tape_spread` mode instead estimates the effective bid-ask
+  spread from OHLCV (Corwin-Schultz) or the public trade tape (Roll) and adds
+  it to the base bps. Both are proxies: spread captures crossing cost but not
+  order-book depth/impact, and the `--slippage-stress-multiplier` scales the
+  estimate for adverse scenarios.
   Stop gaps fill at the opening price when that is worse than the stop trigger;
   TP levels are conservatively tick-quantized. Isolated initial margin, tier
   leverage caps, and approximate tier-based liquidation are simulated, with an
-  optional `--liquidation-fee-bps` charged on liquidation fills. Cross-margin
-  portfolio liquidation and exchange-exact liquidation adjustments are not
-  modeled.
+  optional `--liquidation-fee-bps` charged on liquidation fills. With
+  `--margin-mode cross`, positions share account equity (no per-position
+  reservation) and liquidation is account-level: all positions close when
+  equity falls to the aggregate maintenance requirement. Cross-margin does not
+  model partial de-risking, auto-deleveraging, or insurance-fund mechanics.
 
 ### Strategy-specific A/B sweeps
 
@@ -152,6 +160,39 @@ client-side and submit one single-strategy run per variant:
 .venv/bin/python scripts/run_trend_pullback_ab.py --symbols AEON-USDT-SWAP
 .venv/bin/python scripts/run_vwap_ab_sweep.py --symbols BTC-USDT-SWAP
 ```
+
+### Research workflow (baseline → sweep → stress → bundle)
+
+`scripts/backtest_research.py` codifies the expert decision workflow: it runs a
+frozen-defaults baseline, a bounded sweep with forward-validation folds and an
+untouched holdout, then re-runs the best validation candidate under adverse
+execution presets (2× fees, 2× slippage, adverse funding, combined). It writes a
+JSON + Markdown **analysis bundle** with a screening verdict.
+
+```bash
+.venv/bin/python scripts/backtest_research.py \
+    --strategy mean_reversion \
+    --symbols BTC-USDT-SWAP,ETH-USDT-SWAP \
+    --timeframe 15m --days 90 --capital 1000 \
+    --validation-folds 4 --final-holdout-fraction 0.15 \
+    --search-mode random --combination-budget 64 \
+    --out-dir backtest_research/mean_reversion
+```
+
+The bundle (`research_bundle.json` / `research_bundle.md`) reports:
+
+- **Robustness** — whether the best combination is a lone spike or sits in a
+  plateau of near-equal results.
+- **Fold consistency** — the fraction of validation folds profitable after costs.
+- **Concentration** — the largest per-symbol and per-trade share of profit.
+- **Stress survival** — whether the edge stays positive under each adverse preset.
+- **Verdict** — `candidate` / `inconclusive` / `reject`, with explicit reasons
+  and caveats.
+
+The verdict is a **screening aid, not a profitability guarantee**. Confirm any
+candidate on untouched out-of-sample data and paper trading before live
+deployment. The analysis logic lives in `app/services/backtest/research.py` and
+is reusable from the UI or tests.
 
 ### Timeframe → higher-timeframe mapping
 

@@ -34,6 +34,7 @@ from typing import Any, Protocol
 from app.services.backtest.models import Candle, EquityPoint, SimPosition
 from app.services.backtest.sizing import compute_order_size
 from app.services.backtest.costs import CostModel
+from app.services.backtest.spread import spread_at
 from app.services.indicator_service import htf_regime_allows
 from app.services.strategies import resolve_analysis_block
 from app.services.strategies.defaults import merged_config
@@ -180,11 +181,17 @@ class Simulator:
         strategy_config: dict[str, Any] | None = None,
         timeframe_seconds: float | None = None,
         cost_model: CostModel | None = None,
+        margin_mode: str = "isolated",
     ) -> None:
         self._initial_capital = initial_capital
         self._notional_per_trade = notional_per_trade
         self._strategy_config = strategy_config or {}
         self._cost_model = cost_model or CostModel()
+        # "isolated" reserves per-position initial margin and liquidates each
+        # position independently; "cross" shares account equity across all
+        # positions and liquidates the whole account when equity falls to the
+        # aggregate maintenance requirement.
+        self._margin_mode = margin_mode if margin_mode in ("isolated", "cross") else "isolated"
         self._open_positions: list[SimPosition] = []
         self._position_sequence = 0
         self._closed_positions: list[SimPosition] = []
@@ -292,6 +299,8 @@ class Simulator:
         """Estimate adverse slippage from recent OHLCV range and quote turnover."""
         model = self._cost_model
         base_bps = model.slippage_bps
+        if model.slippage_mode == "tape_spread":
+            return self._tape_spread_bps(symbol, base_bps, execution_ts)
         if model.slippage_mode != "ohlcv_liquidity":
             return model.stressed_slippage_bps(base_bps)
         candles = self._recent_candles.get(symbol, [])
@@ -327,6 +336,27 @@ class Simulator:
         capped = min(max(estimated, 0.0), model.max_liquidity_slippage_bps)
         return model.stressed_slippage_bps(capped)
 
+    def _tape_spread_bps(
+        self, symbol: str, base_bps: float, execution_ts: int | None
+    ) -> float:
+        """Estimate slippage from a trade-tape/OHLCV spread series.
+
+        Uses the most recent spread estimate at or before the execution time
+        (no look-ahead).  Falls back to the base bps when no estimate exists.
+        The spread is a *spread* estimate, not order-book depth/impact.
+        """
+        model = self._cost_model
+        series = (model.spread_series or {}).get(symbol)
+        if not series:
+            return model.stressed_slippage_bps(base_bps)
+        ts = execution_ts if execution_ts is not None else 2**63 - 1
+        spread = spread_at(series, ts)
+        if spread is None:
+            return model.stressed_slippage_bps(base_bps)
+        estimated = base_bps + spread
+        capped = min(max(estimated, 0.0), model.max_liquidity_slippage_bps)
+        return model.stressed_slippage_bps(capped)
+
     def open_position_notional(self) -> float:
         """Sum of entry notional across all currently-open positions."""
         total = 0.0
@@ -336,6 +366,52 @@ class Simulator:
 
     def used_initial_margin(self) -> float:
         return sum(position.initial_margin for position in self._open_positions)
+
+    @property
+    def margin_mode(self) -> str:
+        return self._margin_mode
+
+    def maintenance_margin_requirement(self, prices: dict[str, float]) -> float:
+        """Aggregate maintenance margin for all open positions at ``prices``.
+
+        For a linear swap the maintenance amount is
+        ``notional * mmr - mmrDeduction`` (floored at zero).  Used by the
+        cross-margin account-level liquidation check.
+        """
+        total = 0.0
+        for position in self._open_positions:
+            price = prices.get(position.symbol)
+            if price is None or price <= 0:
+                price = position.entry_price
+            notional = position.size * price
+            requirement = (
+                notional * position.maintenance_margin_ratio
+                - position.maintenance_margin_deduction
+            )
+            total += max(requirement, 0.0)
+        return total
+
+    def cross_margin_liquidation_triggered(self, prices: dict[str, float]) -> bool:
+        """Return whether account equity has fallen to the maintenance requirement.
+
+        Cross margin shares all account equity across positions, so liquidation
+        is account-level: it triggers when total equity (cash + unrealised PnL)
+        is at or below the aggregate maintenance margin.
+        """
+        if self._margin_mode != "cross" or not self._open_positions:
+            return False
+        requirement = self.maintenance_margin_requirement(prices)
+        if requirement <= 0:
+            return False
+        return self.equity(prices) <= requirement
+
+    def _liquidate_cross_account(self, prices: dict[str, float], ts: int) -> None:
+        """Close every open position at the current price (account liquidation)."""
+        for position in list(self._open_positions):
+            price = prices.get(position.symbol)
+            if price is None or price <= 0:
+                price = position.entry_price
+            self._close_position(position, price, ts, "liquidation")
 
     def is_daily_loss_locked(self, current_ts: int) -> bool:
         """Return whether the live daily-loss guardrail would block new entries.
@@ -392,10 +468,22 @@ class Simulator:
         # Portfolio free-equity cap — clip (or block) the requested notional
         # so total deployed notional never exceeds account equity.
         current_equity = self._equity_history[-1][1] if self._equity_history else self._cash
-        free_margin = max(current_equity - self.used_initial_margin(), 0.0)
-        if free_margin <= 0:
-            return None
         max_leverage = _to_positive_float(guardrails.get("max_leverage")) or 1.0
+        if self._margin_mode == "cross":
+            # Cross margin: all account equity backs all positions, so headroom
+            # is equity * leverage minus already-deployed notional (no per-
+            # position initial-margin reservation).
+            headroom = max(
+                current_equity * max_leverage - self.open_position_notional(), 0.0
+            )
+            if headroom <= 0:
+                return None
+            requested_notional = min(self._notional_per_trade, headroom)
+        else:
+            free_margin = max(current_equity - self.used_initial_margin(), 0.0)
+            if free_margin <= 0:
+                return None
+            requested_notional = min(self._notional_per_trade, free_margin * max_leverage)
         instrument_tiers = [
             tier for tier in instrument.get("position_tiers", [])
             if isinstance(tier, dict)
@@ -407,7 +495,13 @@ class Simulator:
         if tier_leverage_caps:
             max_leverage = min(max_leverage, max(tier_leverage_caps))
         max_leverage = max(max_leverage, 1.0)
-        requested_notional = min(self._notional_per_trade, free_margin * max_leverage)
+        if self._margin_mode == "cross":
+            requested_notional = min(
+                self._notional_per_trade,
+                max(current_equity * max_leverage - self.open_position_notional(), 0.0),
+            )
+        else:
+            requested_notional = min(self._notional_per_trade, free_margin * max_leverage)
 
         size, _actual_notional = compute_order_size(
             requested_notional=requested_notional,
@@ -433,7 +527,13 @@ class Simulator:
         tier_imr = _to_positive_float(selected_tier.get("initial_margin_ratio"))
         margin_ratio = max(tier_imr or (1.0 / effective_leverage), 1.0 / effective_leverage)
         if effective_leverage < max_leverage:
-            requested_notional = min(self._notional_per_trade, free_margin * effective_leverage)
+            if self._margin_mode == "cross":
+                requested_notional = min(
+                    self._notional_per_trade,
+                    max(current_equity * effective_leverage - self.open_position_notional(), 0.0),
+                )
+            else:
+                requested_notional = min(self._notional_per_trade, free_margin * effective_leverage)
             size, _actual_notional = compute_order_size(
                 requested_notional=requested_notional,
                 entry_price=entry_price,
@@ -488,7 +588,7 @@ class Simulator:
         )
         initial_margin = size * fill_price * margin_ratio
         liquidation_price = None
-        if effective_leverage > 1.0:
+        if self._margin_mode == "isolated" and effective_leverage > 1.0:
             liquidation_price = compute_isolated_liquidation_price(
                 direction=direction,
                 size=size,
@@ -506,7 +606,7 @@ class Simulator:
             entry_ts=entry_ts,
             trade_id=trade_id,
             funding_settled_through_ts=entry_ts,
-            margin_mode="isolated",
+            margin_mode=self._margin_mode,
             leverage=effective_leverage,
             initial_margin=size * fill_price * margin_ratio,
             maintenance_margin_ratio=maintenance_ratio,
@@ -723,6 +823,12 @@ class Simulator:
                     self._apply_pm_action(action, position, candle)
                     break
 
+        # 2b. Cross-margin account-level liquidation (all positions share equity).
+        if self._margin_mode == "cross" and self._open_positions:
+            prices = {candle.ts: candle.close}
+            if self.cross_margin_liquidation_triggered(prices):
+                self._liquidate_cross_account(prices, candle.ts)
+
         # 3. Record equity curve point.
         eq = self.equity({candle.ts: candle.close})  # simplified — engine passes prices
         self._equity_curve.append(
@@ -766,10 +872,15 @@ class Simulator:
                     self._apply_pm_action(action, position, candle)
                     break
 
-        # 2. Record equity curve point.
+        # 2. Cross-margin account-level liquidation (all positions share equity).
         current_prices = {sym: c.close for sym, c in prices.items()}
-        eq = self.equity(current_prices)
         ts = next(iter(prices.values())).ts if prices else 0
+        if self._margin_mode == "cross" and self._open_positions:
+            if self.cross_margin_liquidation_triggered(current_prices):
+                self._liquidate_cross_account(current_prices, ts)
+
+        # 3. Record equity curve point.
+        eq = self.equity(current_prices)
         self._equity_curve.append(
             EquityPoint(ts=ts, equity=eq, open_positions=len(self._open_positions))
         )

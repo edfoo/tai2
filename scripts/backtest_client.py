@@ -174,7 +174,10 @@ def _build_run_payload(args: argparse.Namespace) -> dict[str, Any]:
         "slippage_bps": args.slippage_bps,
         "slippage_mode": args.slippage_mode,
         "slippage_stress_multiplier": args.slippage_stress_multiplier,
+        "spread_estimator": args.spread_estimator,
+        "spread_window": args.spread_window,
         "liquidation_fee_bps": args.liquidation_fee_bps,
+        "margin_mode": args.margin_mode,
         "funding_rate_pct": args.funding_rate_pct,
         "funding_mode": args.funding_mode,
         "allow_concurrent_strategies_per_symbol": args.allow_concurrent_strategies_per_symbol,
@@ -237,11 +240,17 @@ def _build_parser() -> argparse.ArgumentParser:
         p.add_argument("--taker-fee-bps", type=float, default=5.0)
         p.add_argument("--maker-fee-bps", type=float, default=0.0)
         p.add_argument("--slippage-bps", type=float, default=0.0)
-        p.add_argument("--slippage-mode", choices=("fixed", "ohlcv_liquidity"), default="ohlcv_liquidity")
+        p.add_argument("--slippage-mode", choices=("fixed", "ohlcv_liquidity", "tape_spread"), default="ohlcv_liquidity")
         p.add_argument("--slippage-stress-multiplier", type=float, default=1.0,
                    help="Scale the estimated slippage for adverse stress tests (1.0 = unchanged)")
+        p.add_argument("--spread-estimator", choices=("corwin_schultz", "roll"), default="corwin_schultz",
+                   help="Spread estimator for --slippage-mode tape_spread")
+        p.add_argument("--spread-window", type=int, default=20,
+                   help="Rolling window (bars/trades) for the spread estimate")
         p.add_argument("--liquidation-fee-bps", type=float, default=0.0,
                    help="Extra fee charged on a liquidation fill, in bps")
+        p.add_argument("--margin-mode", choices=("isolated", "cross"), default="isolated",
+                   help="Isolated (per-position margin) or cross (shared account equity)")
         p.add_argument("--funding-mode", choices=("historical", "constant", "off"), default="historical")
         p.add_argument("--funding-rate-pct", type=float, default=0.0,
                    help="Fallback rate per funding interval; 0.01 means 0.01%%")

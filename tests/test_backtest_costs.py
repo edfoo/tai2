@@ -249,6 +249,157 @@ class TestCostAwareSimulator:
         # 10 bps × 3 = 30 bps → entry fill 100 * 1.003
         assert position.entry_price == pytest.approx(100.3)
 
+
+class TestCrossMargin:
+    def test_cross_position_has_no_per_position_liquidation_price(self) -> None:
+        sim = Simulator(
+            initial_capital=1000.0,
+            notional_per_trade=100.0,
+            strategy_config={"guardrails": {"max_leverage": 5.0}},
+            cost_model=CostModel(slippage_mode="fixed"),
+            margin_mode="cross",
+        )
+        position = sim.open_position(
+            symbol="BTC-USDT-SWAP",
+            direction="long",
+            entry_price=100.0,
+            entry_ts=0,
+            strategy_name="cross",
+        )
+        assert position is not None
+        assert position.margin_mode == "cross"
+        # Cross margin liquidates at the account level, not per position.
+        assert position.liquidation_price is None
+
+    def test_cross_margin_shares_equity_across_positions(self) -> None:
+        # Isolated would reserve 100 margin for the first position and block
+        # the second; cross margin shares equity so both can open.
+        sim = Simulator(
+            initial_capital=100.0,
+            notional_per_trade=100.0,
+            strategy_config={"guardrails": {"max_leverage": 5.0}},
+            cost_model=CostModel(slippage_mode="fixed"),
+            margin_mode="cross",
+        )
+        first = sim.open_position(
+            symbol="BTC-USDT-SWAP",
+            direction="long",
+            entry_price=100.0,
+            entry_ts=0,
+            strategy_name="first",
+        )
+        second = sim.open_position(
+            symbol="ETH-USDT-SWAP",
+            direction="long",
+            entry_price=100.0,
+            entry_ts=1,
+            strategy_name="second",
+        )
+        assert first is not None
+        assert second is not None
+        assert len(sim.open_positions) == 2
+
+    def test_cross_margin_account_liquidation_closes_all_positions(self) -> None:
+        sim = Simulator(
+            initial_capital=100.0,
+            notional_per_trade=100.0,
+            strategy_config={
+                "guardrails": {"max_leverage": 5.0},
+                "instrument_specs": {
+                    "BTC-USDT-SWAP": {
+                        "ct_val": 1.0,
+                        "position_tiers": [{
+                            "min_size": 0.0,
+                            "max_size": 100.0,
+                            "initial_margin_ratio": 0.2,
+                            "maintenance_margin_ratio": 0.1,
+                            "max_leverage": 5.0,
+                        }],
+                    },
+                    "ETH-USDT-SWAP": {
+                        "ct_val": 1.0,
+                        "position_tiers": [{
+                            "min_size": 0.0,
+                            "max_size": 100.0,
+                            "initial_margin_ratio": 0.2,
+                            "maintenance_margin_ratio": 0.1,
+                            "max_leverage": 5.0,
+                        }],
+                    },
+                },
+            },
+            cost_model=CostModel(slippage_mode="fixed"),
+            margin_mode="cross",
+        )
+        sim.open_position(
+            symbol="BTC-USDT-SWAP", direction="long",
+            entry_price=100.0, entry_ts=0, strategy_name="a",
+        )
+        sim.open_position(
+            symbol="ETH-USDT-SWAP", direction="long",
+            entry_price=100.0, entry_ts=0, strategy_name="b",
+        )
+        assert len(sim.open_positions) == 2
+
+        # A large adverse move pushes account equity below the aggregate
+        # maintenance requirement → both positions liquidate together.
+        sim.update_multi({
+            "BTC-USDT-SWAP": Candle(ts=1, open=60, high=60, low=55, close=55, volume=1),
+            "ETH-USDT-SWAP": Candle(ts=1, open=60, high=60, low=55, close=55, volume=1),
+        })
+
+        assert len(sim.open_positions) == 0
+        assert all(t.close_reason == "liquidation" for t in sim.closed_positions)
+        assert len(sim.closed_positions) == 2
+
+    def test_cross_margin_healthy_account_is_not_liquidated(self) -> None:
+        sim = Simulator(
+            initial_capital=1000.0,
+            notional_per_trade=100.0,
+            strategy_config={"guardrails": {"max_leverage": 5.0}},
+            cost_model=CostModel(slippage_mode="fixed"),
+            margin_mode="cross",
+        )
+        sim.open_position(
+            symbol="BTC-USDT-SWAP", direction="long",
+            entry_price=100.0, entry_ts=0, strategy_name="a",
+        )
+        sim.update_multi({
+            "BTC-USDT-SWAP": Candle(ts=1, open=100, high=101, low=99, close=100, volume=1),
+        })
+        assert len(sim.open_positions) == 1
+        assert sim.closed_positions == []
+
+    def test_maintenance_requirement_uses_tier_mmr(self) -> None:
+        sim = Simulator(
+            initial_capital=1000.0,
+            notional_per_trade=100.0,
+            strategy_config={
+                "guardrails": {"max_leverage": 5.0},
+                "instrument_specs": {
+                    "BTC-USDT-SWAP": {
+                        "ct_val": 1.0,
+                        "position_tiers": [{
+                            "min_size": 0.0,
+                            "max_size": 100.0,
+                            "initial_margin_ratio": 0.2,
+                            "maintenance_margin_ratio": 0.1,
+                            "max_leverage": 5.0,
+                        }],
+                    },
+                },
+            },
+            cost_model=CostModel(slippage_mode="fixed"),
+            margin_mode="cross",
+        )
+        position = sim.open_position(
+            symbol="BTC-USDT-SWAP", direction="long",
+            entry_price=100.0, entry_ts=0, strategy_name="a",
+        )
+        assert position is not None
+        requirement = sim.maintenance_margin_requirement({"BTC-USDT-SWAP": 100.0})
+        assert requirement == pytest.approx(position.size * 100.0 * 0.1)
+
     def test_initial_margin_reservation_caps_following_positions(self) -> None:
         sim = Simulator(
             initial_capital=100.0,

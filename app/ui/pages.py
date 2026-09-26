@@ -9260,10 +9260,19 @@ def register_pages(app: FastAPI) -> None:
                     slippage_mode_input = ui.select(
                         options={
                             "ohlcv_liquidity": "OHLCV liquidity proxy",
+                            "tape_spread": "Trade-tape/OHLCV spread",
                             "fixed": "Fixed bps",
                         },
                         value="ohlcv_liquidity",
                         label="Slippage model",
+                    ).classes("w-56")
+                    spread_estimator_input = ui.select(
+                        options={
+                            "corwin_schultz": "Corwin-Schultz (OHLCV)",
+                            "roll": "Roll (trade tape)",
+                        },
+                        value="corwin_schultz",
+                        label="Spread estimator",
                     ).classes("w-56")
                     slippage_bps_input = ui.number(
                         label="Base slippage (bps / fill)",
@@ -9286,6 +9295,14 @@ def register_pages(app: FastAPI) -> None:
                         step=1.0,
                         precision=2,
                     ).classes("w-48")
+                    margin_mode_input = ui.select(
+                        options={
+                            "isolated": "Isolated (per-position margin)",
+                            "cross": "Cross (shared account equity)",
+                        },
+                        value="isolated",
+                        label="Margin mode",
+                    ).classes("w-64")
                     allow_concurrent_strategies_input = ui.checkbox(
                         "Allow multiple strategies per symbol",
                         value=False,
@@ -9735,7 +9752,9 @@ def register_pages(app: FastAPI) -> None:
                 slippage_mode=slippage_mode_input.value or "ohlcv_liquidity",
                 slippage_bps=float(slippage_bps_input.value or 0.0),
                 slippage_stress_multiplier=float(slippage_stress_input.value or 1.0),
+                spread_estimator=spread_estimator_input.value or "corwin_schultz",
                 liquidation_fee_bps=float(liquidation_fee_input.value or 0.0),
+                margin_mode=margin_mode_input.value or "isolated",
                 allow_concurrent_strategies_per_symbol=bool(
                     allow_concurrent_strategies_input.value
                 ),
@@ -9886,7 +9905,9 @@ def register_pages(app: FastAPI) -> None:
                 slippage_mode=slippage_mode_input.value or "ohlcv_liquidity",
                 slippage_bps=float(slippage_bps_input.value or 0.0),
                 slippage_stress_multiplier=float(slippage_stress_input.value or 1.0),
+                spread_estimator=spread_estimator_input.value or "corwin_schultz",
                 liquidation_fee_bps=float(liquidation_fee_input.value or 0.0),
+                margin_mode=margin_mode_input.value or "isolated",
                 allow_concurrent_strategies_per_symbol=bool(
                     allow_concurrent_strategies_input.value
                 ),

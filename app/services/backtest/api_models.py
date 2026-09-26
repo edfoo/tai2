@@ -35,8 +35,10 @@ class BacktestRunRequest(BaseModel):
     taker_fee_bps: float = Field(default=5.0, ge=0.0)
     maker_fee_bps: float = Field(default=0.0, ge=0.0)
     slippage_bps: float = Field(default=0.0, ge=0.0)
-    slippage_mode: str = Field(default="ohlcv_liquidity", pattern="^(fixed|ohlcv_liquidity)$")
+    slippage_mode: str = Field(default="ohlcv_liquidity", pattern="^(fixed|ohlcv_liquidity|tape_spread)$")
     slippage_stress_multiplier: float = Field(default=1.0, ge=0.0)
+    spread_estimator: str = Field(default="corwin_schultz", pattern="^(corwin_schultz|roll)$")
+    spread_window: int = Field(default=20, ge=2)
     liquidity_impact_coefficient: float = Field(default=0.05, ge=0.0)
     candle_range_slippage_fraction: float = Field(default=0.1, ge=0.0)
     max_liquidity_slippage_bps: float = Field(default=500.0, ge=0.0)
@@ -44,7 +46,7 @@ class BacktestRunRequest(BaseModel):
     funding_rate_pct: float = 0.0
     funding_mode: str = Field(default="historical", pattern="^(historical|constant|off)$")
     allow_concurrent_strategies_per_symbol: bool = False
-    margin_mode: str = Field(default="isolated", pattern="^isolated$")
+    margin_mode: str = Field(default="isolated", pattern="^(isolated|cross)$")
 
 
 class GridParamRequest(BaseModel):

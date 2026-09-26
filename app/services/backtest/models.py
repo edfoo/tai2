@@ -186,6 +186,10 @@ class BacktestConfig:
     # Adverse-scenario multiplier applied to the estimated slippage (both
     # modes). 1.0 = unmodified estimate; >1.0 stresses execution costs.
     slippage_stress_multiplier: float = 1.0
+    # Spread-estimation method for slippage_mode="tape_spread":
+    # "corwin_schultz" (OHLC high-low) or "roll" (trade-tape covariance).
+    spread_estimator: str = "corwin_schultz"
+    spread_window: int = 20
     liquidity_impact_coefficient: float = 0.05
     candle_range_slippage_fraction: float = 0.1
     max_liquidity_slippage_bps: float = 500.0

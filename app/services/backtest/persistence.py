@@ -233,8 +233,12 @@ def _backtest_assumptions(config: BacktestConfig) -> dict[str, Any]:
             "slippage_source": (
                 "fixed configured bps per fill"
                 if getattr(config, "slippage_mode", "fixed") == "fixed"
+                else "trade-tape/OHLCV spread estimate (Corwin-Schultz or Roll)"
+                if getattr(config, "slippage_mode", "fixed") == "tape_spread"
                 else "fixed base plus prior-bar OHLCV range and quote-turnover proxy"
             ),
+            "spread_estimator": getattr(config, "spread_estimator", "corwin_schultz"),
+            "spread_window": getattr(config, "spread_window", 20),
             "liquidity_impact_coefficient": getattr(config, "liquidity_impact_coefficient", 0.05),
             "candle_range_slippage_fraction": getattr(config, "candle_range_slippage_fraction", 0.1),
             "max_liquidity_slippage_bps": getattr(config, "max_liquidity_slippage_bps", 500.0),
@@ -259,22 +263,35 @@ def _backtest_assumptions(config: BacktestConfig) -> dict[str, Any]:
         ],
         "execution_model_limitations": [
             "OHLCV range and contract-adjusted turnover are slippage proxies, not historical bid-ask spread/order-book impact; estimates use only completed bars before each fill.",
+            "The tape_spread mode estimates the effective bid-ask spread (Corwin-Schultz/Roll) from OHLCV or the public trade tape; it captures spread cost but not order-book depth or market impact.",
             "Slippage coefficients are stress-test knobs, not fitted market-impact parameters; the slippage_stress_multiplier scales the estimate for adverse scenarios.",
             "Isolated liquidation is an approximation using tier IMR/MMR and maintenance deduction; funding accrued in the liquidation equation and exchange-specific risk adjustments are omitted.",
-            "Cross-margin portfolio liquidation and maintenance-margin offsets are not simulated; configured mode is isolated only.",
+            "Cross-margin liquidation is account-level (equity vs aggregate maintenance requirement) and closes all positions at the current price; it does not model partial de-risking, auto-deleveraging, or insurance-fund mechanics.",
             "Exchange tick-size rounding is applied conservatively to TP/SL levels, but other exchange-specific algo-order price rules may differ.",
         ],
         "sizing_model": {
             "instrument_specs_source": "OKX public SWAP instrument and isolated position-tier metadata when available; ct_val fallback is 1.0 and missing lot/min-size constraints are not enforced.",
-            "margin_mode": "isolated",
+            "margin_mode": getattr(config, "margin_mode", "isolated"),
             "leverage_source": "configured guardrail max_leverage capped by the selected OKX tier maxLever",
-            "initial_margin_source": "max(tier IMR, reciprocal effective leverage)",
-            "liquidation_model": "isolated approximation using initial margin, tier MMR, and maintenance deduction; adverse gap fills use candle open",
-            "cross_margin_supported": False,
+            "initial_margin_source": (
+                "cross margin: no per-position reservation; account equity backs all positions"
+                if getattr(config, "margin_mode", "isolated") == "cross"
+                else "max(tier IMR, reciprocal effective leverage)"
+            ),
+            "liquidation_model": (
+                "cross-margin account-level: liquidate all positions when equity <= aggregate maintenance requirement"
+                if getattr(config, "margin_mode", "isolated") == "cross"
+                else "isolated approximation using initial margin, tier MMR, and maintenance deduction; adverse gap fills use candle open"
+            ),
+            "cross_margin_supported": True,
             "allow_concurrent_strategies_per_symbol": getattr(
                 config, "allow_concurrent_strategies_per_symbol", False
             ),
-            "position_capital": "Isolated initial margin uses the selected tier IMR or reciprocal leverage floor; open positions reserve initial margin from portfolio free margin.",
+            "position_capital": (
+                "Cross margin shares account equity across positions; new entries are capped by equity * leverage minus deployed notional."
+                if getattr(config, "margin_mode", "isolated") == "cross"
+                else "Isolated initial margin uses the selected tier IMR or reciprocal leverage floor; open positions reserve initial margin from portfolio free margin."
+            ),
         },
         "enabled_gates_with_unavailable_inputs": enabled_gates,
     }

@@ -138,3 +138,37 @@ async def test_funding_history_records_are_paginated_and_range_filtered(monkeypa
     assert len(calls) == 2
     assert calls[0][1]["after"] == "350"
     assert calls[1][1]["after"] == "200"
+
+
+@pytest.mark.asyncio
+async def test_trade_history_records_are_paginated_and_range_filtered(monkeypatch) -> None:
+    import app.services.okx_metrics as module
+
+    pages = [
+        [
+            {"ts": "300", "px": "100.5", "sz": "2", "side": "buy"},
+            {"ts": "200", "px": "100.0", "sz": "1", "side": "sell"},
+        ],
+        [
+            {"ts": "200", "px": "100.0", "sz": "1", "side": "sell"},
+            {"ts": "100", "px": "99.5", "sz": "3", "side": "buy"},
+        ],
+    ]
+    calls = []
+
+    async def fake_get(path, params):
+        calls.append((path, params))
+        return pages.pop(0)
+
+    monkeypatch.setattr(module, "_get", fake_get)
+
+    result = await module.fetch_trade_history_records("BTC-USDT-SWAP", 150, 350)
+
+    assert result == [
+        {"ts": 200, "px": 100.0, "sz": 1.0, "side": "sell"},
+        {"ts": 300, "px": 100.5, "sz": 2.0, "side": "buy"},
+    ]
+    assert len(calls) == 2
+    assert calls[0][0] == "/api/v5/market/history-trades"
+    assert calls[0][1]["after"] == "350"
+    assert calls[1][1]["after"] == "200"

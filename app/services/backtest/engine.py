@@ -41,6 +41,7 @@ from app.services.backtest.models import (
 )
 from app.services.backtest.simulator import Simulator
 from app.services.backtest.snapshot_builder import SnapshotBuilder
+from app.services.backtest.spread import estimate_spread_series, roll_spread_bps
 from app.services.launcher_tp_sl import LauncherTpSl, resolve_launcher_tp_sl
 from app.services.strategies import Strategy, StrategyHelpers
 from app.services.strategies.liquidity_sweep import LiquiditySweepStrategy
@@ -100,9 +101,9 @@ class BacktestEngine:
     """
 
     def __init__(self, config: BacktestConfig) -> None:
-        if config.margin_mode != "isolated":
+        if config.margin_mode not in ("isolated", "cross"):
             raise ValueError(
-                "Backtest currently supports isolated margin only; cross-margin liquidation is not modeled."
+                f"Unsupported margin_mode '{config.margin_mode}'; use 'isolated' or 'cross'."
             )
         self._config = config
         self._fetcher = HistoricalDataFetcher()
@@ -154,6 +155,7 @@ class BacktestEngine:
             strategy_config=_sim_cfg,
             timeframe_seconds=_timeframe_seconds,
             cost_model=self._cost_model,
+            margin_mode=config.margin_mode,
         )
         # Build the list of strategy instances to evaluate.
         self._strategies: list[Strategy] = [
@@ -313,6 +315,29 @@ class BacktestEngine:
                     if funding_provenance:
                         data_provenance.append(dict(funding_provenance))
                 self._cost_model.historical_funding_rates = historical_rates
+
+            if self._config.slippage_mode == "tape_spread":
+                spread_series: dict[str, list[dict[str, float | int]]] = {}
+                for symbol in self._config.symbols:
+                    candles = symbol_candles.get(symbol) or []
+                    if self._config.spread_estimator == "roll":
+                        fetch_tape = getattr(self._fetcher, "fetch_trade_tape", None)
+                        tape = (
+                            await fetch_tape(symbol, self._config.start_ts, self._config.end_ts)
+                            if fetch_tape is not None else []
+                        )
+                        tape_provenance = getattr(self._fetcher, "last_tape_provenance", None)
+                        if tape_provenance:
+                            data_provenance.append(dict(tape_provenance))
+                        series = _spread_series_from_tape(tape, self._config.spread_window)
+                    else:
+                        series = estimate_spread_series(
+                            candles,
+                            method="corwin_schultz",
+                            window=self._config.spread_window,
+                        )
+                    spread_series[symbol] = series
+                self._cost_model.spread_series = spread_series
 
             fetch_instrument_specs = getattr(self._fetcher, "fetch_instrument_specs", None)
             instrument_specs = (
@@ -815,6 +840,29 @@ def _extract_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _spread_series_from_tape(
+    tape: list[dict[str, Any]],
+    window: int,
+) -> list[dict[str, float | int]]:
+    """Build a rolling Roll spread series from a trade tape.
+
+    Groups trades into ``window``-sized chunks and estimates the spread from
+    each chunk's prices, timestamped at the chunk's last trade.  Returns an
+    empty list when the tape is too short.
+    """
+    if len(tape) < 3 or window < 2:
+        return []
+    series: list[dict[str, float | int]] = []
+    for i in range(window, len(tape) + 1):
+        chunk = tape[i - window:i]
+        prices = [float(row["px"]) for row in chunk if row.get("px")]
+        spread = roll_spread_bps(prices)
+        if spread is None:
+            continue
+        series.append({"ts": int(chunk[-1]["ts"]), "spread_bps": round(spread, 6)})
+    return series
 
 
 def _candles_per_year(timeframe: str) -> int:

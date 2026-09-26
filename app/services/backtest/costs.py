@@ -14,7 +14,8 @@ Config knobs:
   * ``taker_fee_bps``  — fee per taker fill, in basis points (default 5 = 0.05%).
   * ``maker_fee_bps``  — fee per maker fill (default 0; launcher uses market/taker).
     * ``slippage_bps``   — base adverse price move on entry/exit (default 0).
-    * ``slippage_mode``  — fixed bps or a prior-OHLCV range/turnover proxy.
+    * ``slippage_mode``  — fixed bps, a prior-OHLCV range/turnover proxy, or a
+      trade-tape/OHLCV spread estimate (``tape_spread``).
     * ``slippage_stress_multiplier`` — scales the *estimated* slippage (both
       modes) for adverse stress tests; 1.0 = unmodified estimate.
     * ``liquidation_fee_bps`` — extra fee charged on a liquidation fill
@@ -41,6 +42,9 @@ class CostModel:
     candle_range_slippage_fraction: float = 0.1
     max_liquidity_slippage_bps: float = 500.0
     liquidation_fee_bps: float = 0.0
+    # Trade-tape / OHLCV spread estimates per symbol: [{ts, spread_bps}, ...].
+    # Used when ``slippage_mode == "tape_spread"``.
+    spread_series: dict[str, list[dict[str, float | int]]] | None = None
     funding_rate_pct: float = 0.0
     funding_interval_ms: int = 8 * 60 * 60 * 1000
     funding_mode: str = "historical"

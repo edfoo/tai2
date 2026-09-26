@@ -231,9 +231,72 @@ async def fetch_funding_history_records(
 
 
 # ---------------------------------------------------------------------------
-# Z-score helpers  (pure math – no I/O)
+# Trade Tape  (for spread estimation)
 # ---------------------------------------------------------------------------
 
+
+async def fetch_trade_history_records(
+    symbol: str,
+    start_ts: int,
+    end_ts: int,
+    *,
+    limit: int = 100,
+    max_pages: int = 200,
+) -> list[dict[str, float | int | str]]:
+    """Return timestamped public trade-tape records in ``[start_ts, end_ts]``.
+
+    OKX ``/api/v5/market/history-trades`` returns recent public trades
+    (newest first, up to 100 per page, ~3 months of history).  Each record is
+    ``{"ts": int, "px": float, "sz": float, "side": "buy"|"sell"}``.  ``after``
+    is advanced to the oldest timestamp from each page to walk backward.
+
+    The tape is used to estimate the effective bid-ask spread (Corwin-Schultz
+    / Roll), which is a *spread* estimate — not order-book depth or impact.
+    """
+    if end_ts <= start_ts:
+        return []
+    cursor = int(end_ts)
+    records: dict[int, dict[str, float | int | str]] = {}
+    for _ in range(max(1, max_pages)):
+        try:
+            raw = await _get(
+                "/api/v5/market/history-trades",
+                {"instId": symbol, "after": str(cursor), "limit": str(min(max(limit, 1), 100))},
+            )
+        except Exception as exc:
+            _log.warning("Trade-tape fetch failed for %s: %s", symbol, exc)
+            raise
+        if not raw:
+            break
+        timestamps: list[int] = []
+        for row in raw:
+            try:
+                timestamp = int(row["ts"])
+                price = float(row["px"])
+                size = float(row.get("sz") or 0.0)
+            except (KeyError, TypeError, ValueError):
+                continue
+            timestamps.append(timestamp)
+            if start_ts <= timestamp <= end_ts:
+                # Keep the last-seen record per timestamp (dedupe collisions).
+                records[timestamp] = {
+                    "ts": timestamp,
+                    "px": price,
+                    "sz": size,
+                    "side": str(row.get("side") or ""),
+                }
+        if not timestamps:
+            break
+        oldest = min(timestamps)
+        if oldest <= start_ts or oldest >= cursor:
+            break
+        cursor = oldest
+    return [records[ts] for ts in sorted(records)]
+
+
+# ---------------------------------------------------------------------------
+# Z-score helpers  (pure math – no I/O)
+# ---------------------------------------------------------------------------
 
 def zscore_latest(series: list[float]) -> float | None:
     """Return the z-score of the *last* element relative to the full series.
