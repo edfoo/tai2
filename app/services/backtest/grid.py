@@ -325,6 +325,7 @@ class BacktestGrid:
                     aggregate.metrics if aggregate is not None else None,
                     fold_metrics=fold_metrics,
                     per_symbol=aggregate.per_symbol if aggregate is not None else None,
+                    per_strategy=aggregate.per_strategy if aggregate is not None else None,
                 )
                 result.runs.append(GridRunResult(
                     params=jobs[idx][1],
@@ -403,6 +404,7 @@ class BacktestGrid:
                         evidence=build_run_evidence(
                             holdout_metrics,
                             per_symbol=holdout_result.per_symbol if holdout_result else None,
+                            per_strategy=holdout_result.per_strategy if holdout_result else None,
                         ),
                         fold_metrics=[{
                             "fold": 1,

@@ -45,6 +45,7 @@ from app.services.backtest.persistence import (  # noqa: E402
     read_comparison_csv,
     result_summary_row,
 )
+from app.services.backtest.models import GridResult  # noqa: E402
 
 OUTPUT_DIR = DEFAULT_OUTPUT_DIR
 CSV_PATH = OUTPUT_DIR / "comparison.csv"
@@ -85,6 +86,12 @@ def load_from_json(results_dir: Path = OUTPUT_DIR) -> list[dict[str, Any]]:
             continue
         if result.error:
             continue
+        if isinstance(result, GridResult):
+            row = _grid_summary_row(result, run_id=p.stem)
+            if row is None:
+                continue
+            rows.append(row)
+            continue
         row = result_summary_row(result, run_id=p.stem, ltf=result.config.timeframe)
         # Attach unflattened metrics + per-strategy so the human table can
         # show breakdowns in JSON mode.
@@ -92,6 +99,40 @@ def load_from_json(results_dir: Path = OUTPUT_DIR) -> list[dict[str, Any]]:
         row["per_strategy"] = result.per_strategy or {}
         rows.append(row)
     return rows
+
+
+def _grid_summary_row(result: GridResult, *, run_id: str) -> dict[str, Any] | None:
+    """Summarise a grid result as one row (best eligible run) for the table.
+
+    Attaches the best run's metrics, per-strategy breakdown, and a compact
+    strategy-attribution block so the parser can show which strategy produced
+    the ranked result.
+    """
+    best_run = next(
+        (
+            run for run in (result.ranked or [])
+            if run.rank_score is not None and not run.below_min_trades and run.result is not None
+        ),
+        None,
+    )
+    if best_run is None or best_run.result is None:
+        return None
+    best = best_run.result
+    row = result_summary_row(best, run_id=run_id, ltf=best.config.timeframe)
+    row["is_grid"] = True
+    row["metrics"] = best.metrics or {}
+    row["per_strategy"] = best.per_strategy or {}
+    row["best_params"] = dict(best_run.params)
+    strategy_summary = (best_run.evidence or {}).get("strategy_summary") or {}
+    row["strategy_attribution"] = strategy_summary
+    tuned = sorted({
+        key.split(".")[1]
+        for key in (best_run.params or {})
+        if key.startswith("strategies.") and key.count(".") >= 2
+    })
+    row["tuned_strategies"] = tuned
+    return row
+
 
 
 def selected_rows(source: str, ltf_filter: str | None) -> list[dict[str, Any]]:
@@ -173,6 +214,30 @@ def render_table(rows: list[dict[str, Any]]) -> None:
                 f"{_fmt(stat.get('net_profit')):>10}"
             )
 
+    # Strategy attribution for a grid run's best combination, if present.
+    if rows and rows[0].get("is_grid"):
+        attribution = rows[0].get("strategy_attribution") or {}
+        strategies = attribution.get("strategies") or []
+        if strategies:
+            tuned = rows[0].get("tuned_strategies") or []
+            print("\n── Strategy attribution (grid best run) ──")
+            if tuned:
+                print(f"  Tuned: {', '.join(tuned)}")
+            print(
+                f"  Dominant: {attribution.get('dominant_strategy') or '—'} "
+                f"(max share {_fmt(attribution.get('max_strategy_share'))})"
+            )
+            print("  " + "  ".join(["Strategy", "Trades", "Share", "NetWin%", "NetPF", "NetPnL"]))
+            for stat in strategies:
+                share = stat.get("share")
+                print(
+                    f"  {str(stat.get('strategy')):<12}{_fmt(stat.get('trades')):>8}"
+                    f"{(_fmt(share) if share is not None else '—'):>8}"
+                    f"{_fmt(stat.get('net_win_rate_after_cost_pct')):>9}"
+                    f"{_fmt(stat.get('net_profit_factor_after_cost')):>7}"
+                    f"{_fmt(stat.get('net_profit_after_cost')):>10}"
+                )
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(
@@ -218,6 +283,9 @@ def main() -> int:
                 "htf": r.get("htf"),
                 "metrics": r.get("metrics", {}),
                 "per_strategy": r.get("per_strategy", {}),
+                "is_grid": r.get("is_grid", False),
+                "best_params": r.get("best_params", {}),
+                "strategy_attribution": r.get("strategy_attribution", {}),
             }
         print(json.dumps(out, indent=2, default=str))
         return 0

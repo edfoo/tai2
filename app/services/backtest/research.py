@@ -296,6 +296,10 @@ def build_research_bundle(
             trades=best_result.get("trades"),
             total_net_profit=_num(best_metrics.get("net_profit_after_cost")),
         )
+        best_strategy_summary = ((best or {}).get("evidence") or {}).get(
+            "strategy_summary"
+        ) or {}
+        strategy_scope = analysis.get("strategy_scope") or {}
 
         bundle["sweep"] = {
             "rank_by": rank_by,
@@ -316,6 +320,8 @@ def build_research_bundle(
             "multiple_comparison": analysis.get("multiple_comparison") or {},
             "fold_consistency": fold,
             "concentration": conc,
+            "strategy_scope": strategy_scope,
+            "strategy_attribution": best_strategy_summary,
         }
 
         # ── Screening reasons ─────────────────────────────────────────
@@ -400,6 +406,8 @@ def build_research_bundle(
             concentration=sweep.get("concentration"),
             stress_rows=stress_rows,
             holdout_metrics=(bundle.get("holdout") or {}).get("metrics"),
+            strategy_scope=sweep.get("strategy_scope"),
+            best_strategy_summary=sweep.get("strategy_attribution"),
             min_fold_consistency=min_fold_consistency,
         )
     else:
@@ -491,6 +499,18 @@ def render_bundle_markdown(bundle: dict[str, Any]) -> str:
             f"- Concentration: max symbol share {conc.get('max_symbol_share')}, "
             f"max trade share {conc.get('max_trade_share')}"
         )
+        scope = sweep.get("strategy_scope") or {}
+        if scope.get("tuned"):
+            lines.append(f"- Tuned strategy/strategies: {', '.join(scope['tuned'])}")
+        attributed = sweep.get("strategy_attribution") or {}
+        if attributed.get("strategies"):
+            lines.append(
+                "- Strategy attribution (best run): "
+                + ", ".join(
+                    f"{row.get('strategy')} {row.get('share') if row.get('share') is not None else '—'}"
+                    for row in attributed["strategies"]
+                )
+            )
         lines.append("")
         lines.append("### Best parameters")
         lines.append("")

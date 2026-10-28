@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from app.services.backtest.sweep_analysis import DEFAULT_RANK_BY, analyze_sweep
+from app.services.backtest.sweep_analysis import (
+    DEFAULT_RANK_BY,
+    analyze_sweep,
+    strategy_of_key,
+)
 
 
 def test_default_sweep_ranking_uses_net_return_after_costs() -> None:
@@ -120,3 +124,36 @@ def test_robustness_score_and_multiple_comparison() -> None:
     assert score["plateau_fraction"] > 0
     assert result["multiple_comparison"]["combinations_tested"] == 9
     assert 0.0 < result["multiple_comparison"]["deflation_factor"] <= 1.0
+
+
+def test_strategy_of_key_parses_owner() -> None:
+    assert strategy_of_key("strategies.mean_reversion.rsi_oversold") == "mean_reversion"
+    assert strategy_of_key("strategies.spike_continuation.max_adx") == "spike_continuation"
+    assert strategy_of_key("tp_pct") is None
+    assert strategy_of_key("strategies") is None
+    assert strategy_of_key("strategies.mean_reversion") is None
+
+
+def test_strategy_scope_splits_tuned_vs_enabled() -> None:
+    entries = [
+        {"params": {"strategies.mean_reversion.rsi_oversold": v},
+         "metrics": {"total_trades": 5, "net_profit_after_cost_pct": 1.0}}
+        for v in (25, 30)
+    ]
+    result = analyze_sweep(entries, min_trades=1)
+    scope = result["strategy_scope"]
+    assert scope["tuned"] == ["mean_reversion"]
+    assert scope["params_by_strategy"] == {"mean_reversion": ["rsi_oversold"]}
+    # Sensitivity entries carry the owning strategy too.
+    assert result["sensitivity"][0]["strategy"] == "mean_reversion"
+
+
+def test_strategy_scope_mixed_strategies() -> None:
+    entries = [
+        {"params": {"strategies.mean_reversion.rsi_oversold": 30,
+                    "strategies.spike_continuation.volume_rsi_min": 60},
+         "metrics": {"total_trades": 5, "net_profit_after_cost_pct": 1.0}},
+    ]
+    result = analyze_sweep(entries, min_trades=1)
+    assert result["strategy_scope"]["tuned"] == ["mean_reversion", "spike_continuation"]
+    assert result["marginal_sensitivity"][0]["strategy"] is not None

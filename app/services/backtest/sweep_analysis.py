@@ -64,6 +64,45 @@ def _avg(vals: Iterable[float]) -> float:
     return sum(vals) / len(vals) if vals else 0.0
 
 
+def strategy_of_key(key: str) -> str | None:
+    """Return the owning strategy name for a swept parameter key.
+
+    Strategy parameters use the dotted form ``strategies.<name>.<param>``, so
+    the owner is the second segment.  Launcher-level keys (e.g. ``tp_pct``)
+    and any malformed key return ``None`` — attribution is optional, never
+    fabricated.
+    """
+    parts = str(key).split(".")
+    if len(parts) >= 3 and parts[0] == "strategies":
+        return parts[1] or None
+    return None
+
+
+def _strategy_scope(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Describe which strategies were *tuned* vs merely enabled in a sweep.
+
+    ``tuned`` is derived from the swept parameter keys (a strategy is "tuned"
+    iff at least one of its parameters was varied).  ``enabled`` cannot be
+    inferred from the entries alone, so callers may enrich it; here it defaults
+    to the tuned set plus any strategy already named by the caller-supplied
+    entry metadata.
+    """
+    params_by_strategy: dict[str, list[str]] = {}
+    for row in rows:
+        for key in (row.get("params") or {}):
+            owner = strategy_of_key(key)
+            if owner:
+                params_by_strategy.setdefault(owner, [])
+                short = key.split(".")[-1]
+                if short not in params_by_strategy[owner]:
+                    params_by_strategy[owner].append(short)
+    tuned = sorted(params_by_strategy)
+    return {
+        "tuned": tuned,
+        "params_by_strategy": {k: sorted(v) for k, v in params_by_strategy.items()},
+    }
+
+
 def analyze_sweep(
     entries: Iterable[dict[str, Any]],
     *,
@@ -183,6 +222,7 @@ def analyze_sweep(
         value_rows.sort(key=lambda x: x["avg_rank"], reverse=True)
         sensitivity.append({
             "key": key,
+            "strategy": strategy_of_key(key),
             "best_value": value_rows[0]["value"] if value_rows else None,
             "values": value_rows,
         })
@@ -193,6 +233,7 @@ def analyze_sweep(
             "params": best["params"],
             "metrics": {k: best["metrics"].get(k) for k in _BEST_METRIC_FIELDS},
         },
+        "strategy_scope": _strategy_scope(rows),
         "robustness": robustness,
         "sensitivity": sensitivity,
         "marginal_sensitivity": marginal_sensitivity(rows, best, rank_by=rank_by),
@@ -261,6 +302,7 @@ def marginal_sensitivity(
         edge = best_point["value"] in (unique_curve[0]["value"], unique_curve[-1]["value"])
         results.append({
             "key": key,
+            "strategy": strategy_of_key(key),
             "curve": unique_curve,
             "best_value": best_point["value"],
             "best_score": round(best_point["score"], 6),
@@ -335,6 +377,8 @@ def detect_interactions(
             interactions.append({
                 "a": a,
                 "b": b,
+                "a_strategy": strategy_of_key(a),
+                "b_strategy": strategy_of_key(b),
                 "strength": strength,
                 "max_residual": round(max_residual, 6),
             })
@@ -386,6 +430,7 @@ def parameter_plateaus(
         in_plateau = [point["value"] for point in unique if point["score"] >= threshold]
         plateaus.append({
             "key": key,
+            "strategy": strategy_of_key(key),
             "best_value": max(unique, key=lambda point: point["score"])["value"],
             "plateau_values": in_plateau,
             "plateau_size": len(in_plateau),

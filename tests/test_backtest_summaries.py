@@ -7,6 +7,7 @@ from app.services.backtest.summaries import (
     build_run_evidence,
     fold_summary,
     run_summary,
+    strategy_summary,
     symbol_summary,
 )
 
@@ -78,6 +79,44 @@ def test_build_run_evidence_shape() -> None:
         fold_metrics=[{"status": "completed", "metrics": {"net_profit_after_cost": 3.0}}],
         per_symbol={"BTC-USDT-SWAP": {"net_profit_after_cost": 3.0, "trades": 5}},
     )
-    assert set(evidence) == {"summary", "fold_summary", "symbol_summary", "benchmark_delta"}
+    assert set(evidence) == {
+        "summary", "fold_summary", "symbol_summary", "strategy_summary", "benchmark_delta",
+    }
     assert evidence["summary"]["total_trades"] == 5
     assert evidence["fold_summary"]["completed_folds"] == 1
+
+
+def test_strategy_summary_shares_and_telemetry() -> None:
+    summary = strategy_summary({
+        "mean_reversion": {
+            "trades": 40, "net_profit_after_cost": 30.0,
+            "net_win_rate_after_cost_pct": 58.0,
+            "net_profit_factor_after_cost": 1.9,
+            "net_expectancy_after_cost": 0.75,
+            "avg_r_multiple": 0.4, "avg_candles_held": 6.0,
+            "exit_reasons": {"tp": 20, "sl": 18, "time_stop": 2},
+        },
+        "spike_continuation": {
+            "trades": 10, "net_profit_after_cost": 10.0,
+            "net_win_rate_after_cost_pct": 50.0,
+        },
+    })
+    assert summary["total_net_profit_after_cost"] == 40.0
+    assert summary["n_strategies"] == 2
+    assert summary["max_strategy_share"] == 0.75
+    assert summary["dominant_strategy"] == "mean_reversion"
+    assert summary["strategies"][0]["strategy"] == "mean_reversion"
+    assert summary["strategies"][0]["exit_reasons"]["tp"] == 20
+
+
+def test_strategy_summary_no_shares_when_unprofitable() -> None:
+    summary = strategy_summary({"mean_reversion": {"net_profit_after_cost": -5.0, "trades": 3}})
+    assert summary["max_strategy_share"] is None
+    assert summary["n_strategies"] == 1
+
+
+def test_strategy_summary_empty() -> None:
+    summary = strategy_summary(None)
+    assert summary["strategies"] == []
+    assert summary["n_strategies"] == 0
+    assert summary["dominant_strategy"] is None

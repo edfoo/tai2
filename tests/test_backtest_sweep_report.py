@@ -24,6 +24,20 @@ def _grid_payload() -> dict:
                 "summary": {"total_trades": 50, "net_profit_after_cost_pct": score},
                 "fold_summary": {"sign_consistency": 0.75, "completed_folds": 4},
                 "symbol_summary": {"max_symbol_share": 0.6},
+                "strategy_summary": {
+                    "n_strategies": 2,
+                    "max_strategy_share": 0.62,
+                    "dominant_strategy": "mean_reversion",
+                    "strategies": [
+                        {"strategy": "mean_reversion", "trades": 31,
+                         "net_profit_after_cost": score * 0.62, "share": 0.62,
+                         "net_win_rate_after_cost_pct": 58.0,
+                         "net_profit_factor_after_cost": 1.8,
+                         "net_expectancy_after_cost": 0.3, "avg_r_multiple": 0.4},
+                        {"strategy": "spike_continuation", "trades": 19,
+                         "net_profit_after_cost": score * 0.38, "share": 0.38},
+                    ],
+                },
                 "benchmark_delta": {"beat_benchmark": True},
             },
             "result": {
@@ -100,3 +114,24 @@ def test_report_handles_missing_baseline() -> None:
     report = build_sweep_report(grid=_grid_payload())
     assert report["baseline"]["net_profit_after_cost_pct"] == 0.0
     assert report["recommendation"] is not None
+
+
+def test_report_carries_strategy_attribution() -> None:
+    report = build_sweep_report(
+        grid=_grid_payload(),
+        workflow={"strategy": "mean_reversion", "symbols": ["BTC-USDT-SWAP"]},
+    )
+    breakdown = report["best_run_strategy_breakdown"]
+    assert breakdown["dominant_strategy"] == "mean_reversion"
+    assert breakdown["max_strategy_share"] == 0.62
+    assert len(breakdown["strategies"]) == 2
+    # Top run rows carry the per-run strategy share.
+    top = report["top_runs"][0]
+    assert top["dominant_strategy"] == "mean_reversion"
+    assert top["max_strategy_share"] == 0.62
+    assert top["strategy_breakdown"]["n_strategies"] == 2
+    # Markdown surfaces attribution and disambiguates param owners.
+    markdown = render_sweep_markdown(report)
+    assert "## Strategy attribution (best run)" in markdown
+    assert "mean_reversion" in markdown
+    assert "mean_reversion.rsi_oversold" in markdown

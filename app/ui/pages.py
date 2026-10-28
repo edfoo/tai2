@@ -10030,6 +10030,26 @@ def register_pages(app: FastAPI) -> None:
                         f"ranked by {rank_by} (min {result.config.min_trades} trades); full-window scoring"
                     ).classes("text-xs text-slate-500 mb-2")
 
+                    # ── Strategy scope (enabled vs tuned) ───────────────
+                    _enabled_strategies = list(result.config.base_config.strategy_names)
+                    _tuned_strategies = sorted({
+                        key.split(".")[1]
+                        for run in result.runs
+                        for key in (run.params or {})
+                        if key.startswith("strategies.") and key.count(".") >= 2
+                    })
+                    if _enabled_strategies or _tuned_strategies:
+                        with ui.row().classes("items-center gap-2 mb-2 flex-wrap"):
+                            ui.label("Enabled:").classes("text-xs font-semibold text-slate-600")
+                            ui.label(", ".join(_enabled_strategies) or "—").classes("text-xs font-mono")
+                            ui.label("Tuned:").classes("text-xs font-semibold text-slate-600")
+                            ui.label(", ".join(_tuned_strategies) or "—").classes("text-xs font-mono")
+                            if len(_enabled_strategies) > 1:
+                                ui.badge(
+                                    "multi-strategy: metrics are blended",
+                                    color="amber",
+                                ).props("outline")
+
                     def _copy_sweep_report() -> None:
                         """Build the compact sweep report and copy it to the clipboard."""
                         try:
@@ -10135,6 +10155,7 @@ def register_pages(app: FastAPI) -> None:
                         }
                         columns.extend([
                             {"name": "trades", "label": "Trades", "field": "trades", "align": "right", "sortable": True},
+                            {"name": "strategy_mix", "label": "Strategy mix (net share)", "field": "strategy_mix", "align": "left", "sortable": True},
                             {"name": "win_rate", "label": "Net Win %", "field": "win_rate", "align": "right", "sortable": True},
                             {"name": "net_profit", "label": "After-slippage PnL", "field": "net_profit", "align": "right", "sortable": True},
                             {"name": "net_after_cost", "label": "Net after costs", "field": "net_after_cost", "align": "right", "sortable": True},
@@ -10151,6 +10172,15 @@ def register_pages(app: FastAPI) -> None:
                             r: dict[str, Any] = {}
                             for pk in param_keys:
                                 r[pk] = run.params.get(pk, "")
+                            _strategy_rows = (
+                                ((run.evidence or {}).get("strategy_summary") or {}).get("strategies") or []
+                            )
+                            _mix_parts = []
+                            for _s in _strategy_rows:
+                                _share = _s.get("share")
+                                _share_txt = f" {_share:.0%}" if isinstance(_share, (int, float)) else ""
+                                _mix_parts.append(f"{_s.get('strategy')}{_share_txt}")
+                            r["strategy_mix"] = " · ".join(_mix_parts) if _mix_parts else "—"
                             if run.result is not None and not run.result.is_error:
                                 m = run.result.metrics
                                 r["trades"] = m.get("total_trades", 0)
@@ -10193,6 +10223,49 @@ def register_pages(app: FastAPI) -> None:
                         ui.label("† = below min expectancy t-stat (not ranked)").classes("text-xs text-slate-400")
                     else:
                         ui.label("No valid results to rank.").classes("text-sm text-slate-500")
+
+                    # ── Trade drilldown for retained top-N runs ─────────────
+                    # Only the top-N runs keep full trade lists (payload bound);
+                    # reuse the single-run renderer to drill per-strategy →
+                    # per-symbol → per-trade.
+                    _detailed_runs = [
+                        run for run in result.ranked
+                        if getattr(run, "detail_retained", False)
+                        and run.result is not None
+                        and getattr(run.result, "trades", None)
+                    ]
+                    if _detailed_runs:
+                        with ui.expansion(
+                            f"Trade drilldown — {len(_detailed_runs)} retained run(s) "
+                            f"(top {result.config.top_n_detail})",
+                            icon="account_tree",
+                        ).classes("w-full mb-2"):
+                            ui.label(
+                                "Only the top-N ranked runs retain full trade lists; "
+                                "all other runs keep their evidence summary only."
+                            ).classes("text-xs text-slate-500 mb-1")
+                            for run in _detailed_runs:
+                                _run_label = ", ".join(
+                                    (
+                                        f"{k.split('.')[-2]}.{k.split('.')[-1]}={v}"
+                                        if k.startswith("strategies.") and k.count(".") >= 2
+                                        else f"{k.split('.')[-1]}={v}"
+                                    )
+                                    for k, v in run.params.items()
+                                )
+                                ui.label(_run_label or "(no params)").classes(
+                                    "text-sm font-mono mt-2 text-slate-700"
+                                )
+                                _by_strategy: dict[str, list[Any]] = {}
+                                for _t in run.result.trades:
+                                    _by_strategy.setdefault(
+                                        _t.strategy_name or "unknown", []
+                                    ).append(_t)
+                                for _name, _strat_trades in sorted(
+                                    _by_strategy.items(),
+                                    key=lambda kv: -sum(t.net_pnl for t in kv[1]),
+                                ):
+                                    _render_strategy_card(_name, _strat_trades)
 
                     _render_sweep_charts(result)
 
@@ -10302,8 +10375,10 @@ def register_pages(app: FastAPI) -> None:
                     ui.badge(f"confidence: {confidence}", color="primary")
                 if changes:
                     for change in changes:
+                        _owner = change.get("strategy")
+                        _param_txt = f"{_owner}.{change['param']}" if _owner else change["param"]
                         ui.label(
-                            f"{change['param']}: {change['from']} → {change['to']}  "
+                            f"{_param_txt}: {change['from']} → {change['to']}  "
                             f"({change['rationale']})"
                         ).classes("text-sm font-mono")
                 else:
@@ -10435,6 +10510,69 @@ def register_pages(app: FastAPI) -> None:
                     ui.label(robustness.get("note", "")).classes(
                         "text-xs text-amber-700 mt-1" if robustness.get("single_point_optimum")
                         else "text-xs text-emerald-700 mt-1")
+
+            # ── Strategy attribution for the best combination ──────────
+            _best_params = (best or {}).get("params") or {}
+            if _best_params:
+                _best_run = next(
+                    (
+                        run for run in result.runs
+                        if run.params == _best_params and run.result is not None
+                    ),
+                    None,
+                )
+                _strategy_summary = (
+                    (_best_run.evidence or {}).get("strategy_summary")
+                    if _best_run is not None else None
+                ) or {}
+                _strategy_rows = _strategy_summary.get("strategies") or []
+                if _strategy_rows:
+                    scope = analysis.get("strategy_scope") or {}
+                    with ui.card().classes("w-full rounded-lg border border-slate-200 mb-2"):
+                        with ui.row().classes("items-center gap-2"):
+                            ui.label("Strategy attribution (best combination)").classes(
+                                "text-base font-semibold"
+                            )
+                            if len(scope.get("tuned") or []) > 1:
+                                ui.badge("multi-strategy blend", color="amber").props("outline")
+                        ui.label(
+                            f"Tuned: {', '.join(scope.get('tuned') or []) or '—'} · "
+                            f"Dominant: {_strategy_summary.get('dominant_strategy') or '—'}"
+                        ).classes("text-xs text-slate-500 mt-1 mb-1")
+                        _attr_columns = [
+                            {"name": "strategy", "label": "Strategy", "field": "strategy", "align": "left", "sortable": True},
+                            {"name": "trades", "label": "Trades", "field": "trades", "align": "right", "sortable": True},
+                            {"name": "net", "label": "Net after costs", "field": "net", "align": "right", "sortable": True},
+                            {"name": "share", "label": "Share", "field": "share", "align": "right", "sortable": True},
+                            {"name": "win_rate", "label": "Net Win %", "field": "win_rate", "align": "right", "sortable": True},
+                            {"name": "pf", "label": "Net PF", "field": "pf", "align": "right", "sortable": True},
+                            {"name": "exp", "label": "Expectancy", "field": "exp", "align": "right", "sortable": True},
+                            {"name": "avg_r", "label": "Avg R", "field": "avg_r", "align": "right", "sortable": True},
+                            {"name": "exits", "label": "Exit mix", "field": "exits", "align": "left"},
+                        ]
+                        _attr_rows = []
+                        for _s in _strategy_rows:
+                            _share = _s.get("share")
+                            _exits = _s.get("exit_reasons") or {}
+                            _attr_rows.append({
+                                "strategy": _s.get("strategy"),
+                                "trades": _s.get("trades"),
+                                "net": _fmt(_s.get("net_profit_after_cost")),
+                                "share": f"{_share:.0%}" if isinstance(_share, (int, float)) else "—",
+                                "win_rate": f"{_fmt(_s.get('net_win_rate_after_cost_pct'), '.1f')}%",
+                                "pf": _fmt(_s.get("net_profit_factor_after_cost")),
+                                "exp": _fmt(_s.get("net_expectancy_after_cost"), ".3f"),
+                                "avg_r": _fmt(_s.get("avg_r_multiple"), ".2f"),
+                                "exits": ", ".join(f"{k}:{v}" for k, v in _exits.items()) or "—",
+                            })
+                        with ui.table(columns=_attr_columns, rows=_attr_rows).classes("w-full"):
+                            pass
+                        _dom = _strategy_summary.get("dominant_strategy")
+                        if _dom and _dom not in (scope.get("tuned") or []):
+                            ui.label(
+                                f"⚠ Net is dominated by '{_dom}', which this sweep is not tuning — "
+                                "the ranked metric is a blend, not the tuned strategy's edge."
+                            ).classes("text-xs text-amber-700 mt-1")
 
             sens = analysis.get("sensitivity") or []
             if sens:

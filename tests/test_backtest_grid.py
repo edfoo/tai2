@@ -441,6 +441,11 @@ async def test_grid_builds_evidence_and_retains_top_n_detail(monkeypatch) -> Non
             "buy_and_hold": {"total_return_pct": 5.0, "symbols": ["BTC-USDT-SWAP"]},
         }
         result.per_symbol = {"BTC-USDT-SWAP": {"net_profit_after_cost": float(rsi), "trades": 10}}
+        result.per_strategy = {
+            "mean_reversion": {"net_profit_after_cost": float(rsi) * 0.7, "trades": 7,
+                               "net_win_rate_after_cost_pct": 60.0},
+            "spike_continuation": {"net_profit_after_cost": float(rsi) * 0.3, "trades": 3},
+        }
         result.trades = []
         result.equity_curve = []
         return result
@@ -460,6 +465,11 @@ async def test_grid_builds_evidence_and_retains_top_n_detail(monkeypatch) -> Non
     assert all(run.evidence for run in result.runs)
     assert result.runs[0].evidence["summary"]["total_trades"] == 10
     assert result.runs[0].evidence["benchmark_delta"]["beat_benchmark"] is True
+    # Strategy attribution is present and identifies the dominant strategy.
+    strategy_summary = result.runs[0].evidence["strategy_summary"]
+    assert strategy_summary["n_strategies"] == 2
+    assert strategy_summary["dominant_strategy"] == "mean_reversion"
+    assert strategy_summary["max_strategy_share"] == 0.7
     # Only the top-ranked run retains full detail.
     retained = [r for r in result.runs if r.detail_retained]
     assert len(retained) == 1

@@ -26,7 +26,11 @@ from app.services.backtest.recommendations import (
     build_recommendation,
     render_recommendation_markdown,
 )
-from app.services.backtest.sweep_analysis import DEFAULT_RANK_BY, analyze_sweep
+from app.services.backtest.sweep_analysis import (
+    DEFAULT_RANK_BY,
+    analyze_sweep,
+    strategy_of_key,
+)
 
 SWEEP_REPORT_SCHEMA_VERSION = 1
 
@@ -80,6 +84,7 @@ def _top_runs(grid: dict[str, Any], top_n: int) -> list[dict[str, Any]]:
         metrics = result.get("metrics") or {}
         evidence = run.get("evidence") or {}
         summary = evidence.get("summary") or {}
+        strategy_summary = evidence.get("strategy_summary") or {}
         rows.append({
             "params": run.get("params") or {},
             "rank_score": _finite(run.get("rank_score")),
@@ -96,10 +101,62 @@ def _top_runs(grid: dict[str, Any], top_n: int) -> list[dict[str, Any]]:
             "max_drawdown_pct": _finite(metrics.get("max_drawdown_pct")),
             "fold_consistency": (evidence.get("fold_summary") or {}).get("sign_consistency"),
             "max_symbol_share": (evidence.get("symbol_summary") or {}).get("max_symbol_share"),
+            "max_strategy_share": strategy_summary.get("max_strategy_share"),
+            "dominant_strategy": strategy_summary.get("dominant_strategy"),
+            "strategy_breakdown": {
+                "n_strategies": strategy_summary.get("n_strategies"),
+                "max_strategy_share": strategy_summary.get("max_strategy_share"),
+                "dominant_strategy": strategy_summary.get("dominant_strategy"),
+                "strategies": strategy_summary.get("strategies") or [],
+            },
             "benchmark_delta": evidence.get("benchmark_delta"),
             "summary": summary,
         })
     return rows
+
+
+def _param_label(key: str, value: Any) -> str:
+    """Format a swept parameter as ``strategy.param=value`` when it has an owner.
+
+    Launcher-level keys stay as ``param=value``.  Including the owning strategy
+    prevents ambiguity when several strategies share a parameter name (e.g.
+    ``max_adx`` exists on multiple strategies).
+    """
+    owner = strategy_of_key(key)
+    short = str(key).split(".")[-1]
+    label = f"{owner}.{short}" if owner else short
+    return f"{label}={value}"
+
+
+def _strategy_scope(
+    grid: dict[str, Any],
+    analysis: dict[str, Any],
+    best_strategy_summary: dict[str, Any],
+) -> dict[str, Any]:
+    """Describe which strategies were enabled, tuned, and actually traded.
+
+    * ``enabled`` — the run's configured strategy list (from ``base_config``).
+    * ``tuned`` — strategies that owned at least one swept parameter.
+    * ``traded`` — strategies that produced trades in the best run.
+    * ``dominant`` — the biggest net-PnL contributor in the best run.
+
+    A tuned strategy that is not the dominant one — or an enabled strategy that
+    contributed most of the net — is exactly the attribution ambiguity this
+    report exists to expose.
+    """
+    base_config = (grid.get("config") or {}).get("base_config") or {}
+    enabled = base_config.get("strategy_names") or []
+    scope = analysis.get("strategy_scope") or {}
+    tuned = scope.get("tuned") or []
+    traded = [s.get("strategy") for s in (best_strategy_summary.get("strategies") or [])]
+    return {
+        "enabled": list(enabled),
+        "tuned": list(tuned),
+        "traded": traded,
+        "params_by_strategy": scope.get("params_by_strategy") or {},
+        "dominant_strategy": best_strategy_summary.get("dominant_strategy"),
+        "max_strategy_share": best_strategy_summary.get("max_strategy_share"),
+    }
 
 
 def build_sweep_report(
@@ -135,6 +192,7 @@ def build_sweep_report(
     best_evidence = (best_run or {}).get("evidence") or {}
     fold = best_evidence.get("fold_summary") or {}
     symbol = best_evidence.get("symbol_summary") or {}
+    best_strategy_summary = best_evidence.get("strategy_summary") or {}
 
     recommendation = build_recommendation(
         analysis=analysis,
@@ -147,6 +205,8 @@ def build_sweep_report(
         },
         stress_rows=stress_runs or [],
         holdout_metrics=holdout_metrics or None,
+        strategy_scope=_strategy_scope(grid, analysis, best_strategy_summary),
+        best_strategy_summary=best_strategy_summary,
     )
 
     benchmark = None
@@ -175,6 +235,13 @@ def build_sweep_report(
             "t_stat": _finite(baseline_metrics.get("net_expectancy_t_stat")),
         },
         "benchmark": benchmark,
+        "strategy_scope": _strategy_scope(grid, analysis, best_strategy_summary),
+        "best_run_strategy_breakdown": {
+            "n_strategies": best_strategy_summary.get("n_strategies"),
+            "max_strategy_share": best_strategy_summary.get("max_strategy_share"),
+            "dominant_strategy": best_strategy_summary.get("dominant_strategy"),
+            "strategies": best_strategy_summary.get("strategies") or [],
+        },
         "top_runs": _top_runs(grid, top_n),
         "marginal_sensitivity": analysis.get("marginal_sensitivity") or [],
         "interactions": analysis.get("interactions") or [],
@@ -224,6 +291,16 @@ def render_sweep_markdown(report: dict[str, Any]) -> str:
     lines.append(f"- Ranked by: `{config.get('rank_by')}`")
     lines.append("")
 
+    scope = report.get("strategy_scope") or {}
+    if scope.get("enabled") or scope.get("tuned"):
+        lines.append("## Strategy scope")
+        lines.append("")
+        lines.append(f"- Enabled: {', '.join(scope.get('enabled') or []) or '—'}")
+        lines.append(f"- Tuned: {', '.join(scope.get('tuned') or []) or '—'}")
+        if scope.get("traded"):
+            lines.append(f"- Traded (best run): {', '.join(scope['traded'])}")
+        lines.append("")
+
     baseline = report.get("baseline") or {}
     lines.append("## Baseline")
     lines.append("")
@@ -243,14 +320,38 @@ def render_sweep_markdown(report: dict[str, Any]) -> str:
     if top_runs:
         lines.append("## Top runs")
         lines.append("")
-        lines.append("| Params | Net % | Trades | t-stat | MaxDD % | Fold cons. |")
-        lines.append("|---|---|---|---|---|---|")
+        lines.append("| Params | Net % | Trades | t-stat | MaxDD % | Fold cons. | Dominant strategy (share) |")
+        lines.append("|---|---|---|---|---|---|---|")
         for run in top_runs:
-            params = ", ".join(f"{k.split('.')[-1]}={v}" for k, v in run["params"].items())
+            params = ", ".join(_param_label(k, v) for k, v in run["params"].items())
+            dominant = run.get("dominant_strategy") or "—"
+            share = run.get("max_strategy_share")
+            share_txt = f" ({share:.0%})" if isinstance(share, (int, float)) else ""
             lines.append(
                 f"| {params} | {run.get('net_profit_after_cost_pct')} | "
                 f"{run.get('total_trades')} | {run.get('t_stat')} | "
-                f"{run.get('max_drawdown_pct')} | {run.get('fold_consistency')} |"
+                f"{run.get('max_drawdown_pct')} | {run.get('fold_consistency')} | "
+                f"{dominant}{share_txt} |"
+            )
+        lines.append("")
+
+    breakdown = report.get("best_run_strategy_breakdown") or {}
+    strategies = breakdown.get("strategies") or []
+    if strategies:
+        lines.append("## Strategy attribution (best run)")
+        lines.append("")
+        lines.append("| Strategy | Trades | Net after cost | Share | Net win % | Net PF | Expectancy | Avg R |")
+        lines.append("|---|---|---|---|---|---|---|---|")
+        for row in strategies:
+            share = row.get("share")
+            share_txt = f"{share:.0%}" if isinstance(share, (int, float)) else "—"
+            lines.append(
+                f"| {row.get('strategy')} | {row.get('trades')} | "
+                f"{row.get('net_profit_after_cost')} | {share_txt} | "
+                f"{row.get('net_win_rate_after_cost_pct')} | "
+                f"{row.get('net_profit_factor_after_cost')} | "
+                f"{row.get('net_expectancy_after_cost')} | "
+                f"{row.get('avg_r_multiple')} |"
             )
         lines.append("")
 
@@ -259,8 +360,10 @@ def render_sweep_markdown(report: dict[str, Any]) -> str:
         lines.append("## Parameter plateaus")
         lines.append("")
         for plateau in plateaus:
+            owner = plateau.get("strategy")
+            label = f"{owner}.{plateau['key'].split('.')[-1]}" if owner else plateau["key"].split('.')[-1]
             lines.append(
-                f"- `{plateau['key'].split('.')[-1]}`: best {plateau.get('best_value')}, "
+                f"- `{label}`: best {plateau.get('best_value')}, "
                 f"plateau {plateau.get('plateau_values')}"
             )
         lines.append("")
@@ -270,9 +373,12 @@ def render_sweep_markdown(report: dict[str, Any]) -> str:
         lines.append("## Interactions")
         lines.append("")
         for interaction in interactions:
+            a_owner = interaction.get("a_strategy")
+            b_owner = interaction.get("b_strategy")
+            a = f"{a_owner}.{interaction['a'].split('.')[-1]}" if a_owner else interaction['a'].split('.')[-1]
+            b = f"{b_owner}.{interaction['b'].split('.')[-1]}" if b_owner else interaction['b'].split('.')[-1]
             lines.append(
-                f"- {interaction['a'].split('.')[-1]} × {interaction['b'].split('.')[-1]}: "
-                f"strength {interaction.get('strength')}"
+                f"- {a} × {b}: strength {interaction.get('strength')}"
             )
         lines.append("")
 

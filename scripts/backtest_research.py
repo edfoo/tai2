@@ -298,6 +298,20 @@ def _cmd_research(args: argparse.Namespace) -> int:
     print(f"  verdict:  {verdict.get('status')}")
     for reason in verdict.get("reasons") or []:
         print(f"    - {reason}")
+    sweep = bundle.get("sweep") or {}
+    scope = sweep.get("strategy_scope") or {}
+    if scope.get("tuned"):
+        print(f"  tuned:    {', '.join(scope['tuned'])}")
+    attributed = sweep.get("strategy_attribution") or {}
+    if attributed.get("strategies"):
+        print(
+            "  attribution (best run): "
+            + ", ".join(
+                f"{row.get('strategy')} "
+                f"{('%.0f%%' % (row['share'] * 100)) if isinstance(row.get('share'), (int, float)) else '—'}"
+                for row in attributed["strategies"]
+            )
+        )
     print(f"  written:  {json_path}")
     print(f"            {md_path}")
     return 0

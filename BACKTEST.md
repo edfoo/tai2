@@ -212,6 +212,8 @@ The bundle (`research_bundle.json` / `research_bundle.md`) reports:
   plateau of near-equal results.
 - **Fold consistency** — the fraction of validation folds profitable after costs.
 - **Concentration** — the largest per-symbol and per-trade share of profit.
+- **Strategy attribution** — which enabled strategies were *tuned* vs merely
+  *enabled*, and each strategy's net-PnL share of the best run (see below).
 - **Stress survival** — whether the edge stays positive under each adverse preset.
 - **Verdict** — `candidate` / `inconclusive` / `reject`, with explicit reasons
   and caveats.
@@ -318,6 +320,38 @@ Repeat for all 5 strategies if you want the full picture:
 .venv/bin/python scripts/backtest_client.py run --timeframe 15m --days 60
 .venv/bin/python scripts/backtest_client.py run --timeframe 1H --days 60
 ```
+
+---
+
+## 4. Strategy attribution
+
+A grid sweep can run **several strategies at once** (`--strategies a,b,c`), and each
+combination enables all of them together. When more than one strategy is enabled the
+ranking metric (`--rank-by`) is a **blended portfolio** number — it does not tell you
+*which* strategy produced the PnL. The output surfaces this explicitly:
+
+- **Enabled vs tuned** — the ranked-table header and the sweep report show which
+  strategies were enabled and which the swept parameters actually belong to. A sweep
+  of `strategies.mean_reversion.rsi_oversold` tunes `mean_reversion` even if other
+  strategies are merely enabled.
+- **Per-strategy evidence** — every run's `evidence.strategy_summary` lists each
+  strategy's trades, net PnL after costs, share of net, net win rate, net profit
+  factor, expectancy, average R-multiple, and exit mix.
+- **Strategy mix column** — the UI ranked table shows each combination's per-strategy
+  net share (e.g. `mean_reversion 62% · spike_continuation 38%`).
+- **Attribution card** — the UI shows a per-strategy table for the best combination.
+- **Handoff report** — `sweep_report.json` / `.md` include a `strategy_scope` block
+  (`enabled` / `tuned` / `traded`), a `best_run_strategy_breakdown`, per-top-run
+  strategy shares, and a **"Strategy attribution (best run)"** Markdown section.
+- **Mis-attribution warning** — the recommendation flags when the best run's net is
+  dominated by a strategy the sweep is **not** tuning: *"Edge is not attributable to
+  the tuned strategy — `<other>` contributed N% of net."* This prevents tuning the
+  wrong knob on a blended metric.
+- **Trade drilldown** — expanding *Trade drilldown* in the UI drills into the
+  retained top-N runs grouped by strategy → symbol → trade.
+
+> Only the top-`top_n_detail` ranked runs retain full trade lists; every run keeps its
+> compact evidence summary (including strategy attribution), so large sweeps stay bounded.
 
 ---
 

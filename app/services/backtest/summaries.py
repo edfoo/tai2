@@ -153,6 +153,62 @@ def symbol_summary(per_symbol: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
+def strategy_summary(per_strategy: dict[str, Any] | None) -> dict[str, Any]:
+    """Per-strategy net contribution, share, and edge telemetry.
+
+    Mirrors :func:`symbol_summary` but for the strategy dimension.  This is the
+    attribution block that tells a reader (or an expert/LLM) *which* strategy
+    produced each block of PnL — essential when a sweep tunes one strategy while
+    others are merely enabled, because ``rank_by`` is otherwise a blended
+    portfolio metric.
+
+    ``n_strategies`` counts strategies that actually traded; ``max_strategy_share``
+    flags a run whose net is dominated by a single strategy (a concentration
+    analogue to ``max_symbol_share``).
+    """
+    per_strategy = per_strategy or {}
+    total = sum(
+        _num((group or {}).get("net_profit_after_cost"))
+        for group in per_strategy.values()
+    )
+    rows: list[dict[str, Any]] = []
+    for strategy, group in per_strategy.items():
+        group = group or {}
+        net = _num(group.get("net_profit_after_cost"))
+        exit_reasons = group.get("exit_reasons")
+        rows.append({
+            "strategy": strategy,
+            "net_profit_after_cost": _finite(net),
+            "trades": group.get("trades"),
+            "share": round(net / total, 4) if total > 0 else None,
+            "win_rate": _finite(group.get("win_rate")),
+            "net_win_rate_after_cost_pct": _finite(
+                group.get("net_win_rate_after_cost_pct")
+            ),
+            "net_profit_factor_after_cost": _finite(
+                group.get("net_profit_factor_after_cost")
+            ),
+            "net_expectancy_after_cost": _finite(
+                group.get("net_expectancy_after_cost")
+            ),
+            "avg_r_multiple": _finite(group.get("avg_r_multiple")),
+            "avg_candles_held": _finite(group.get("avg_candles_held")),
+            "exit_reasons": dict(exit_reasons) if isinstance(exit_reasons, dict) else {},
+        })
+    rows.sort(key=lambda row: _num(row["net_profit_after_cost"]), reverse=True)
+    traded = [row for row in rows if _num(row["trades"]) > 0]
+    max_share = None
+    if total > 0 and rows:
+        max_share = rows[0]["share"]
+    return {
+        "total_net_profit_after_cost": _finite(total),
+        "n_strategies": len(traded),
+        "max_strategy_share": max_share,
+        "dominant_strategy": rows[0]["strategy"] if rows else None,
+        "strategies": rows,
+    }
+
+
 def benchmark_delta(metrics: dict[str, Any] | None) -> dict[str, Any] | None:
     """Compare the strategy's return against the equal-weight buy-and-hold.
 
@@ -180,11 +236,17 @@ def build_run_evidence(
     *,
     fold_metrics: Iterable[dict[str, Any]] | None = None,
     per_symbol: dict[str, Any] | None = None,
+    per_strategy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Assemble the full per-run evidence block (summary + folds + symbols)."""
+    """Assemble the full per-run evidence block.
+
+    Includes the summary, fold dispersion, symbol concentration, strategy
+    attribution, and the buy-and-hold benchmark delta.
+    """
     return {
         "summary": run_summary(metrics),
         "fold_summary": fold_summary(fold_metrics),
         "symbol_summary": symbol_summary(per_symbol),
+        "strategy_summary": strategy_summary(per_strategy),
         "benchmark_delta": benchmark_delta(metrics),
     }

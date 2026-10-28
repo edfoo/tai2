@@ -26,6 +26,8 @@ from __future__ import annotations
 
 from typing import Any, Iterable
 
+from app.services.backtest.sweep_analysis import strategy_of_key
+
 # Confidence thresholds (overridable per call).
 DEFAULT_HIGH_ROBUSTNESS = 0.65
 DEFAULT_MEDIUM_ROBUSTNESS = 0.4
@@ -74,6 +76,8 @@ def build_recommendation(
     concentration: dict[str, Any] | None = None,
     stress_rows: Iterable[dict[str, Any]] | None = None,
     holdout_metrics: dict[str, Any] | None = None,
+    strategy_scope: dict[str, Any] | None = None,
+    best_strategy_summary: dict[str, Any] | None = None,
     high_robustness: float = DEFAULT_HIGH_ROBUSTNESS,
     medium_robustness: float = DEFAULT_MEDIUM_ROBUSTNESS,
     min_fold_consistency: float = DEFAULT_MIN_FOLD_CONSISTENCY,
@@ -88,6 +92,8 @@ def build_recommendation(
     fold_consistency = fold_consistency or {}
     concentration = concentration or {}
     stress_rows = list(stress_rows or [])
+    strategy_scope = strategy_scope or {}
+    best_strategy_summary = best_strategy_summary or {}
 
     plateaus = {p["key"]: p for p in (analysis.get("plateaus") or [])}
     marginal = {m["key"]: m for m in (analysis.get("marginal_sensitivity") or [])}
@@ -112,6 +118,7 @@ def build_recommendation(
         changes.append({
             "key": key,
             "param": _short(key),
+            "strategy": strategy_of_key(key),
             "from": current,
             "to": recommended,
             "changed": str(current) != str(recommended),
@@ -119,6 +126,39 @@ def build_recommendation(
             "edge_of_range": bool(marg.get("edge_of_range")),
             "in_plateau": bool(plateau.get("is_plateau")),
         })
+
+    # ── Strategy attribution ──────────────────────────────────────────
+    # Which strategies were tuned, which actually traded, and whether the
+    # best run's net is dominated by a strategy the sweep is NOT tuning.  In a
+    # multi-strategy sweep the rank metric is a blend, so a non-attributable
+    # result must not be read as the tuned strategy's edge.
+    tuned = list(
+        strategy_scope.get("tuned")
+        or sorted({c["strategy"] for c in changes if c["strategy"]})
+    )
+    traded_rows = best_strategy_summary.get("strategies") or []
+    dominant_strategy = best_strategy_summary.get("dominant_strategy")
+    dominant_share = best_strategy_summary.get("max_strategy_share")
+    net_by_strategy = {
+        row.get("strategy"): _finite(row.get("net_profit_after_cost"))
+        for row in traded_rows
+        if row.get("strategy")
+    }
+    multi_strategy = len(tuned) > 1 or len(traded_rows) > 1
+    edge_attributable = (
+        not multi_strategy
+        or dominant_strategy is None
+        or (tuned and dominant_strategy in tuned)
+    )
+    attribution = {
+        "tuned": tuned,
+        "traded": [row.get("strategy") for row in traded_rows],
+        "dominant_strategy": dominant_strategy,
+        "dominant_share": _finite(dominant_share),
+        "net_by_strategy": net_by_strategy,
+        "multi_strategy": multi_strategy,
+        "edge_attributable_to_tuned": bool(edge_attributable),
+    }
 
     # ── Expected effect (in-sample) ───────────────────────────────────
     expected_effect = {
@@ -156,6 +196,13 @@ def build_recommendation(
     max_trade_share = concentration.get("max_trade_share")
     if max_trade_share is not None and max_trade_share > 0.5:
         risks.append(f"Profit concentrated in one trade ({max_trade_share:.0%} of gross).")
+    if not edge_attributable:
+        risks.append(
+            f"Edge is not attributable to the tuned strategy — "
+            f"'{dominant_strategy}' contributed "
+            f"{_num(dominant_share):.0%} of the best run's net PnL. "
+            f"Sweep '{dominant_strategy}' parameters instead, or disable it and re-run."
+        )
     if int(best_metrics.get("total_trades") or 0) < 30:
         risks.append(
             f"Only {best_metrics.get('total_trades')} trades — the edge is "
@@ -227,6 +274,7 @@ def build_recommendation(
 
     return {
         "changes": changes,
+        "attribution": attribution,
         "expected_effect": expected_effect,
         "confidence": confidence,
         "confidence_inputs": {
@@ -252,13 +300,30 @@ def render_recommendation_markdown(recommendation: dict[str, Any]) -> str:
     if changes:
         lines.append("### Parameter changes")
         lines.append("")
-        lines.append("| Parameter | From | To | Rationale |")
-        lines.append("|---|---|---|---|")
+        lines.append("| Strategy | Parameter | From | To | Rationale |")
+        lines.append("|---|---|---|---|---|")
         for change in changes:
             lines.append(
-                f"| `{change['param']}` | {change['from']} | {change['to']} | "
-                f"{change['rationale']} |"
+                f"| {change.get('strategy') or '—'} | `{change['param']}` | "
+                f"{change['from']} | {change['to']} | {change['rationale']} |"
             )
+        lines.append("")
+
+    attribution = recommendation.get("attribution") or {}
+    if attribution:
+        lines.append("### Strategy attribution")
+        lines.append("")
+        lines.append(f"- Tuned: {', '.join(attribution.get('tuned') or []) or '—'}")
+        lines.append(f"- Traded (best run): {', '.join(attribution.get('traded') or []) or '—'}")
+        dominant = attribution.get("dominant_strategy")
+        share = attribution.get("dominant_share")
+        if dominant is not None:
+            share_txt = f" ({share:.0%})" if isinstance(share, (int, float)) else ""
+            lines.append(f"- Dominant net contributor: {dominant}{share_txt}")
+        lines.append(
+            "- Edge attributable to tuned strategy: "
+            f"**{attribution.get('edge_attributable_to_tuned')}**"
+        )
         lines.append("")
 
     effect = recommendation.get("expected_effect") or {}
