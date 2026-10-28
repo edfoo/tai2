@@ -5471,11 +5471,14 @@ class MarketService:
 
         # Stage 1: cheap ticker prefilter (pattern / volume / spread).  Shared
         # with score_universe so the candidate set is identical either way.
+        # OKX's raw volCcy24h is base-currency volume, so build_candidates
+        # converts it to USDT (× last) before comparing against min_volume_usd.
         candidates = build_candidates(
             tickers,
             cfg,
             vol_history=self._screener_vol_history,
             update_vol_history=True,
+            vol_ccy_is_quote=False,
         )
 
         # Stage 2: recent-activity features for the prefiltered candidates.

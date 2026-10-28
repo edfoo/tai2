@@ -98,7 +98,9 @@ async def _run(args: argparse.Namespace) -> int:
         print("ERROR: no tickers returned from OKX", file=sys.stderr)
         return 1
 
-    candidates = build_candidates(tickers, cfg)
+    # Live tickers carry base-currency volCcy24h; build_candidates converts it
+    # to USDT so the volume gate and vol_ratio are in comparable units.
+    candidates = build_candidates(tickers, cfg, vol_ccy_is_quote=False)
     print(
         f"{len(candidates)} candidates from {len(tickers)} tickers "
         f"(vol>={cfg['min_volume_usd'] / 1e6:.1f}M, spread<={cfg['max_spread_pct']}%)",

@@ -356,6 +356,9 @@ async def build_universe_schedule(
             vol_history=vol_history,
             update_vol_history=True,
             activity=activity or None,
+            # _ticker_at() sums Candle.effective_quote_volume (OKX volCcyQuote),
+            # so volCcy24h here is already quote-currency — do not re-convert.
+            vol_ccy_is_quote=True,
         )
         schedule.intervals.append(
             UniverseInterval(

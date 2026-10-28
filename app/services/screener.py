@@ -218,6 +218,7 @@ def build_candidates(
     *,
     vol_history: dict[str, deque] | None = None,
     update_vol_history: bool = True,
+    vol_ccy_is_quote: bool = False,
 ) -> list[dict[str, Any]]:
     """Filter a ticker snapshot into enriched screener candidates.
 
@@ -225,6 +226,17 @@ def build_candidates(
     spread gates and attaches the 24h-derived features.  Live uses it to pick
     which symbols are worth fetching recent candles for; ``score_universe``
     uses it as its first stage.
+
+    ``vol_ccy_is_quote``
+        OKX's raw ticker ``volCcy24h`` is volume in **base currency** (BTC,
+        ETH, tokens), not quote currency.  Comparing it directly against
+        ``min_volume_usd`` silently rejects high-priced symbols (BTC's
+        ``volCcy24h`` is ~55k, which reads as "55k USDT" against a 10M floor)
+        while letting low-priced tokens through on raw token counts.  Live
+        therefore passes ``False`` so this function converts to quote volume
+        via ``volCcy24h × last``.  The backtest already reconstructs
+        ``volCcy24h`` from summed ``volCcyQuote`` (i.e. it is already quote
+        volume) and passes ``True`` to skip the conversion.
     """
     cfg = cfg or {}
     universe_pattern = str(cfg.get("universe_filter") or "*-USDT-SWAP").strip().upper()
@@ -248,6 +260,10 @@ def build_candidates(
         vol_ccy_24h = _extract_float(ticker.get("volCcy24h"))
         if not last or last <= 0:
             continue
+        # OKX's volCcy24h is base-currency volume; convert to quote (USDT) so it
+        # is comparable to min_volume_usd and to candle volCcyQuote sums.
+        if vol_ccy_24h is not None and not vol_ccy_is_quote:
+            vol_ccy_24h *= last
         if vol_ccy_24h is None or vol_ccy_24h < min_volume_usd:
             continue
         # Liquidity guard: reject wide-spread (thin book) symbols.
@@ -310,6 +326,7 @@ def score_universe(
     update_vol_history: bool = True,
     activity: dict[str, dict[str, Any]] | None = None,
     candidates: list[dict[str, Any]] | None = None,
+    vol_ccy_is_quote: bool = False,
 ) -> dict[str, Any]:
     """Score a ticker snapshot into SC / MR / union universes.
 
@@ -338,6 +355,11 @@ def score_universe(
         builds it once to decide which symbols need an activity candle fetch,
         then passes it here so the prefilter does not run twice (which would
         double-append to ``vol_history``).
+    vol_ccy_is_quote:
+        Set True when the tickers' ``volCcy24h`` is already quote-currency
+        volume (the backtest reconstructs it from summed ``volCcyQuote``).
+        Live passes False so ``build_candidates`` converts OKX's base-currency
+        ``volCcy24h`` to USDT via ``× last``.
 
     Returns
     -------
@@ -385,6 +407,7 @@ def score_universe(
             cfg,
             vol_history=vol_history,
             update_vol_history=update_vol_history,
+            vol_ccy_is_quote=vol_ccy_is_quote,
         )
 
     # ── Attach recent-activity features ───────────────────────────────
