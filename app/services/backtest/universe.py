@@ -36,7 +36,12 @@ from typing import Any
 
 from app.services.backtest.data_fetcher import HistoricalDataFetcher
 from app.services.backtest.models import Candle
-from app.services.screener import score_universe, universe_for_strategy
+from app.services.screener import (
+    compute_recent_activity,
+    score_universe,
+    timeframe_to_ms,
+    universe_for_strategy,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -180,6 +185,52 @@ def _ticker_at(
     }
 
 
+def _activity_at(
+    candles: list[Candle],
+    ts_list: list[int],
+    ts: int,
+    *,
+    lookback_hours: float,
+    timeframe_ms: int,
+    vol_ccy_24h: float | None,
+    hl_range_pct: float | None,
+) -> dict[str, Any] | None:
+    """Reconstruct the live recent-activity features at interval ``ts``.
+
+    Converts the already-fetched 1H candles into OKX-style rows and delegates to
+    :func:`app.services.screener.compute_recent_activity` — the exact function
+    live uses — so the backtest ranks on the same features with no extra fetch.
+    """
+    idx = bisect.bisect_right(ts_list, ts) - 1
+    if idx < 0:
+        return None
+    # Only the bars the window can possibly need (plus one reference bar).
+    bars_needed = int(round(lookback_hours * 3_600_000 / max(1, timeframe_ms))) + 2
+    window = candles[max(0, idx - bars_needed + 1): idx + 1]
+    rows = [
+        [
+            c.ts,
+            c.open,
+            c.high,
+            c.low,
+            c.close,
+            c.volume,
+            0.0,
+            c.effective_quote_volume,
+            "1",
+        ]
+        for c in window
+    ]
+    return compute_recent_activity(
+        rows,
+        lookback_hours=lookback_hours,
+        timeframe_ms=timeframe_ms,
+        vol_ccy_24h=vol_ccy_24h,
+        hl_range_pct=hl_range_pct,
+        as_of_ts=ts,
+    )
+
+
 async def build_universe_schedule(
     *,
     fetcher: HistoricalDataFetcher,
@@ -229,6 +280,8 @@ async def build_universe_schedule(
             "universe": universe_provenance,
             "timeframe": _UNIVERSE_TIMEFRAME,
             "lookback_hours": 24,
+            "activity_lookback_hours": float(cfg.get("activity_lookback_hours") or 0.0),
+            "activity_timeframe": str(cfg.get("activity_timeframe") or "1H"),
             "spread_filter": (
                 "skipped (live bid/ask unavailable historically)"
                 if float(cfg.get("max_spread_pct") or 0.0) > 0
@@ -266,19 +319,43 @@ async def build_universe_schedule(
         return schedule
 
     # ── Score each interval with a rolling volume history ─────────────
+    # Recent-activity features are derived from the same 1H candles already
+    # fetched above, so enabling the activity window costs the backtest nothing
+    # and keeps it in lockstep with live.
+    activity_lookback_hours = float(cfg.get("activity_lookback_hours") or 0.0)
+    activity_tf_ms = timeframe_to_ms(str(cfg.get("activity_timeframe") or "1H"))
     vol_history: dict[str, Any] = {}
     for ts in boundaries:
         tickers: list[dict[str, Any]] = []
+        activity: dict[str, dict[str, Any]] = {}
         for symbol, candles in symbol_candles.items():
             ticker = _ticker_at(candles, symbol_ts[symbol], ts)
-            if ticker is not None:
-                ticker["instId"] = symbol
-                tickers.append(ticker)
+            if ticker is None:
+                continue
+            ticker["instId"] = symbol
+            tickers.append(ticker)
+            if activity_lookback_hours > 0:
+                act = _activity_at(
+                    candles,
+                    symbol_ts[symbol],
+                    ts,
+                    lookback_hours=activity_lookback_hours,
+                    timeframe_ms=activity_tf_ms,
+                    vol_ccy_24h=ticker.get("volCcy24h"),
+                    hl_range_pct=(
+                        (ticker["high24h"] - ticker["low24h"]) / ticker["open24h"] * 100.0
+                        if ticker.get("open24h")
+                        else None
+                    ),
+                )
+                if act is not None:
+                    activity[symbol] = act
         result = score_universe(
             tickers,
             cfg,
             vol_history=vol_history,
             update_vol_history=True,
+            activity=activity or None,
         )
         schedule.intervals.append(
             UniverseInterval(

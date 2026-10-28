@@ -30,65 +30,197 @@ def _extract_float(value: Any) -> float | None:
         return None
 
 
-def score_universe(
+# ── Recent-activity features ────────────────────────────────────────────────
+#
+# The 24h ticker fields (``open24h``/``high24h``/``low24h``/``volCcy24h``) are
+# *aggregates*: a coin that pumped 20 hours ago and has been flat since still
+# shows a large ``momentum_pct`` and a wide ``hl_range_pct`` for the rest of the
+# day.  Ranking on them therefore selects "was hot, now dead" names.
+#
+# ``compute_recent_activity`` derives the same three dimensions over a short
+# trailing window (default 3h) so the screener can rank on what is moving *now*.
+# It is pure and shared by live (``MarketService``) and the backtest
+# (``app/services/backtest/universe.py``) so the two cannot drift.
+
+_HOUR_MS = 3_600_000
+
+# OKX bar string → duration in ms.  Mirrors
+# ``app.services.backtest.data_fetcher._timeframe_to_ms`` but lives here so the
+# live service can size its activity window without importing the backtest.
+_TIMEFRAME_MS: dict[str, int] = {
+    "1m": 60_000,
+    "3m": 180_000,
+    "5m": 300_000,
+    "15m": 900_000,
+    "30m": 1_800_000,
+    "1H": 3_600_000,
+    "2H": 7_200_000,
+    "4H": 14_400_000,
+    "6H": 21_600_000,
+    "12H": 43_200_000,
+    "1D": 86_400_000,
+}
+
+
+def timeframe_to_ms(bar: str | None) -> int:
+    """Return the duration of an OKX bar string in milliseconds.
+
+    Unknown bars fall back to 1H, matching the screener's default activity
+    timeframe.
+    """
+    key = str(bar or "").strip()
+    if key in _TIMEFRAME_MS:
+        return _TIMEFRAME_MS[key]
+    # Case-insensitive retry (OKX accepts "1h" and "1H").
+    for candidate, ms in _TIMEFRAME_MS.items():
+        if candidate.lower() == key.lower():
+            return ms
+    return _HOUR_MS
+
+
+def _row_quote_volume(row: Any) -> float:
+    """Return a candle row's quote-currency volume (OKX ``volCcyQuote``).
+
+    OKX rows are ``[ts, o, h, l, c, vol, volCcy, volCcyQuote, confirm]``.
+    Legacy/short rows fall back to ``vol × close`` (an approximation).
+    """
+    if len(row) >= 8:
+        quote = _extract_float(row[7])
+        if quote is not None and quote > 0:
+            return quote
+    vol = _extract_float(row[5]) or 0.0
+    close = _extract_float(row[4]) or 0.0
+    return max(vol, 0.0) * max(close, 0.0)
+
+
+def _row_is_confirmed(row: Any) -> bool:
+    """Return False for the still-forming candle (OKX ``confirm == "0"``)."""
+    if len(row) < 9:
+        return True
+    flag = row[8]
+    if isinstance(flag, str):
+        return flag.strip().lower() not in {"0", "false"}
+    return bool(flag)
+
+
+def compute_recent_activity(
+    candles: list[Any],
+    *,
+    lookback_hours: float = 4.0,
+    timeframe_ms: int = _HOUR_MS,
+    vol_ccy_24h: float | None = None,
+    hl_range_pct: float | None = None,
+    as_of_ts: int | None = None,
+) -> dict[str, Any] | None:
+    """Derive short-window activity features from raw OKX candle rows.
+
+    Parameters
+    ----------
+    candles:
+        Raw OKX candlestick rows (any order).  Unconfirmed (forming) candles are
+        dropped so live and backtest see the same closed-candle window.
+    lookback_hours:
+        Trailing window length in hours (default 4).
+    timeframe_ms:
+        Candle duration in ms — used to size the window and to express the
+        expected 24h-proportional baseline.
+    vol_ccy_24h:
+        The ticker's 24h quote volume, used to normalise recent volume against
+        the symbol's *own* baseline.  ``None`` disables ``recent_vol_ratio``.
+    hl_range_pct:
+        The ticker's 24h high-low range %, used to compute ``decay_ratio``.
+    as_of_ts:
+        Optional ms-epoch cutoff; candles after it are ignored (backtest use).
+
+    Returns
+    -------
+    dict with ``recent_vol``, ``recent_vol_ratio``, ``recent_range_pct``,
+    ``recent_mom_pct`` (signed), ``decay_ratio``, ``hours_covered``,
+    ``candle_count`` — or ``None`` when there is no usable candle.
+    """
+    rows: list[tuple[int, float, float, float, float, float]] = []
+    for row in candles or []:
+        if not isinstance(row, (list, tuple)) or len(row) < 6:
+            continue
+        if not _row_is_confirmed(row):
+            continue
+        ts = _extract_float(row[0])
+        o = _extract_float(row[1])
+        h = _extract_float(row[2])
+        lo = _extract_float(row[3])
+        c = _extract_float(row[4])
+        if ts is None or o is None or h is None or lo is None or c is None:
+            continue
+        if as_of_ts is not None and ts > as_of_ts:
+            continue
+        rows.append((int(ts), o, h, lo, c, _row_quote_volume(row)))
+    if not rows:
+        return None
+    rows.sort(key=lambda r: r[0])
+
+    tf_ms = max(1, int(timeframe_ms))
+    window_bars = max(1, int(round(float(lookback_hours) * _HOUR_MS / tf_ms)))
+    window = rows[-window_bars:]
+    if not window:
+        return None
+
+    last = window[-1][4]
+    if last <= 0:
+        return None
+    base_open = window[0][1]
+    high = max(r[2] for r in window)
+    low = min(r[3] for r in window)
+    recent_vol = sum(r[5] for r in window)
+
+    recent_range_pct = (high - low) / last * 100.0
+    recent_mom_pct = (
+        (last - base_open) / base_open * 100.0 if base_open > 0 else 0.0
+    )
+
+    hours_covered = len(window) * tf_ms / _HOUR_MS
+    share = hours_covered / 24.0
+
+    recent_vol_ratio: float | None = None
+    if vol_ccy_24h and vol_ccy_24h > 0 and share > 0:
+        expected_vol = vol_ccy_24h * share
+        if expected_vol > 0:
+            recent_vol_ratio = recent_vol / expected_vol
+
+    decay_ratio: float | None = None
+    if hl_range_pct and hl_range_pct > 0 and share > 0:
+        expected_range = hl_range_pct * share
+        if expected_range > 0:
+            decay_ratio = recent_range_pct / expected_range
+
+    return {
+        "recent_vol": recent_vol,
+        "recent_vol_ratio": recent_vol_ratio,
+        "recent_range_pct": recent_range_pct,
+        "recent_mom_pct": recent_mom_pct,
+        "decay_ratio": decay_ratio,
+        "hours_covered": hours_covered,
+        "candle_count": len(window),
+    }
+
+
+def build_candidates(
     tickers: list[dict[str, Any]],
     cfg: dict[str, Any],
     *,
     vol_history: dict[str, deque] | None = None,
     update_vol_history: bool = True,
-) -> dict[str, Any]:
-    """Score a ticker snapshot into SC / MR / union universes.
+) -> list[dict[str, Any]]:
+    """Filter a ticker snapshot into enriched screener candidates.
 
-    Parameters
-    ----------
-    tickers:
-        Raw OKX ticker dicts (``instId``, ``last``, ``open24h``, ``high24h``,
-        ``low24h``, ``volCcy24h``, optional ``bidPx``/``askPx``).  The backtest
-        synthesises these from candles.
-    cfg:
-        Screener configuration (see ``runtime_config["screener"]``).
-    vol_history:
-        Optional per-symbol rolling deque of 24h quote volume used to compute
-        ``vol_spike_ratio``.  When provided and ``update_vol_history`` is True
-        the deque is appended to in place (matching live's rolling window).
-    update_vol_history:
-        Set False to score against a pre-built history without mutating it.
-
-    Returns
-    -------
-    dict with keys:
-        ``selected`` (union, SC-first), ``sc``, ``mr``, ``candidates``,
-        ``base_candidate_count``, ``ticker_count``, ``sc_pool_size``,
-        ``mr_pool_size``, ``overlap``, ``dual_universe``, ``diagnostics``.
+    This is the shared prefilter: it applies the pattern / price / volume /
+    spread gates and attaches the 24h-derived features.  Live uses it to pick
+    which symbols are worth fetching recent candles for; ``score_universe``
+    uses it as its first stage.
     """
     cfg = cfg or {}
     universe_pattern = str(cfg.get("universe_filter") or "*-USDT-SWAP").strip().upper()
-    dual_universe = bool(cfg.get("dual_universe", True))
-    # Shared / legacy caps.
-    max_symbols = max(1, int(cfg.get("max_symbols") or 10))
-    # Dual-universe caps (default to half of max_symbols each, min 3).
-    sc_max = max(1, int(cfg.get("sc_max_symbols") or max(3, max_symbols // 2)))
-    mr_max = max(1, int(cfg.get("mr_max_symbols") or max(3, max_symbols // 2)))
     min_volume_usd = float(cfg.get("min_volume_usd") or 0.0)
-    # Liquidity guard: reject symbols whose bid/ask spread is too wide.
-    # Wide spreads signal thin order books where market-order SL closes
-    # slip badly (the dominant loss mechanism on low-liquidity alts).
-    # 0.0 = disabled.  Default 0.5% filters out names like SATS/MMT where
-    # a 10-USDT market close slipped 2-5x beyond the SL trigger.
     max_spread_pct = float(cfg.get("max_spread_pct") or 0.0)
-    # SC filters: want movement.
-    sc_min_momentum_pct = float(
-        cfg.get("sc_min_momentum_pct", cfg.get("min_momentum_pct") or 1.5)
-    )
-    sc_min_hl_range_pct = float(
-        cfg.get("sc_min_hl_range_pct", cfg.get("min_hl_range_pct") or 0.0)
-    )
-    # MR filters: want range but not strong trend.
-    mr_min_hl_range_pct = float(cfg.get("mr_min_hl_range_pct") or 2.5)
-    mr_max_momentum_pct = float(cfg.get("mr_max_momentum_pct") or 5.0)
-    # Legacy single-list filters.
-    min_momentum_pct = float(cfg.get("min_momentum_pct") or 0.0)
-    min_hl_range_pct = float(cfg.get("min_hl_range_pct") or 0.0)
     vol_history_window = max(2, int(cfg.get("vol_history_window") or 8))
 
     candidates: list[dict[str, Any]] = []
@@ -158,11 +290,129 @@ def score_universe(
                 "spread_pct": spread_pct,
             }
         )
+    return candidates
+
+
+def score_universe(
+    tickers: list[dict[str, Any]],
+    cfg: dict[str, Any],
+    *,
+    vol_history: dict[str, deque] | None = None,
+    update_vol_history: bool = True,
+    activity: dict[str, dict[str, Any]] | None = None,
+    candidates: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Score a ticker snapshot into SC / MR / union universes.
+
+    Parameters
+    ----------
+    tickers:
+        Raw OKX ticker dicts (``instId``, ``last``, ``open24h``, ``high24h``,
+        ``low24h``, ``volCcy24h``, optional ``bidPx``/``askPx``).  The backtest
+        synthesises these from candles.
+    cfg:
+        Screener configuration (see ``runtime_config["screener"]``).
+    vol_history:
+        Optional per-symbol rolling deque of 24h quote volume used to compute
+        ``vol_spike_ratio``.  When provided and ``update_vol_history`` is True
+        the deque is appended to in place (matching live's rolling window).
+    update_vol_history:
+        Set False to score against a pre-built history without mutating it.
+    activity:
+        Optional ``symbol → compute_recent_activity()`` mapping.  When supplied
+        (and ``activity_lookback_hours`` > 0) the SC/MR gates and scores use the
+        short-window features instead of the 24h aggregates, so a coin that was
+        hot hours ago but has since gone quiet no longer ranks.  Symbols missing
+        from the mapping fall back to their 24h features.
+    candidates:
+        Optional pre-built candidate list from :func:`build_candidates`.  Live
+        builds it once to decide which symbols need an activity candle fetch,
+        then passes it here so the prefilter does not run twice (which would
+        double-append to ``vol_history``).
+
+    Returns
+    -------
+    dict with keys:
+        ``selected`` (union, SC-first), ``sc``, ``mr``, ``candidates``,
+        ``base_candidate_count``, ``ticker_count``, ``sc_pool_size``,
+        ``mr_pool_size``, ``overlap``, ``dual_universe``, ``activity_used``,
+        ``diagnostics``.
+    """
+    cfg = cfg or {}
+    dual_universe = bool(cfg.get("dual_universe", True))
+    # Shared / legacy caps.
+    max_symbols = max(1, int(cfg.get("max_symbols") or 10))
+    # Dual-universe caps (default to half of max_symbols each, min 3).
+    sc_max = max(1, int(cfg.get("sc_max_symbols") or max(3, max_symbols // 2)))
+    mr_max = max(1, int(cfg.get("mr_max_symbols") or max(3, max_symbols // 2)))
+    min_volume_usd = float(cfg.get("min_volume_usd") or 0.0)
+    # Liquidity guard: reject symbols whose bid/ask spread is too wide.
+    # Wide spreads signal thin order books where market-order SL closes
+    # slip badly (the dominant loss mechanism on low-liquidity alts).
+    # 0.0 = disabled.  Default 0.5% filters out names like SATS/MMT where
+    # a 10-USDT market close slipped 2-5x beyond the SL trigger.
+    max_spread_pct = float(cfg.get("max_spread_pct") or 0.0)
+    # SC filters: want movement.
+    sc_min_momentum_pct = float(
+        cfg.get("sc_min_momentum_pct", cfg.get("min_momentum_pct") or 1.5)
+    )
+    sc_min_hl_range_pct = float(
+        cfg.get("sc_min_hl_range_pct", cfg.get("min_hl_range_pct") or 0.0)
+    )
+    # MR filters: want range but not strong trend.
+    mr_min_hl_range_pct = float(cfg.get("mr_min_hl_range_pct") or 2.5)
+    mr_max_momentum_pct = float(cfg.get("mr_max_momentum_pct") or 5.0)
+    # Legacy single-list filters.
+    min_momentum_pct = float(cfg.get("min_momentum_pct") or 0.0)
+    min_hl_range_pct = float(cfg.get("min_hl_range_pct") or 0.0)
+    # Recent-activity gate: require the symbol to be at least as active in the
+    # short window as its own 24h average.  0 disables the gate.
+    activity_min_ratio = float(cfg.get("activity_min_ratio") or 0.0)
+    activity_lookback_hours = float(cfg.get("activity_lookback_hours") or 0.0)
+
+    if candidates is None:
+        candidates = build_candidates(
+            tickers,
+            cfg,
+            vol_history=vol_history,
+            update_vol_history=update_vol_history,
+        )
+
+    # ── Attach recent-activity features ───────────────────────────────
+    # ``rec_*`` are the ranking inputs when activity data is available; the
+    # 24h ``momentum_pct``/``hl_range_pct`` remain as context/diagnostics.
+    activity_used = bool(activity) and activity_lookback_hours > 0
+    for c in candidates:
+        act = (activity or {}).get(c["symbol"])
+        if act:
+            c["recent_vol"] = act.get("recent_vol")
+            c["recent_vol_ratio"] = act.get("recent_vol_ratio")
+            c["recent_range_pct"] = act.get("recent_range_pct")
+            c["recent_mom_pct"] = act.get("recent_mom_pct")
+            c["decay_ratio"] = act.get("decay_ratio")
+        else:
+            c["recent_vol"] = None
+            c["recent_vol_ratio"] = None
+            c["recent_range_pct"] = None
+            c["recent_mom_pct"] = None
+            c["decay_ratio"] = None
+        # Ranking inputs: prefer recent features, fall back to 24h aggregates.
+        if activity_used and c["recent_range_pct"] is not None:
+            c["rank_mom_pct"] = abs(c["recent_mom_pct"] or 0.0)
+            c["rank_range_pct"] = c["recent_range_pct"]
+            c["rank_vol_ratio"] = c["recent_vol_ratio"]
+        else:
+            c["rank_mom_pct"] = c["momentum_pct"]
+            c["rank_range_pct"] = c["hl_range_pct"]
+            c["rank_vol_ratio"] = c["vol_spike_ratio"]
 
     spread_str = f", spread<={max_spread_pct:.2f}%" if max_spread_pct > 0 else ""
+    activity_str = (
+        f", activity={activity_lookback_hours:g}h" if activity_used else ""
+    )
     diagnostics: list[str] = [
         f"Screener: {len(candidates)} base candidates from {len(tickers)} tickers "
-        f"(vol>={min_volume_usd:.0f} USD{spread_str}, dual={dual_universe})"
+        f"(vol>={min_volume_usd:.0f} USD{spread_str}{activity_str}, dual={dual_universe})"
     ]
 
     selected: list[str] = []
@@ -184,33 +434,56 @@ def score_universe(
             "mr_pool_size": 0,
             "overlap": overlap,
             "dual_universe": dual_universe,
+            "activity_used": activity_used,
             "diagnostics": diagnostics,
         }
 
-    spike_candidates = [c for c in candidates if c["vol_spike_ratio"] is not None]
-    max_spike = max((c["vol_spike_ratio"] for c in spike_candidates), default=None) or 1.0
+    # ── Normalisers ───────────────────────────────────────────────────
+    # Computed over the ranking inputs so scores stay comparable whether we
+    # rank on recent-window features or the 24h aggregates.
+    max_vol_ratio = max(
+        (c["rank_vol_ratio"] for c in candidates if c["rank_vol_ratio"] is not None),
+        default=None,
+    ) or 1.0
     max_raw_vol = max(c["vol_ccy_24h"] for c in candidates) or 1.0
-    max_hl = max(c["hl_range_pct"] for c in candidates) or 1.0
-    max_mom = max(c["momentum_pct"] for c in candidates) or 1.0
+    max_range = max(c["rank_range_pct"] for c in candidates) or 1.0
+    max_mom = max(c["rank_mom_pct"] for c in candidates) or 1.0
 
     def _norm_vol(c: dict[str, Any]) -> float:
-        if c["vol_spike_ratio"] is not None and spike_candidates:
-            return float(c["vol_spike_ratio"]) / max_spike
+        ratio = c["rank_vol_ratio"]
+        if ratio is not None:
+            return float(ratio) / max_vol_ratio
         return float(c["vol_ccy_24h"]) / max_raw_vol
+
+    def _fmt(c: dict[str, Any], score_key: str) -> str:
+        """Diagnostic fragment: recent features when used, else 24h ones."""
+        ratio = c["rank_vol_ratio"]
+        ratio_str = f"{ratio:.2f}x" if ratio is not None else "n/a"
+        decay = c.get("decay_ratio")
+        decay_str = f" decay={decay:.2f}" if decay is not None else ""
+        return (
+            f"{c['symbol']}({score_key}={c.get(score_key, 0):.3f} vol={ratio_str} "
+            f"rng={c['rank_range_pct']:.2f}% mom={c['rank_mom_pct']:.2f}%{decay_str})"
+        )
 
     if dual_universe:
         # ── SC universe: expansion / momentum ──────────────────────
         sc_pool = [
             c for c in candidates
-            if c["momentum_pct"] >= sc_min_momentum_pct
-            and c["hl_range_pct"] >= sc_min_hl_range_pct
+            if c["rank_mom_pct"] >= sc_min_momentum_pct
+            and c["rank_range_pct"] >= sc_min_hl_range_pct
+            and (
+                activity_min_ratio <= 0
+                or c["rank_vol_ratio"] is None
+                or c["rank_vol_ratio"] >= activity_min_ratio
+            )
         ]
         for c in sc_pool:
             norm_vol = _norm_vol(c)
-            norm_hl = c["hl_range_pct"] / max_hl
-            norm_mom = c["momentum_pct"] / max_mom
+            norm_range = c["rank_range_pct"] / max_range
+            norm_mom = c["rank_mom_pct"] / max_mom
             # Reward unusual volume + range + directional momentum.
-            c["sc_score"] = norm_vol * 0.45 + norm_hl * 0.25 + norm_mom * 0.30
+            c["sc_score"] = norm_vol * 0.45 + norm_range * 0.25 + norm_mom * 0.30
         sc_pool.sort(key=lambda x: x.get("sc_score", 0.0), reverse=True)
         sc_selected = [c["symbol"] for c in sc_pool[:sc_max]]
         sc_pool_size = len(sc_pool)
@@ -218,17 +491,22 @@ def score_universe(
         # ── MR universe: chop / mean reversion ─────────────────────
         mr_pool = [
             c for c in candidates
-            if c["hl_range_pct"] >= mr_min_hl_range_pct
-            and c["momentum_pct"] <= mr_max_momentum_pct
+            if c["rank_range_pct"] >= mr_min_hl_range_pct
+            and c["rank_mom_pct"] <= mr_max_momentum_pct
+            and (
+                activity_min_ratio <= 0
+                or c["rank_vol_ratio"] is None
+                or c["rank_vol_ratio"] >= activity_min_ratio
+            )
         ]
         for c in mr_pool:
             norm_vol = _norm_vol(c)
-            norm_hl = c["hl_range_pct"] / max_hl
+            norm_range = c["rank_range_pct"] / max_range
             # Inverse momentum: low directional body is better for MR.
-            inv_mom = 1.0 - (c["momentum_pct"] / max_mom if max_mom > 0 else 0.0)
+            inv_mom = 1.0 - (c["rank_mom_pct"] / max_mom if max_mom > 0 else 0.0)
             inv_mom = max(0.0, min(1.0, inv_mom))
             # Prefer wide range + low trend + some activity.
-            c["mr_score"] = norm_hl * 0.45 + inv_mom * 0.35 + norm_vol * 0.20
+            c["mr_score"] = norm_range * 0.45 + inv_mom * 0.35 + norm_vol * 0.20
         mr_pool.sort(key=lambda x: x.get("mr_score", 0.0), reverse=True)
         mr_selected = [c["symbol"] for c in mr_pool[:mr_max]]
         mr_pool_size = len(mr_pool)
@@ -239,20 +517,8 @@ def score_universe(
             if sym not in selected:
                 selected.append(sym)
 
-        sc_parts = []
-        for c in sc_pool[:sc_max]:
-            spike_str = f"{c['vol_spike_ratio']:.2f}x" if c["vol_spike_ratio"] is not None else "n/a"
-            sc_parts.append(
-                f"{c['symbol']}(sc={c.get('sc_score', 0):.3f} spike={spike_str} "
-                f"hl={c['hl_range_pct']:.2f}% mom={c['momentum_pct']:.2f}%)"
-            )
-        mr_parts = []
-        for c in mr_pool[:mr_max]:
-            spike_str = f"{c['vol_spike_ratio']:.2f}x" if c["vol_spike_ratio"] is not None else "n/a"
-            mr_parts.append(
-                f"{c['symbol']}(mr={c.get('mr_score', 0):.3f} spike={spike_str} "
-                f"hl={c['hl_range_pct']:.2f}% mom={c['momentum_pct']:.2f}%)"
-            )
+        sc_parts = [_fmt(c, "sc_score") for c in sc_pool[:sc_max]]
+        mr_parts = [_fmt(c, "mr_score") for c in mr_pool[:mr_max]]
         diagnostics.append(
             f"Screener SC selected ({len(sc_selected)}/{len(sc_pool)} pool): "
             f"{sc_selected} | {', '.join(sc_parts) if sc_parts else 'none'}"
@@ -270,28 +536,49 @@ def score_universe(
         # ── Legacy single-list mode ────────────────────────────────
         legacy_pool = [
             c for c in candidates
-            if c["momentum_pct"] >= min_momentum_pct
-            and c["hl_range_pct"] >= min_hl_range_pct
+            if c["rank_mom_pct"] >= min_momentum_pct
+            and c["rank_range_pct"] >= min_hl_range_pct
+            and (
+                activity_min_ratio <= 0
+                or c["rank_vol_ratio"] is None
+                or c["rank_vol_ratio"] >= activity_min_ratio
+            )
         ]
         for c in legacy_pool:
             norm_vol = _norm_vol(c)
-            norm_hl = c["hl_range_pct"] / max_hl
-            norm_mom = c["momentum_pct"] / max_mom
-            c["score"] = norm_vol * 0.5 + norm_hl * 0.3 + norm_mom * 0.2
+            norm_range = c["rank_range_pct"] / max_range
+            norm_mom = c["rank_mom_pct"] / max_mom
+            c["score"] = norm_vol * 0.5 + norm_range * 0.3 + norm_mom * 0.2
         legacy_pool.sort(key=lambda x: x.get("score", 0.0), reverse=True)
         selected = [c["symbol"] for c in legacy_pool[:max_symbols]]
         sc_selected = list(selected)
         mr_selected = list(selected)
         sc_pool_size = len(legacy_pool)
         mr_pool_size = len(legacy_pool)
-        top_parts = []
-        for c in legacy_pool[:max_symbols]:
-            spike_str = f"{c['vol_spike_ratio']:.2f}x" if c["vol_spike_ratio"] is not None else "n/a"
-            top_parts.append(
-                f"{c['symbol']}(score={c.get('score', 0):.3f} spike={spike_str} "
-                f"hl={c['hl_range_pct']:.2f}% mom={c['momentum_pct']:.2f}%)"
-            )
+        top_parts = [_fmt(c, "score") for c in legacy_pool[:max_symbols]]
         diagnostics.append(f"Screener selected: {selected} | {', '.join(top_parts)}")
+
+    # ── Faded-name diagnostic ─────────────────────────────────────────
+    # Names that passed the liquidity gates and still look active on 24h
+    # aggregates but have gone quiet in the recent window.  These are exactly
+    # the "big 24h change, not moving now" picks the activity window removes.
+    if activity_used:
+        faded = [
+            c for c in candidates
+            if c.get("decay_ratio") is not None
+            and c["decay_ratio"] < 0.25
+            and c["hl_range_pct"] >= mr_min_hl_range_pct
+        ]
+        if faded:
+            faded.sort(key=lambda c: c["decay_ratio"])
+            sample = ", ".join(
+                f"{c['symbol']}(decay={c['decay_ratio']:.2f} "
+                f"24h_hl={c['hl_range_pct']:.1f}%)"
+                for c in faded[:8]
+            )
+            diagnostics.append(
+                f"Screener dropped {len(faded)} faded name(s) (decay<0.25): {sample}"
+            )
 
     return {
         "selected": selected,
@@ -304,6 +591,7 @@ def score_universe(
         "mr_pool_size": mr_pool_size,
         "overlap": overlap,
         "dual_universe": dual_universe,
+        "activity_used": activity_used,
         "diagnostics": diagnostics,
     }
 

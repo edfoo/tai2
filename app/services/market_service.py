@@ -32,7 +32,13 @@ from app.db.postgres import (
 from app.lib.volume_profile import value_area
 from app.models.trade import ExecutedTrade
 from app.services.launcher_tp_sl import resolve_launcher_tp_sl
-from app.services.screener import score_universe, universe_for_strategy
+from app.services.screener import (
+    build_candidates,
+    compute_recent_activity,
+    score_universe,
+    timeframe_to_ms,
+    universe_for_strategy,
+)
 from app.services.trade_management_rules import (
     compute_breakeven_sl,
     compute_far_tp,
@@ -369,6 +375,16 @@ class MarketService:
         self._screener_mr_symbols: list[str] = []
         # Rolling 24h volume history for spike detection (symbol → deque of vol samples).
         self._screener_vol_history: dict[str, deque] = {}
+        # Recent-activity cache: (symbol, bar) → (fetched_at_epoch, features).
+        # Avoids refetching short-window candles on every force=True scheduler
+        # tick.  Keyed by bar too so changing activity_timeframe cannot serve
+        # stale candles from the previous timeframe.
+        self._screener_activity_cache: dict[
+            tuple[str, str], tuple[float, dict[str, Any]]
+        ] = {}
+        # Short-window candle cache for the activity fetch: bar → symbol → rows.
+        # Nested per bar because ``_fetch_ohlcv_bar`` keys its cache by symbol.
+        self._screener_activity_candles: dict[str, dict[str, list[list[Any]]]] = {}
         self._reconcile_task: Optional[asyncio.Task] = None
         self._positions_refresh_task: Optional[asyncio.Task] = None
         self._positions_refresh_interval: int = 10  # seconds between fast position/equity refreshes
@@ -5310,6 +5326,98 @@ class MarketService:
             self._emit_debug(f"Screener ticker fetch failed: {exc}")
             return []
 
+    async def _fetch_recent_activity(
+        self,
+        candidates: list[dict[str, Any]],
+        cfg: dict[str, Any],
+    ) -> dict[str, dict[str, Any]]:
+        """Fetch short-window candles for the prefiltered candidates.
+
+        The 24h ticker fields cannot distinguish "moving now" from "moved 20
+        hours ago", so the screener ranks on features derived from the last
+        ``activity_lookback_hours`` of candles.  Fetching candles for the whole
+        SWAP universe every tick would be wasteful, so this runs on the
+        already-prefiltered candidate list, capped at
+        ``activity_prefilter_top_n`` symbols (highest 24h volume first).
+
+        Results are cached for ``activity_cache_seconds`` so repeated
+        ``force=True`` scheduler ticks inside the same window do not refetch.
+
+        Returns ``symbol → compute_recent_activity()`` (symbols whose fetch
+        failed are simply absent, and the scorer falls back to 24h features).
+        """
+        lookback_hours = float(cfg.get("activity_lookback_hours") or 0.0)
+        if lookback_hours <= 0 or not candidates:
+            return {}
+        bar = self._normalize_bar(str(cfg.get("activity_timeframe") or "1H"))
+        top_n = max(1, int(cfg.get("activity_prefilter_top_n") or 120))
+        cache_ttl = max(0.0, float(cfg.get("activity_cache_seconds") or 300.0))
+
+        # Pre-rank by 24h volume so the cap keeps the liquid names.
+        ranked = sorted(
+            candidates, key=lambda c: c.get("vol_ccy_24h") or 0.0, reverse=True
+        )[:top_n]
+
+        now = time.time()
+        cache = self._screener_activity_cache
+        # Drop expired entries so the cache cannot grow unbounded.
+        if cache_ttl > 0:
+            for stale in [
+                key for key, (ts, _) in cache.items() if now - ts > cache_ttl
+            ]:
+                del cache[stale]
+
+        # Candles needed: enough bars to cover the lookback window, plus one
+        # for the window's opening reference.  OKX caps a request at 300.
+        tf_ms = timeframe_to_ms(bar)
+        bars_needed = int(round(lookback_hours * 3_600_000 / max(1, tf_ms))) + 2
+        limit = max(3, min(300, bars_needed))
+
+        async def _one(c: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
+            symbol = c["symbol"]
+            key = (symbol, bar)
+            if cache_ttl > 0:
+                hit = cache.get(key)
+                if hit is not None and now - hit[0] <= cache_ttl:
+                    return symbol, hit[1]
+            rows = await self._fetch_ohlcv_bar(
+                symbol,
+                bar,
+                self._screener_activity_candles.setdefault(bar, {}),
+                limit=limit,
+            )
+            if not rows:
+                return symbol, None
+            act = compute_recent_activity(
+                rows,
+                lookback_hours=lookback_hours,
+                timeframe_ms=tf_ms,
+                vol_ccy_24h=c.get("vol_ccy_24h"),
+                hl_range_pct=c.get("hl_range_pct"),
+            )
+            if act is not None and cache_ttl > 0:
+                cache[key] = (now, act)
+            return symbol, act
+
+        results = await asyncio.gather(
+            *(_one(c) for c in ranked), return_exceptions=True
+        )
+        activity: dict[str, dict[str, Any]] = {}
+        failures = 0
+        for item in results:
+            if isinstance(item, BaseException):
+                failures += 1
+                continue
+            symbol, act = item
+            if act is not None:
+                activity[symbol] = act
+        if failures:
+            self._emit_debug(
+                f"Screener: recent-activity fetch failed for {failures} symbol(s); "
+                "falling back to 24h features for those"
+            )
+        return activity
+
     async def run_screener_if_due(self, *, force: bool = False) -> bool:
         """Run the symbol screener if enabled and its interval has elapsed.
 
@@ -5318,14 +5426,20 @@ class MarketService:
         Builds **two** ranked lists from the same ticker snapshot:
 
         **SC (expansion / momentum)**
-          vol_spike_ratio (45%) + hl_range (25%) + momentum (30%)
-          Filters: min volume, min momentum, min HL range.
+          recent_vol_ratio (45%) + recent_range (25%) + recent_momentum (30%)
+          Filters: min volume, min recent momentum, min recent HL range.
           Goal: early expansion candidates for Spike Continuation.
 
         **MR (chop / mean reversion)**
-          hl_range (45%) + inverse_momentum (35%) + vol activity (20%)
-          Filters: min volume, min HL range, **max** momentum (exclude strong trends).
+          recent_range (45%) + inverse_recent_momentum (35%) + recent_vol (20%)
+          Filters: min volume, min recent HL range, **max** recent momentum.
           Goal: oscillatory names for Mean Reversion.
+
+        Recent-window features come from ``compute_recent_activity`` over the
+        last ``activity_lookback_hours`` (default 4h) of candles, so a coin that
+        pumped hours ago and has since gone quiet no longer ranks.  When the
+        activity window is disabled (``activity_lookback_hours=0``) or a
+        symbol's candles are unavailable, the 24h aggregates are used instead.
 
         Soft overlap is allowed.  The active fetch list is the **union** of both
         lists (plus open-position symbols are always retained at snapshot time).
@@ -5333,7 +5447,7 @@ class MarketService:
         Legacy single-list mode
         -----------------------
         When ``dual_universe=False``, falls back to the original combined score:
-        vol_spike 50% + hl_range 30% + momentum 20%.
+        vol 50% + range 30% + momentum 20%.
 
         Returns True when the active symbol list was modified.
 
@@ -5355,14 +5469,30 @@ class MarketService:
             self._emit_debug("Screener: no tickers returned from OKX")
             return False
 
-        # Scoring is delegated to the shared core (app/services/screener.py) so
-        # the backtest can select the same universe from reconstructed
-        # historical tickers using the exact same code path.
-        result = score_universe(
+        # Stage 1: cheap ticker prefilter (pattern / volume / spread).  Shared
+        # with score_universe so the candidate set is identical either way.
+        candidates = build_candidates(
             tickers,
             cfg,
             vol_history=self._screener_vol_history,
             update_vol_history=True,
+        )
+
+        # Stage 2: recent-activity features for the prefiltered candidates.
+        activity = await self._fetch_recent_activity(candidates, cfg)
+
+        # Stage 3: scoring is delegated to the shared core
+        # (app/services/screener.py) so the backtest can select the same
+        # universe from reconstructed historical tickers using the exact same
+        # code path.  The stage-1 candidates are passed through so the
+        # prefilter (and its vol_history append) does not run twice.
+        result = score_universe(
+            tickers,
+            cfg,
+            vol_history=self._screener_vol_history,
+            update_vol_history=False,
+            activity=activity,
+            candidates=candidates,
         )
         for line in result["diagnostics"]:
             self._emit_debug(line)
@@ -5376,10 +5506,15 @@ class MarketService:
         self._screener_sc_symbols = sc_selected
         self._screener_mr_symbols = mr_selected
 
-        # Prune vol history for symbols no longer in universe.
+        # Prune vol history and activity caches for symbols no longer in universe.
         active_universe = {str(t.get("instId", "")).upper() for t in tickers if isinstance(t, dict)}
         for gone in set(self._screener_vol_history) - active_universe:
             del self._screener_vol_history[gone]
+        for key in [k for k in self._screener_activity_cache if k[0] not in active_universe]:
+            del self._screener_activity_cache[key]
+        for bar_cache in self._screener_activity_candles.values():
+            for gone in set(bar_cache) - active_universe:
+                del bar_cache[gone]
 
         if not selected:
             return False
@@ -6328,6 +6463,8 @@ class MarketService:
         symbol: str,
         bar: str,
         cache: dict[str, list[list[Any]]],
+        *,
+        limit: int | None = None,
     ) -> list[list[Any]]:
         """Fetch OHLCV candles for an explicit ``bar`` timeframe with cached fallback.
 
@@ -6335,7 +6472,12 @@ class MarketService:
         ``_fetch_ohlcv_htf`` (global HTF), and reused for per-strategy analysis
         timeframes.  ``cache`` is the dict to read/write the cached candles for
         this bar (callers pass the appropriate per-bar cache).
+
+        ``limit`` overrides the default ``_ohlcv_fetch_limit`` — the screener's
+        recent-activity fetch only needs a handful of bars and should not pull
+        200 per symbol.
         """
+        fetch_limit = max(1, int(limit or self._ohlcv_fetch_limit))
         cached = cache.get(symbol)
         slot = await self._acquire_candle_slot()
         if slot is not None:
@@ -6346,7 +6488,7 @@ class MarketService:
                         candle_api.get_candlesticks,
                         instId=symbol,
                         bar=bar,
-                        limit=self._ohlcv_fetch_limit,
+                        limit=fetch_limit,
                     ),
                     timeout=15.0,
                 )
@@ -6374,7 +6516,7 @@ class MarketService:
                         candle_api.get_candlesticks,
                         instId=symbol,
                         bar=bar,
-                        limit=self._ohlcv_fetch_limit,
+                        limit=fetch_limit,
                     ),
                     timeout=15.0,
                 )

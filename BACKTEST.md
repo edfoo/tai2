@@ -133,6 +133,13 @@ drift. `--symbols` then acts as the fallback list used before the first
 screener interval. The reconstructed schedule (per-interval SC/MR lists) is
 stored on the result and shown in the BACKTEST UI.
 
+When `screener.activity_lookback_hours > 0` (default 4), ranking uses
+short-window features (`recent_vol_ratio`, `recent_range_pct`,
+`recent_mom_pct`, `decay_ratio`) instead of the 24h aggregates, so a coin that
+pumped hours ago and has since gone quiet is not selected. The backtest derives
+these from the same 1H candles it already fetched — no extra requests — via
+`_activity_at()` → `compute_recent_activity()`, the function live uses.
+
 **Data limitation:** the live `max_spread_pct` filter reads live bid/ask, which
 OHLCV cannot reproduce. When enabled it is skipped and recorded in the
 schedule provenance, so the reconstructed universe may be slightly larger than

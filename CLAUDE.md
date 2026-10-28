@@ -160,8 +160,10 @@ logs/
 ## Screener universe parity (backtest ↔ live)
 - Screener scoring lives in `app/services/screener.py` (`score_universe`, `universe_for_strategy`) — **one** implementation shared by live `MarketService` and the backtest. Never re-implement scoring in the backtest.
 - `universe_mode="screener"` reconstructs per-interval tickers from 1H candles (`app/services/backtest/universe.py`) and gates each strategy per step via `BacktestEngine._symbol_in_universe` (SC strategies → SC list, MR strategies → MR list). `symbols` becomes the pre-first-interval fallback.
+- **Recent-activity window:** 24h ticker fields are aggregates, so a coin that pumped hours ago and has since gone quiet still ranks highly on them. When `screener.activity_lookback_hours > 0` (default 4), SC/MR gates and scores use `compute_recent_activity()` features (`recent_vol_ratio`, `recent_range_pct`, `recent_mom_pct`, `decay_ratio`) derived from the last N hours of candles instead. Live fetches those candles for the volume-ranked top `activity_prefilter_top_n` candidates (cached `activity_cache_seconds`); the backtest derives them from the 1H candles it already fetched, so parity costs nothing. `activity_lookback_hours=0` restores pure 24h ranking.
 - `Candle.quote_volume` (OKX `volCcyQuote`) is required for the volume filter; legacy caches fall back to `volume × close`.
 - The live `max_spread_pct` filter is **skipped** historically (no bid/ask in OHLCV) and recorded in the schedule provenance.
+- **Screener defaults live in `app/services/strategies/defaults.py`** (`DEFAULT_SCREENER` / `screener_defaults()`), not inline in `main.py`. `main.py` bootstraps `runtime_config["screener"]` from it and the CFG page merges saved config over it — change defaults there, never in the UI or lifespan.
 
 ---
 

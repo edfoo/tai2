@@ -55,7 +55,11 @@ from app.services.openrouter_service import (
     list_openrouter_models,
 )
 from app.services.prompt_utils import sanitize_prompt_text
-from app.services.strategies.defaults import strategy_defaults, trade_management_defaults
+from app.services.strategies.defaults import (
+    screener_defaults,
+    strategy_defaults,
+    trade_management_defaults,
+)
 from app.ui.components import SnapshotStore, badge_stat
 
 logger = logging.getLogger(__name__)
@@ -7618,7 +7622,10 @@ def register_pages(app: FastAPI) -> None:
                 "Strategies only evaluate their own universe. Soft overlap is allowed. "
                 "The manual list is ignored while this is on."
             ).classes("text-xs text-slate-500 mb-1")
-            screener_cfg = (config.get("screener") or {})
+            # Merge saved config over the canonical defaults so every input
+            # below shows the real default when a key is absent, instead of a
+            # hardcoded literal that can drift from defaults.py.
+            screener_cfg = {**screener_defaults(), **(config.get("screener") or {})}
             with ui.row().classes("w-full flex-wrap gap-4 items-start"):
                 auto_select_symbols_switch = ui.switch(
                     "Auto-select symbols",
@@ -7676,7 +7683,7 @@ def register_pages(app: FastAPI) -> None:
                 )
                 screener_min_volume_input = ui.number(
                     label="Min 24h volume (M USDT)",
-                    value=float((screener_cfg.get("min_volume_usd") or 10_000_000) / 1_000_000),
+                    value=float((screener_cfg.get("min_volume_usd") or 0.0) / 1_000_000),
                     min=0,
                     step=0.1,
                     format="%.2f",
@@ -7692,6 +7699,49 @@ def register_pages(app: FastAPI) -> None:
                 ).classes("w-full md:w-56").props(
                     "hint='Reject symbols whose bid/ask spread exceeds this % of mid. Wide spreads signal thin order books where SL market-order closes slip 2-5x. 0 = disabled. Default 0.5%.' persistent-hint"
                 )
+            ui.label("Recent-activity window (what is moving NOW)").classes("text-xs font-semibold text-slate-600 mt-2")
+            ui.label(
+                "24h ticker fields are aggregates: a coin that pumped 20 hours ago and has been flat "
+                "since still shows a large 24h change and range. Ranking on them selects 'was hot, now dead' "
+                "names. When the window below is > 0, SC/MR filters and scores use features from the last "
+                "N hours instead, so only coins active right now are picked. Set 0 to restore pure 24h ranking."
+            ).classes("text-xs text-slate-500 mb-1")
+            with ui.row().classes("w-full flex-wrap gap-4"):
+                screener_activity_hours_input = ui.number(
+                    label="Activity lookback (hours)",
+                    value=float(screener_cfg.get("activity_lookback_hours") or 0.0),
+                    min=0,
+                    max=24,
+                    step=0.5,
+                    format="%.1f",
+                ).classes("w-full md:w-56").props(
+                    "hint='Rank on the last N hours of candles instead of 24h aggregates. 4 = last 4 hours (default). 0 = disabled (legacy 24h ranking).' persistent-hint"
+                )
+                screener_activity_tf_select = ui.select(
+                    options=["1m", "5m", "15m", "1H", "4H"],
+                    label="Activity timeframe",
+                    value=str(screener_cfg.get("activity_timeframe") or "1H"),
+                ).classes("w-full md:w-48").props(
+                    "hint='Candle timeframe for the activity window. 1H matches the backtest reconstruction exactly (no extra fetch cost).' persistent-hint"
+                )
+                screener_activity_topn_input = ui.number(
+                    label="Activity prefilter (top N)",
+                    value=int(screener_cfg.get("activity_prefilter_top_n") or 120),
+                    min=10,
+                    max=400,
+                    step=10,
+                ).classes("w-full md:w-56").props(
+                    "hint='How many volume-ranked candidates get a candle fetch for activity scoring. Higher = broader but slower.' persistent-hint"
+                )
+                screener_activity_min_ratio_input = ui.number(
+                    label="Min activity ratio",
+                    value=float(screener_cfg.get("activity_min_ratio") or 0.0),
+                    min=0,
+                    step=0.1,
+                    format="%.2f",
+                ).classes("w-full md:w-56").props(
+                    "hint='Reject symbols whose recent volume is below this multiple of their own 24h average. 1.0 = must be at least as active as usual. 0 = no gate.' persistent-hint"
+                )
             ui.label("SC universe filters (expansion)").classes("text-xs font-semibold text-slate-600 mt-2")
             with ui.row().classes("w-full flex-wrap gap-4"):
                 screener_min_momentum_input = ui.number(
@@ -7704,7 +7754,7 @@ def register_pages(app: FastAPI) -> None:
                     min=0,
                     step=0.1,
                 ).classes("w-full md:w-48").props(
-                    "hint='SC: exclude symbols whose absolute 24h price change is below this %' persistent-hint"
+                    "hint='SC: exclude symbols whose absolute price change over the activity window (or 24h when disabled) is below this %' persistent-hint"
                 )
                 screener_min_hl_range_input = ui.number(
                     label="SC min HL range (%)",
@@ -7716,7 +7766,7 @@ def register_pages(app: FastAPI) -> None:
                     min=0,
                     step=0.1,
                 ).classes("w-full md:w-48").props(
-                    "hint='SC: exclude symbols whose 24h high-low range is below this %' persistent-hint"
+                    "hint='SC: exclude symbols whose high-low range over the activity window (or 24h when disabled) is below this %' persistent-hint"
                 )
             ui.label("MR universe filters (chop)").classes("text-xs font-semibold text-slate-600 mt-2")
             with ui.row().classes("w-full flex-wrap gap-4"):
@@ -7734,7 +7784,7 @@ def register_pages(app: FastAPI) -> None:
                     min=0,
                     step=0.5,
                 ).classes("w-full md:w-48").props(
-                    "hint='MR: exclude strong trends above this 24h absolute move %' persistent-hint"
+                    "hint='MR: exclude strong trends above this absolute move % (activity window, or 24h when disabled)' persistent-hint"
                 )
             ui.separator().classes("w-full my-4")
             ui.label("Model, cadence, and prompt controls").classes("text-sm text-slate-500")
@@ -9027,24 +9077,35 @@ def register_pages(app: FastAPI) -> None:
                 await save_guardrails(config["guardrails"])
             except Exception as exc:  # pragma: no cover - db optional
                 _safe_notify(f"Failed to persist guardrails: {exc}", color="warning")
+            # Fallbacks come from the canonical defaults so this handler cannot
+            # drift from app/services/strategies/defaults.py.
+            _sc_def = screener_defaults()
             config["screener"] = {
                 "enabled": bool(auto_select_symbols_switch.value),
                 "dual_universe": bool(screener_dual_switch.value),
-                "universe_filter": str(screener_universe_input.value or "*-USDT-SWAP").strip(),
-                "max_symbols": max(1, _coerce(screener_max_symbols_input.value, 10, int)),
-                "sc_max_symbols": max(1, _coerce(screener_sc_max_input.value, 8, int)),
-                "mr_max_symbols": max(1, _coerce(screener_mr_max_input.value, 8, int)),
-                "interval_minutes": max(5, _coerce(screener_interval_input.value, 60, int)),
+                "universe_filter": str(
+                    screener_universe_input.value or _sc_def["universe_filter"]
+                ).strip(),
+                "max_symbols": max(1, _coerce(screener_max_symbols_input.value, _sc_def["max_symbols"], int)),
+                "sc_max_symbols": max(1, _coerce(screener_sc_max_input.value, _sc_def["sc_max_symbols"], int)),
+                "mr_max_symbols": max(1, _coerce(screener_mr_max_input.value, _sc_def["mr_max_symbols"], int)),
+                "interval_minutes": max(5, _coerce(screener_interval_input.value, _sc_def["interval_minutes"], int)),
                 "min_volume_usd": max(0.0, _coerce(screener_min_volume_input.value, 0.0, float) * 1_000_000),
-                "max_spread_pct": max(0.0, _coerce(screener_max_spread_input.value, 0.0, float)),
+                "max_spread_pct": max(0.0, _coerce(screener_max_spread_input.value, _sc_def["max_spread_pct"], float)),
+                # Recent-activity window (0 = legacy 24h ranking)
+                "activity_lookback_hours": max(0.0, _coerce(screener_activity_hours_input.value, _sc_def["activity_lookback_hours"], float)),
+                "activity_timeframe": str(screener_activity_tf_select.value or _sc_def["activity_timeframe"]),
+                "activity_prefilter_top_n": max(10, _coerce(screener_activity_topn_input.value, _sc_def["activity_prefilter_top_n"], int)),
+                "activity_min_ratio": max(0.0, _coerce(screener_activity_min_ratio_input.value, _sc_def["activity_min_ratio"], float)),
+                "activity_cache_seconds": float((config.get("screener") or {}).get("activity_cache_seconds") or _sc_def["activity_cache_seconds"]),
                 # SC filters (also stored as legacy min_* for backward compatibility)
-                "sc_min_momentum_pct": max(0.0, _coerce(screener_min_momentum_input.value, 0.0, float)),
-                "sc_min_hl_range_pct": max(0.0, _coerce(screener_min_hl_range_input.value, 0.0, float)),
-                "min_momentum_pct": max(0.0, _coerce(screener_min_momentum_input.value, 0.0, float)),
-                "min_hl_range_pct": max(0.0, _coerce(screener_min_hl_range_input.value, 0.0, float)),
+                "sc_min_momentum_pct": max(0.0, _coerce(screener_min_momentum_input.value, _sc_def["sc_min_momentum_pct"], float)),
+                "sc_min_hl_range_pct": max(0.0, _coerce(screener_min_hl_range_input.value, _sc_def["sc_min_hl_range_pct"], float)),
+                "min_momentum_pct": max(0.0, _coerce(screener_min_momentum_input.value, _sc_def["min_momentum_pct"], float)),
+                "min_hl_range_pct": max(0.0, _coerce(screener_min_hl_range_input.value, _sc_def["min_hl_range_pct"], float)),
                 # MR filters
-                "mr_min_hl_range_pct": max(0.0, _coerce(screener_mr_min_hl_input.value, 1.0, float)),
-                "mr_max_momentum_pct": max(0.0, _coerce(screener_mr_max_mom_input.value, 8.0, float)),
+                "mr_min_hl_range_pct": max(0.0, _coerce(screener_mr_min_hl_input.value, _sc_def["mr_min_hl_range_pct"], float)),
+                "mr_max_momentum_pct": max(0.0, _coerce(screener_mr_max_mom_input.value, _sc_def["mr_max_momentum_pct"], float)),
             }
             # Preserve signal fields from config (edited on STRATEGY page) and
             # only overwrite the operational fields managed on this page.

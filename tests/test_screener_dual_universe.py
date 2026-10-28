@@ -574,26 +574,21 @@ class TestScreenerConfigPlumbing:
         assert stored["enabled"] is True
 
     def test_default_runtime_screener_has_dual_keys(self) -> None:
-        """Verify the default screener config source has dual-universe keys.
+        """Verify the canonical screener defaults carry the dual-universe keys.
 
-        The defaults are defined inside the ``_create_lifespan`` closure in
-        ``main.py``.  We inspect the source rather than executing the lifespan
-        to avoid event-loop conflicts with prior ``asyncio_run`` calls in the
-        same test session (which close the default loop).
+        The defaults live in ``app/services/strategies/defaults.py``
+        (``DEFAULT_SCREENER``) and ``main.py`` bootstraps runtime config from
+        ``screener_defaults()``, so asserting on the defaults dict is both
+        stronger and drift-proof.
         """
-        import inspect
+        from app.services.strategies.defaults import screener_defaults
 
-        from app import main as main_module
-
-        # _create_lifespan returns the actual lifespan function that contains
-        # the default runtime_config dict with screener defaults.
-        lifespan_factory = main_module._create_lifespan(False)
-        src = inspect.getsource(lifespan_factory)
-        assert "dual_universe" in src
-        assert "sc_max_symbols" in src
-        assert "mr_max_symbols" in src
-        assert "mr_min_hl_range_pct" in src
-        assert "mr_max_momentum_pct" in src
+        defaults = screener_defaults()
+        assert defaults["dual_universe"] is True
+        assert "sc_max_symbols" in defaults
+        assert "mr_max_symbols" in defaults
+        assert "mr_min_hl_range_pct" in defaults
+        assert "mr_max_momentum_pct" in defaults
 
     def test_default_runtime_screener_has_liquidity_filters(self) -> None:
         """Verify the default screener config has the liquidity guardrails.
@@ -601,11 +596,27 @@ class TestScreenerConfigPlumbing:
         min_volume_usd default was raised to 10M and max_spread_pct (0.5%)
         was added to filter out thin-book alts where SL market closes slip.
         """
+        from app.services.strategies.defaults import screener_defaults
+
+        defaults = screener_defaults()
+        assert defaults["max_spread_pct"] == 0.5
+        assert defaults["min_volume_usd"] == 10_000_000
+
+    def test_default_runtime_screener_has_activity_window(self) -> None:
+        """The recent-activity window defaults to 4 hours on 1H candles."""
+        from app.services.strategies.defaults import screener_defaults
+
+        defaults = screener_defaults()
+        assert defaults["activity_lookback_hours"] == 4.0
+        assert defaults["activity_timeframe"] == "1H"
+        assert defaults["activity_prefilter_top_n"] == 120
+        assert defaults["activity_min_ratio"] == 1.0
+
+    def test_main_bootstraps_screener_from_defaults(self) -> None:
+        """main.py must not duplicate screener defaults inline."""
         import inspect
 
         from app import main as main_module
 
-        lifespan_factory = main_module._create_lifespan(False)
-        src = inspect.getsource(lifespan_factory)
-        assert "max_spread_pct" in src
-        assert "10_000_000" in src or "10000000" in src
+        src = inspect.getsource(main_module._create_lifespan(False))
+        assert "screener_defaults()" in src

@@ -395,6 +395,37 @@ DEFAULT_STRATEGY_CONFIG: dict[str, dict[str, Any]] = {
     "trend_pullback": DEFAULT_TREND_PULLBACK,
 }
 
+# ── Symbol screener ─────────────────────────────────────────────────────────
+# Canonical defaults for ``config["screener"]``.  This is not a launcher
+# strategy, but it belongs here for the same reason: it is the single source of
+# truth for the screener's default values, so ``app/main.py`` (runtime config
+# bootstrap) and the CFG page cannot drift apart.
+DEFAULT_SCREENER: dict[str, Any] = {
+    "enabled": False,
+    "dual_universe": True,
+    "universe_filter": "*-USDT-SWAP",
+    "max_symbols": 10,
+    "sc_max_symbols": 8,
+    "mr_max_symbols": 8,
+    "interval_minutes": 60,
+    "min_volume_usd": 10_000_000,
+    "max_spread_pct": 0.5,
+    # Recent-activity window: rank on the last N hours instead of 24h
+    # aggregates so "was hot, now dead" names stop being picked.  0 disables
+    # the window and restores pure 24h ranking.
+    "activity_lookback_hours": 4.0,
+    "activity_timeframe": "1H",
+    "activity_prefilter_top_n": 120,
+    "activity_min_ratio": 1.0,
+    "activity_cache_seconds": 300.0,
+    "sc_min_momentum_pct": 1.5,
+    "sc_min_hl_range_pct": 0.0,
+    "min_momentum_pct": 1.5,
+    "min_hl_range_pct": 0.0,
+    "mr_min_hl_range_pct": 2.5,
+    "mr_max_momentum_pct": 5.0,
+}
+
 # ── Trade management (position-overlay) ─────────────────────────────────────
 # Canonical defaults for the trade-management sub-config.  This is NOT one of
 # the pluggable launcher strategies — it lives under
@@ -454,6 +485,11 @@ def strategy_defaults(name: str) -> dict[str, Any]:
 def trade_management_defaults() -> dict[str, Any]:
     """Return a shallow copy of the canonical trade-management defaults."""
     return dict(DEFAULT_TRADE_MANAGEMENT)
+
+
+def screener_defaults() -> dict[str, Any]:
+    """Return a shallow copy of the canonical screener defaults."""
+    return dict(DEFAULT_SCREENER)
 
 
 def merged_config(config: dict[str, Any] | None, name: str) -> dict[str, Any]:
