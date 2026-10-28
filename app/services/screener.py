@@ -16,6 +16,7 @@ universe schedule builder.
 from __future__ import annotations
 
 import fnmatch
+import math
 from collections import deque
 from typing import Any
 
@@ -180,15 +181,23 @@ def compute_recent_activity(
     hours_covered = len(window) * tf_ms / _HOUR_MS
     share = hours_covered / 24.0
 
+    # Volume accumulates linearly with time, so the 24h baseline scales by
+    # ``share`` directly.
     recent_vol_ratio: float | None = None
     if vol_ccy_24h and vol_ccy_24h > 0 and share > 0:
         expected_vol = vol_ccy_24h * share
         if expected_vol > 0:
             recent_vol_ratio = recent_vol / expected_vol
 
+    # Range does NOT scale linearly: the 24h high-low is the extreme of the
+    # whole path, and a sub-window captures a disproportionate slice of it.
+    # For a random walk the range over a fraction ``f`` of the time is ~√f of
+    # the full range, so the baseline uses ``sqrt(share)``.  Using ``share``
+    # here inflates every value ~2.8x at a 3h window and makes the diagnostic
+    # useless (nothing ever reads as faded).
     decay_ratio: float | None = None
     if hl_range_pct and hl_range_pct > 0 and share > 0:
-        expected_range = hl_range_pct * share
+        expected_range = hl_range_pct * math.sqrt(share)
         if expected_range > 0:
             decay_ratio = recent_range_pct / expected_range
 
