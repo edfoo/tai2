@@ -147,7 +147,33 @@ FUNDING_ACCOUNT_TYPE = "6"
 TRADING_ACCOUNT_TYPE = "18"
 INSUFFICIENT_MARGIN_CODES = {"59300"}
 ORDER_INSUFFICIENT_MARGIN_CODES = {"51008"}
- 
+
+# Client-order-id prefixes emitted by ``_generate_client_order_id`` across the
+# entry/close/trade-management helpers.  ``_generate_client_order_id`` strips
+# every non-alphanumeric character from the prefix, so the *effective* prefixes
+# are the sanitized forms below (e.g. "tm-p" -> "tmp", "cmtr-c" -> "cmtrc").
+# The fill reconciler matches fills against these to tell bot-owned fills apart
+# from manually-placed ones.
+BOT_CLIENT_ORDER_PREFIXES: tuple[str, ...] = (
+    "tai2",
+    "gov",
+    "shot",
+    "skim",
+    "tmp",
+    "tmt",
+    "tmr",
+    "tmm",
+    "cmtrc",
+    "cmtre",
+    "altrc",
+    "altre",
+)
+
+
+def _sanitize_client_order_prefix(prefix: str) -> str:
+    """Return the alphanumeric-only form of *prefix* (mirrors the generator)."""
+    return "".join(ch for ch in (prefix or "") if ch.isalnum())
+
 
 class MarketService:
     """Streams OKX market data and publishes normalized snapshots to Redis."""
@@ -349,6 +375,15 @@ class MarketService:
         self._position_protection: dict[str, dict[str, Any]] = {}
         self._protection_sync_ts: dict[str, float] = {}
         self._execution_feedback: Deque[dict[str, Any]] = deque(maxlen=50)
+        # Fill-reconciliation dedup: fill ids already reported as manual (skipped).
+        # The reconciler re-fetches the same trailing window of fills every run,
+        # so without this the identical manual fills would be re-logged on every
+        # tick (~every 2.5 min) and flood the log.  Bounded FIFO (deque + set kept
+        # in sync) so memory stays flat; a fill evicted from the set is simply
+        # re-logged once more.
+        self._reconciled_manual_fill_ids: Deque[str] = deque()
+        self._reconciled_manual_fill_id_set: set[str] = set()
+        self._reconciled_manual_fill_id_limit = 2000
         self._latest_execution_limits: dict[str, dict[str, Any]] = {}
         self._last_margin_guidance: dict[str, dict[str, Any]] = {}
         self._isolated_leverage_cache: dict[str, float] = {}
@@ -11616,7 +11651,7 @@ class MarketService:
     @staticmethod
     def _generate_client_order_id(prefix: str = "tai2") -> str:
         """Generate a short, unique client order ID compatible with OKX limits."""
-        safe_prefix = "".join(ch for ch in (prefix or "") if ch.isalnum()) or "tai2"
+        safe_prefix = _sanitize_client_order_prefix(prefix) or "tai2"
         timestamp = str(int(time.time() * 1000))
         random_suffix = secrets.token_hex(3)
         value = f"{safe_prefix}{timestamp}{random_suffix}"
@@ -11631,15 +11666,16 @@ class MarketService:
         (which do not).  A manual close fill must never be attributed to a bot
         entry, or the bot's realised PnL gets polluted / orphaned.
 
-        Prefixes mirror the `prefix=` arguments passed to
-        `_generate_client_order_id` across the close/entry helpers.
+        Prefixes mirror the *sanitized* `prefix=` arguments passed to
+        `_generate_client_order_id` across the close/entry helpers (see
+        ``BOT_CLIENT_ORDER_PREFIXES``).  Matching the sanitized forms is
+        essential: the generator strips non-alphanumerics, so a hyphenated
+        prefix like ``tm-p`` is emitted as ``tmp`` and would otherwise be
+        misclassified as a manual fill.
         """
         if not cl_order_id:
             return False
-        cid = cl_order_id.lower()
-        return cid.startswith(
-            ("tai2", "gov", "shot", "skim", "tm-", "cmtr-", "altr-")
-        )
+        return cl_order_id.lower().startswith(BOT_CLIENT_ORDER_PREFIXES)
 
     def _normalize_order_response(self, response: Any) -> dict[str, Any] | None:
         """Return the first OKX data entry if the envelope and sub-codes signal success."""
@@ -12823,6 +12859,7 @@ class MarketService:
             return
 
         reconciled = 0
+        manual_skipped = 0
         for fill in fills:
             raw_pnl = fill.get("pnl") or fill.get("fillPnl") or "0"
             try:
@@ -12851,21 +12888,35 @@ class MarketService:
             # ── Bot-fill identity guard ──────────────────────────────────
             # The closing fill carries the client order id of the order that
             # caused it.  Every bot order uses a known prefix (see
-            # `_generate_client_order_id`: "tai2", "gov", "gov-c", "shot",
-            # "skim", "tm-*", "cmtr-*", "altr-*"), whereas a manually-placed
-            # order does not.  If the fill's clOrdId is present AND non-empty
-            # AND does not match a known bot prefix, it is a manual fill and
-            # must NOT be attributed to a bot entry — pairing it would both
-            # pollute a bot row with manual PnL and orphan the bot's real close
-            # fill (losing its PnL).  We only skip when we are *sure* it is
-            # manual (clOrdId present and unknown); a missing/empty clOrdId is
-            # treated as ambiguous and left to the existing symbol+side match.
+            # `_generate_client_order_id` / ``BOT_CLIENT_ORDER_PREFIXES``),
+            # whereas a manually-placed order does not.  If the fill's clOrdId
+            # is present AND non-empty AND does not match a known bot prefix,
+            # it is a manual fill and must NOT be attributed to a bot entry —
+            # pairing it would both pollute a bot row with manual PnL and
+            # orphan the bot's real close fill (losing its PnL).  We only skip
+            # when we are *sure* it is manual (clOrdId present and unknown); a
+            # missing/empty clOrdId is treated as ambiguous and left to the
+            # existing symbol+side match.
             fill_clordid = str(fill.get("clOrdId") or "").strip()
             if fill_clordid and not self._is_bot_client_order_id(fill_clordid):
-                self._emit_debug(
-                    f"Fill reconciliation: skipping manual fill for {inst_id} "
-                    f"(clOrdId={fill_clordid}, fill {fill_id})"
-                )
+                manual_skipped += 1
+                # Log each distinct manual fill only once.  The reconciler
+                # re-fetches the same trailing window every run, so without
+                # this dedup the identical fills would be re-logged on every
+                # tick and flood the log.
+                if fill_id and fill_id not in self._reconciled_manual_fill_id_set:
+                    self._reconciled_manual_fill_id_set.add(fill_id)
+                    self._reconciled_manual_fill_ids.append(fill_id)
+                    while (
+                        len(self._reconciled_manual_fill_ids)
+                        > self._reconciled_manual_fill_id_limit
+                    ):
+                        evicted = self._reconciled_manual_fill_ids.popleft()
+                        self._reconciled_manual_fill_id_set.discard(evicted)
+                    self._emit_debug(
+                        f"Fill reconciliation: skipping manual fill for {inst_id} "
+                        f"(clOrdId={fill_clordid}, fill {fill_id})"
+                    )
                 continue
 
             try:
@@ -12904,6 +12955,12 @@ class MarketService:
 
         if reconciled:
             logger.info("Fill reconciliation: updated PnL for %d trade(s)", reconciled)
+        if manual_skipped:
+            # One summary line per run instead of one line per fill (the
+            # per-fill detail is emitted once, above, on first sighting).
+            logger.info(
+                "Fill reconciliation: skipped %d manual fill(s)", manual_skipped
+            )
 
         # Second pass: capture entry-leg taker fees (pnl == 0 fills).
         # The entry row was inserted with fee=NULL; once the exchange reports the fill
@@ -12935,14 +12992,28 @@ class MarketService:
             if not inst_id or not fill_side:
                 continue
 
+            # ── Bot-fill identity guard ──────────────────────────────────
+            # Mirror the PnL pass: a manual entry fill (unknown clOrdId prefix)
+            # must never have its fee attributed to a bot entry row.  Without
+            # this guard a manual fill could match a bot row by symbol+side and
+            # stamp a foreign fee onto it.
+            fill_clordid = str(fill.get("clOrdId") or "").strip()
+            if fill_clordid and not self._is_bot_client_order_id(fill_clordid):
+                continue
+
             try:
                 # For entry fills the row side matches the fill side (same direction).
                 # Identity-aware: prefer matching by the fill's own ordId (the bot's
                 # order id stored at entry time) so the fee lands on the exact row.
+                # ``fee_unset_only=True`` makes the pass idempotent: once the fee is
+                # stored the row is no longer a candidate, so the same entry fill is
+                # not re-stored on every reconcile run.
                 fill_ordid = str(fill.get("ordId") or "").strip()
                 candidates: list[dict[str, Any]] = []
                 if fill_ordid:
-                    candidates = await fetch_unreconciled_by_order_id(fill_ordid)
+                    candidates = await fetch_unreconciled_by_order_id(
+                        fill_ordid, fee_unset_only=True
+                    )
                 if not candidates:
                     # Fall back to symbol+side matching when the fill lacks an ordId
                     # (or the row predates the identity column).
@@ -12951,6 +13022,7 @@ class MarketService:
                         side=fill_side,
                         lookback_hours=48.0,
                         same_side=True,
+                        fee_unset_only=True,
                     )
             except TypeError:
                 # fetch_unreconciled_trades may not support same_side yet; skip gracefully.

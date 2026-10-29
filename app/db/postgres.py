@@ -99,6 +99,23 @@ FETCH_UNRECONCILED_SQL = """
     LIMIT 5
 """
 
+# Same as FETCH_UNRECONCILED_SQL but additionally requires the entry fee to be
+# unset.  Used by the entry-fee back-fill pass so a row whose fee has already
+# been stored is no longer a candidate — making the pass idempotent (without
+# this, the same entry fill was re-stored on every reconcile run).
+FETCH_UNRECONCILED_FEE_UNSET_SQL = """
+    SELECT id, timestamp, symbol, side, okx_order_id
+    FROM executed_trades
+    WHERE symbol = $1
+      AND side = $2
+      AND pnl IS NULL
+      AND okx_fill_id IS NULL
+      AND fee IS NULL
+      AND timestamp >= NOW() - ($3::double precision * INTERVAL '1 hour')
+    ORDER BY timestamp ASC
+    LIMIT 5
+"""
+
 # Look up a single unreconciled entry by its OWN okx_order_id (matches an entry
 # fill to the exact row the bot created for that order), used by the entry-fee
 # back-fill pass so fees are not attributed to a neighbouring row of the same
@@ -109,6 +126,19 @@ FETCH_BY_ORDER_ID_SQL = """
     WHERE okx_order_id = $1
       AND pnl IS NULL
       AND okx_fill_id IS NULL
+    ORDER BY timestamp ASC
+    LIMIT 1
+"""
+
+# Same as FETCH_BY_ORDER_ID_SQL but additionally requires the entry fee to be
+# unset, so the entry-fee back-fill pass is idempotent.
+FETCH_BY_ORDER_ID_FEE_UNSET_SQL = """
+    SELECT id, timestamp, symbol, side, okx_order_id
+    FROM executed_trades
+    WHERE okx_order_id = $1
+      AND pnl IS NULL
+      AND okx_fill_id IS NULL
+      AND fee IS NULL
     ORDER BY timestamp ASC
     LIMIT 1
 """
@@ -343,6 +373,7 @@ async def fetch_unreconciled_trades(
     side: str,
     lookback_hours: float = 48.0,
     same_side: bool = False,
+    fee_unset_only: bool = False,
 ) -> list[dict[str, Any]]:
     """Return the most recent trades for *symbol*/*side* that still have no PnL recorded.
 
@@ -350,12 +381,15 @@ async def fetch_unreconciled_trades(
     of a SHORT) and we query the *opposite* direction to find the original entry.
 
     Pass ``same_side=True`` when you want to look up an entry fill directly (e.g. to
-    back-fill a taker fee before the position closes).
+    back-fill a taker fee before the position closes).  Pass ``fee_unset_only=True``
+    to additionally require ``fee IS NULL`` — used by the entry-fee back-fill pass so
+    a row whose fee is already stored is not re-updated on every reconcile run.
     """
     resolved_side = side.lower() if same_side else ("sell" if side.lower() == "buy" else "buy")
     pool = await get_postgres_pool()
+    sql = FETCH_UNRECONCILED_FEE_UNSET_SQL if fee_unset_only else FETCH_UNRECONCILED_SQL
     records = await pool.fetch(
-        FETCH_UNRECONCILED_SQL,
+        sql,
         symbol.upper(),
         resolved_side,
         float(lookback_hours),
@@ -363,17 +397,22 @@ async def fetch_unreconciled_trades(
     return [dict(row) for row in records]
 
 
-async def fetch_unreconciled_by_order_id(order_id: str) -> list[dict[str, Any]]:
+async def fetch_unreconciled_by_order_id(
+    order_id: str,
+    fee_unset_only: bool = False,
+) -> list[dict[str, Any]]:
     """Return the unreconciled entry whose own ``okx_order_id`` matches *order_id*.
 
     Used by the entry-fee back-fill pass to link an entry fill to the exact row
     the bot created for that order, rather than guessing by symbol+side (which
-    can attribute a fee to a neighbouring entry of the same symbol).
+    can attribute a fee to a neighbouring entry of the same symbol).  Pass
+    ``fee_unset_only=True`` to require ``fee IS NULL`` so the pass is idempotent.
     """
     if not order_id:
         return []
     pool = await get_postgres_pool()
-    records = await pool.fetch(FETCH_BY_ORDER_ID_SQL, str(order_id))
+    sql = FETCH_BY_ORDER_ID_FEE_UNSET_SQL if fee_unset_only else FETCH_BY_ORDER_ID_SQL
+    records = await pool.fetch(sql, str(order_id))
     return [dict(row) for row in records]
 
 
