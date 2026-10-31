@@ -465,6 +465,10 @@ DEFAULT_TRADE_MANAGEMENT: dict[str, Any] = {
     "trailing_activate_r": 0.6,
     "trailing_distance_atr": 1.0,
     "trailing_floor_r": 0.25,
+    # Profit floor as a % of notional (== % of entry price).  Locks the
+    # runner's stop 0.5% in profit instead of the legacy R floor that sat
+    # *below* entry (the "trailing SL at a small loss" bug).
+    "trailing_floor_profit_pct": 0.5,
     "trailing_step_r": 0.1,
     # Drop the fixed TP on the runner after the partial fires so the trailing
     # stop is the profit-taker (asymmetric exit).  When False, the original TP

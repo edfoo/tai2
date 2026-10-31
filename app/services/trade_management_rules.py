@@ -42,6 +42,12 @@ _DEFAULTS: dict[str, Any] = {
     "trailing_activate_r": 0.8,
     "trailing_distance_atr": 1.5,
     "trailing_floor_r": 0.5,
+    # Profit floor for the trailing stop as a PERCENTAGE OF NOTIONAL (== % of
+    # entry price, since size cancels).  0.5 = lock the runner's stop 0.5%
+    # above entry (long) / below entry (short).  When set it REPLACES the
+    # R-based ``trailing_floor_r`` floor so the stop is always in profit.
+    # 0/negative disables it and restores the legacy R-based floor.
+    "trailing_floor_profit_pct": 0.5,
     "trailing_step_r": 0.2,
     "trailing_remove_tp": True,
     "trailing_far_tp_mult": None,
@@ -78,6 +84,7 @@ class TradeMgmtParams:
     trailing_activate_r: float
     trailing_distance_atr: float
     trailing_floor_r: float
+    trailing_floor_profit_pct: float | None
     trailing_step_r: float
     trailing_remove_tp: bool
     trailing_far_tp_mult: float | None
@@ -99,6 +106,13 @@ def resolve_tm_params(tm: dict[str, Any] | None) -> TradeMgmtParams:
     if far_tp is not None and far_tp <= 0:
         far_tp = None
 
+    # Profit floor as a percentage of notional.  Defaults to the canonical
+    # 0.5% so the runner's stop is locked in profit out of the box; an explicit
+    # non-positive value disables it and restores the R-based floor.
+    floor_profit_pct = fb("trailing_floor_profit_pct")
+    if floor_profit_pct <= 0:
+        floor_profit_pct = None
+
     return TradeMgmtParams(
         enabled=bool(tm.get("enabled", True)),
         breakeven_enabled=bool(tm.get("breakeven_enabled", _DEFAULTS["breakeven_enabled"])),
@@ -118,6 +132,7 @@ def resolve_tm_params(tm: dict[str, Any] | None) -> TradeMgmtParams:
         trailing_activate_r=fb("trailing_activate_r"),
         trailing_distance_atr=fb("trailing_distance_atr"),
         trailing_floor_r=fb("trailing_floor_r"),
+        trailing_floor_profit_pct=floor_profit_pct,
         trailing_step_r=fb("trailing_step_r"),
         trailing_remove_tp=bool(tm.get("trailing_remove_tp", _DEFAULTS["trailing_remove_tp"])),
         trailing_far_tp_mult=far_tp,
@@ -148,19 +163,44 @@ def compute_trailing_sl(
     atr_pct: float,
     trailing_distance_atr: float,
     trailing_floor_r: float,
+    trailing_floor_profit_pct: float | None = None,
 ) -> tuple[float, float]:
     """Return ``(new_sl, floor_sl)`` for the trailing stop.
 
     Mirrors live: the trail distance is ``trailing_distance_atr × atr%`` behind
-    the mark, clamped so it never crosses the floor R below/above entry.
+    the mark, clamped so it never crosses the floor.
+
+    If ``trailing_floor_profit_pct`` is set (a PERCENTAGE OF NOTIONAL, which
+    equals a percentage of entry price because size cancels), the floor is
+    placed that far above entry (long) or below entry (short) so the runner's
+    stop is always locked in profit.  Otherwise it falls back to
+    ``trailing_floor_r`` (legacy R-based floor, which sits *below* entry for a
+    long and is therefore a loss).
+
+    A floor at/above the mark (long) or at/below it (short) would trigger
+    instantly, so when the profit floor is unreachable — e.g. a 0.5% floor on a
+    position whose mark has not yet moved that far — it is ignored and the
+    trail distance (the tightest valid stop) is used instead.
     """
     trail_dist = trailing_distance_atr * atr_pct / 100.0 * mark_price
     if is_long:
         trail_sl = mark_price - trail_dist
-        floor_sl = entry_price * (1.0 - trailing_floor_r * risk_pct / 100.0)
+        if trailing_floor_profit_pct is not None:
+            floor_sl = entry_price * (1.0 + trailing_floor_profit_pct / 100.0)
+        else:
+            floor_sl = entry_price * (1.0 - trailing_floor_r * risk_pct / 100.0)
+        # Unreachable floor → fall back to the trail (never place at/above mark).
+        if floor_sl >= mark_price:
+            floor_sl = trail_sl
         return max(trail_sl, floor_sl), floor_sl
     trail_sl = mark_price + trail_dist
-    floor_sl = entry_price * (1.0 + trailing_floor_r * risk_pct / 100.0)
+    if trailing_floor_profit_pct is not None:
+        floor_sl = entry_price * (1.0 - trailing_floor_profit_pct / 100.0)
+    else:
+        floor_sl = entry_price * (1.0 + trailing_floor_r * risk_pct / 100.0)
+    # Unreachable floor → fall back to the trail (never place at/below mark).
+    if floor_sl <= mark_price:
+        floor_sl = trail_sl
     return min(trail_sl, floor_sl), floor_sl
 
 
@@ -319,6 +359,7 @@ def compute_trade_management_decision(
             atr_pct=atr,
             trailing_distance_atr=params.trailing_distance_atr,
             trailing_floor_r=params.trailing_floor_r,
+            trailing_floor_profit_pct=params.trailing_floor_profit_pct,
         )
         step_distance = params.trailing_step_r * risk / 100.0 * entry_price
         if should_ratchet_sl(

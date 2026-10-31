@@ -18,6 +18,7 @@ import logging
 from typing import Any
 
 from app.services.backtest.data_fetcher import htf_for
+from app.services.backtest.indicator_cache import IndicatorCache
 from app.services.backtest.models import Candle
 from app.services.market_service import MarketService
 
@@ -30,6 +31,11 @@ class SnapshotBuilder:
     The builder is stateless — it receives the full LTF and HTF candle arrays
     and a window index, and returns a snapshot dict matching the shape
     strategies expect.
+
+    Indicator series are precomputed **once** per candle array via
+    :class:`IndicatorCache` and served per step by slicing (the pandas-ta
+    indicators are causal, so a sliced full-array series equals a prefix
+    recompute).  This turns the O(n²) per-step recompute into O(n).
     """
 
     def __init__(
@@ -50,24 +56,24 @@ class SnapshotBuilder:
         # is derived from that bar via htf_for().
         self._tf_candles: dict[str, list[Candle]] = tf_candles or {}
 
-    @staticmethod
-    def _build_block(
-        candle_window: list[Candle],
-        current_ts: int,
-        htf_candles: list[Candle] | None,
-        htf_timeframe: str,
-    ) -> dict[str, Any]:
-        """Compute an indicator block from a candle window + its HTF.
+        # Precomputed indicator caches (one per candle array).
+        self._ltf_cache = IndicatorCache([self._candle_to_row(c) for c in ltf_candles])
+        self._htf_cache = (
+            IndicatorCache([self._candle_to_row(c) for c in self._htf_candles])
+            if self._htf_candles
+            else None
+        )
+        self._tf_caches: dict[str, IndicatorCache] = {
+            tf: IndicatorCache([self._candle_to_row(c) for c in candles])
+            for tf, candles in self._tf_candles.items()
+        }
 
-        Mirrors ``MarketService._build_timeframes_block``: builds the same
-        shape as ``indicators`` (with structure and flattened swing scalars)
-        and attaches the HTF layer (``htf_indicators`` / ``adx_htf`` /
-        ``choppiness_htf``) from the most recent closed HTF candle at or
-        before ``current_ts``.
-        """
-        raw = [SnapshotBuilder._candle_to_row(c) for c in candle_window]
-        block = MarketService._compute_indicators(raw)
+    @staticmethod
+    def _attach_structure(block: dict[str, Any], raw: list[list[Any]], *, with_swings: bool) -> None:
+        """Attach ``structure`` (and optionally flattened swing scalars) to *block*."""
         block["structure"] = MarketService._compute_structure(raw)
+        if not with_swings:
+            return
         _structure = block.get("structure") or {}
         _sw_highs = _structure.get("swing_highs") or []
         _sw_lows = _structure.get("swing_lows") or []
@@ -77,6 +83,59 @@ class SnapshotBuilder:
         block["swing_low"] = (
             _sw_lows[-1].get("price") if _sw_lows and isinstance(_sw_lows[-1], dict) else None
         )
+
+    @staticmethod
+    def _attach_htf(
+        block: dict[str, Any],
+        htf_cache: IndicatorCache | None,
+        htf_timeframe: str,
+        current_ts: int,
+    ) -> None:
+        """Attach the HTF layer from the most recent closed HTF candle."""
+        if htf_cache is None or not htf_timeframe:
+            return
+        htf_idx = htf_cache.end_idx_for_ts(current_ts)
+        if htf_idx < 0:
+            return
+        htf_block = htf_cache.block_at(htf_idx)
+        block["ohlcv_htf"] = htf_cache.rows_upto(htf_idx)
+        block["htf_indicators"] = htf_block
+        block["ohlcv_htf_bar"] = htf_timeframe
+        block["adx_htf"] = (htf_block.get("adx") or {}).get("value")
+        block["choppiness_htf"] = htf_block.get("choppiness")
+
+    def _cached_block(
+        self,
+        cache: IndicatorCache,
+        end_idx: int,
+        current_ts: int,
+        htf_cache: IndicatorCache | None,
+        htf_timeframe: str,
+        *,
+        with_swings: bool,
+    ) -> dict[str, Any]:
+        """Build an indicator block for ``cache``'s window ``[:end_idx+1]``."""
+        block = cache.block_at(end_idx)
+        self._attach_structure(block, cache.rows_upto(end_idx), with_swings=with_swings)
+        self._attach_htf(block, htf_cache, htf_timeframe, current_ts)
+        return block
+
+    @staticmethod
+    def _build_block(
+        candle_window: list[Candle],
+        current_ts: int,
+        htf_candles: list[Candle] | None,
+        htf_timeframe: str,
+    ) -> dict[str, Any]:
+        """Compute an indicator block from a candle window + its HTF (uncached).
+
+        Retained for callers that build a non-prefix window (the finer-LTF
+        loop's synthetic in-progress candle).  Prefix windows go through
+        :meth:`_cached_block` instead.
+        """
+        raw = [SnapshotBuilder._candle_to_row(c) for c in candle_window]
+        block = MarketService._compute_indicators(raw)
+        SnapshotBuilder._attach_structure(block, raw, with_swings=True)
         if htf_candles and htf_timeframe:
             htf_window = [c for c in htf_candles if c.ts <= current_ts]
             if htf_window:
@@ -98,50 +157,34 @@ class SnapshotBuilder:
         the current candle is included).
         """
         # ── LTF indicators ────────────────────────────────────────────
-        ltf_window = self._ltf_candles[: window_end_idx + 1]
-        ltf_raw = [self._candle_to_row(c) for c in ltf_window]
-        indicators = MarketService._compute_indicators(ltf_raw)
-        indicators["structure"] = MarketService._compute_structure(ltf_raw)
-
-        # ── HTF alignment ─────────────────────────────────────────────
-        # Use the most recent closed HTF candle at or before the current
-        # LTF candle's timestamp.
         current_ts = self._ltf_candles[window_end_idx].ts
-        htf_window_raw: list[list[Any]] = []
-        htf_bar = ""
-        if self._htf_candles and self._htf_timeframe:
-            htf_window = [c for c in self._htf_candles if c.ts <= current_ts]
-            if htf_window:
-                htf_window_raw = [self._candle_to_row(c) for c in htf_window]
-                htf_bar = self._htf_timeframe
-                indicators["ohlcv_htf"] = htf_window_raw
-                indicators["htf_indicators"] = MarketService._compute_indicators(htf_window_raw)
-                indicators["ohlcv_htf_bar"] = htf_bar
-                # Flatten HTF regime scalars (mirrors live) so regime gates
-                # and regime-exit checks see adx_htf / choppiness_htf.
-                _htf = indicators.get("htf_indicators") or {}
-                indicators["adx_htf"] = (_htf.get("adx") or {}).get("value")
-                indicators["choppiness_htf"] = _htf.get("choppiness")
+        indicators = self._cached_block(
+            self._ltf_cache,
+            window_end_idx,
+            current_ts,
+            self._htf_cache,
+            self._htf_timeframe,
+            with_swings=False,
+        )
 
         # ── Per-strategy analysis timeframes ─────────────────────────
         # Build a ``timeframes`` map for each requested bar, aligning each
         # bar's candles to the current LTF step (closed candles at or before
         # current_ts) and attaching that bar's own HTF.
         timeframes: dict[str, dict[str, Any]] = {}
-        for tf, tf_candles in self._tf_candles.items():
-            tf_window = [c for c in tf_candles if c.ts <= current_ts]
-            if not tf_window:
+        for tf, tf_cache in self._tf_caches.items():
+            tf_idx = tf_cache.end_idx_for_ts(current_ts)
+            if tf_idx < 0:
                 continue
             tf_htf = htf_for(tf)
-            tf_htf_candles: list[Candle] = []
-            if tf_htf:
-                tf_htf_candles = [c for c in tf_candles if c.ts <= current_ts]
-                # The HTF of a strategy tf is a separate bar; use the generic
-                # per-tf candle set if present, else reuse the strategy tf's
-                # own candles (best-effort).
-                tf_htf_candles = self._tf_candles.get(tf_htf) or tf_htf_candles
-            timeframes[tf] = self._build_block(
-                tf_window, current_ts, tf_htf_candles, tf_htf
+            # The HTF of a strategy tf is a separate bar; use the generic
+            # per-tf candle set if present, else reuse the strategy tf's
+            # own candles (best-effort).
+            tf_htf_cache = self._tf_caches.get(tf_htf) if tf_htf else None
+            if tf_htf and tf_htf_cache is None:
+                tf_htf_cache = tf_cache
+            timeframes[tf] = self._cached_block(
+                tf_cache, tf_idx, current_ts, tf_htf_cache, tf_htf, with_swings=True
             )
 
         # ── Assemble snapshot ─────────────────────────────────────────

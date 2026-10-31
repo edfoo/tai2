@@ -5402,12 +5402,18 @@ def register_pages(app: FastAPI) -> None:
                                 value=float(trade_management.get("trailing_floor_r") or 0.5),
                                 min=0.0, max=5.0, step=0.1, format="%.1f",
                             ).classes("w-32").props("dense")
+                            _floor_pct_raw = trade_management.get("trailing_floor_profit_pct")
+                            tm_trailing_floor_pct_input = ui.number(
+                                label="Floor profit (%)",
+                                value=float(_floor_pct_raw) if _floor_pct_raw is not None else 0.5,
+                                min=0.0, max=5.0, step=0.05, format="%.2f",
+                            ).classes("w-40").props("dense clearable")
                             tm_trailing_step_input = ui.number(
                                 label="Step R",
                                 value=float(trade_management.get("trailing_step_r") or 0.2),
                                 min=0.0, max=2.0, step=0.05, format="%.2f",
                             ).classes("w-32").props("dense")
-                        ui.label("After the partial TP, trail the runner's SL behind price (never below the floor R). Activate at 0.8R so the runner is protected the moment the partial fires.").classes("text-xs text-slate-500")
+                        ui.label("After the partial TP, trail the runner's SL behind price. Floor profit (%) locks the stop that far in profit as a % of notional (0 = fall back to the R-based Floor R, which sits below entry). Activate at 0.8R so the runner is protected the moment the partial fires.").classes("text-xs text-slate-500")
                         ui.separator().classes("my-2")
                         ui.label("Runner take-profit").classes("text-xs font-semibold text-slate-600")
                         with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
@@ -5453,6 +5459,7 @@ def register_pages(app: FastAPI) -> None:
                 tm_trailing_activate_input.value = d["trailing_activate_r"]
                 tm_trailing_distance_input.value = d["trailing_distance_atr"]
                 tm_trailing_floor_input.value = d["trailing_floor_r"]
+                tm_trailing_floor_pct_input.value = d["trailing_floor_profit_pct"]
                 tm_trailing_step_input.value = d["trailing_step_r"]
                 tm_trailing_remove_switch.value = d["trailing_remove_tp"]
                 tm_trailing_far_input.value = d["trailing_far_tp_mult"]
@@ -6009,6 +6016,11 @@ def register_pages(app: FastAPI) -> None:
                     "trailing_activate_r": float(tm_trailing_activate_input.value or 0.8),
                     "trailing_distance_atr": float(tm_trailing_distance_input.value or 1.5),
                     "trailing_floor_r": float(tm_trailing_floor_input.value or 0.5),
+                    "trailing_floor_profit_pct": (
+                        float(tm_trailing_floor_pct_input.value)
+                        if tm_trailing_floor_pct_input.value not in (None, "")
+                        else None
+                    ),
                     "trailing_step_r": float(tm_trailing_step_input.value or 0.2),
                     "trailing_remove_tp": bool(tm_trailing_remove_switch.value),
                     "trailing_far_tp_mult": float(_far_tp_val) if _far_tp_val not in (None, "") else None,

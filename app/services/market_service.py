@@ -2381,6 +2381,9 @@ class MarketService:
           trailing_activate_r      – float, start trailing after this R (default 0.8)
           trailing_distance_atr    – float, trail SL this many ATR% behind price (default 1.5)
           trailing_floor_r         – float, never let trailing SL go below this R (default 0.5)
+          trailing_floor_profit_pct – float, profit floor as a % of notional (default 0.5);
+                                      locks the runner's stop that far in profit.
+                                      0/negative → legacy R floor.
           trailing_step_r          – float, only re-place SL when improvement exceeds this R (default 0.2)
           software_stop_loss_enabled – bool (default True), market-close when pnl_pct <= -sl_pct
         """
@@ -2469,6 +2472,12 @@ class MarketService:
         trailing_floor_r = self._extract_float(tm.get("trailing_floor_r"))
         if trailing_floor_r is None:
             trailing_floor_r = 0.5
+        trailing_floor_profit_pct = self._extract_float(tm.get("trailing_floor_profit_pct"))
+        if trailing_floor_profit_pct is None:
+            trailing_floor_profit_pct = 0.5
+        elif trailing_floor_profit_pct <= 0:
+            # Explicit 0/negative disables the profit floor → legacy R floor.
+            trailing_floor_profit_pct = None
         trailing_step_r = self._extract_float(tm.get("trailing_step_r"))
         if trailing_step_r is None:
             trailing_step_r = 0.2
@@ -2761,6 +2770,7 @@ class MarketService:
                     atr_pct=atr_tf_pct,
                     trailing_distance_atr=trailing_distance_atr,
                     trailing_floor_r=trailing_floor_r,
+                    trailing_floor_profit_pct=trailing_floor_profit_pct,
                 )
 
                 # Ratchet: only update if strictly better than the current SL by
@@ -6640,62 +6650,89 @@ class MarketService:
         return pv / vol
 
     @staticmethod
-    def _compute_indicators(ohlcv: list[list[Any]]) -> dict[str, Any]:
-        """Build the technical indicator bundle consumed by downstream strategy logic."""
-        if not ohlcv:
-            return {
-                "bollinger_bands": {},
-                "stoch_rsi": {},
-                "adx": {},
-                "choppiness": None,
-                "obv": {},
-                "cmf": {},
-                "vwap": None,
-                "volume": {},
-                "vpoc": None,
-                "value_area_high": None,
-                "value_area_low": None,
-                "value_area_width": None,
-            }
+    def _empty_indicators() -> dict[str, Any]:
+        """Return the degenerate indicator bundle for empty/short windows."""
+        return {
+            "bollinger_bands": {},
+            "stoch_rsi": {},
+            "adx": {},
+            "choppiness": None,
+            "obv": {},
+            "cmf": {},
+            "vwap": None,
+            "volume": {},
+            "vpoc": None,
+            "value_area_high": None,
+            "value_area_low": None,
+            "value_area_width": None,
+        }
 
-        normalized_rows = [row[:6] for row in ohlcv if len(row) >= 6]
-        if not normalized_rows:
-            return {
-                "bollinger_bands": {},
-                "stoch_rsi": {},
-                "adx": {},
-                "choppiness": None,
-                "obv": {},
-                "cmf": {},
-                "vwap": None,
-                "volume": {},
-                "vpoc": None,
-                "value_area_high": None,
-                "value_area_low": None,
-                "value_area_width": None,
-            }
+    @staticmethod
+    def _compute_indicator_series(df: pd.DataFrame) -> dict[str, Any]:
+        """Compute the causal pandas-ta series over *df* (indexed by ts).
 
-        df = pd.DataFrame(normalized_rows, columns=["ts", "open", "high", "low", "close", "volume"])
-        df["ts"] = pd.to_numeric(df["ts"], errors="coerce")
-        df["ts"] = pd.to_datetime(df["ts"], unit="ms", errors="coerce")
-        for column in ["open", "high", "low", "close", "volume"]:
-            df[column] = pd.to_numeric(df[column], errors="coerce")
-        df = df.sort_values("ts").set_index("ts")
-        bb = ta.bbands(close=df["close"], length=20)
-        stoch = ta.stochrsi(close=df["close"])
-        rsi_series = ta.rsi(df["close"], length=14)
-        macd_df = ta.macd(df["close"])
-        ema_50 = ta.ema(df["close"], length=50)
-        ema_200 = ta.ema(df["close"], length=200)
-        ema_21 = ta.ema(df["close"], length=21)
-        adx_df = ta.adx(high=df["high"], low=df["low"], close=df["close"], length=14)
-        obv_series = ta.obv(close=df["close"], volume=df["volume"])
-        cmf_series = ta.cmf(high=df["high"], low=df["low"], close=df["close"], volume=df["volume"], length=20)
-        cmf_14_series = ta.cmf(high=df["high"], low=df["low"], close=df["close"], volume=df["volume"], length=14)
-        vwap_series = ta.vwap(high=df["high"], low=df["low"], close=df["close"], volume=df["volume"])
-        volume_rsi_series = ta.rsi(df["volume"], length=14)
-        atr_series = ta.atr(high=df["high"], low=df["low"], close=df["close"], length=14)
-        chop_series = ta.chop(high=df["high"], low=df["low"], close=df["close"], length=14)
+        Every series here is causal (value at index ``i`` depends only on data
+        at indices ``<= i``), so a series precomputed over the full candle
+        array can be sliced to ``[:i+1]`` to reproduce a prefix recompute
+        exactly.  This is what lets the backtest engine precompute once and
+        serve per-step blocks by slicing (see
+        ``app/services/backtest/indicator_cache.py``).
+        """
+        if df is None or df.empty:
+            return {}
+        return {
+            "bb": ta.bbands(close=df["close"], length=20),
+            "stoch": ta.stochrsi(close=df["close"]),
+            "rsi": ta.rsi(df["close"], length=14),
+            "macd": ta.macd(df["close"]),
+            "ema_50": ta.ema(df["close"], length=50),
+            "ema_200": ta.ema(df["close"], length=200),
+            "ema_21": ta.ema(df["close"], length=21),
+            "adx": ta.adx(high=df["high"], low=df["low"], close=df["close"], length=14),
+            "obv": ta.obv(close=df["close"], volume=df["volume"]),
+            "cmf": ta.cmf(high=df["high"], low=df["low"], close=df["close"], volume=df["volume"], length=20),
+            "cmf_14": ta.cmf(high=df["high"], low=df["low"], close=df["close"], volume=df["volume"], length=14),
+            "vwap": ta.vwap(high=df["high"], low=df["low"], close=df["close"], volume=df["volume"]),
+            "volume_rsi": ta.rsi(df["volume"], length=14),
+            "atr": ta.atr(high=df["high"], low=df["low"], close=df["close"], length=14),
+            "chop": ta.chop(high=df["high"], low=df["low"], close=df["close"], length=14),
+        }
+
+    @staticmethod
+    def _assemble_indicators(
+        df: pd.DataFrame,
+        series: dict[str, Any],
+        ohlcv_compact: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Assemble the indicator bundle from a frame + precomputed series.
+
+        ``df`` is the (possibly sliced) candle frame; ``series`` holds the
+        causal pandas-ta series aligned to ``df`` (from
+        :meth:`_compute_indicator_series`).  Window-dependent quantities
+        (value area, session VWAP) are recomputed here from ``df``.
+
+        ``ohlcv_compact``, when provided, is used verbatim as the ``ohlcv``
+        key — the backtest cache precomputes it once and slices, avoiding an
+        O(n) dict rebuild per step.  When ``None`` it is built from ``df``.
+        """
+        if df is None or df.empty:
+            return MarketService._empty_indicators()
+
+        bb = series.get("bb")
+        stoch = series.get("stoch")
+        rsi_series = series.get("rsi")
+        macd_df = series.get("macd")
+        ema_50 = series.get("ema_50")
+        ema_200 = series.get("ema_200")
+        ema_21 = series.get("ema_21")
+        adx_df = series.get("adx")
+        obv_series = series.get("obv")
+        cmf_series = series.get("cmf")
+        cmf_14_series = series.get("cmf_14")
+        vwap_series = series.get("vwap")
+        volume_rsi_series = series.get("volume_rsi")
+        atr_series = series.get("atr")
+        chop_series = series.get("chop")
         volume_avg = float(df["volume"].tail(20).mean()) if not df.empty else 0.0
         tail_df = df
         last_close = float(df["close"].iloc[-1]) if not df.empty else None
@@ -6728,17 +6765,26 @@ class MarketService:
                 # Non-positive volume or degenerate input — leave VA keys None.
                 pass
 
-        ohlcv_compact = [
-            {
-                "ts": int(idx.timestamp() * 1000),
-                "open": float(row["open"]),
-                "high": float(row["high"]),
-                "low": float(row["low"]),
-                "close": float(row["close"]),
-                "volume": float(row["volume"]),
-            }
-            for idx, row in tail_df.iterrows()
-        ]
+        if ohlcv_compact is None:
+            ohlcv_compact = [
+                {
+                    "ts": int(ts.timestamp() * 1000),
+                    "open": float(o),
+                    "high": float(h),
+                    "low": float(l),
+                    "close": float(c),
+                    "volume": float(v),
+                }
+                for ts, o, h, l, c, v in zip(
+                    tail_df.index,
+                    tail_df["open"],
+                    tail_df["high"],
+                    tail_df["low"],
+                    tail_df["close"],
+                    tail_df["volume"],
+                )
+            ]
+        _session_vwap = MarketService.session_vwap(df)
         indicators = {
             "bollinger_bands": {
                 "lower": MarketService._column_value(bb, ["BBL_20_2.0", "BBL_20_2.0_2.0"]),
@@ -6788,11 +6834,11 @@ class MarketService:
                 "ema_50": float(ema_50.iloc[-1]) if ema_50 is not None and not ema_50.empty else None,
                 "ema_200": float(ema_200.iloc[-1]) if ema_200 is not None and not ema_200.empty else None,
             },
-            "vwap": MarketService.session_vwap(df),
+            "vwap": _session_vwap,
             # Legacy rolling-window cumulative VWAP, preserved for display and
             # any consumer that still wants the multi-session blend.
             "vwap_series": MarketService._series_to_list(vwap_series),
-            "vwap_session": MarketService.session_vwap(df),
+            "vwap_session": _session_vwap,
             "volume": {
                 "last": float(df["volume"].iloc[-1]) if not df.empty else 0.0,
                 "average": volume_avg,
@@ -6808,6 +6854,31 @@ class MarketService:
             "value_area_width": va_width,
         }
         return indicators
+
+    @staticmethod
+    def _compute_indicators(ohlcv: list[list[Any]]) -> dict[str, Any]:
+        """Build the technical indicator bundle consumed by downstream strategy logic.
+
+        Thin wrapper: normalise rows → frame → compute causal series → assemble.
+        The backtest engine bypasses this and precomputes the series once via
+        :meth:`_compute_indicator_series` + :meth:`_assemble_indicators`
+        (see ``app/services/backtest/indicator_cache.py``).
+        """
+        if not ohlcv:
+            return MarketService._empty_indicators()
+
+        normalized_rows = [row[:6] for row in ohlcv if len(row) >= 6]
+        if not normalized_rows:
+            return MarketService._empty_indicators()
+
+        df = pd.DataFrame(normalized_rows, columns=["ts", "open", "high", "low", "close", "volume"])
+        df["ts"] = pd.to_numeric(df["ts"], errors="coerce")
+        df["ts"] = pd.to_datetime(df["ts"], unit="ms", errors="coerce")
+        for column in ["open", "high", "low", "close", "volume"]:
+            df[column] = pd.to_numeric(df[column], errors="coerce")
+        df = df.sort_values("ts").set_index("ts")
+        series = MarketService._compute_indicator_series(df)
+        return MarketService._assemble_indicators(df, series)
 
     @staticmethod
     def _compute_structure(ohlcv: list[list[Any]], swing_lookback: int = 5) -> dict[str, Any]:

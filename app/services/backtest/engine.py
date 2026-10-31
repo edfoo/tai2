@@ -33,6 +33,7 @@ from app.services.backtest.metrics import (
     compute_per_strategy_metrics,
     compute_per_symbol_metrics,
 )
+from app.services.backtest.runner import parse_timeframe
 from app.services.backtest.models import (
     BacktestConfig,
     BacktestProgress,
@@ -73,8 +74,17 @@ def _requested_tfs(launcher_config: dict[str, Any]) -> list[str]:
 
     Reads each enabled strategy's ``analysis_timeframe`` from
     ``launcher_config["strategies"]``.  ``None``/empty means "use the global
-    LTF" (skipped here).  Constants like ``"15m"`` / ``"1H"`` are passed
-    through; the caller normalizes via the fetcher's timeframe handling.
+    LTF" (skipped here).
+
+    Each value is normalised to OKX bar form via :func:`parse_timeframe`
+    (``"15M"``/``"15min"`` → ``"15m"``).  This matters twice over:
+
+    * OKX rejects uppercase minute bars (``bar=15M`` → ``51000 Parameter bar
+      error``), so an un-normalised value silently yields zero candles.
+    * The snapshot keys ``timeframes[<tf>]`` by this string and strategies
+      look it up with their raw ``analysis_timeframe`` (``"15m"``), so an
+      uppercase key would never match and the strategy would silently fall
+      back to the global LTF indicators — a live/backtest parity break.
     """
     strategies_cfg = launcher_config.get("strategies") or {}
     requested: list[str] = []
@@ -86,7 +96,7 @@ def _requested_tfs(launcher_config: dict[str, Any]) -> list[str]:
         tf = strat_cfg.get("analysis_timeframe")
         if not tf:
             continue
-        tf_str = str(tf).strip().upper()
+        tf_str = parse_timeframe(str(tf), ctx="analysis_timeframe")
         if tf_str and tf_str not in requested:
             requested.append(tf_str)
     return requested

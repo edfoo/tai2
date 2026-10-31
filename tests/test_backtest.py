@@ -19,6 +19,7 @@ from app.services.backtest.engine import (
     _extract_float,
     _passes_protection_guard,
     _passes_reward_risk_guard,
+    _requested_tfs,
     available_strategy_names,
 )
 from app.services.launcher_tp_sl import LauncherTpSl
@@ -1155,6 +1156,62 @@ class TestEngineHelpers:
     def test_extract_float_invalid(self) -> None:
         assert _extract_float("abc") is None
         assert _extract_float([]) is None
+
+
+class TestRequestedTfs:
+    """``_requested_tfs`` must normalise analysis timeframes to OKX bar form.
+
+    Regression: it previously uppercased the value (``15m`` → ``15M``), which
+    (a) OKX rejects with ``51000 Parameter bar error`` (zero candles fetched)
+    and (b) never matched the snapshot's ``timeframes[<tf>]`` key that
+    strategies look up with their raw ``analysis_timeframe`` — silently
+    falling back to the global LTF indicators (a live/backtest parity break).
+    """
+
+    def test_normalises_minute_bars_to_lowercase(self) -> None:
+        cfg = {
+            "strategies": {
+                "vwap_reversion": {"enabled": True, "analysis_timeframe": "15m"},
+            }
+        }
+        assert _requested_tfs(cfg) == ["15m"]
+
+    def test_accepts_uppercase_and_alias_input(self) -> None:
+        cfg = {
+            "strategies": {
+                "a": {"enabled": True, "analysis_timeframe": "15M"},
+                "b": {"enabled": True, "analysis_timeframe": "15min"},
+            }
+        }
+        assert _requested_tfs(cfg) == ["15m"]
+
+    def test_preserves_hour_bars(self) -> None:
+        cfg = {
+            "strategies": {
+                "a": {"enabled": True, "analysis_timeframe": "1H"},
+                "b": {"enabled": True, "analysis_timeframe": "4h"},
+            }
+        }
+        assert _requested_tfs(cfg) == ["1H", "4H"]
+
+    def test_skips_disabled_and_unset(self) -> None:
+        cfg = {
+            "strategies": {
+                "a": {"enabled": False, "analysis_timeframe": "15m"},
+                "b": {"enabled": True, "analysis_timeframe": None},
+                "c": {"enabled": True},
+            }
+        }
+        assert _requested_tfs(cfg) == []
+
+    def test_deduplicates(self) -> None:
+        cfg = {
+            "strategies": {
+                "a": {"enabled": True, "analysis_timeframe": "15m"},
+                "b": {"enabled": True, "analysis_timeframe": "15M"},
+            }
+        }
+        assert _requested_tfs(cfg) == ["15m"]
 
 
 # ── Model tests ──────────────────────────────────────────────────────────────
