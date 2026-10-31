@@ -155,12 +155,14 @@ def _main(args: argparse.Namespace) -> int:
     print(f"\n{'rank':>4}  {'min_dist':>8} {'sl_buf':>7} {'max_adx':>7} {'min_atr':>7}  metrics")
     print("-" * 90)
     for rank, run in enumerate(ranked[: args.top], start=1):
+        # ``run.params`` is keyed by the GridParamDef *label* (not the dotted
+        # config key), so look up by label here.
         p = run.params or {}
         m = (run.result.metrics if run.result is not None else {}) or {}
-        md = p.get("strategies.vwap_reversion.vwap_min_distance_atr")
-        sb = p.get("strategies.vwap_reversion.structural_sl_buffer_atr")
-        ax = p.get("strategies.vwap_reversion.max_adx")
-        ma = p.get("strategies.vwap_reversion.min_atr_pct")
+        md = p.get("min_dist_atr")
+        sb = p.get("sl_buffer_atr")
+        ax = p.get("max_adx")
+        ma = p.get("min_atr_pct")
         print(f"{rank:>4}  {str(md):>8} {str(sb):>7} {str(ax):>7} {str(ma):>7}  {_fmt_metrics(m)}")
 
     if not ranked:
@@ -174,7 +176,13 @@ def main() -> int:
     p.add_argument("--symbols", default="BTC-USDT-SWAP,ETH-USDT-SWAP,ADA-USDT-SWAP,DOGE-USDT-SWAP,ANIME-USDT-SWAP,CRV-USDT-SWAP,ARX-USDT-SWAP,AVNT-USDT-SWAP")
     p.add_argument("--timeframe", default="15m")
     p.add_argument("--days", type=int, default=60)
-    p.add_argument("--capital", type=float, default=1000.0)
+    # ``capital`` doubles as the per-trade notional (``notional_usd``).  It
+    # MUST match the live per-trade size (30 USDT) or the ``ohlcv_liquidity``
+    # slippage model maxes out at 500 bps on illiquid alts and swamps the
+    # strategy edge — a 1000-USDT notional is 33x live and produces a pure
+    # slippage artifact (verified: ORDER 7 trades, 28.6% WR / -3.68 at 30 vs
+    # 0% WR / -475 at 1000).
+    p.add_argument("--capital", type=float, default=30.0)
     p.add_argument("--warmup", type=int, default=200)
     p.add_argument(
         "--evaluation-mode", default="closed", choices=["closed", "finer_ltf"],
