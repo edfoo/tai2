@@ -134,6 +134,7 @@ def _main(args: argparse.Namespace) -> int:
         GridParamDef("strategies.vwap_reversion.vwap_min_distance_atr", list(args.min_dist), "min_dist_atr"),
         GridParamDef("strategies.vwap_reversion.structural_sl_buffer_atr", list(args.sl_buffer), "sl_buffer_atr"),
         GridParamDef("strategies.vwap_reversion.max_adx", list(args.max_adx), "max_adx"),
+        GridParamDef("strategies.vwap_reversion.min_atr_pct", list(args.min_atr), "min_atr_pct"),
     ]
     n_combos = 1
     for p in params:
@@ -151,15 +152,16 @@ def _main(args: argparse.Namespace) -> int:
     runs = grid.runs
     ranked = grid.ranked
 
-    print(f"\n{'rank':>4}  {'min_dist':>8} {'sl_buf':>7} {'max_adx':>7}  metrics")
-    print("-" * 78)
+    print(f"\n{'rank':>4}  {'min_dist':>8} {'sl_buf':>7} {'max_adx':>7} {'min_atr':>7}  metrics")
+    print("-" * 90)
     for rank, run in enumerate(ranked[: args.top], start=1):
         p = run.params or {}
         m = (run.result.metrics if run.result is not None else {}) or {}
         md = p.get("strategies.vwap_reversion.vwap_min_distance_atr")
         sb = p.get("strategies.vwap_reversion.structural_sl_buffer_atr")
         ax = p.get("strategies.vwap_reversion.max_adx")
-        print(f"{rank:>4}  {str(md):>8} {str(sb):>7} {str(ax):>7}  {_fmt_metrics(m)}")
+        ma = p.get("strategies.vwap_reversion.min_atr_pct")
+        print(f"{rank:>4}  {str(md):>8} {str(sb):>7} {str(ax):>7} {str(ma):>7}  {_fmt_metrics(m)}")
 
     if not ranked:
         print("  (no combinations met min_trades)")
@@ -184,6 +186,7 @@ def main() -> int:
     p.add_argument("--min-dist", type=float, nargs="+", default=[2.5, 3.0, 3.5])
     p.add_argument("--sl-buffer", type=float, nargs="+", default=[0.15, 0.35, 0.6])
     p.add_argument("--max-adx", type=float, nargs="+", default=[20.0, 25.0, 30.0])
+    p.add_argument("--min-atr", type=float, nargs="+", default=[0.3, 0.6, 1.0])
     args = p.parse_args()
     args.symbols = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
     return _main(args)
