@@ -145,6 +145,37 @@ OHLCV cannot reproduce. When enabled it is skipped and recorded in the
 schedule provenance, so the reconstructed universe may be slightly larger than
 live's.
 
+### Fast lane (short-window move discovery)
+
+The trailing-24h volume gate is a **lagging** indicator: a coin with a quiet
+baseline cannot reach `min_volume_usd` until the pump's own candles have
+printed. SHELL-USDT-SWAP on 2026-11-13 is the canonical case — +9% at 15:00,
++26% by 17:00, +72% by 18:00, but its trailing-24h volume only crossed the 10M
+floor at 18:00, i.e. the gate confirmed the move 4h and most of the gain late.
+
+`screener.fast_lane_enabled` (default **false**) adds a discovery stage that
+admits symbols on a short-window price move instead:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `fast_lane_enabled` | `false` | Master switch |
+| `fast_move_threshold_pct` | `4.0` | Absolute move required to be admitted |
+| `fast_move_window_minutes` | `60` | Trailing window the move is measured over |
+| `fast_lane_min_volume_usd` | `250_000` | *Tradability* floor — far below `min_volume_usd` |
+| `fast_lane_max_symbols` | `40` | Cap per run, ranked by absolute move |
+| `fast_lane_sod_max_age_mult` | `3.0` | Cold-start `sodUtc0` fallback staleness bound |
+
+Admitted symbols are **not** auto-selected — they join the candidate pool and
+must still win SC/MR scoring, so the lane widens who is *examined*, not who is
+*chosen*. Costs no extra REST calls: the move comes from the all-SWAP ticker
+poll the screener already performs (`_record_screener_price_samples`).
+
+Backtest parity: `_price_history_at()` reconstructs the same price deque from
+the 1H candles already fetched, and `fast_lane_candidates()` is the same pure
+function live calls. The cold-start `sodUtc0` fallback cannot be reconstructed
+from candles, so it is disabled in the backtest and recorded in the schedule
+provenance — the only intentional live/backtest delta.
+
 ### Parameter sweep (`grid` subcommand)
 
 ```bash

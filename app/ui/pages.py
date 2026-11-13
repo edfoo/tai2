@@ -7798,6 +7798,60 @@ def register_pages(app: FastAPI) -> None:
                 ).classes("w-full md:w-48").props(
                     "hint='MR: exclude strong trends above this absolute move % (activity window, or 24h when disabled)' persistent-hint"
                 )
+            ui.label("Fast lane (find sharp moves before 24h volume confirms them)").classes("text-xs font-semibold text-slate-600 mt-2")
+            ui.label(
+                "The 24h volume gate is lagging: a coin with a quiet baseline cannot reach Min 24h volume "
+                "until the pump's own candles have printed. SHELL-USDT-SWAP moved +72% in 4h but only crossed "
+                "the 10M floor as the move ended. The fast lane admits symbols whose price moved sharply inside "
+                "the window below, using a much lower tradability floor. Admitted symbols still have to win "
+                "SC/MR scoring — the lane widens who is examined, not who is chosen. Costs no extra API calls."
+            ).classes("text-xs text-slate-500 mb-1")
+            with ui.row().classes("w-full flex-wrap gap-4 items-center"):
+                screener_fast_lane_switch = ui.switch(
+                    "Enable fast lane",
+                    value=bool(screener_cfg.get("fast_lane_enabled", False)),
+                ).classes("w-full md:w-48").props(
+                    "hint='OFF by default — A/B it in the backtest before enabling live.' persistent-hint"
+                )
+                screener_fast_move_input = ui.number(
+                    label="Fast move threshold (%)",
+                    value=float(screener_cfg.get("fast_move_threshold_pct") or 4.0),
+                    min=0.5,
+                    max=30,
+                    step=0.5,
+                    format="%.1f",
+                ).classes("w-full md:w-48").props(
+                    "hint='Absolute price move inside the window required to be admitted. 4% catches SHELL-class moves; 2% catches earlier stages but admits chop.' persistent-hint"
+                )
+                screener_fast_window_input = ui.number(
+                    label="Fast move window (min)",
+                    value=float(screener_cfg.get("fast_move_window_minutes") or 60.0),
+                    min=5,
+                    max=240,
+                    step=5,
+                    format="%.0f",
+                ).classes("w-full md:w-48").props(
+                    "hint='Trailing window the move is measured over. Shorter = earlier detection but noisier.' persistent-hint"
+                )
+            with ui.row().classes("w-full flex-wrap gap-4"):
+                screener_fast_lane_min_vol_input = ui.number(
+                    label="Fast lane min volume (M USDT)",
+                    value=float((screener_cfg.get("fast_lane_min_volume_usd") or 250_000) / 1_000_000),
+                    min=0,
+                    step=0.05,
+                    format="%.2f",
+                ).classes("w-full md:w-48").props(
+                    "hint='Tradability floor for lane admissions — much lower than Min 24h volume (default 0.25M). Raise it if lane picks slip on close.' persistent-hint"
+                )
+                screener_fast_lane_max_input = ui.number(
+                    label="Fast lane max symbols",
+                    value=int(screener_cfg.get("fast_lane_max_symbols") or 40),
+                    min=1,
+                    max=200,
+                    step=5,
+                ).classes("w-full md:w-48").props(
+                    "hint='Cap on lane admissions per run, ranked by absolute move. Bounds the extra candle fetches.' persistent-hint"
+                )
             ui.separator().classes("w-full my-4")
             ui.label("Model, cadence, and prompt controls").classes("text-sm text-slate-500")
             with ui.row().classes("w-full flex-wrap gap-4"):
@@ -9118,6 +9172,20 @@ def register_pages(app: FastAPI) -> None:
                 # MR filters
                 "mr_min_hl_range_pct": max(0.0, _coerce(screener_mr_min_hl_input.value, _sc_def["mr_min_hl_range_pct"], float)),
                 "mr_max_momentum_pct": max(0.0, _coerce(screener_mr_max_mom_input.value, _sc_def["mr_max_momentum_pct"], float)),
+                # Fast lane (short-window move discovery).  Default OFF — the
+                # lane widens the examined pool, so it must be A/B validated.
+                "fast_lane_enabled": bool(screener_fast_lane_switch.value),
+                "fast_move_threshold_pct": max(0.5, _coerce(screener_fast_move_input.value, _sc_def["fast_move_threshold_pct"], float)),
+                "fast_move_window_minutes": max(5.0, _coerce(screener_fast_window_input.value, _sc_def["fast_move_window_minutes"], float)),
+                "fast_lane_min_volume_usd": max(
+                    0.0,
+                    _coerce(screener_fast_lane_min_vol_input.value, _sc_def["fast_lane_min_volume_usd"] / 1_000_000, float) * 1_000_000,
+                ),
+                "fast_lane_max_symbols": max(1, _coerce(screener_fast_lane_max_input.value, _sc_def["fast_lane_max_symbols"], int)),
+                "fast_lane_sod_max_age_mult": float(
+                    (config.get("screener") or {}).get("fast_lane_sod_max_age_mult")
+                    or _sc_def["fast_lane_sod_max_age_mult"]
+                ),
             }
             # Preserve signal fields from config (edited on STRATEGY page) and
             # only overwrite the operational fields managed on this page.

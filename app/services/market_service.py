@@ -35,6 +35,8 @@ from app.services.launcher_tp_sl import resolve_launcher_tp_sl
 from app.services.screener import (
     build_candidates,
     compute_recent_activity,
+    fast_lane_candidates,
+    merge_candidates,
     score_universe,
     timeframe_to_ms,
     universe_for_strategy,
@@ -410,6 +412,13 @@ class MarketService:
         self._screener_mr_symbols: list[str] = []
         # Rolling 24h volume history for spike detection (symbol → deque of vol samples).
         self._screener_vol_history: dict[str, deque] = {}
+        # Rolling short-window PRICE history for fast-lane discovery
+        # (symbol → deque of (ts_epoch_seconds, last_price)).  Populated from
+        # the all-SWAP ticker fetch the screener already performs, so the lane
+        # costs no additional REST calls.  See ``fast_lane_candidates``.
+        # Deque length is derived per-run from ``fast_move_window_minutes`` and
+        # the poll cadence (see ``_record_screener_price_samples``).
+        self._screener_price_history: dict[str, deque] = {}
         # Recent-activity cache: (symbol, bar) → (fetched_at_epoch, features).
         # Avoids refetching short-window candles on every force=True scheduler
         # tick.  Keyed by bar too so changing activity_timeframe cannot serve
@@ -5371,6 +5380,39 @@ class MarketService:
             self._emit_debug(f"Screener ticker fetch failed: {exc}")
             return []
 
+    def _record_screener_price_samples(self, tickers: list[dict[str, Any]]) -> None:
+        """Append this poll's price to the rolling per-symbol price deque.
+
+        Feeds :func:`fast_lane_candidates`, which needs a short-window move
+        signal that does not depend on the lagging 24h volume aggregates.  Runs
+        against the full all-SWAP ticker list, so a symbol is sampled even while
+        it is far below ``min_volume_usd`` — that is the whole point of the lane.
+
+        The deque is bounded by ``history_maxlen`` derived from the configured
+        window and poll cadence, so memory stays flat (~240 entries per symbol).
+        """
+        now = time.time()
+        cfg = self._screener_config or {}
+        window_minutes = max(1.0, float(cfg.get("fast_move_window_minutes") or 60.0))
+        # Cover the window at poll cadence, plus 2x margin for missed polls.
+        samples_needed = int(window_minutes * 60 / max(1, self._poll_interval)) + 8
+        maxlen = max(16, min(600, samples_needed * 2))
+        history = self._screener_price_history
+        for ticker in tickers:
+            if not isinstance(ticker, dict):
+                continue
+            inst_id = str(ticker.get("instId") or "").upper()
+            if not inst_id:
+                continue
+            last = self._extract_float(ticker.get("last"))
+            if not last or last <= 0:
+                continue
+            samples = history.get(inst_id)
+            if samples is None or samples.maxlen != maxlen:
+                samples = deque(samples or (), maxlen=maxlen)
+                history[inst_id] = samples
+            samples.append((now, last))
+
     async def _fetch_recent_activity(
         self,
         candidates: list[dict[str, Any]],
@@ -5398,10 +5440,20 @@ class MarketService:
         top_n = max(1, int(cfg.get("activity_prefilter_top_n") or 120))
         cache_ttl = max(0.0, float(cfg.get("activity_cache_seconds") or 300.0))
 
-        # Pre-rank by 24h volume so the cap keeps the liquid names.
+        # Pre-rank by 24h volume so the cap keeps the liquid names.  Fast-lane
+        # symbols bypass the cap: they were admitted precisely because their 24h
+        # volume is too low to win a volume-ranked slot, so capping them would
+        # defeat the lane. They are bounded by ``fast_lane_max_symbols`` instead.
         ranked = sorted(
             candidates, key=lambda c: c.get("vol_ccy_24h") or 0.0, reverse=True
         )[:top_n]
+        by_volume = {c["symbol"] for c in ranked}
+        extra = [
+            c for c in candidates
+            if c.get("_fast_lane") and c["symbol"] not in by_volume
+        ]
+        if extra:
+            ranked = ranked + extra
 
         now = time.time()
         cache = self._screener_activity_cache
@@ -5514,6 +5566,11 @@ class MarketService:
             self._emit_debug("Screener: no tickers returned from OKX")
             return False
 
+        # Record the short-window price samples the fast lane reads.  This runs
+        # on every screener tick (including force=True from the scheduler), so
+        # the deque stays fresh at poll cadence even between interval runs.
+        self._record_screener_price_samples(tickers)
+
         # Stage 1: cheap ticker prefilter (pattern / volume / spread).  Shared
         # with score_universe so the candidate set is identical either way.
         # OKX's raw volCcy24h is base-currency volume, so build_candidates
@@ -5525,6 +5582,18 @@ class MarketService:
             update_vol_history=True,
             vol_ccy_is_quote=False,
         )
+
+        # Stage 1b: fast-lane discovery.  Admits symbols moving sharply in the
+        # recent window that the 24h volume gate would not reach until the pump
+        # is already over (SHELL: crossed the 10M floor 4h/+72% late).  These
+        # join the pool but still have to win SC/MR scoring to be selected.
+        fast_lane = fast_lane_candidates(
+            tickers,
+            self._screener_price_history,
+            cfg,
+            vol_ccy_is_quote=False,
+        )
+        candidates = merge_candidates(candidates, fast_lane)
 
         # Stage 2: recent-activity features for the prefiltered candidates.
         activity = await self._fetch_recent_activity(candidates, cfg)
@@ -5541,6 +5610,7 @@ class MarketService:
             update_vol_history=False,
             activity=activity,
             candidates=candidates,
+            fast_lane=fast_lane,
         )
         for line in result["diagnostics"]:
             self._emit_debug(line)
@@ -5558,6 +5628,8 @@ class MarketService:
         active_universe = {str(t.get("instId", "")).upper() for t in tickers if isinstance(t, dict)}
         for gone in set(self._screener_vol_history) - active_universe:
             del self._screener_vol_history[gone]
+        for gone in set(self._screener_price_history) - active_universe:
+            del self._screener_price_history[gone]
         for key in [k for k in self._screener_activity_cache if k[0] not in active_universe]:
             del self._screener_activity_cache[key]
         for bar_cache in self._screener_activity_candles.values():

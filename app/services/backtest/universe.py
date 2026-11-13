@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import bisect
 import logging
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -38,6 +39,8 @@ from app.services.backtest.data_fetcher import HistoricalDataFetcher
 from app.services.backtest.models import Candle
 from app.services.screener import (
     compute_recent_activity,
+    fast_lane_candidates,
+    merge_candidates,
     score_universe,
     timeframe_to_ms,
     universe_for_strategy,
@@ -231,6 +234,35 @@ def _activity_at(
     )
 
 
+def _price_history_at(
+    candles: list[Candle],
+    ts_list: list[int],
+    ts: int,
+    *,
+    window_minutes: float,
+) -> deque:
+    """Reconstruct the fast lane's rolling price deque at interval ``ts``.
+
+    Live samples ``last`` at every ticker poll (``poll_interval`` seconds); the
+    backtest only has 1H candles, so samples are candle closes.  Both are fed to
+    :func:`app.services.screener.fast_lane_candidates`, which measures the move
+    against the newest sample at or before ``ts - window`` — so with a 60-minute
+    window and 1H candles the reconstructed measurement is the same
+    close-to-close 1h move live would have computed, just sampled at bar
+    granularity instead of poll granularity.
+
+    Enough history is returned to satisfy the lane's minimum-sample guard even
+    for sub-hour windows.
+    """
+    idx = bisect.bisect_right(ts_list, ts) - 1
+    if idx < 0:
+        return deque()
+    bars_needed = int(round(window_minutes * 60_000 / (60 * 60 * 1000))) + 1
+    bars_needed = max(4, bars_needed)
+    window = candles[max(0, idx - bars_needed + 1): idx + 1]
+    return deque((c.ts / 1000.0, c.close) for c in window)
+
+
 async def build_universe_schedule(
     *,
     fetcher: HistoricalDataFetcher,
@@ -282,6 +314,20 @@ async def build_universe_schedule(
             "lookback_hours": 24,
             "activity_lookback_hours": float(cfg.get("activity_lookback_hours") or 0.0),
             "activity_timeframe": str(cfg.get("activity_timeframe") or "1H"),
+            "fast_lane": (
+                {
+                    "threshold_pct": float(cfg.get("fast_move_threshold_pct") or 0.0),
+                    "window_minutes": float(cfg.get("fast_move_window_minutes") or 60.0),
+                    "min_volume_usd": float(cfg.get("fast_lane_min_volume_usd") or 0.0),
+                    # The cold-start sodUtc0 fallback cannot be reproduced from
+                    # 1H candles, so the backtest relies on the reconstructed
+                    # price deque only.  Recorded so a live/backtest delta in
+                    # the first interval of a session is explainable.
+                    "sod_fallback": "disabled (reconstructed from candles)",
+                }
+                if bool(cfg.get("fast_lane_enabled", False))
+                else "disabled"
+            ),
             "spread_filter": (
                 "skipped (live bid/ask unavailable historically)"
                 if float(cfg.get("max_spread_pct") or 0.0) > 0
@@ -324,16 +370,28 @@ async def build_universe_schedule(
     # and keeps it in lockstep with live.
     activity_lookback_hours = float(cfg.get("activity_lookback_hours") or 0.0)
     activity_tf_ms = timeframe_to_ms(str(cfg.get("activity_timeframe") or "1H"))
+    fast_lane_enabled = bool(cfg.get("fast_lane_enabled", False))
+    fast_window_minutes = max(1.0, float(cfg.get("fast_move_window_minutes") or 60.0))
     vol_history: dict[str, Any] = {}
     for ts in boundaries:
         tickers: list[dict[str, Any]] = []
         activity: dict[str, dict[str, Any]] = {}
+        price_history: dict[str, deque] = {}
         for symbol, candles in symbol_candles.items():
             ticker = _ticker_at(candles, symbol_ts[symbol], ts)
             if ticker is None:
                 continue
             ticker["instId"] = symbol
             tickers.append(ticker)
+            if fast_lane_enabled:
+                # Reconstruct the lane's price deque from the same 1H candles —
+                # no extra fetch, and identical code path to live.
+                price_history[symbol] = _price_history_at(
+                    candles,
+                    symbol_ts[symbol],
+                    ts,
+                    window_minutes=fast_window_minutes,
+                )
             if activity_lookback_hours > 0:
                 act = _activity_at(
                     candles,
@@ -350,6 +408,17 @@ async def build_universe_schedule(
                 )
                 if act is not None:
                     activity[symbol] = act
+        fast_lane: list[dict[str, Any]] = []
+        if fast_lane_enabled:
+            fast_lane = fast_lane_candidates(
+                tickers,
+                price_history,
+                cfg,
+                # Interval boundaries are bar-close timestamps in ms; the lane
+                # expects epoch seconds.
+                now_ts=ts / 1000.0,
+                vol_ccy_is_quote=True,
+            )
         result = score_universe(
             tickers,
             cfg,
@@ -359,6 +428,7 @@ async def build_universe_schedule(
             # _ticker_at() sums Candle.effective_quote_volume (OKX volCcyQuote),
             # so volCcy24h here is already quote-currency — do not re-convert.
             vol_ccy_is_quote=True,
+            fast_lane=fast_lane,
         )
         schedule.intervals.append(
             UniverseInterval(

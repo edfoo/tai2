@@ -318,6 +318,235 @@ def build_candidates(
     return candidates
 
 
+# ── Fast lane: short-window move discovery ──────────────────────────────────
+#
+# ``build_candidates`` gates on trailing-24h quote volume.  A 24h *sum* is a
+# lagging indicator by construction: a coin that starts from a quiet baseline
+# (SHELL: ~100k/day) cannot reach the ``min_volume_usd`` floor until the pump's
+# own candles have printed.  SHELL went +9% at 15:00, +26% at 17:00, and only
+# crossed the 10M floor at 18:00 — by which point the move was over.
+#
+# The fast lane therefore admits symbols on a *short-window price move* instead,
+# with a much lower (tradability-only) volume floor.  It is a discovery
+# widening, not a selection change: admitted symbols still go through
+# ``compute_recent_activity`` and the normal SC/MR scoring, so they must win on
+# activity to be traded.  It costs **no extra fetches** when the caller already
+# polls all tickers — the move is computed from a rolling ``(ts, last)`` deque.
+
+# Minimum samples before the deque-based move is trusted (guards a single
+# thin print from being read as a pump).
+_FAST_LANE_MIN_SAMPLES = 3
+
+
+def _fast_move_from_history(
+    history: Any,
+    *,
+    now_ts: float,
+    window_seconds: float,
+) -> tuple[float, float, str] | None:
+    """Return ``(move_pct, span_seconds, source)`` from a rolling price deque.
+
+    ``history`` is any iterable of ``(ts_epoch_seconds, last_price)`` samples,
+    oldest-first.  The move is measured against the newest sample that is at
+    least ``window_seconds`` old — or the oldest sample available when the
+    history is shorter than the window.
+
+    Returns None when there are too few samples or the span is too short to
+    be meaningful.
+    """
+    samples = [(float(ts), float(px)) for ts, px in history if px]
+    if len(samples) < _FAST_LANE_MIN_SAMPLES:
+        return None
+    samples.sort(key=lambda s: s[0])
+    last_ts, last_px = samples[-1]
+    if last_px <= 0 or last_ts <= 0:
+        return None
+
+    window_start = now_ts - window_seconds
+    # Newest sample at or before the window start; fall back to the oldest.
+    base = samples[0]
+    for sample in samples:
+        if sample[0] <= window_start:
+            base = sample
+        else:
+            break
+    span = last_ts - base[0]
+    # Require at least half the window to actually be covered, otherwise the
+    # "move" is just noise between adjacent polls.
+    if span < window_seconds * 0.5:
+        return None
+    if base[1] <= 0:
+        return None
+    return ((last_px - base[1]) / base[1] * 100.0, span, "history")
+
+
+def fast_lane_candidates(
+    tickers: list[dict[str, Any]],
+    price_history: dict[str, deque] | None,
+    cfg: dict[str, Any],
+    *,
+    now_ts: float | None = None,
+    vol_ccy_is_quote: bool = False,
+) -> list[dict[str, Any]]:
+    """Admit symbols moving sharply in the recent window, ignoring the 24h gate.
+
+    This is the discovery complement to :func:`build_candidates`.  A symbol
+    qualifies when **all** of the following hold:
+
+      * ``|move_pct|`` over the last ``fast_move_window_minutes`` exceeds
+        ``fast_move_threshold_pct`` — the discovery signal.
+      * trailing-24h quote volume is at least ``fast_lane_min_volume_usd``
+        (default 250k) — a *tradability* floor, far below ``min_volume_usd``.
+      * the instrument matches ``universe_filter``.
+      * bid/ask spread is within ``max_spread_pct`` (when bid/ask is present).
+
+    Cold start: when the price history is too short, ``sodUtc0`` (the OKX
+    session-open price, already in every ticker) is used as the reference — but
+    only while the session is young enough that the move is still recent
+    (``fast_lane_sod_max_age_mult`` × the window), so a pump from hours ago is
+    not mistaken for a fresh one.
+
+    Returns candidate dicts shaped like :func:`build_candidates` output, plus
+    ``fast_move_pct``, ``fast_span_seconds`` and ``fast_source``.  Each carries
+    ``_fast_lane = True`` so callers can exempt them from volume-based fetch
+    caps and surface them in diagnostics.
+    """
+    cfg = cfg or {}
+    if not bool(cfg.get("fast_lane_enabled", False)):
+        return []
+
+    threshold = abs(float(cfg.get("fast_move_threshold_pct") or 4.0))
+    window_minutes = max(1.0, float(cfg.get("fast_move_window_minutes") or 60.0))
+    window_seconds = window_minutes * 60.0
+    min_volume_usd = max(0.0, float(cfg.get("fast_lane_min_volume_usd") or 250_000.0))
+    max_symbols = max(0, int(cfg.get("fast_lane_max_symbols") or 40))
+    sod_max_age = max(1.0, float(cfg.get("fast_lane_sod_max_age_mult") or 3.0))
+    universe_pattern = str(cfg.get("universe_filter") or "*-USDT-SWAP").strip().upper()
+    max_spread_pct = float(cfg.get("max_spread_pct") or 0.0)
+    history = price_history or {}
+    now = float(now_ts if now_ts is not None else _now_seconds())
+
+    admitted: list[dict[str, Any]] = []
+    for ticker in tickers:
+        if not isinstance(ticker, dict):
+            continue
+        inst_id = str(ticker.get("instId") or "").upper()
+        if not inst_id or not fnmatch.fnmatch(inst_id, universe_pattern):
+            continue
+        last = _extract_float(ticker.get("last"))
+        if not last or last <= 0:
+            continue
+        vol_ccy_24h = _extract_float(ticker.get("volCcy24h"))
+        if vol_ccy_24h is not None and not vol_ccy_is_quote:
+            vol_ccy_24h *= last
+        if vol_ccy_24h is None or vol_ccy_24h < min_volume_usd:
+            continue
+
+        spread_pct: float | None = None
+        if max_spread_pct > 0:
+            bid_px = _extract_float(ticker.get("bidPx"))
+            ask_px = _extract_float(ticker.get("askPx"))
+            if bid_px and ask_px and bid_px > 0 and ask_px > 0:
+                mid = (bid_px + ask_px) / 2.0
+                if mid > 0:
+                    spread_pct = (ask_px - bid_px) / mid * 100.0
+                    if spread_pct > max_spread_pct:
+                        continue
+
+        measured = _fast_move_from_history(
+            history.get(inst_id) or (),
+            now_ts=now,
+            window_seconds=window_seconds,
+        )
+        if measured is not None:
+            move_pct, span, source = measured
+        else:
+            # Cold start: fall back to the session-open price, but only while
+            # the session is young enough for "since open" to mean "recently".
+            sod = _extract_float(ticker.get("sodUtc0"))
+            if not sod or sod <= 0:
+                continue
+            session_age = _seconds_since_utc_midnight(now)
+            if session_age <= 0 or session_age > window_seconds * sod_max_age:
+                continue
+            move_pct = (last - sod) / sod * 100.0
+            span = session_age
+            source = "sodUtc0"
+
+        if abs(move_pct) < threshold:
+            continue
+
+        open24h = _extract_float(ticker.get("open24h"))
+        high24h = _extract_float(ticker.get("high24h"))
+        low24h = _extract_float(ticker.get("low24h"))
+        hl_range_pct = (
+            (high24h - low24h) / open24h * 100
+            if open24h and open24h > 0 and high24h is not None and low24h is not None
+            else 0.0
+        )
+        momentum_pct = (
+            abs((last - open24h) / open24h * 100)
+            if open24h and open24h > 0
+            else 0.0
+        )
+        admitted.append(
+            {
+                "symbol": inst_id,
+                "vol_ccy_24h": vol_ccy_24h,
+                # No rolling history for lane-added symbols — score_universe
+                # falls back to raw volume for normalisation.
+                "vol_spike_ratio": None,
+                "hl_range_pct": hl_range_pct,
+                "momentum_pct": momentum_pct,
+                "spread_pct": spread_pct,
+                "fast_move_pct": move_pct,
+                "fast_span_seconds": span,
+                "fast_source": source,
+                "_fast_lane": True,
+            }
+        )
+
+    # Biggest absolute move first, then cap.
+    admitted.sort(key=lambda c: abs(c["fast_move_pct"]), reverse=True)
+    return admitted[:max_symbols] if max_symbols else admitted
+
+
+def merge_candidates(
+    base: list[dict[str, Any]],
+    extra: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Union two candidate lists by symbol, preferring ``base``'s feature dict.
+
+    Symbols present in both keep their ``build_candidates`` entry (so the
+    rolling ``vol_spike_ratio`` is preserved) but are annotated with the extra
+    list's fast-lane fields, letting diagnostics report *why* they were found
+    twice without double-counting them in the pool.
+    """
+    by_symbol = {c["symbol"]: c for c in base}
+    for candidate in extra:
+        symbol = candidate["symbol"]
+        existing = by_symbol.get(symbol)
+        if existing is None:
+            by_symbol[symbol] = candidate
+            continue
+        existing["fast_move_pct"] = candidate.get("fast_move_pct")
+        existing["fast_span_seconds"] = candidate.get("fast_span_seconds")
+        existing["fast_source"] = candidate.get("fast_source")
+    return list(by_symbol.values())
+
+
+def _now_seconds() -> float:
+    """Current epoch seconds (patchable in tests)."""
+    import time
+
+    return time.time()
+
+
+def _seconds_since_utc_midnight(now_ts: float) -> float:
+    """Seconds elapsed since 00:00 UTC for an epoch-seconds timestamp."""
+    return float(now_ts) % 86_400.0
+
+
 def score_universe(
     tickers: list[dict[str, Any]],
     cfg: dict[str, Any],
@@ -327,6 +556,7 @@ def score_universe(
     activity: dict[str, dict[str, Any]] | None = None,
     candidates: list[dict[str, Any]] | None = None,
     vol_ccy_is_quote: bool = False,
+    fast_lane: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Score a ticker snapshot into SC / MR / union universes.
 
@@ -360,6 +590,12 @@ def score_universe(
         volume (the backtest reconstructs it from summed ``volCcyQuote``).
         Live passes False so ``build_candidates`` converts OKX's base-currency
         ``volCcy24h`` to USDT via ``× last``.
+    fast_lane:
+        Optional output of :func:`fast_lane_candidates` — symbols admitted on a
+        short-window price move rather than the trailing-24h volume gate.  They
+        are merged into the candidate pool (deduped by symbol) so the normal
+        SC/MR gates and scoring decide whether they are actually selected.
+        Admitted symbols carry ``_fast_lane = True``.
 
     Returns
     -------
@@ -410,6 +646,14 @@ def score_universe(
             vol_ccy_is_quote=vol_ccy_is_quote,
         )
 
+    # ── Fast-lane discovery merge ─────────────────────────────────────
+    # Symbols admitted on a short-window move join the pool before scoring, so
+    # they must still win on activity to be selected.  This is the only place
+    # the 24h volume gate is bypassed; nothing downstream changes.
+    fast_lane_admitted = list(fast_lane or [])
+    if fast_lane_admitted:
+        candidates = merge_candidates(candidates, fast_lane_admitted)
+
     # ── Attach recent-activity features ───────────────────────────────
     # ``rec_*`` are the ranking inputs when activity data is available; the
     # 24h ``momentum_pct``/``hl_range_pct`` remain as context/diagnostics.
@@ -446,6 +690,25 @@ def score_universe(
         f"Screener: {len(candidates)} base candidates from {len(tickers)} tickers "
         f"(vol>={min_volume_usd:.0f} USD{spread_str}{activity_str}, dual={dual_universe})"
     ]
+    if fast_lane_admitted:
+        # Report the lane separately so "why is this symbol here?" is answerable
+        # from the log alone.
+        window = float(cfg.get("fast_move_window_minutes") or 60.0)
+        samples = ", ".join(
+            f"{c['symbol']}({c.get('fast_move_pct') or 0:+.2f}%/"
+            f"{(c.get('fast_span_seconds') or 0) / 60:.0f}m "
+            f"v24h={c.get('vol_ccy_24h') or 0:,.0f} {c.get('fast_source') or '?'})"
+            for c in sorted(
+                fast_lane_admitted,
+                key=lambda c: abs(c.get("fast_move_pct") or 0.0),
+                reverse=True,
+            )[:8]
+        )
+        diagnostics.append(
+            f"Screener fast lane: {len(fast_lane_admitted)} admitted "
+            f"(|move|>={abs(float(cfg.get('fast_move_threshold_pct') or 4.0)):g}% "
+            f"over {window:g}m): {samples}"
+        )
 
     selected: list[str] = []
     sc_selected: list[str] = []
@@ -467,6 +730,8 @@ def score_universe(
             "overlap": overlap,
             "dual_universe": dual_universe,
             "activity_used": activity_used,
+            "fast_lane_count": len(fast_lane_admitted),
+            "fast_lane_symbols": [c["symbol"] for c in fast_lane_admitted],
             "diagnostics": diagnostics,
         }
 
@@ -624,6 +889,8 @@ def score_universe(
         "overlap": overlap,
         "dual_universe": dual_universe,
         "activity_used": activity_used,
+        "fast_lane_count": len(fast_lane_admitted),
+        "fast_lane_symbols": [c["symbol"] for c in fast_lane_admitted],
         "diagnostics": diagnostics,
     }
 

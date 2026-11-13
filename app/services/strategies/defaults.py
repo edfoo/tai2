@@ -424,6 +424,27 @@ DEFAULT_SCREENER: dict[str, Any] = {
     "min_hl_range_pct": 0.0,
     "mr_min_hl_range_pct": 2.5,
     "mr_max_momentum_pct": 5.0,
+    # ── Fast lane: short-window move discovery ────────────────────────
+    # The trailing-24h volume gate above is a LAGGING indicator: a coin whose
+    # baseline is quiet cannot reach min_volume_usd until the pump's own
+    # candles have printed.  SHELL-USDT-SWAP is the canonical example — it went
+    # +9% at 15:00 and +72% by 18:00, but only crossed the 10M floor at 18:00,
+    # i.e. the gate confirmed the move after it was over.
+    #
+    # The fast lane admits symbols whose price moved sharply inside the recent
+    # window, using a much lower (tradability-only) volume floor.  It costs no
+    # extra REST calls: the move is computed from the all-SWAP ticker poll the
+    # screener already performs.  Admitted symbols are NOT auto-selected — they
+    # join the candidate pool and must still win SC/MR scoring.
+    "fast_lane_enabled": False,
+    "fast_move_threshold_pct": 4.0,
+    "fast_move_window_minutes": 60,
+    "fast_lane_min_volume_usd": 250_000,
+    "fast_lane_max_symbols": 40,
+    # Cold-start fallback: use the session-open price (sodUtc0) as the move
+    # reference only while the session is younger than this multiple of the
+    # window, so an old move is not mistaken for a fresh one.
+    "fast_lane_sod_max_age_mult": 3.0,
 }
 
 # ── Trade management (position-overlay) ─────────────────────────────────────
