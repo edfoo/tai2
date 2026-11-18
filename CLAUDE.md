@@ -230,6 +230,7 @@ Covered by `tests/test_live_backtest_parity.py` — extend it when touching any 
 - `require_protection` blocks if TP/SL algo placement fails
 - `max_position_pct` and per-symbol caps enforced before sizing
 - `daily_loss_limit_pct` locks execution when threshold breached
+- One launcher position per symbol: `_launcher_symbol_conflict` blocks a launcher entry when the symbol has an open position or another launcher strategy tracks it (build time + execution time). Without it, an opposite-direction launcher signal becomes a `reduce_only` close of the other strategy's position. Matches backtest `allow_concurrent_strategies_per_symbol=False`.
 
 ### Prompt versioning
 - `insert_prompt_version` only called when user explicitly types a name in "Save As New Version"

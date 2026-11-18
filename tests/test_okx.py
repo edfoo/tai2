@@ -437,6 +437,158 @@ def test_launcher_decision_seeds_trade_mgmt_state_on_success(monkeypatch: pytest
     assert trade_mgmt_state[symbol.upper()]["strategy"] == "vwap_reversion"
 
 
+def _launcher_conflict_service(monkeypatch: pytest.MonkeyPatch) -> tuple[MarketService, dict[str, Any]]:
+    """MarketService wired for launcher handle_llm_decision tests.
+
+    Returns the service and a ``calls`` dict recording submitted orders and
+    protection cancellations.
+    """
+    service = MarketService(
+        state_service=DummySnapshotStore(),
+        enable_websocket=False,
+        account_api=object(),
+        market_api=None,
+        public_api=None,
+        trade_api=object(),
+    )
+    service._instrument_specs[service.symbol] = {
+        "lot_size": 0.1,
+        "min_size": 0.1,
+        "tick_size": 0.0001,
+    }
+    service._latest_ticker[service.symbol] = {"last": 100.0}
+    calls: dict[str, Any] = {"orders": [], "cancelled": []}
+
+    async def fake_submit_order(*args: Any, **kwargs: Any) -> tuple[dict[str, Any], bool]:
+        calls["orders"].append(kwargs)
+        return {"ordId": f"order-{len(calls['orders'])}"}, True
+
+    async def fake_cancel_protection(symbol: str) -> None:
+        calls["cancelled"].append(symbol)
+
+    async def fake_record_trade_execution(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    async def fake_fetch_positions(*args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+        return []
+
+    async def fake_fetch_account_balance(_self: MarketService) -> dict[str, Any]:
+        return {
+            "available_balances": {"USDT": {"available_usd": 1000.0, "cash": 1000.0}},
+            "available_eq_usd": 1000.0,
+            "total_eq_usd": 1000.0,
+        }
+
+    monkeypatch.setattr(service, "_submit_order", fake_submit_order)
+    monkeypatch.setattr(service, "_cancel_position_protection", fake_cancel_protection)
+    monkeypatch.setattr(service, "_record_trade_execution", fake_record_trade_execution)
+    monkeypatch.setattr(service, "_fetch_positions", fake_fetch_positions)
+    service._fetch_account_balance = MethodType(fake_fetch_account_balance, service)
+    return service, calls
+
+
+def _launcher_context(service: MarketService, positions: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    # Cross margin keeps the fixture out of the isolated-margin top-up path,
+    # which would otherwise stop execution before order submission and make
+    # the conflict tests pass vacuously.
+    return {
+        "symbol": service.symbol,
+        "execution": {
+            "enabled": True,
+            "trade_mode": "cross",
+            "order_type": "market",
+            "min_size": 0.1,
+        },
+        "guardrails": {},
+        "account": {"account_equity": 1000.0},
+        "market": {"last_price": 100.0},
+        "positions": positions or [],
+    }
+
+
+def _launcher_decision(action: str, strategy: str) -> dict[str, Any]:
+    return {
+        "action": action,
+        "confidence": 1.0,
+        "notional_usd": 100.0,
+        "take_profit": 95.0 if action == "SELL" else 105.0,
+        "stop_loss": 105.0 if action == "SELL" else 95.0,
+        "rationale": "launcher",
+        "_decision_origin": "launcher",
+        "_strategy_name": strategy,
+    }
+
+
+def test_launcher_opposite_signal_does_not_close_existing_position(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A launcher SELL on a LONG symbol must be blocked, not sent as a reduce_only close."""
+
+    async def scenario() -> tuple[bool, dict[str, Any], MarketService]:
+        service, calls = _launcher_conflict_service(monkeypatch)
+        positions = [{"instId": service.symbol, "pos": "1", "posSide": "long"}]
+        executed = await service.handle_llm_decision(
+            _launcher_decision("SELL", "wick_rejection"),
+            _launcher_context(service, positions),
+        )
+        return executed, calls, service
+
+    executed, calls, service = asyncio.run(scenario())
+    assert executed is False
+    assert calls["orders"] == []
+    assert calls["cancelled"] == []
+    assert not service._launcher_in_position
+
+
+def test_launcher_second_strategy_same_tick_is_blocked(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Decisions built in one tick execute sequentially; the second strategy's
+    opposite entry must see the first strategy's fresh fill and be blocked,
+    even though the position snapshot has not caught up yet."""
+
+    async def scenario() -> tuple[bool, bool, dict[str, Any], MarketService]:
+        service, calls = _launcher_conflict_service(monkeypatch)
+        first = await service.handle_llm_decision(
+            _launcher_decision("BUY", "spike_continuation"),
+            _launcher_context(service),
+        )
+        calls["cancelled_before_second"] = list(calls["cancelled"])
+        # The per-symbol cooldown (min_hold_seconds, falling back to the poll
+        # interval) would also block this second order; shrink it so the test
+        # exercises the launcher conflict guard on its own.
+        context = _launcher_context(service)
+        context["guardrails"] = {"min_hold_seconds": 0.001}
+        await asyncio.sleep(0.01)
+        second = await service.handle_llm_decision(
+            _launcher_decision("SELL", "wick_rejection"),
+            context,
+        )
+        return first, second, calls, service
+
+    first, second, calls, service = asyncio.run(scenario())
+    assert first is True
+    assert second is False
+    assert len(calls["orders"]) == 1
+    assert calls["orders"][0]["reduce_only"] is False
+    # The blocked second entry must not touch the first position's TP/SL.
+    assert calls["cancelled"] == calls["cancelled_before_second"]
+    assert set(service._launcher_in_position) == {f"spike_continuation:{service.symbol.upper()}"}
+
+
+def test_llm_decision_can_still_close_opposite_position(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The guard is launcher-only: an LLM SELL on a LONG symbol remains a close."""
+
+    async def scenario() -> dict[str, Any]:
+        service, calls = _launcher_conflict_service(monkeypatch)
+        decision = _launcher_decision("SELL", "")
+        decision.pop("_decision_origin")
+        decision.pop("_strategy_name")
+        positions = [{"instId": service.symbol, "pos": "1", "posSide": "long"}]
+        await service.handle_llm_decision(decision, _launcher_context(service, positions))
+        return calls
+
+    calls = asyncio.run(scenario())
+    assert calls["orders"], "LLM close should reach order submission"
+    assert calls["orders"][0]["reduce_only"] is True
+
+
 def test_handle_llm_seeds_isolated_margin_when_tier_requires_more_margin(monkeypatch: pytest.MonkeyPatch) -> None:
     class RecordingAccountApi:
         def __init__(self) -> None:

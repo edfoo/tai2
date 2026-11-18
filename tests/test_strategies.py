@@ -1393,6 +1393,71 @@ class TestBuildLauncherDecision:
         assert abs(decision["take_profit"] - 110.24) < 0.01
         assert abs(decision["stop_loss"] - 102.82) < 0.01
 
+    # ── Same-symbol conflict guard ────────────────────────────────────────
+
+    def _setup_firing_mean_reversion(self, service: MarketService) -> None:
+        """Configure MR so it fires a BUY on BTC-USDT-SWAP (rsi=20)."""
+        self._setup_service_with_price(service, 100.0)
+        service.set_launcher_config({
+            "mode": "launcher_only",
+            "notional_usd": 50.0,
+            "strategies": {
+                "mean_reversion": {
+                    "enabled": True,
+                    "rsi_oversold": 30.0,
+                    "rsi_overbought": 70.0,
+                    "tp_pct": 3.0,
+                    "sl_pct": 10.0,
+                    "require_cmf": False,
+                    "require_htf_trend": False,
+                    "require_cmf_cross": False,
+                    "require_bb_position": False,
+                    "require_candle_rejection": False,
+                    "require_vwap_reversion": False,
+                    "require_volume_cooling": False,
+                    "require_regime": False,
+                    "use_atr_sizing": False,
+                    "max_adx": 0.0,
+                    "min_atr_pct": 0.0,
+                    "min_bb_bandwidth": 0.0,
+                }
+            },
+        })
+        service._last_full_snapshot = _make_snapshot(rsi=20.0)
+
+    def test_skips_symbol_held_by_other_launcher_strategy(self) -> None:
+        service = _make_service()
+        self._setup_firing_mean_reversion(service)
+        service._launcher_in_position["spike_continuation:BTC-USDT-SWAP"] = {
+            "side": "short",
+            "pos_side": "short",
+            "strategy": "spike_continuation",
+        }
+        assert service.build_launcher_decisions("BTC-USDT-SWAP") == []
+
+    def test_skips_symbol_with_untracked_open_position(self) -> None:
+        service = _make_service()
+        self._setup_firing_mean_reversion(service)
+        service._last_full_snapshot["positions"] = [
+            {"instId": "BTC-USDT-SWAP", "pos": "3", "posSide": "short"},
+        ]
+        assert service.build_launcher_decisions("BTC-USDT-SWAP") == []
+
+    def test_other_symbol_position_does_not_block(self) -> None:
+        service = _make_service()
+        self._setup_firing_mean_reversion(service)
+        service._launcher_in_position["spike_continuation:ETH-USDT-SWAP"] = {
+            "side": "long",
+            "pos_side": "long",
+            "strategy": "spike_continuation",
+        }
+        service._last_full_snapshot["positions"] = [
+            {"instId": "ETH-USDT-SWAP", "pos": "1", "posSide": "long"},
+        ]
+        decisions = service.build_launcher_decisions("BTC-USDT-SWAP")
+        assert len(decisions) == 1
+        assert decisions[0]["action"] == "BUY"
+
 
 # ── Spike Continuation Strategy ──────────────────────────────────────────────
 

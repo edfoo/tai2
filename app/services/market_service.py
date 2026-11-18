@@ -3766,6 +3766,39 @@ class MarketService:
                 block["choppiness_htf"] = _htf.get("choppiness")
         return block
 
+    def _launcher_symbol_conflict(
+        self,
+        symbol: str,
+        strategy_name: str | None,
+        positions: list[dict[str, Any]] | None,
+    ) -> str | None:
+        """Return why a launcher entry on *symbol* must be blocked, or None.
+
+        A launcher entry is only allowed on a symbol with no open position and
+        no other launcher strategy tracking it.  Without this guard an
+        opposite-direction signal from a second strategy reaches
+        ``handle_llm_decision``, which sees the symbol as LONG/SHORT and turns
+        the "entry" into a ``reduce_only`` close of the first strategy's
+        position (cancelling its TP/SL first).  Blocking matches the backtest's
+        default ``allow_concurrent_strategies_per_symbol=False``.
+        """
+        symbol_u = (symbol or "").upper()
+        own = (strategy_name or "").strip().lower()
+        for key, tracked in self._launcher_in_position.items():
+            key_u = str(key).upper()
+            if key_u != symbol_u and not key_u.endswith(f":{symbol_u}"):
+                continue
+            holder = str((tracked or {}).get("strategy") or "").strip().lower()
+            if not holder and ":" in key_u:
+                holder = key_u.split(":", 1)[0].lower()
+            if holder == own and own:
+                return f"already tracked by {own}"
+            return f"held by launcher strategy {holder or 'unknown'}"
+        side = self._detect_position_side(positions or [], symbol_u)
+        if side != "FLAT":
+            return f"open {side} position on symbol"
+        return None
+
     def _launcher_evaluate_signals(self, symbol: str) -> list[StrategySignal]:
         """Return all strategy signals for a symbol (concurrent evaluation).
 
@@ -4110,6 +4143,17 @@ class MarketService:
                 continue
             if strat_key in self._launcher_in_position:
                 self._emit_debug(f"Launcher: {symbol} [{signal.strategy_name}] already tracked — skipping")
+                continue
+            # One launcher position per symbol: an entry while another
+            # strategy (or an untracked position) holds the symbol would be
+            # executed as a close of that position.  Re-checked at execution
+            # time in handle_llm_decision, since every decision in a tick is
+            # built before any of them executes.
+            conflict = self._launcher_symbol_conflict(symbol_upper, signal.strategy_name, positions)
+            if conflict:
+                self._emit_debug(
+                    f"Launcher: {symbol} [{signal.strategy_name}] {conflict} — skipping"
+                )
                 continue
             # Re-entry cooldown after a recent close (trade management).
             if self._is_reentry_blocked(symbol_upper):
@@ -9129,6 +9173,32 @@ class MarketService:
             self._decision_state[symbol] = {"action": action, "timestamp": now}
             self._emit_debug(summary)
             return False
+
+        # Launcher same-symbol guard (execution-time re-check).  A launcher
+        # decision is always an entry; if the symbol already has a position or
+        # another launcher strategy holds it, the order below would become a
+        # reduce_only close of that position.  Block instead.
+        if _is_launcher_decision and action in {"BUY", "SELL"}:
+            _conflict = self._launcher_symbol_conflict(
+                symbol, decision.get("_strategy_name"), positions
+            )
+            if _conflict:
+                self._emit_debug(
+                    f"Launcher entry blocked for {symbol} "
+                    f"[{decision.get('_strategy_name')}] {action}: {_conflict}"
+                )
+                self._record_execution_feedback(
+                    symbol,
+                    f"Blocked: launcher entry {action} — {_conflict}",
+                    level="warning",
+                    meta={
+                        "guardrail": "launcher_symbol_conflict",
+                        "strategy": decision.get("_strategy_name"),
+                        "current_side": current_side,
+                        "action": action,
+                    },
+                )
+                return False
 
         # ── Launcher LLM filter (llm_with_filter mode) ───────────────────────
         _gov = self._launcher_config
