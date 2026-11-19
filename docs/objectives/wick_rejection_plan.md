@@ -1,6 +1,6 @@
 # Design: Hourly Wick Rejection Short (`wick_rejection`)
 
-**Status:** Planned (redesigned 2026-11-18 from the manual-trade analysis — §1.1; vol screener §3.5)
+**Status:** Planned (redesigned 2026-11-18 from the manual-trade analysis — §1.1; vol screener §3.5; optional momentum entry mode §3.8 / Phase 9 added 2026-11-19)
 **Date:** 2026-10-28 (revised 2026-11-18)
 **Scope:** New launcher strategy with a clock-aligned entry trigger, forming-candle
 exposure, strategy-owned exits (TP + emergency stop + time stop), per-strategy
@@ -76,6 +76,38 @@ What this means for the defaults:
   twice the window's total profit. An emergency stop at 35% on margin would
   have closed none of the 33 in-window trades and capped INIT. This is why the
   emergency stop is on by default (§3.2).
+
+### 1.2 Evidence: tick-level momentum at entry
+
+`scripts/analyze_manual_trades_tape.py` pulled the public trade tape for the
+10 minutes before each of the 33 entries (plus the two after the window).
+Measured at the moment of entry:
+
+| Measure (33 in-window trades) | p25 | median | p75 |
+|---|---|---|---|
+| Price change, last 30 s | −0.19% | −0.02% | +0.25% |
+| Price change, last 60 s | −0.22% | −0.05% | +0.46% |
+| Price change, last 5 min | −0.40% | +0.18% | +0.68% |
+| Seconds since the 10-min high | 108 | **243** | 382 |
+| % below the 10-min high | 0.39 | **0.74** | 1.16 |
+| Buy share of traded size, last 60 s | 0.41 | 0.48 | 0.54 |
+| Trade rate, last 60 s ÷ 10-min average | 0.65 | 0.89 | 1.30 |
+
+- **Entries came after the push had stalled, not into it.** The median entry
+  was flat over the last 30–60 s, about 4 minutes after the last 10-min high
+  and 0.7% below it.
+- **Entering into a strong push did not hurt:** the 6 entries with a ≥ +1%
+  rise in the last 60 s were all winners. A "veto while still rising" rule is
+  **not** supported by this data.
+- **Losers didn't look like a runaway at entry.** The clearest odd one was BEAT
+  (Oct 27): −2.3% in the last 60 s at 4.6× the usual trade rate, i.e. entered
+  after a sharp drop had already happened, 43% off the hour high.
+- **INIT looked normal at entry:** flat 60 s, last high 77 s earlier. No
+  momentum measure at entry would have flagged it, so the emergency stop
+  (§3.2), not a momentum veto, is what protects against runaways.
+- Buy/sell share and trade rate showed no difference between winners and
+  losers.
+- With 5 losers this is descriptive, not a validated rule.
 
 ---
 
@@ -345,7 +377,10 @@ undercounts rather than invents. Recorded in the schedule provenance.
 ### 3.6 Clock-aligned entry trigger (live)
 
 A dedicated task, `WickRejectionTrigger`, started by the scheduler when WR is
-enabled and `launcher.mode == "launcher_only"`:
+enabled and `launcher.mode == "launcher_only"`. It is built as a **watch loop**
+(sleep until the watch start, then evaluate on a cadence until the window
+closes) with `entry_mode="clock"` evaluating exactly once. That lets the
+optional momentum mode (§3.8) slot in without rework.
 
 1. Sleep until `H:00:00 − entry_seconds_before_close` (default 40 s), computed
    from wall-clock UTC each cycle (no drift accumulation).
@@ -412,6 +447,81 @@ Rules:
 - Validation: the 1m backtest over the user's window, run with the user's
   observed settings, should broadly reproduce §1.1 (win rate, median hold, MAE
   distribution). If it does not, fix the simulation before tuning.
+
+### 3.8 Momentum entry mode (optional, Phase 9)
+
+Replaces the fixed 40 s entry with continuous watching in the last minutes of
+the hour, like the user watching the chart. Off by default
+(`entry_mode = "clock"`).
+
+| `entry_mode` | Behaviour |
+|---|---|
+| `"clock"` (default) | §3.6: one evaluation at `H:00 − entry_seconds_before_close` |
+| `"momentum"` | Watch from `watch_seconds_before_close`; enter the first moment all momentum conditions pass inside the momentum entry window; no entry otherwise |
+| `"momentum_or_clock"` | As `"momentum"`, but if nothing has triggered by the clock time, evaluate the clock entry as usual |
+
+**Watching vs entering.** Entries should stay close to the end of the hour (the
+thesis is the dip at the hour open; the user's entries were a median 39 s
+before). So the window is split:
+
+- **Watch** from `watch_seconds_before_close` (default `300`): fetch the 1H
+  candles once, run the setup and range gates (§3.1 stages 3–6) to get a
+  shortlist, then compute momentum for the shortlist every
+  `momentum_eval_interval_seconds` (default `2`).
+- **Enter** only inside `momentum_entry_max_seconds_to_close` (default `120`) to
+  `min_seconds_to_close` (`10`). Earlier signals are logged but not traded.
+
+**Data.** All in memory from the public websocket `trades` channel (already
+subscribed for selected symbols): a per-symbol rolling tape of
+`{ts, px, sz, side}` for the last `watch_seconds_before_close + 120` seconds.
+The existing footprint buffer keeps price and time but is sized for the
+footprint, so add a dedicated `_wr_tape[symbol]` deque. No REST calls after the
+watch start. If a symbol's tape has a gap (websocket reconnect), it is dropped
+from momentum evaluation for that hour and logged; with `"momentum_or_clock"`
+it can still enter on the clock.
+
+**Momentum measures** (one pure function, `compute_momentum(tape, now_ms)`,
+shared by live and the backtest):
+
+| Measure | Definition |
+|---|---|
+| `ret_30s`, `ret_60s`, `ret_120s` | % change of last price vs the price at `now − N s` |
+| `accel_60s` | `ret_60s` minus the change over the 60 s before that |
+| `secs_since_high` | seconds since the highest trade in the watch window |
+| `below_high_pct` | % below that high |
+| `buy_share_60s` | buy size ÷ total size, last 60 s |
+| `rate_ratio_60s` | trades in the last 60 s ÷ average per 60 s over the watch window |
+
+**Entry conditions** (all must pass; starting values from §1.2):
+
+| Condition | Default | Why |
+|---|---|---|
+| `secs_since_high >= stall_min_seconds` | `60` | "Stopped making new highs" — 75% of the user's entries were ≥ 108 s after the high |
+| `below_high_pct <= max_below_high_pct` | `1.5` | Still near the top — p75 was 1.16%, max 2.6% |
+| `ret_60s >= min_ret_60s` | `-1.0` | Skip entries after a sharp drop already happened (the BEAT loser: −2.3%) |
+| `ret_60s <= max_ret_60s` | `null` (off) | A "still pushing up" veto is available but **off**: the 6 entries after a ≥ 1% rise all won |
+| `buy_share_60s <= max_buy_share_60s` | `null` (off) | No difference seen in the data; available for sweeps |
+
+The §3.1 high-offset gate (range-relative, vs the 1H high) still applies.
+When several symbols trigger at different moments, each enters when it
+triggers, subject to `max_concurrent_positions` and `max_total_margin_pct`.
+`rank_score` only orders symbols that trigger on the same evaluation.
+
+**Backtest.** Two levels:
+
+1. **1m approximation** (default for Phase 9): the 1m candles give
+   minute-resolution measures (`ret_60s` = the last 1m candle's change,
+   `secs_since_high` rounded to minutes, no buy share). Entries can land on
+   H:58:00 and H:59:00 steps only. Cheap and enough to see whether momentum
+   timing beats the clock at all.
+2. **Tape replay** (`wr_momentum_tape=True`, only if level 1 looks promising):
+   fetch the trade tape for the watch window of each hour where a vol symbol
+   passed the setup gates, and replay `compute_momentum` second by second.
+   Uses `data_fetcher.fetch_trade_tape` after its pagination bug is fixed
+   (`okx_metrics.fetch_trade_history_records` sends a timestamp as `after`
+   without `type=2`, so OKX reads it as a trade ID, and it keeps only one trade
+   per millisecond). OKX keeps about 3 months of tape, so tape replay is
+   limited to recent windows; cached per symbol-hour.
 
 ---
 
@@ -531,6 +641,32 @@ Rules:
       `test_live_backtest_parity.py` — WR signal and exit parity on a 1m fixture;
       same-candle TP + stop → stop.
 
+### Phase 9 — Momentum entry mode *(optional; after the clock mode has run live)*
+
+27. **New `app/services/strategies/wr_momentum.py`** — pure
+    `compute_momentum(tape, now_ms, window_s)` and
+    `momentum_entry_ok(measures, cfg)` (§3.8).
+28. **`market_service`** — `_wr_tape[symbol]` rolling deque fed from
+    `_handle_ws_message` (`trades` channel) for vol symbols only; gap detection
+    on reconnect.
+29. **`wick_rejection_trigger.py`** — `entry_mode` handling: watch start,
+    shortlist from the setup gates, evaluation every
+    `momentum_eval_interval_seconds`, entry window, `momentum_or_clock`
+    fallback, per-symbol log of the measures at each decision.
+30. **`okx_metrics.fetch_trade_history_records`** — fix pagination (`type=2`)
+    and keep every trade (dedupe by `tradeId`, not timestamp). Add a test with a
+    recorded page. This also fixes the backtest spread estimate.
+31. **Backtest** — 1m-approximation momentum in the engine's finer_ltf loop;
+    optional tape replay behind `wr_momentum_tape`.
+32. **UI** — entry mode selector and the momentum thresholds on the WR card;
+    LIVE page shows the shortlist and current measures during the watch window.
+33. **Tests** — `compute_momentum` on synthetic tapes (stall, push, drop, gap);
+    `momentum_entry_ok` per condition, `null` thresholds disabled; trigger
+    enters inside the entry window only, falls back to clock in
+    `momentum_or_clock`, never enters in `momentum` mode without a trigger;
+    tape-gap symbols excluded; live/backtest parity of the measures on the same
+    1m-derived tape.
+
 ---
 
 ## 5. Config reference
@@ -549,6 +685,16 @@ DEFAULT_WICK_REJECTION = {
     # Entry
     "entry_seconds_before_close": 40, # live trigger time (H:00 − this)
     "ws_price_max_age_seconds": 5,    # use the websocket price if fresher than this, else REST
+    # Momentum entry mode (§3.8, Phase 9) — off by default
+    "entry_mode": "clock",            # clock | momentum | momentum_or_clock
+    "watch_seconds_before_close": 300,
+    "momentum_entry_max_seconds_to_close": 120,
+    "momentum_eval_interval_seconds": 2,
+    "stall_min_seconds": 60,
+    "max_below_high_pct": 1.5,
+    "min_ret_60s": -1.0,
+    "max_ret_60s": None,              # "still pushing up" veto, off
+    "max_buy_share_60s": None,        # off
     "min_seconds_to_close": 10,       # entry window gate (live + backtest)
     "max_seconds_to_close": 90,
     "require_forming_green": True,
@@ -613,6 +759,11 @@ Screener additions (`DEFAULT_SCREENER`, §3.5):
    position.
 7. `emergency_stop_mode="software"` → TP algo only, no SL order, no
    `stop_loss_required` block; the monitor closes past the stop.
+8. **Momentum mode (Phase 9):** backtest `entry_mode` clock vs
+   `momentum_or_clock` on the same window with the 1m approximation; adopt
+   momentum only if expectancy and worst-hour loss are at least as good. Live:
+   run `momentum_or_clock` with small margin and compare per-hour logs of the
+   measures with what the clock would have done.
 
 ---
 
@@ -636,4 +787,7 @@ Screener additions (`DEFAULT_SCREENER`, §3.5):
 | **Forming-mode screener parity** — live sees the current hour's spike, the backtest universe lags an hour | Accepted (§3.5): the backtest undercounts; recorded in provenance |
 | **Fetch cost** — vol adds up to 8 symbols per poll plus 8 REST calls per trigger | `vol_enabled` defaults to `False`; cap at 8 |
 | **Correlated losses** — several WR shorts at the same hour can all run against the position in a market-wide pump | `max_total_margin_pct` bounds the combined loss; the sweep compares `max_concurrent_positions` 1/3/5 on worst-hour loss, not only total PnL |
+| **Momentum mode overfits** — thresholds come from 33 trades with 5 losers | Off by default; 1m backtest on windows outside the user's period before enabling; vetoes the data doesn't support (`max_ret_60s`, `max_buy_share_60s`) stay off |
+| **Momentum parity** — live uses second-level tape, the backtest 1m candles | Accepted for level 1 and recorded in provenance; tape replay closes the gap for recent windows |
+| **Websocket trade gaps** during the watch window | Gap detection drops the symbol from momentum for that hour; `momentum_or_clock` still allows the clock entry |
 | **App restart** wipes WR tracking (`_launcher_in_position`) | `_rehydrate_open_positions` must restore WR positions with their entry time so the time stop survives restarts; add a test |
