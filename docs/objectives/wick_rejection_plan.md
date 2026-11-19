@@ -349,11 +349,10 @@ enabled and `launcher.mode == "launcher_only"`:
 
 1. Sleep until `H:00:00 − entry_seconds_before_close` (default 40 s), computed
    from wall-clock UTC each cycle (no drift accumulation).
-2. For each symbol in the current vol list: fetch the last
-   `body_avg_window + setup_lookback_candles + 2` 1H candles (REST, one call per
-   symbol, run concurrently; 8 symbols is well inside OKX's candle rate limit)
-   and the latest ticker price. Build the per-symbol snapshot through the normal
-   snapshot path, with `forming_candle` set and its close = the latest price.
+2. For each symbol in the current vol list, gather the data (see *Data sources*
+   below): REST 1H candles, then the websocket price. Build the per-symbol
+   snapshot through the normal snapshot path, with `forming_candle` set and its
+   close = the current price.
 3. Run `build_launcher_decisions(symbol, strategies=["wick_rejection"])`. All
    existing guards apply: in-flight, already tracked, `_launcher_symbol_conflict`,
    re-entry cooldown, daily-loss lock.
@@ -374,6 +373,27 @@ Rules:
   the late symbols and the miss is logged. A late entry is worse than none.
 - `launcher.schedule = "on_close"` does not block the trigger (WR manages its own
   timing).
+
+#### Data sources
+
+| Data | Source | Why |
+|---|---|---|
+| Current price `P` (high-offset gate, forming close) | **Public websocket `tickers` channel** — `_latest_ticker[symbol]["last"]`, used when its `ts` is at most `ws_price_max_age_seconds` (default `5`) old; otherwise a REST ticker call (`/market/ticker`) | Freshest price with no request cost. Vol symbols are in `selected`, so `update_symbols` already subscribes them. The fallback covers a websocket gap or reconnect |
+| Forming 1H candle (open, high, low) | **REST** `/market/candles` at trigger time, then `high = max(high, P)`, `low = min(low, P)` | The tickers channel carries only 24h high/low, and the bot has no candle websocket. Folding `P` in covers moves after the fetch |
+| Closed 1H candles (body-ratio setup) | REST, in the same call: the last `body_avg_window + setup_lookback_candles + 2` candles | They don't change during the hour |
+| TP and emergency stop | Exchange algo orders | Nothing to poll. `software` stop mode uses mark price from the private websocket `positions` channel; the time stop runs from the positions-refresh loop |
+
+- One REST call per symbol, run concurrently: 8 symbols take well under a
+  second, inside OKX's candle rate limit and the ~30 s window.
+- Each trigger logs, per symbol, which price source was used and its age.
+- The screener's `fast_speed` keeps using the all-SWAP REST ticker poll the
+  screener already does (§3.5). The websocket only covers selected symbols, so
+  it can't discover new ones.
+- **Later option, only if the live dry run shows the trigger is tight:**
+  subscribe to `candle1H` on OKX's business websocket
+  (`wss://ws.okx.com:8443/ws/v5/business`), so the forming candle is always
+  current in memory and the trigger makes no REST calls. This costs a third
+  websocket connection with its own reconnect, ping and resubscribe handling.
 
 ### 3.7 Backtest
 
@@ -498,7 +518,9 @@ Rules:
       logged.
     - Trigger — fires at H:00 − 40 s (frozen clock); evaluates only vol
       symbols and only WR; opens several positions up to `max_concurrent_positions` by `rank_score`;
-      `max_total_margin_pct` sizes down / skips the last entry;
+      `max_total_margin_pct` sizes down / skips the last entry; uses the
+      websocket price when fresh and falls back to REST when stale or missing;
+      the forming high/low are widened by `P`;
       the regular tick never evaluates WR.
     - Vol screener — all cases from the previous revision (`hours_covered`
       divisor, no 24h fallback, quiet-then-spiking coin via `fast_speed`,
@@ -526,6 +548,7 @@ DEFAULT_WICK_REJECTION = {
     "min_big_bodies": 1,
     # Entry
     "entry_seconds_before_close": 40, # live trigger time (H:00 − this)
+    "ws_price_max_age_seconds": 5,    # use the websocket price if fresher than this, else REST
     "min_seconds_to_close": 10,       # entry window gate (live + backtest)
     "max_seconds_to_close": 90,
     "require_forming_green": True,
@@ -601,7 +624,8 @@ Screener additions (`DEFAULT_SCREENER`, §3.5):
 | **Runaway pump** (INIT: −85% MAE on margin) | Emergency stop on by default (35% margin, exchange-side); `max_total_margin_pct` caps combined exposure; modest default margin |
 | **50% portfolio margin** — one bad trade costs a large share of the account | Configurable but not the default; the STRATEGY card shows margin at risk and the emergency-stop loss in USDT |
 | **Exchange stop gets hunted** | Wide (7% price at 5×); `software` mode as the alternative, with its offline-risk trade-off documented |
-| **Trigger latency** — REST fetches for 8 symbols must finish inside ~30 s | Concurrent fetches; the entry-window gate drops late symbols rather than entering late; logged |
+| **Trigger latency** — REST candle fetches for 8 symbols must finish inside ~30 s | Concurrent fetches; price from the websocket; the entry-window gate drops late symbols rather than entering late; logged. Fallback: `candle1H` business websocket (§3.6) |
+| **Stale websocket price** — reconnect gap or unsubscribed symbol | `ws_price_max_age_seconds` check on the ticker `ts`; REST ticker fallback; source and age logged |
 | **Clock skew** | Use exchange server time (`/public/time`) offset, refreshed hourly, for the trigger |
 | **Entry-time parity** — live 40 s vs backtest 60 s before close | Accepted, recorded in provenance; sweep `entry_seconds_before_close` live-only via the dry run |
 | **Same-candle TP + stop in 1m simulation** | Stop fills first (conservative) |
