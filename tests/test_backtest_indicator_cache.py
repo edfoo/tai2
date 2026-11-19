@@ -122,7 +122,9 @@ class TestSnapshotBuilderCacheParity:
         builder = SnapshotBuilder("BTC-USDT-SWAP", candles, None, "15m")
         for idx in (80, 200, 299):
             snap = builder.build(idx)
-            got = snap["market_data"]["BTC-USDT-SWAP"]["indicators"]
+            got = dict(snap["market_data"]["BTC-USDT-SWAP"]["indicators"])
+            # Closed mode never has an in-progress candle.
+            assert got.pop("forming_candle") is None
             raw = [[c.ts, c.open, c.high, c.low, c.close, c.volume] for c in candles[: idx + 1]]
             expected = MarketService._compute_indicators(raw)
             expected["structure"] = MarketService._compute_structure(raw)
@@ -138,8 +140,10 @@ class TestSnapshotBuilderCacheParity:
         idx = 200
         snap = builder.build(idx)
         block = snap["market_data"]["BTC-USDT-SWAP"]["timeframes"]["1H"]
-        current_ts = candles[idx].ts
-        window = [c for c in hourly if c.ts <= current_ts]
+        # The step is the close of 15m candle ``idx``; only 1H candles closed
+        # by then are visible (no look-ahead into the in-progress hour).
+        moment = candles[idx].ts + 900_000
+        window = [c for c in hourly if c.ts + 3_600_000 <= moment]
         raw = [[c.ts, c.open, c.high, c.low, c.close, c.volume] for c in window]
         expected = MarketService._compute_indicators(raw)
         expected["structure"] = MarketService._compute_structure(raw)
@@ -154,8 +158,8 @@ class TestSnapshotBuilderCacheParity:
         idx = 200
         snap = builder.build(idx)
         ind = snap["market_data"]["BTC-USDT-SWAP"]["indicators"]
-        current_ts = candles[idx].ts
-        window = [c for c in hourly if c.ts <= current_ts]
+        moment = candles[idx].ts + 900_000
+        window = [c for c in hourly if c.ts + 3_600_000 <= moment]
         raw = [[c.ts, c.open, c.high, c.low, c.close, c.volume] for c in window]
         expected = MarketService._compute_indicators(raw)
         _assert_equal(ind["htf_indicators"], expected, "htf")

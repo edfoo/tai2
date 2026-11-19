@@ -68,7 +68,7 @@ uv run pytest
 ```
 - `pytest-xdist` runs with `-n auto` by default (see `pyproject.toml`); the suite takes ~15s.
 - Tests marked `network` hit live services and are skipped by default.
-- All tests must pass (802 passing, 0 pre-existing failures as of 2026-11-17). Any failure is a regression.
+- All tests must pass (820 passing, 0 pre-existing failures as of 2026-11-19). Any failure is a regression.
 
 ---
 
@@ -146,7 +146,7 @@ logs/app.log               # Rotating log file (5 MB × 5 backups), created at r
 ### Launcher flow (`launcher_only`)
 1. `PromptScheduler._tick()` runs `run_screener_if_due()`, refreshes the snapshot, then calls `_collect_launcher_decisions()`.
 2. `MarketService.build_launcher_decisions(symbol)` → `_launcher_evaluate_signals()`:
-   - Rebuilds the snapshot on **closed candles only** (`_build_closed_candle_snapshot`), including per-strategy `timeframes[<tf>]` blocks, so live sees the same indicator values as the backtest.
+   - Rebuilds the snapshot on **closed candles only** (`_build_closed_candle_snapshot`): the base bar, each per-strategy `timeframes[<tf>]` block and each HTF layer drop their in-progress candle (decided per timeframe: `now < ts + bar_ms`), so live sees the same indicator values as the backtest. The dropped bar is exposed as `forming_candle` on `indicators` and each tf block, and `snapshot["as_of_ts"]` records the moment.
    - Runs every enabled strategy whose screener universe contains the symbol (`_strategy_allowed_on_symbol`).
 3. Per signal: skip if the `strategy:symbol` key is in-flight (`_launcher_entering`), already tracked (`_launcher_in_position`), or in re-entry cooldown; then `resolve_launcher_tp_sl()` produces action/TP/SL (static, ATR, structural, dynamic TP, direction flip).
 4. The decision dict (`notional_usd` from `launcher.notional_usd`, `_decision_origin: "launcher"`, `_strategy_name`) is passed straight to `handle_llm_decision()`, so **all guardrails, sizing and order/TP-SL placement are shared with the LLM path**.
@@ -194,8 +194,11 @@ Parity is a core design rule: logic is written **once** and shared, never mirror
 - Trade management: `trade_management_rules.py`.
 - Screener: `screener.py` (see below).
 - Guardrails: the backtest receives `guardrails_config` separately from `launcher_config` / `strategy_config`, matching the live `runtime_config` split.
+- Candle visibility: a snapshot describes one moment (`as_of_ts`). Tf blocks and HTF layers hold only candles **closed** by then (`ts + bar_ms <= as_of_ts`; OKX `ts` is the bar's *open* time, so `ts <= now` would leak the bar's final values). Backtest moment = close of the step candle (`build`: `ts + ltf_ms`; finer_ltf: `current_ts + eval_ms`). In finer_ltf the in-progress tf bar is aggregated from eval candles as `forming_candle`. Pinned by `tests/test_forming_candle.py`.
+- Backtest history: OKX `/market/candles` only serves the newest 1,440 candles; `HistoricalDataFetcher._fetch_range` continues on `/market/history-candles` for older data. Never page historical ranges on the recent endpoint alone.
+- Live per-timeframe candles live in `_latest_ohlcv_tf[(symbol, bar)]` — pass `cache_key=(symbol, bar)` to `_fetch_ohlcv_bar`.
 
-Covered by `tests/test_live_backtest_parity.py` — extend it when touching any of the above.
+Covered by `tests/test_live_backtest_parity.py` and `tests/test_forming_candle.py` — extend them when touching any of the above.
 
 ---
 

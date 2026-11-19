@@ -117,6 +117,10 @@ class IndicatorCache:
         """Index of the last candle with ``ts <= ts`` (``-1`` if none)."""
         return bisect_right(self._ts, ts) - 1
 
+    def ts_at(self, idx: int) -> int:
+        """Open timestamp of the candle at ``idx``."""
+        return self._ts[idx]
+
     def block_at(self, end_idx: int) -> dict[str, Any]:
         """Indicator block for the window ``rows[:end_idx+1]``.
 

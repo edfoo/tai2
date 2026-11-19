@@ -1040,7 +1040,9 @@ class MarketService:
             if tf_fetch_bars:
                 await asyncio.gather(
                     *[
-                        self._fetch_ohlcv_bar(symbol, bar, self._latest_ohlcv_tf)
+                        self._fetch_ohlcv_bar(
+                            symbol, bar, self._latest_ohlcv_tf, cache_key=(symbol, bar)
+                        )
                         for bar in tf_fetch_bars
                     ]
                 )
@@ -3835,135 +3837,161 @@ class MarketService:
                 signals.append(signal)
         return signals
 
-    def _build_closed_candle_snapshot(
-        self, snapshot: dict[str, Any], symbol: str
-    ) -> dict[str, Any]:
-        """Return a shallow-copied snapshot with indicators recomputed on closed candles.
+    @staticmethod
+    def _split_forming_candle(
+        rows: list[Any] | None, bar_ms: int, now_ms: float
+    ) -> tuple[list[list[Any]], dict[str, Any] | None]:
+        """Split candle rows into (closed rows oldest-first, forming candle | None).
 
-        Drops the last (incomplete/forming) candle from the symbol's OHLCV and
-        recomputes indicators on the remaining closed candles.  If the last
-        candle is already closed (or there are too few candles to trim), the
-        original snapshot is returned unchanged.
+        Accepts raw OKX rows (``[ts, o, h, l, c, vol, ...]``, strings, newest
+        first) or compact dicts (``{ts, open, ...}``), in any order.  A candle
+        is forming while ``now_ms < ts + bar_ms`` (OKX ``ts`` is the bar's open
+        time).  The closed rows are ``[ts, o, h, l, c, v]`` as floats, ready
+        for ``_compute_indicators`` / ``_compute_structure``.
+        """
+        parsed: list[list[float]] = []
+        for row in rows or []:
+            try:
+                if isinstance(row, dict):
+                    values = [row.get("ts"), row.get("open"), row.get("high"),
+                              row.get("low"), row.get("close"), row.get("volume")]
+                else:
+                    values = list(row[:6])
+                    if len(values) < 6:
+                        continue
+                parsed.append([float(v) for v in values])
+            except (TypeError, ValueError):
+                continue
+        parsed.sort(key=lambda r: r[0])
+        if not parsed or bar_ms <= 0:
+            return parsed, None
+        last = parsed[-1]
+        if now_ms >= last[0] + bar_ms:
+            return parsed, None
+        forming = {
+            "ts": int(last[0]),
+            "open": last[1],
+            "high": last[2],
+            "low": last[3],
+            "close": last[4],
+            "volume": last[5],
+        }
+        return parsed[:-1], forming
+
+    def _closed_htf_layer(
+        self, block: dict[str, Any], htf_rows: list[Any] | None, htf_bar: str, now_ms: float
+    ) -> None:
+        """Set ``block``'s HTF layer from the HTF candles closed by ``now_ms``.
+
+        Live HTF rows include the in-progress HTF candle; the backtest only
+        ever sees closed HTF candles, so it is trimmed here for parity.
+        """
+        if not htf_rows or not htf_bar:
+            return
+        closed, forming = self._split_forming_candle(htf_rows, timeframe_to_ms(htf_bar), now_ms)
+        if forming is None and closed and block.get("htf_indicators") is not None:
+            return  # nothing to trim — keep the already-computed layer
+        if not closed:
+            for key in ("ohlcv_htf", "htf_indicators", "adx_htf", "choppiness_htf"):
+                block.pop(key, None)
+            return
+        htf_indicators = self._compute_indicators(closed)
+        block["ohlcv_htf"] = closed
+        block["htf_indicators"] = htf_indicators
+        block["ohlcv_htf_bar"] = htf_bar
+        block["adx_htf"] = (htf_indicators.get("adx") or {}).get("value")
+        block["choppiness_htf"] = htf_indicators.get("choppiness")
+
+    def _closed_indicator_block(self, closed_rows: list[list[Any]]) -> dict[str, Any]:
+        """Indicators + structure + flattened swing scalars over closed rows."""
+        block = self._compute_indicators(closed_rows)
+        block["structure"] = self._compute_structure(closed_rows)
+        _structure = block.get("structure") or {}
+        _sw_highs = _structure.get("swing_highs") or []
+        _sw_lows = _structure.get("swing_lows") or []
+        block["swing_high"] = (
+            _sw_highs[-1].get("price") if _sw_highs and isinstance(_sw_highs[-1], dict) else None
+        )
+        block["swing_low"] = (
+            _sw_lows[-1].get("price") if _sw_lows and isinstance(_sw_lows[-1], dict) else None
+        )
+        return block
+
+    def _build_closed_candle_snapshot(
+        self, snapshot: dict[str, Any], symbol: str, *, now_ms: float | None = None
+    ) -> dict[str, Any]:
+        """Return a shallow-copied snapshot whose candles are all closed at ``now_ms``.
+
+        For the base timeframe, every per-strategy ``timeframes[<tf>]`` block,
+        and each of their HTF layers, the in-progress candle (``now < ts +
+        bar_ms``) is dropped and the indicators are recomputed on the closed
+        candles, so live strategies see what the backtest sees at the same
+        moment.  Each timeframe is decided on its own timestamps.
+
+        The dropped candle is exposed as ``forming_candle`` (``{ts, open,
+        high, low, close, volume}``, ``None`` when the bar has closed) on the
+        base ``indicators`` and on each ``timeframes`` block, for strategies
+        that measure the bar in progress (wick_rejection).
 
         Only the target symbol's ``market_data`` entry is modified; all other
         symbols and top-level snapshot keys (positions, account, etc.) are
-        preserved.  The real-time ticker / last_price are NOT changed — they
-        are used downstream for TP/SL placement and order sizing.
+        preserved, plus ``as_of_ts`` (the split moment).  The real-time
+        ticker / last_price are NOT changed — they are used downstream for
+        TP/SL placement and order sizing.
         """
         market_data: dict[str, Any] = snapshot.get("market_data") or {}
         sym_data = market_data.get(symbol) or {}
         indicators = sym_data.get("indicators") or {}
-        ohlcv_compact = indicators.get("ohlcv") or []
-        if len(ohlcv_compact) < 3:
-            # Not enough candles to trim safely.
+        if not indicators:
             return snapshot
+        now = float(now_ms if now_ms is not None else time.time() * 1000.0)
 
-        # Detect the forming candle by comparing the last candle's start
-        # timestamp to the current time.  OKX returns candle-start timestamps
-        # in milliseconds.  The bar duration is inferred from the gap between
-        # the last two candle timestamps (robust across all timeframes).
-        now_ms = time.time() * 1000.0
-        last_ts = ohlcv_compact[-1].get("ts") if isinstance(ohlcv_compact[-1], dict) else None
-        prev_ts = ohlcv_compact[-2].get("ts") if isinstance(ohlcv_compact[-2], dict) else None
-        if last_ts is None or prev_ts is None:
-            return snapshot
+        # ── Base timeframe ────────────────────────────────────────────
+        new_indicators: dict[str, Any] = dict(indicators)
+        closed_rows, forming = self._split_forming_candle(
+            indicators.get("ohlcv") or [], timeframe_to_ms(self._ohlc_bar), now
+        )
+        if forming is not None and len(closed_rows) >= 3:
+            try:
+                new_indicators = self._closed_indicator_block(closed_rows)
+            except Exception as exc:  # pragma: no cover - defensive
+                self._emit_debug(f"Closed-candle recompute failed for {symbol}: {exc}")
+                new_indicators = dict(indicators)
+            for key in ("ohlcv_htf", "htf_indicators", "ohlcv_htf_bar", "adx_htf", "choppiness_htf"):
+                if key in indicators:
+                    new_indicators[key] = indicators[key]
+        new_indicators["forming_candle"] = forming
+        htf_bar, _ = self._HTF_MAP.get(self._ohlc_bar, ("", 0))
         try:
-            last_ts = float(last_ts)
-            prev_ts = float(prev_ts)
-        except (TypeError, ValueError):
-            return snapshot
-        bar_ms = last_ts - prev_ts
-        if bar_ms <= 0:
-            return snapshot
-        # The last candle is "forming" if the current time is before the
-        # candle's expected close (start + bar duration).  Add a small margin
-        # (10% of bar) so a candle that closed seconds ago is treated as closed.
-        candle_close_ts = last_ts + bar_ms
-        is_forming = now_ms < candle_close_ts - (bar_ms * 0.1)
-        if not is_forming:
-            # Last candle already closed — no trimming needed.
-            return snapshot
-
-        # Trim the forming candle and recompute indicators on closed candles.
-        closed_compact = ohlcv_compact[:-1]
-        # Convert compact dicts back to the row-list format _compute_indicators expects.
-        closed_rows = [
-            [c.get("ts"), c.get("open"), c.get("high"), c.get("low"), c.get("close"), c.get("volume")]
-            for c in closed_compact
-            if isinstance(c, dict)
-        ]
-        if len(closed_rows) < 3:
-            return snapshot
-        try:
-            new_indicators = self._compute_indicators(closed_rows)
+            self._closed_htf_layer(new_indicators, indicators.get("ohlcv_htf"), htf_bar, now)
         except Exception as exc:  # pragma: no cover - defensive
-            self._emit_debug(f"Closed-candle recompute failed for {symbol}: {exc}")
-            return snapshot
-        # Preserve HTF indicators and structure from the original snapshot —
-        # HTF candles are already aligned to their own closed bars in _build_snapshot.
-        new_indicators["htf_indicators"] = indicators.get("htf_indicators")
-        new_indicators["ohlcv_htf"] = indicators.get("ohlcv_htf")
-        new_indicators["ohlcv_htf_bar"] = indicators.get("ohlcv_htf_bar")
-        # Recompute structure on closed candles (symmetric with the timeframes
-        # branch below) so swing_high/swing_low scalars are closed-bar data and
-        # not silently missing.  ``_compute_indicators`` does not flatten swing
-        # scalars, so we do it here exactly as ``_build_snapshot`` does.
-        new_indicators["structure"] = self._compute_structure(closed_rows)
-        _new_structure = new_indicators.get("structure") or {}
-        _new_sw_highs = _new_structure.get("swing_highs") or []
-        _new_sw_lows = _new_structure.get("swing_lows") or []
-        new_indicators["swing_high"] = (
-            _new_sw_highs[-1].get("price") if _new_sw_highs and isinstance(_new_sw_highs[-1], dict) else None
-        )
-        new_indicators["swing_low"] = (
-            _new_sw_lows[-1].get("price") if _new_sw_lows and isinstance(_new_sw_lows[-1], dict) else None
-        )
+            self._emit_debug(f"Closed-candle HTF recompute failed for {symbol}: {exc}")
 
-        # ── Recompute per-strategy analysis timeframe blocks on closed candles ──
-        # Each ``timeframes[<tf>]`` block is built from that bar's candles
-        # (cached in ``_latest_ohlcv_tf``).  Trim the forming candle from each
-        # requested bar's cache entry and rebuild the block so live evaluation
-        # on closed candles matches the backtest.
+        # ── Per-strategy analysis timeframe blocks ────────────────────
+        # Each ``timeframes[<tf>]`` block is rebuilt from that bar's cached
+        # candles (``_latest_ohlcv_tf[(symbol, tf)]``) with its own forming
+        # candle removed, plus that bar's own closed HTF layer.
         new_timeframes: dict[str, dict[str, Any]] = {}
         for tf, block in (sym_data.get("timeframes") or {}).items():
-            tf_candles = self._latest_ohlcv_tf.get((symbol, tf)) or []
-            if not tf_candles:
-                # No cached candles — keep the original block.
-                new_timeframes[tf] = block
-                continue
-            closed_rows = []
-            for c in tf_candles[:-1]:
-                closed_rows.append(
-                    [c.get("ts"), c.get("open"), c.get("high"), c.get("low"), c.get("close"), c.get("volume")]
-                    if isinstance(c, dict)
-                    else c
-                )
-            if len(closed_rows) < 3:
-                new_timeframes[tf] = block
-                continue
+            new_block: dict[str, Any] = dict(block or {})
+            tf_rows = self._latest_ohlcv_tf.get((symbol, tf)) or []
+            tf_closed, tf_forming = self._split_forming_candle(tf_rows, timeframe_to_ms(tf), now)
             try:
-                tf_indicators = self._compute_indicators(closed_rows)
-                tf_indicators["structure"] = self._compute_structure(closed_rows)
-                _structure = tf_indicators.get("structure") or {}
-                _sw_highs = _structure.get("swing_highs") or []
-                _sw_lows = _structure.get("swing_lows") or []
-                tf_indicators["swing_high"] = (
-                    _sw_highs[-1].get("price") if _sw_highs and isinstance(_sw_highs[-1], dict) else None
-                )
-                tf_indicators["swing_low"] = (
-                    _sw_lows[-1].get("price") if _sw_lows and isinstance(_sw_lows[-1], dict) else None
-                )
-                # Preserve the HTF layer from the original block (HTF candles
-                # are already closed-bar aligned).
-                tf_indicators["htf_indicators"] = block.get("htf_indicators")
-                tf_indicators["ohlcv_htf"] = block.get("ohlcv_htf")
-                tf_indicators["ohlcv_htf_bar"] = block.get("ohlcv_htf_bar")
-                tf_indicators["adx_htf"] = block.get("adx_htf")
-                tf_indicators["choppiness_htf"] = block.get("choppiness_htf")
-                new_timeframes[tf] = tf_indicators
+                if tf_forming is not None and len(tf_closed) >= 3:
+                    new_block = self._closed_indicator_block(tf_closed)
+                    for key in ("ohlcv_htf", "htf_indicators", "ohlcv_htf_bar", "adx_htf", "choppiness_htf"):
+                        if key in (block or {}):
+                            new_block[key] = block[key]
+                tf_htf_bar, _ = self._HTF_MAP.get(tf, ("", 0))
+                if tf_htf_bar:
+                    self._closed_htf_layer(
+                        new_block, self._latest_ohlcv_tf.get((symbol, tf_htf_bar)), tf_htf_bar, now
+                    )
             except Exception as exc:  # pragma: no cover - defensive
                 self._emit_debug(f"Closed-candle tf recompute failed for {symbol} ({tf}): {exc}")
-                new_timeframes[tf] = block
+                new_block = dict(block or {})
+            new_block["forming_candle"] = tf_forming
+            new_timeframes[tf] = new_block
 
         # Shallow-copy the snapshot and patch only the target symbol's indicators.
         trimmed = dict(snapshot)
@@ -3974,6 +4002,9 @@ class MarketService:
             trimmed_sym["timeframes"] = new_timeframes
         trimmed_market[symbol] = trimmed_sym
         trimmed["market_data"] = trimmed_market
+        # The moment the candles were split at (ms epoch); the backtest sets
+        # the same key, so time-of-bar logic reads one field in both.
+        trimmed["as_of_ts"] = int(now)
         return trimmed
 
     async def _check_launcher(self) -> None:
@@ -6629,6 +6660,7 @@ class MarketService:
         cache: dict[str, list[list[Any]]],
         *,
         limit: int | None = None,
+        cache_key: Any = None,
     ) -> list[list[Any]]:
         """Fetch OHLCV candles for an explicit ``bar`` timeframe with cached fallback.
 
@@ -6642,7 +6674,10 @@ class MarketService:
         200 per symbol.
         """
         fetch_limit = max(1, int(limit or self._ohlcv_fetch_limit))
-        cached = cache.get(symbol)
+        # Per-bar caches are keyed by symbol; the shared multi-bar cache
+        # (``_latest_ohlcv_tf``) is keyed by ``(symbol, bar)``.
+        key = cache_key if cache_key is not None else symbol
+        cached = cache.get(key)
         slot = await self._acquire_candle_slot()
         if slot is not None:
             candle_api, candle_sem = slot
@@ -6694,7 +6729,7 @@ class MarketService:
                 return cached or []
         data = self._safe_data(response)
         if data:
-            cache[symbol] = data
+            cache[key] = data
             return data
         return cached or []
 

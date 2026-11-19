@@ -12,6 +12,8 @@ Covers:
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from app.services.backtest.data_fetcher import htf_for, _timeframe_to_ms
@@ -1106,6 +1108,78 @@ class TestSnapshotBuilder:
 
 
 # ── DataFetcher helper tests ──────────────────────────────────────────────────
+
+
+class _FakeOkxCandleApi:
+    """OKX-like candle API: ``/market/candles`` serves only the newest 1,440
+    candles; ``/market/history-candles`` serves everything older too."""
+
+    def __init__(self, newest_ts: int, count: int, step_ms: int) -> None:
+        self.step_ms = step_ms
+        self.all_ts = [newest_ts - i * step_ms for i in range(count)]  # newest first
+        self.recent_calls = 0
+        self.history_calls = 0
+
+    def _page(self, ts_list: list[int], after: str, limit: Any) -> dict[str, Any]:
+        rows = [t for t in ts_list if t < int(after)][: int(limit)]
+        return {"code": "0", "data": [[str(t), "1", "2", "0.5", "1.5", "10", "0", "15", "1"] for t in rows]}
+
+    def get_candlesticks(self, instId: str, bar: str, limit: Any, after: str) -> dict[str, Any]:
+        self.recent_calls += 1
+        return self._page(self.all_ts[:1440], after, limit)
+
+    def get_history_candlesticks(self, instId: str, bar: str, limit: Any, after: str) -> dict[str, Any]:
+        self.history_calls += 1
+        return self._page(self.all_ts, after, limit)
+
+
+class TestDataFetcherHistoryFallback:
+    """Regression: the fetcher only used ``/market/candles``, so every range
+    was silently truncated to the newest 1,440 candles (1 day of 1m)."""
+
+    def test_fetch_beyond_1440_candles_uses_history_endpoint(self, tmp_path) -> None:
+        import asyncio
+
+        from app.services.backtest import data_fetcher as df
+
+        step = 60_000
+        end_ts = 1_800_000_000_000
+        api = _FakeOkxCandleApi(newest_ts=end_ts - step, count=5000, step_ms=step)
+        fetcher = df.HistoricalDataFetcher(cache_dir=tmp_path)
+        fetcher._api = api
+        start_ts = end_ts - 4000 * step  # ~2.8 days of 1m
+        candles = asyncio.run(fetcher.fetch_candles("BTC-USDT-SWAP", "1m", start_ts, end_ts, warmup_candles=200))
+        ts = [c.ts for c in candles]
+        assert ts == sorted(set(ts))
+        assert ts[0] <= start_ts - 200 * step  # warmup covered
+        assert ts[-1] == end_ts - step
+        assert len(candles) >= 4200  # far beyond the 1,440 cap
+        assert api.recent_calls >= 1 and api.history_calls >= 1
+
+    def test_truncated_cache_from_old_fetcher_is_refetched(self, tmp_path) -> None:
+        import asyncio
+
+        from app.services.backtest import data_fetcher as df
+
+        step = 60_000
+        end_ts = 1_800_000_000_000
+        start_ts = end_ts - 4000 * step
+        api = _FakeOkxCandleApi(newest_ts=end_ts - step, count=5000, step_ms=step)
+        fetcher = df.HistoricalDataFetcher(cache_dir=tmp_path)
+        fetcher._api = api
+        # A cache file as the old fetcher wrote it: only the newest 1,440 candles.
+        truncated = [
+            Candle(ts=end_ts - i * step, open=1, high=2, low=0.5, close=1.5, volume=10)
+            for i in range(1440, 0, -1)
+        ]
+        fetcher._save_cache(fetcher._cache_key("BTC-USDT-SWAP", "1m", start_ts, end_ts, 200), truncated)
+        candles = asyncio.run(fetcher.fetch_candles("BTC-USDT-SWAP", "1m", start_ts, end_ts, warmup_candles=200))
+        assert len(candles) >= 4200
+        assert api.history_calls >= 1
+        # The refetched range is cached and served without further requests.
+        calls = api.recent_calls + api.history_calls
+        again = asyncio.run(fetcher.fetch_candles("BTC-USDT-SWAP", "1m", start_ts, end_ts, warmup_candles=200))
+        assert len(again) == len(candles) and api.recent_calls + api.history_calls == calls
 
 
 class TestDataFetcherHelpers:

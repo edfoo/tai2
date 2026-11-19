@@ -1,6 +1,6 @@
 # Design: Hourly Wick Rejection Short (`wick_rejection`)
 
-**Status:** Planned (redesigned 2026-11-18 from the manual-trade analysis — §1.1; vol screener §3.5; optional momentum entry mode §3.8 / Phase 9 added 2026-11-19)
+**Status:** In progress — Phase 1 done 2026-11-19 (closed-candle alignment + `forming_candle` + `as_of_ts`, live and backtest). Redesigned 2026-11-18 from the manual-trade analysis (§1.1); vol screener §3.5; optional momentum entry mode §3.8 / Phase 9.
 **Date:** 2026-10-28 (revised 2026-11-18)
 **Scope:** New launcher strategy with a clock-aligned entry trigger, forming-candle
 exposure, strategy-owned exits (TP + emergency stop + time stop), per-strategy
@@ -200,9 +200,12 @@ before the next and emits a debug line with the measured value.
 
 Definitions:
 
-- `seconds_to_close = (candle_ts + bar_ms − now_ms) / 1000`. Live uses wall-clock
-  `now`; the backtest uses the eval step's timestamp. With 1m eval, the step that
-  sees the forming candle at H:59:00 gets `seconds_to_close = 60`.
+- `seconds_to_close = (candle_ts + bar_ms − now_ms) / 1000`, with
+  `now_ms = snapshot["as_of_ts"]` — the moment the snapshot describes, set by
+  both live (`_build_closed_candle_snapshot`) and the backtest
+  (`current_ts + eval_ms`, the close of the eval candle). With 1m eval, the step
+  whose close is H:59:00 (the eval candle opened at H:58) gets
+  `seconds_to_close = 60`.
 - `P` is the forming candle's current close (live: the latest price at trigger
   time).
 - `body_ratio(i) = (C_i − O_i) / mean(|C_j − O_j| for the body_avg_window candles before i)`,
@@ -433,8 +436,11 @@ Rules:
 ### 3.7 Backtest
 
 - Requires `evaluation_mode="finer_ltf"` with `evaluation_timeframe="1m"`. The
-  entry step is H:59:00 (`seconds_to_close = 60`, inside the default 10–90 s
-  window); the entry price is that step's close. In `closed` mode, or with an
+  entry step is the 1m candle opened at H:58, whose close is the price at
+  H:59:00 (`as_of_ts = H:59:00`, `seconds_to_close = 60`, inside the default
+  10–90 s window); the entry price is that close. The next step (the H:59
+  candle) closes exactly on the hour, so its 1H bar has closed and
+  `forming_candle` is `None` — no entry can land after the hour. In `closed` mode, or with an
   eval timeframe ≥ 5m that never lands inside the window, WR produces **zero
   trades**, and the engine logs why.
 - TP, emergency stop and time stop are simulated on 1m candles. When the TP and
@@ -512,7 +518,7 @@ triggers, subject to `max_concurrent_positions` and `max_total_margin_pct`.
 1. **1m approximation** (default for Phase 9): the 1m candles give
    minute-resolution measures (`ret_60s` = the last 1m candle's change,
    `secs_since_high` rounded to minutes, no buy share). Entries can land on
-   H:58:00 and H:59:00 steps only. Cheap and enough to see whether momentum
+   the steps whose close is H:58:00 or H:59:00 only. Cheap and enough to see whether momentum
    timing beats the clock at all.
 2. **Tape replay** (`wr_momentum_tape=True`, only if level 1 looks promising):
    fetch the trade tape for the watch window of each hour where a vol symbol
@@ -527,14 +533,44 @@ triggers, subject to `max_concurrent_positions` and `max_total_margin_pct`.
 
 ## 4. Implementation steps
 
-### Phase 1 — Forming-candle exposure
+### Phase 1 — Forming-candle exposure ✅ *(done 2026-11-19)*
 
-1. **`market_service._build_closed_candle_snapshot`** — before trimming, copy the
-   forming candle into `new_indicators["forming_candle"]` as
-   `{ts, open, high, low, close, volume}`; `None` on the untrimmed path so the
-   key always exists. Existing strategies ignore it.
-2. **`backtest/snapshot_builder.py`** — `build_with_incomplete_ltf` sets
-   `indicators["forming_candle"]` from `incomplete_candle`; `build()` sets `None`.
+1. **`market_service._build_closed_candle_snapshot`** — splits each timeframe
+   on its own timestamps (`now < ts + bar_ms` → forming): base bar, every
+   `timeframes[<tf>]` block, and each HTF layer. Closed candles feed the
+   indicators; the forming candle is exposed as `forming_candle`
+   (`{ts, open, high, low, close, volume}` or `None`) on the base indicators
+   and each tf block. Sets `snapshot["as_of_ts"]`.
+2. **`backtest/snapshot_builder.py`** — tf blocks and HTF layers hold only
+   candles closed by the snapshot's moment; in finer_ltf mode each tf's
+   `forming_candle` is aggregated from the eval candles seen so far; closed
+   mode sets `None`. Sets `as_of_ts`.
+
+Found and fixed while doing this (they blocked Phase 1):
+
+- **Backtest look-ahead.** Tf blocks and HTF layers selected candles by
+  `ts <= now`, and OKX `ts` is the bar's open, so the in-progress bar was
+  visible with its final high/low/close. With 1m eval, the five strategies'
+  15m blocks could see up to 14 minutes ahead, and HTF regime layers up to a
+  full HTF bar. Backtest results before this fix are optimistic.
+- **Live per-timeframe cache never populated.** `_fetch_ohlcv_bar` stored
+  per-tf candles under `symbol` but they were read as `(symbol, bar)`, so live
+  `timeframes[<tf>]` blocks were never built and strategies silently fell back
+  to the global `ta_timeframe` indicators. Fixed with a `cache_key` argument.
+- **Live forming bar treated as closed in its last 10%.** The old forming check
+  (`now < close − 10% of bar`) let strategies read the in-progress candle as
+  closed during the last 10% of each bar. Now strict.
+- **Live HTF layers included the forming HTF bar.** Now trimmed, matching the
+  backtest.
+- **Backtest history capped at 1,440 candles.** The fetcher only paged OKX
+  `/market/candles`, which serves the newest 1,440 candles, so 1m stepping
+  covered about one day whatever range was requested. It now continues on
+  `/market/history-candles`, and truncated cache files are refetched. Needed
+  for the 16-day 1m validation in §6.
+
+Tests: `tests/test_forming_candle.py` (no look-ahead in either mode, forming
+candle built from minutes so far, last-minute boundary, live trimming per
+timeframe, cache key regression, live ↔ backtest parity at the same moment).
 
 ### Phase 2 — Strategy *(parallel with 3, 4)*
 

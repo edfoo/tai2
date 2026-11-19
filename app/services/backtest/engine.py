@@ -428,6 +428,10 @@ class BacktestEngine:
                     htf_candles=symbol_htf_candles.get(symbol),
                     ltf_timeframe=self._config.timeframe,
                     tf_candles=symbol_tf_candles.get(symbol) or {},
+                    # finer_ltf: in-progress candles are built from the eval
+                    # candles seen so far (never a bar's final values).
+                    eval_candles=symbol_eval_candles.get(symbol) if use_finer_ltf else None,
+                    eval_timeframe=self._eval_tf if use_finer_ltf else None,
                 )
 
             # ── Phase 3: Determine backtest window ────────────────────

@@ -382,6 +382,12 @@ class HistoricalDataFetcher:
         cache_key = self._cache_key(symbol, timeframe, start_ts, end_ts, warmup_candles)
         self._last_fetch_provenance = {}
         cached = self._load_cache(cache_key)
+        if cached is not None and self._is_truncated_cache(cached, timeframe, start_ts, warmup_candles):
+            logger.warning(
+                "Cache %s holds only the newest %d candles (pre-fix 1,440-candle truncation) — refetching",
+                cache_key, len(cached),
+            )
+            cached = None
         if cached is not None:
             self._record_provenance(
                 cache_key, symbol, timeframe, start_ts, end_ts, warmup_candles,
@@ -424,6 +430,27 @@ class HistoricalDataFetcher:
             candles, source="okx_market_api", cache_hit=False,
         )
         return candles
+
+    @staticmethod
+    def _is_truncated_cache(
+        cached: list[Candle], timeframe: str, start_ts: int, warmup_candles: int
+    ) -> bool:
+        """True for a cache file written before the history-candles fallback.
+
+        Those files hold at most 1,440 candles ending at ``end_ts``.  Flagged
+        when the file does not even reach ``start_ts``, or holds exactly the
+        endpoint's 1,439–1,440 candles and misses the warmup.  A short file
+        that covers the window (e.g. a recently listed symbol with no warmup
+        history) is left alone.
+        """
+        if not cached or len(cached) > 1440:
+            return False
+        tf_ms = _timeframe_to_ms(timeframe)
+        first = cached[0].ts
+        if first > start_ts + tf_ms:
+            return True
+        wanted_first = start_ts - max(0, warmup_candles) * tf_ms
+        return len(cached) >= 1439 and first > wanted_first + tf_ms
 
     def _record_provenance(
         self,
@@ -493,26 +520,38 @@ class HistoricalDataFetcher:
         warmup_candles: int,
         progress_cb: Callable[[int, int, str], None] | None,
     ) -> list[Candle]:
-        """Walk backward from ``end_ts`` to ``start_ts`` using ``after`` cursor."""
+        """Walk backward from ``end_ts`` to ``start_ts`` using ``after`` cursor.
+
+        OKX ``/market/candles`` (``get_candlesticks``) only serves the most
+        recent 1,440 candles — one day of 1m, 15 days of 15m, 60 days of 1H.
+        When it runs dry, the walk continues on ``/market/history-candles``
+        (``get_history_candlesticks``), which covers older data.  Without the
+        fallback every range was silently truncated to the last 1,440 candles.
+        """
         all_candles: list[Candle] = []
         # Start cursor = end_ts (fetch candles older than end_ts)
         after_ts = end_ts
         # Extend the start boundary to accommodate warmup candles.
         # We don't know the exact ts offset, so we fetch a bit more.
+        tf_ms = _timeframe_to_ms(timeframe)
         extended_start = start_ts
         if warmup_candles > 0:
             # Estimate: warmup_candles * timeframe_ms.  We over-fetch and trim.
-            tf_ms = _timeframe_to_ms(timeframe)
             extended_start = start_ts - warmup_candles * tf_ms
 
         request_count = 0
-        max_requests = 500  # safety cap
+        # Safety cap sized to the range (pages of up to _OKX_MAX_LIMIT, with
+        # headroom for short pages), never below the old fixed cap.
+        expected_pages = (max(0, end_ts - extended_start) // max(tf_ms, 1)) // _OKX_MAX_LIMIT
+        max_requests = max(500, int(expected_pages * 4) + 10)
+        use_history = False
 
         while after_ts > extended_start and request_count < max_requests:
             request_count += 1
+            endpoint = self._api.get_history_candlesticks if use_history else self._api.get_candlesticks
             try:
                 response = await asyncio.to_thread(
-                    self._api.get_candlesticks,
+                    endpoint,
                     instId=symbol,
                     bar=timeframe,
                     limit=_OKX_MAX_LIMIT,
@@ -524,6 +563,10 @@ class HistoricalDataFetcher:
 
             rows = _safe_data(response)
             if not rows:
+                if not use_history:
+                    # Past the recent endpoint's 1,440-candle window.
+                    use_history = True
+                    continue
                 break
 
             batch: list[Candle] = []
@@ -548,9 +591,16 @@ class HistoricalDataFetcher:
             if progress_cb:
                 progress_cb(len(all_candles), 0, f"fetched {len(all_candles)} candles")
 
-            # Be gentle with rate limits (~20 req/2s for public endpoints).
-            await asyncio.sleep(0.05)
+            # Rate limits: /market/candles 40 req/2s, /market/history-candles
+            # 20 req/2s per IP.
+            await asyncio.sleep(0.11 if use_history else 0.05)
 
+        if after_ts > extended_start:
+            logger.warning(
+                "Historical fetch for %s %s stopped at %s, before the requested start %s "
+                "(%d requests) — the range is truncated",
+                symbol, timeframe, after_ts, extended_start, request_count,
+            )
         return all_candles
 
     # ── Internal: file cache ──────────────────────────────────────────

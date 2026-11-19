@@ -7,17 +7,28 @@ exactly the keys the strategies read, computed from historical candles
 using the same ``_compute_indicators`` / ``_compute_structure`` static
 methods.
 
-HTF alignment: at each LTF step, the most recent *closed* HTF candle is
-used for ``htf_indicators`` — matching live behaviour where the bot only
-sees confirmed HTF candles.
+Closed-candle alignment (no look-ahead): a snapshot describes one *moment*.
+Per-strategy ``timeframes[<tf>]`` blocks and every HTF layer contain only
+candles that have **closed** by that moment (``ts + bar_ms <= moment``),
+matching live, where ``MarketService._build_closed_candle_snapshot`` trims
+the forming candle of each timeframe.  OKX candle timestamps are the bar's
+*open* time, so selecting candles by ``ts <= now`` would expose the in-progress
+bar with its final high/low/close — future data.
+
+* ``build(i)`` — the moment is the close of LTF candle ``i`` (``ts_i + ltf_ms``).
+* ``build_with_incomplete_ltf`` — the moment is the close of the current eval
+  candle (``current_ts + eval_ms``).  Each timeframe's in-progress candle is
+  aggregated from the eval candles seen so far and exposed as
+  ``forming_candle`` (``None`` when the bar has just closed).
 """
 
 from __future__ import annotations
 
 import logging
+from bisect import bisect_left, bisect_right
 from typing import Any
 
-from app.services.backtest.data_fetcher import htf_for
+from app.services.backtest.data_fetcher import htf_for, timeframe_ms
 from app.services.backtest.indicator_cache import IndicatorCache
 from app.services.backtest.models import Candle
 from app.services.market_service import MarketService
@@ -46,12 +57,24 @@ class SnapshotBuilder:
         ltf_timeframe: str,
         *,
         tf_candles: dict[str, list[Candle]] | None = None,
+        eval_candles: list[Candle] | None = None,
+        eval_timeframe: str | None = None,
     ) -> None:
         self._symbol = symbol
         self._ltf_candles = ltf_candles
         self._htf_candles = htf_candles or []
         self._ltf_timeframe = ltf_timeframe
+        self._ltf_ms = timeframe_ms(ltf_timeframe)
         self._htf_timeframe = htf_for(ltf_timeframe)
+        # Finer evaluation candles (finer_ltf mode): the source for each
+        # timeframe's in-progress candle.  ``eval_ms`` turns an eval candle's
+        # open ts into the moment its close is known.
+        self._eval_candles: list[Candle] = eval_candles or []
+        self._eval_ts: list[int] = [c.ts for c in self._eval_candles]
+        self._eval_ms = timeframe_ms(eval_timeframe) if eval_timeframe else 0
+        # bucket_ts -> (eval end index, aggregated candle); extended
+        # incrementally as the engine steps forward through a bucket.
+        self._forming_memo: dict[int, tuple[int, dict[str, Any]]] = {}
         # Per-strategy analysis timeframes: {bar: candles}.  Each block's HTF
         # is derived from that bar via htf_for().
         self._tf_candles: dict[str, list[Candle]] = tf_candles or {}
@@ -85,16 +108,21 @@ class SnapshotBuilder:
         )
 
     @staticmethod
+    def _closed_idx(cache: IndicatorCache, bar_ms: int, moment_ts: int) -> int:
+        """Index of the last candle closed by ``moment_ts`` (``ts + bar_ms <= moment``)."""
+        return cache.end_idx_for_ts(moment_ts - bar_ms)
+
+    @staticmethod
     def _attach_htf(
         block: dict[str, Any],
         htf_cache: IndicatorCache | None,
         htf_timeframe: str,
-        current_ts: int,
+        moment_ts: int,
     ) -> None:
-        """Attach the HTF layer from the most recent closed HTF candle."""
+        """Attach the HTF layer from the HTF candles closed by ``moment_ts``."""
         if htf_cache is None or not htf_timeframe:
             return
-        htf_idx = htf_cache.end_idx_for_ts(current_ts)
+        htf_idx = SnapshotBuilder._closed_idx(htf_cache, timeframe_ms(htf_timeframe), moment_ts)
         if htf_idx < 0:
             return
         htf_block = htf_cache.block_at(htf_idx)
@@ -108,7 +136,7 @@ class SnapshotBuilder:
         self,
         cache: IndicatorCache,
         end_idx: int,
-        current_ts: int,
+        moment_ts: int,
         htf_cache: IndicatorCache | None,
         htf_timeframe: str,
         *,
@@ -117,36 +145,97 @@ class SnapshotBuilder:
         """Build an indicator block for ``cache``'s window ``[:end_idx+1]``."""
         block = cache.block_at(end_idx)
         self._attach_structure(block, cache.rows_upto(end_idx), with_swings=with_swings)
-        self._attach_htf(block, htf_cache, htf_timeframe, current_ts)
+        self._attach_htf(block, htf_cache, htf_timeframe, moment_ts)
         return block
 
-    @staticmethod
-    def _build_block(
-        candle_window: list[Candle],
-        current_ts: int,
-        htf_candles: list[Candle] | None,
-        htf_timeframe: str,
-    ) -> dict[str, Any]:
-        """Compute an indicator block from a candle window + its HTF (uncached).
+    def _timeframe_blocks(
+        self, moment_ts: int, *, forming_from_ts: int | None
+    ) -> dict[str, dict[str, Any]]:
+        """Closed-candle ``timeframes`` blocks at ``moment_ts``.
 
-        Retained for callers that build a non-prefix window (the finer-LTF
-        loop's synthetic in-progress candle).  Prefix windows go through
-        :meth:`_cached_block` instead.
+        ``forming_from_ts`` is the open ts of the current eval candle
+        (finer_ltf mode); when set, each block also carries its in-progress
+        candle as ``forming_candle``.  ``None`` (closed mode) → no forming
+        candle.
         """
-        raw = [SnapshotBuilder._candle_to_row(c) for c in candle_window]
-        block = MarketService._compute_indicators(raw)
-        SnapshotBuilder._attach_structure(block, raw, with_swings=True)
-        if htf_candles and htf_timeframe:
-            htf_window = [c for c in htf_candles if c.ts <= current_ts]
-            if htf_window:
-                htf_raw = [SnapshotBuilder._candle_to_row(c) for c in htf_window]
-                block["ohlcv_htf"] = htf_raw
-                block["htf_indicators"] = MarketService._compute_indicators(htf_raw)
-                block["ohlcv_htf_bar"] = htf_timeframe
-                _htf = block.get("htf_indicators") or {}
-                block["adx_htf"] = ((_htf.get("adx") or {}).get("value"))
-                block["choppiness_htf"] = _htf.get("choppiness")
-        return block
+        timeframes: dict[str, dict[str, Any]] = {}
+        for tf, tf_cache in self._tf_caches.items():
+            tf_ms = timeframe_ms(tf)
+            tf_idx = self._closed_idx(tf_cache, tf_ms, moment_ts)
+            if tf_idx < 0:
+                continue
+            tf_htf = htf_for(tf)
+            # The HTF of a strategy tf is a separate bar; use the generic
+            # per-tf candle set if present, else reuse the strategy tf's
+            # own candles (best-effort).
+            tf_htf_cache = self._tf_caches.get(tf_htf) if tf_htf else None
+            if tf_htf and tf_htf_cache is None:
+                tf_htf_cache = tf_cache
+            block = self._cached_block(
+                tf_cache, tf_idx, moment_ts, tf_htf_cache, tf_htf, with_swings=True
+            )
+            block["forming_candle"] = None
+            if forming_from_ts is not None:
+                block["forming_candle"] = self._forming_candle(
+                    tf_cache, tf_ms, tf_idx, forming_from_ts, moment_ts
+                )
+            timeframes[tf] = block
+        return timeframes
+
+    def _forming_candle(
+        self,
+        tf_cache: IndicatorCache,
+        tf_ms: int,
+        closed_idx: int,
+        current_ts: int,
+        moment_ts: int,
+    ) -> dict[str, Any] | None:
+        """The ``tf`` candle in progress at ``moment_ts``, built from eval candles.
+
+        The bucket is located from the tf candle list itself (robust to bars
+        that are not aligned to UTC multiples, e.g. OKX's HK-time ``1D``).
+        Returns ``None`` when the bar containing ``current_ts`` has closed by
+        ``moment_ts`` or no eval candles are available.
+        """
+        cur_idx = tf_cache.end_idx_for_ts(current_ts)
+        if cur_idx < 0 or cur_idx <= closed_idx:
+            return None
+        bucket_ts = int(tf_cache.ts_at(cur_idx))
+        if bucket_ts + tf_ms <= moment_ts:
+            return None
+        return self._aggregate_eval(bucket_ts, current_ts)
+
+    def _aggregate_eval(self, bucket_ts: int, current_ts: int) -> dict[str, Any] | None:
+        """Aggregate eval candles with ``bucket_ts <= ts <= current_ts``."""
+        if not self._eval_candles:
+            return None
+        lo = bisect_left(self._eval_ts, bucket_ts)
+        hi = bisect_right(self._eval_ts, current_ts)
+        if hi <= lo:
+            return None
+        memo = self._forming_memo.get(bucket_ts)
+        if memo is not None and memo[0] <= hi:
+            start, agg = memo[0], dict(memo[1])
+        else:
+            first = self._eval_candles[lo]
+            start = lo + 1
+            agg = {
+                "ts": bucket_ts,
+                "open": float(first.open),
+                "high": float(first.high),
+                "low": float(first.low),
+                "close": float(first.close),
+                "volume": float(first.volume),
+            }
+        for candle in self._eval_candles[start:hi]:
+            agg["high"] = max(agg["high"], float(candle.high))
+            agg["low"] = min(agg["low"], float(candle.low))
+            agg["close"] = float(candle.close)
+            agg["volume"] += float(candle.volume)
+        if len(self._forming_memo) > 16:
+            self._forming_memo.clear()
+        self._forming_memo[bucket_ts] = (hi, dict(agg))
+        return agg
 
     def build(self, window_end_idx: int) -> dict[str, Any]:
         """Build a snapshot for the LTF candle at ``window_end_idx``.
@@ -157,40 +246,29 @@ class SnapshotBuilder:
         the current candle is included).
         """
         # ── LTF indicators ────────────────────────────────────────────
-        current_ts = self._ltf_candles[window_end_idx].ts
+        # The step represents the close of LTF candle ``window_end_idx``.
+        moment_ts = self._ltf_candles[window_end_idx].ts + self._ltf_ms
         indicators = self._cached_block(
             self._ltf_cache,
             window_end_idx,
-            current_ts,
+            moment_ts,
             self._htf_cache,
             self._htf_timeframe,
             with_swings=False,
         )
+        # Closed mode never has an in-progress candle.
+        indicators["forming_candle"] = None
 
         # ── Per-strategy analysis timeframes ─────────────────────────
-        # Build a ``timeframes`` map for each requested bar, aligning each
-        # bar's candles to the current LTF step (closed candles at or before
-        # current_ts) and attaching that bar's own HTF.
-        timeframes: dict[str, dict[str, Any]] = {}
-        for tf, tf_cache in self._tf_caches.items():
-            tf_idx = tf_cache.end_idx_for_ts(current_ts)
-            if tf_idx < 0:
-                continue
-            tf_htf = htf_for(tf)
-            # The HTF of a strategy tf is a separate bar; use the generic
-            # per-tf candle set if present, else reuse the strategy tf's
-            # own candles (best-effort).
-            tf_htf_cache = self._tf_caches.get(tf_htf) if tf_htf else None
-            if tf_htf and tf_htf_cache is None:
-                tf_htf_cache = tf_cache
-            timeframes[tf] = self._cached_block(
-                tf_cache, tf_idx, current_ts, tf_htf_cache, tf_htf, with_swings=True
-            )
+        # Closed candles only, each with that bar's own HTF.
+        timeframes = self._timeframe_blocks(moment_ts, forming_from_ts=None)
 
         # ── Assemble snapshot ─────────────────────────────────────────
         last_price = float(self._ltf_candles[window_end_idx].close)
         return {
             "generated_at": self._ltf_candles[window_end_idx].dt.isoformat(),
+            # The moment this snapshot describes (ms epoch); live sets the same key.
+            "as_of_ts": int(moment_ts),
             "symbol": self._symbol,
             "symbols": [self._symbol],
             "last_price": last_price,
@@ -242,50 +320,34 @@ class SnapshotBuilder:
             ``low``/``volume`` are aggregated from eval candles seen so far
             in this LTF bucket.
         current_ts:
-            Timestamp of the current eval candle (ms epoch).  Used for HTF
-            alignment — HTF candles with ``ts <= current_ts`` are included.
+            Open timestamp of the current eval candle (ms epoch).  The
+            snapshot's moment is that candle's close, ``current_ts + eval_ms``;
+            timeframe and HTF blocks hold only candles closed by then.
         """
+        moment_ts = current_ts + self._eval_ms
         # ── LTF indicators (closed window + incomplete last candle) ───
         ltf_raw = [self._candle_to_row(c) for c in closed_ltf_window]
         ltf_raw.append(self._candle_to_row(incomplete_candle))
         indicators = MarketService._compute_indicators(ltf_raw)
         indicators["structure"] = MarketService._compute_structure(ltf_raw)
+        indicators["forming_candle"] = (
+            self._candle_to_dict(incomplete_candle)
+            if incomplete_candle.ts + self._ltf_ms > moment_ts
+            else None
+        )
 
-        # ── HTF alignment ─────────────────────────────────────────────
-        htf_window_raw: list[list[Any]] = []
-        htf_bar = ""
-        if self._htf_candles and self._htf_timeframe:
-            htf_window = [c for c in self._htf_candles if c.ts <= current_ts]
-            if htf_window:
-                htf_window_raw = [self._candle_to_row(c) for c in htf_window]
-                htf_bar = self._htf_timeframe
-                indicators["ohlcv_htf"] = htf_window_raw
-                indicators["htf_indicators"] = MarketService._compute_indicators(htf_window_raw)
-                indicators["ohlcv_htf_bar"] = htf_bar
-                # Flatten HTF regime scalars (mirrors live) so regime gates
-                # and regime-exit checks see adx_htf / choppiness_htf.
-                _htf = indicators.get("htf_indicators") or {}
-                indicators["adx_htf"] = (_htf.get("adx") or {}).get("value")
-                indicators["choppiness_htf"] = _htf.get("choppiness")
+        # ── HTF alignment (closed HTF candles only) ───────────────────
+        # Flattened regime scalars (adx_htf / choppiness_htf) mirror live.
+        self._attach_htf(indicators, self._htf_cache, self._htf_timeframe, moment_ts)
 
         # ── Per-strategy analysis timeframes ─────────────────────────
-        timeframes: dict[str, dict[str, Any]] = {}
-        for tf, tf_candles in self._tf_candles.items():
-            tf_window = [c for c in tf_candles if c.ts <= current_ts]
-            if not tf_window:
-                continue
-            tf_htf = htf_for(tf)
-            tf_htf_candles: list[Candle] = []
-            if tf_htf:
-                tf_htf_candles = self._tf_candles.get(tf_htf) or tf_window
-            timeframes[tf] = self._build_block(
-                tf_window, current_ts, tf_htf_candles, tf_htf
-            )
+        timeframes = self._timeframe_blocks(moment_ts, forming_from_ts=current_ts)
 
         # ── Assemble snapshot ─────────────────────────────────────────
         last_price = float(incomplete_candle.close)
         return {
             "generated_at": incomplete_candle.dt.isoformat(),
+            "as_of_ts": int(moment_ts),
             "symbol": self._symbol,
             "symbols": [self._symbol],
             "last_price": last_price,
@@ -306,6 +368,18 @@ class SnapshotBuilder:
             "positions": [],
             "account_equity": 0.0,
             "total_account_value": 0.0,
+        }
+
+    @staticmethod
+    def _candle_to_dict(c: Candle) -> dict[str, Any]:
+        """Candle as the compact ``{ts, open, high, low, close, volume}`` dict."""
+        return {
+            "ts": int(c.ts),
+            "open": float(c.open),
+            "high": float(c.high),
+            "low": float(c.low),
+            "close": float(c.close),
+            "volume": float(c.volume),
         }
 
     @staticmethod
