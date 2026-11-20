@@ -1,6 +1,6 @@
 # Design: Hourly Wick Rejection Short (`wick_rejection`)
 
-**Status:** In progress — Phase 1 done 2026-11-19 (closed-candle alignment + `forming_candle` + `as_of_ts`, live and backtest); Phase 2 done 2026-11-20 (strategy funnel, defaults, registration; disabled by default); Phase 3 done 2026-11-20 (TP/stop units, protection modes, per-strategy leverage + margin sizing, live and backtest); Phase 4 done 2026-11-20 (strategy-owned exits: time stop, software emergency stop, own re-entry cooldown, live and backtest). Redesigned 2026-11-18 from the manual-trade analysis (§1.1); vol screener §3.5; optional momentum entry mode §3.8 / Phase 9.
+**Status:** In progress — Phase 1 done 2026-11-19 (closed-candle alignment + `forming_candle` + `as_of_ts`, live and backtest); Phase 2 done 2026-11-20 (strategy funnel, defaults, registration; disabled by default); Phase 3 done 2026-11-20 (TP/stop units, protection modes, per-strategy leverage + margin sizing, live and backtest); Phase 4 done 2026-11-20 (strategy-owned exits: time stop, software emergency stop, own re-entry cooldown, live and backtest); Phase 5 done 2026-11-20 (`vol` screener universe, live and backtest; also fixed a 1H look-ahead in the backtest universe). Redesigned 2026-11-18 from the manual-trade analysis (§1.1); vol screener §3.5; optional momentum entry mode §3.8 / Phase 9.
 **Date:** 2026-10-28 (revised 2026-11-18)
 **Scope:** New launcher strategy with a clock-aligned entry trigger, forming-candle
 exposure, strategy-owned exits (TP + emergency stop + time stop), per-strategy
@@ -732,7 +732,7 @@ Tests: `tests/test_wick_rejection_exits.py` (25): the rule, the resolver
 params, simulator fill order, time stop, global rules skipped/opt-in,
 cooldown, and the live split with global management on and off.
 
-### Phase 5 — Dedicated `vol` universe *(parallel with 2–4)*
+### Phase 5 — Dedicated `vol` universe ✅ *(done 2026-11-20)*
 
 12. **`screener.py`** — `score_universe` takes optional `price_history` and
     `now_ts`; computes `closed_speed`, `fast_speed`, `speed` for every candidate;
@@ -748,6 +748,43 @@ cooldown, and the live split with global management on and off.
     `_screener_vol_symbols`; `run_screener_if_due` stores `result["vol"]`;
     `_strategy_allowed_on_symbol` and `get_screener_universe` route WR.
 16. **`prompt_scheduler`** — expose `runtime_config["_screener_vol_symbols"]`.
+
+**As built.**
+
+- `screener.compute_speed()` gives `closed_speed`, `fast_speed`, `speed` for
+  every candidate (attached to the candidate dicts, so the diagnostics show
+  both terms). `score_universe(..., price_history=, now_ts=)` builds the vol
+  pool with its own gates, score and cap in dual and legacy mode, returns
+  `vol` / `vol_pool_size`, logs `Screener VOL selected (n/pool …)` with speed,
+  closed/fast terms, volume ratio and decay per symbol, and appends vol to
+  `selected`.
+- **Routing.** `universe_for_strategy(..., vol_symbols=)` sends WR to the vol
+  list (fallback: selected, then the configured symbols). Symbols that are
+  **only** on the vol list are removed from every other strategy's fallback,
+  so adding vol to the fetch list never widens SC/MR strategies, including in
+  legacy mode. Live `_strategy_allowed_on_symbol` applies the same rules
+  (before the dual-mode check), and `get_screener_universe` passes the list.
+- **Live data.** `run_screener_if_due` passes `_screener_price_history` and
+  stores `_screener_vol_symbols`; the scheduler exposes
+  `runtime_config["_screener_vol_symbols"]`. Note: the vol gate needs
+  `recent_vol_ratio`, which live only fetches for the
+  `activity_prefilter_top_n` volume-ranked candidates plus fast-lane symbols.
+  A fast coin outside both cannot reach the vol list; enable the fast lane
+  (or raise the prefilter) if this misses movers.
+- **Backtest.** `UniverseInterval.vol`, `universe_at` and `to_dict` carry the
+  list; the price deque is built when `vol_enabled` or `fast_lane_enabled`;
+  the §3.5 parity limitation is in the provenance (`vol_universe`).
+- **Look-ahead fix (all screener backtests).** The backtest universe read the
+  1H candle *opening* at each interval boundary (`ts <= boundary`), i.e. the
+  hour that had not happened yet: tickers, activity features and fast-lane
+  samples all knew that hour's high/low/close. It now uses only candles closed
+  by the boundary (open `<= boundary − 1h`), and price samples are stamped
+  with the candle's close time. Recorded as `candle_visibility` in the
+  provenance. Universe-mode backtests from before this fix are optimistic.
+- Defaults: `vol_enabled=False`, `vol_max_symbols=8`,
+  `vol_min_speed_pct_per_hour=1.0`, `vol_min_vol_ratio=0.5`. No UI yet (Phase 7).
+
+Tests: `tests/test_screener_vol.py` (19).
 
 ### Phase 6 — Clock trigger *(depends on 1–5)*
 

@@ -68,7 +68,7 @@ uv run pytest
 ```
 - `pytest-xdist` runs with `-n auto` by default (see `pyproject.toml`); the suite takes ~15s.
 - Tests marked `network` hit live services and are skipped by default.
-- All tests must pass (917 passing, 0 pre-existing failures as of 2026-11-20). Any failure is a regression.
+- All tests must pass (936 passing, 0 pre-existing failures as of 2026-11-20). Any failure is a regression.
 
 ---
 
@@ -173,7 +173,7 @@ With `launcher.schedule="on_close"`, the scheduler waits for all positions to cl
 | `trend_pullback` | SC (trending) | Enter pullbacks in established trends |
 | `liquidity_sweep` | MR (chop) | Fade stop-hunt sweeps of fractal swing levels |
 | `vwap_reversion` | MR (chop) | Revert intraday deviations back to VWAP |
-| `wick_rejection` | combined (own `vol` list planned) | Short a strong green 1H candle seconds before close (in progress, see `docs/objectives/wick_rejection_plan.md`) |
+| `wick_rejection` | vol (speed-ranked, `vol_enabled`) | Short a strong green 1H candle seconds before close (in progress, see `docs/objectives/wick_rejection_plan.md`) |
 
 - Config lives under `runtime_config["launcher"]["strategies"][<name>]`; defaults in `strategies/defaults.py` (`strategy_defaults()` / `merged_config()`).
 - Each strategy may set `analysis_timeframe`; the snapshot then exposes `sym_data["timeframes"][<tf>]` (read via `resolve_analysis_block`).
@@ -277,6 +277,8 @@ Covered by `tests/test_live_backtest_parity.py` and `tests/test_forming_candle.p
 - **Recent-activity window:** 24h ticker fields are aggregates, so a coin that pumped hours ago and has since gone quiet still ranks highly on them. When `screener.activity_lookback_hours > 0` (default 4), SC/MR gates and scores use `compute_recent_activity()` features (`recent_vol_ratio`, `recent_range_pct`, `recent_mom_pct`, `decay_ratio`) derived from the last N hours of candles instead. Live fetches those candles for the volume-ranked top `activity_prefilter_top_n` candidates (cached `activity_cache_seconds`); the backtest derives them from the 1H candles it already fetched, so parity costs nothing. `activity_lookback_hours=0` restores pure 24h ranking.
 - `Candle.quote_volume` (OKX `volCcyQuote`) is required for the volume filter; legacy caches fall back to `volume × close`.
 - **Volume units:** OKX's raw ticker `volCcy24h` is **base-currency** volume, not USDT. `build_candidates()` converts it via `volCcy24h × last` unless `vol_ccy_is_quote=True`. Live passes `False`; the backtest passes `True` because `_ticker_at()` already sums `volCcyQuote`. Never compare raw `volCcy24h` against `min_volume_usd` — it silently excludes high-priced symbols and admits low-priced ones on token counts.
+- **Vol universe (`vol_enabled`, default off):** a third list ranked on speed (`compute_speed`: max of closed-candle range/hour and price-sample move/hour), own gates and cap, built in dual and legacy mode and appended to `selected`. Routes `wick_rejection` only; symbols that are only on the vol list never reach other strategies (`universe_for_strategy(vol_symbols=)`, `_strategy_allowed_on_symbol`).
+- **Backtest universe candle visibility:** each interval uses only 1H candles closed by the boundary (open `<= boundary − 1h`); price samples are stamped with close time. Never select by `ts <= boundary` (that reads the coming hour).
 - The live `max_spread_pct` filter is **skipped** historically (no bid/ask in OHLCV) and recorded in the schedule provenance.
 - **Screener defaults live in `app/services/strategies/defaults.py`** (`DEFAULT_SCREENER` / `screener_defaults()`), not inline in `main.py`. `main.py` bootstraps `runtime_config["screener"]` from it and the CFG page merges saved config over it — change defaults there, never in the UI or lifespan.
 - **Fast lane (`fast_lane_enabled`, default off):** `build_candidates()` gates on trailing-24h volume, which is a *lagging* indicator — a quiet-baseline coin cannot reach `min_volume_usd` until the pump's candles have printed (SHELL +72% in 4h, gate crossed 4h late). `fast_lane_candidates()` (screener.py) admits symbols on a short-window price move with a much lower `fast_lane_min_volume_usd` floor. It is a **discovery widening only** — admitted symbols still go through `compute_recent_activity` and SC/MR scoring, so they must win to be selected. It costs **no extra REST calls**: the move comes from `_record_screener_price_samples()` on the all-SWAP ticker poll the screener already does. `_fetch_recent_activity` exempts `_fast_lane` symbols from the `activity_prefilter_top_n` volume-ranked cap (bounding them by `fast_lane_max_symbols` instead), otherwise the lane could never fetch the low-volume symbols it exists to find. Backtest parity via `_price_history_at()` in `universe.py`; the `sodUtc0` cold-start fallback is live-only and recorded in provenance.

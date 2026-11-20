@@ -447,8 +447,9 @@ class TestBacktestParity:
         ts_list = [c.ts for c in candles]
         hist = _price_history_at(candles, ts_list, candles[-1].ts, window_minutes=60.0)
         assert len(hist) >= 2
-        # Newest sample is the close of the interval candle.
-        assert hist[-1] == pytest.approx((candles[-1].ts / 1000.0, 109.0))
+        # Newest sample is the close of the last candle, stamped with its
+        # close time (OKX ts is the open time).
+        assert hist[-1] == pytest.approx(((candles[-1].ts + 3_600_000) / 1000.0, 109.0))
 
     def test_backtest_lane_matches_live_semantics(self) -> None:
         """A reconstructed deque drives the same admission decision as live."""

@@ -500,6 +500,16 @@ DEFAULT_SCREENER: dict[str, Any] = {
     # reference only while the session is younger than this multiple of the
     # window, so an old move is not mistaken for a fresh one.
     "fast_lane_sod_max_age_mult": 3.0,
+    # ── Vol universe (wick_rejection plan §3.5) ───────────────────────────
+    # A third list ranked on speed (% per hour): max of the closed-candle
+    # range rate over the activity window and the |move| rate over
+    # fast_move_window_minutes from the rolling price samples.  Own gates
+    # (no activity_min_ratio); appended to the fetch list after SC and MR.
+    # Routes wick_rejection.
+    "vol_enabled": False,
+    "vol_max_symbols": 8,
+    "vol_min_speed_pct_per_hour": 1.0,
+    "vol_min_vol_ratio": 0.5,
 }
 
 # ── Trade management (position-overlay) ─────────────────────────────────────

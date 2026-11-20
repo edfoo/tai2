@@ -413,6 +413,8 @@ class MarketService:
         # SC = expansion/momentum; MR = chop/mean-reversion.
         self._screener_sc_symbols: list[str] = []
         self._screener_mr_symbols: list[str] = []
+        # Vol universe (speed-ranked, wick_rejection plan §3.5).
+        self._screener_vol_symbols: list[str] = []
         # Rolling 24h volume history for spike detection (symbol → deque of vol samples).
         self._screener_vol_history: dict[str, deque] = {}
         # Rolling short-window PRICE history for fast-lane discovery
@@ -3754,10 +3756,23 @@ class MarketService:
         cfg = self._screener_config or {}
         if not cfg.get("enabled"):
             return True
-        if not bool(cfg.get("dual_universe", True)):
-            return True
         symbol_u = (symbol or "").upper()
         name = (strategy_name or "").strip().lower()
+        # Vol universe (wick_rejection §3.5), in dual and legacy mode.  WR is
+        # restricted to it (falling back to the combined list when empty);
+        # symbols only on the vol list are not evaluated by other strategies.
+        vol = {s.upper() for s in self._screener_vol_symbols}
+        if name == "wick_rejection":
+            universe = self._screener_vol_symbols or self._screener_selected_symbols
+            if not universe:
+                return True
+            return symbol_u in {s.upper() for s in universe}
+        if vol and symbol_u in vol and symbol_u not in {
+            s.upper() for s in (*self._screener_sc_symbols, *self._screener_mr_symbols)
+        }:
+            return False
+        if not bool(cfg.get("dual_universe", True)):
+            return True
         if name == "spike_continuation":
             universe = self._screener_sc_symbols or self._screener_selected_symbols
             if not universe:
@@ -5560,6 +5575,7 @@ class MarketService:
             selected_symbols=self._screener_selected_symbols,
             fallback_symbols=self.symbols,
             dual_universe=bool((self._screener_config or {}).get("dual_universe", True)),
+            vol_symbols=self._screener_vol_symbols,
         )
 
     async def _fetch_all_swap_tickers(self) -> list[dict[str, Any]]:
@@ -5804,6 +5820,10 @@ class MarketService:
             activity=activity,
             candidates=candidates,
             fast_lane=fast_lane,
+            # Rolling price samples give the vol list's fast_speed term (the
+            # only one that sees the current hour).
+            price_history=self._screener_price_history,
+            now_ts=now,
         )
         for line in result["diagnostics"]:
             self._emit_debug(line)
@@ -5816,6 +5836,7 @@ class MarketService:
         self._screener_selected_symbols = selected
         self._screener_sc_symbols = sc_selected
         self._screener_mr_symbols = mr_selected
+        self._screener_vol_symbols = list(result.get("vol") or [])
 
         # Prune vol history and activity caches for symbols no longer in universe.
         active_universe = {str(t.get("instId", "")).upper() for t in tickers if isinstance(t, dict)}

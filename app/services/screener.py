@@ -557,8 +557,10 @@ def score_universe(
     candidates: list[dict[str, Any]] | None = None,
     vol_ccy_is_quote: bool = False,
     fast_lane: list[dict[str, Any]] | None = None,
+    price_history: dict[str, deque] | None = None,
+    now_ts: float | None = None,
 ) -> dict[str, Any]:
-    """Score a ticker snapshot into SC / MR / union universes.
+    """Score a ticker snapshot into SC / MR / vol / union universes.
 
     Parameters
     ----------
@@ -596,14 +598,27 @@ def score_universe(
         are merged into the candidate pool (deduped by symbol) so the normal
         SC/MR gates and scoring decide whether they are actually selected.
         Admitted symbols carry ``_fast_lane = True``.
+    price_history, now_ts:
+        Rolling ``(epoch_seconds, price)`` samples per symbol (live:
+        ``_screener_price_history``) and the moment to measure at (epoch
+        seconds).  They give the ``fast_speed`` term of the vol list, the only
+        one that sees the current hour.  See :func:`compute_speed`.
+
+    Vol universe (``vol_enabled``, wick_rejection plan §3.5)
+    -------------------------------------------------------
+    Ranked on speed (% per hour) rather than 24h aggregates, with its own gates
+    (``vol_min_speed_pct_per_hour``, ``vol_min_vol_ratio``; the SC/MR
+    ``activity_min_ratio`` gate does not apply) and cap ``vol_max_symbols``.
+    Built in dual and legacy mode and appended to ``selected`` after SC and MR
+    so its symbols get market data.
 
     Returns
     -------
     dict with keys:
-        ``selected`` (union, SC-first), ``sc``, ``mr``, ``candidates``,
-        ``base_candidate_count``, ``ticker_count``, ``sc_pool_size``,
-        ``mr_pool_size``, ``overlap``, ``dual_universe``, ``activity_used``,
-        ``diagnostics``.
+        ``selected`` (union, SC-first, then MR, then vol), ``sc``, ``mr``,
+        ``vol``, ``candidates``, ``base_candidate_count``, ``ticker_count``,
+        ``sc_pool_size``, ``mr_pool_size``, ``vol_pool_size``, ``overlap``,
+        ``dual_universe``, ``activity_used``, ``diagnostics``.
     """
     cfg = cfg or {}
     dual_universe = bool(cfg.get("dual_universe", True))
@@ -666,7 +681,9 @@ def score_universe(
             c["recent_range_pct"] = act.get("recent_range_pct")
             c["recent_mom_pct"] = act.get("recent_mom_pct")
             c["decay_ratio"] = act.get("decay_ratio")
+            c["recent_hours_covered"] = act.get("hours_covered")
         else:
+            c["recent_hours_covered"] = None
             c["recent_vol"] = None
             c["recent_vol_ratio"] = None
             c["recent_range_pct"] = None
@@ -681,6 +698,19 @@ def score_universe(
             c["rank_mom_pct"] = c["momentum_pct"]
             c["rank_range_pct"] = c["hl_range_pct"]
             c["rank_vol_ratio"] = c["vol_spike_ratio"]
+
+    # ── Speed (vol universe, §3.5) ────────────────────────────────────
+    vol_enabled = bool(cfg.get("vol_enabled", False))
+    speed_now = float(now_ts if now_ts is not None else _now_seconds())
+    for c in candidates:
+        c.update(
+            compute_speed(
+                c,
+                (price_history or {}).get(c["symbol"]),
+                now_ts=speed_now,
+                window_minutes=float(cfg.get("fast_move_window_minutes") or 60.0),
+            )
+        )
 
     spread_str = f", spread<={max_spread_pct:.2f}%" if max_spread_pct > 0 else ""
     activity_str = (
@@ -727,6 +757,8 @@ def score_universe(
             "ticker_count": len(tickers),
             "sc_pool_size": 0,
             "mr_pool_size": 0,
+            "vol": [],
+            "vol_pool_size": 0,
             "overlap": overlap,
             "dual_universe": dual_universe,
             "activity_used": activity_used,
@@ -855,6 +887,53 @@ def score_universe(
         top_parts = [_fmt(c, "score") for c in legacy_pool[:max_symbols]]
         diagnostics.append(f"Screener selected: {selected} | {', '.join(top_parts)}")
 
+    # ── Vol universe: speed (wick_rejection §3.5) ─────────────────────
+    vol_selected: list[str] = []
+    vol_pool_size = 0
+    if vol_enabled:
+        vol_max = max(1, int(cfg.get("vol_max_symbols") or 8))
+        vol_min_speed = float(cfg.get("vol_min_speed_pct_per_hour") or 0.0)
+        vol_min_ratio = float(cfg.get("vol_min_vol_ratio") or 0.0)
+        vol_pool = [
+            c for c in candidates
+            if c.get("speed") is not None
+            and c["speed"] >= vol_min_speed
+            # Missing activity volume fails the gate (no 24h fallback).
+            and c.get("recent_vol_ratio") is not None
+            and c["recent_vol_ratio"] >= vol_min_ratio
+        ]
+        if vol_pool:
+            max_speed = max(c["speed"] for c in vol_pool) or 1.0
+            max_ratio = max(c["recent_vol_ratio"] for c in vol_pool) or 1.0
+            max_decay = max((c.get("decay_ratio") or 0.0) for c in vol_pool) or 1.0
+            for c in vol_pool:
+                c["vol_score"] = (
+                    c["speed"] / max_speed * 0.50
+                    + c["recent_vol_ratio"] / max_ratio * 0.30
+                    + (c.get("decay_ratio") or 0.0) / max_decay * 0.20
+                )
+            vol_pool.sort(key=lambda x: x["vol_score"], reverse=True)
+        vol_selected = [c["symbol"] for c in vol_pool[:vol_max]]
+        vol_pool_size = len(vol_pool)
+        for sym in vol_selected:
+            if sym not in selected:
+                selected.append(sym)
+
+        def _fmt_speed(v: float | None) -> str:
+            return f"{v:.2f}" if v is not None else "n/a"
+
+        vol_parts = [
+            f"{c['symbol']}(vol_score={c['vol_score']:.3f} speed={c['speed']:.2f}%/h "
+            f"closed={_fmt_speed(c.get('closed_speed'))} fast={_fmt_speed(c.get('fast_speed'))} "
+            f"vol={c['recent_vol_ratio']:.2f}x decay={_fmt_speed(c.get('decay_ratio'))})"
+            for c in vol_pool[:vol_max]
+        ]
+        diagnostics.append(
+            f"Screener VOL selected ({len(vol_selected)}/{vol_pool_size} pool, "
+            f"speed>={vol_min_speed:g}%/h vol>={vol_min_ratio:g}x): "
+            f"{vol_selected} | {', '.join(vol_parts) if vol_parts else 'none'}"
+        )
+
     # ── Faded-name diagnostic ─────────────────────────────────────────
     # Names that passed the liquidity gates and still look active on 24h
     # aggregates but have gone quiet in the recent window.  These are exactly
@@ -886,12 +965,55 @@ def score_universe(
         "ticker_count": len(tickers),
         "sc_pool_size": sc_pool_size,
         "mr_pool_size": mr_pool_size,
+        "vol": vol_selected,
+        "vol_pool_size": vol_pool_size,
         "overlap": overlap,
         "dual_universe": dual_universe,
         "activity_used": activity_used,
         "fast_lane_count": len(fast_lane_admitted),
         "fast_lane_symbols": [c["symbol"] for c in fast_lane_admitted],
         "diagnostics": diagnostics,
+    }
+
+
+def compute_speed(
+    candidate: dict[str, Any],
+    history: Any,
+    *,
+    now_ts: float,
+    window_minutes: float,
+) -> dict[str, float | None]:
+    """Return ``closed_speed``, ``fast_speed`` and ``speed`` (% per hour).
+
+    * ``closed_speed`` = ``recent_range_pct / recent_hours_covered`` from
+      :func:`compute_recent_activity` features only — never the 24h
+      ``hl_range_pct`` (that inflates speed ~6×).  None without activity data.
+    * ``fast_speed`` = ``|move| / (window_minutes / 60)`` from the rolling
+      price samples (:func:`_fast_move_from_history`); the only term that sees
+      the current hour.  None without enough history.
+    * ``speed`` = the larger defined term, or None when neither is defined
+      (the symbol cannot enter the vol list).
+    """
+    closed_speed: float | None = None
+    rng = candidate.get("recent_range_pct")
+    hours = candidate.get("recent_hours_covered")
+    if rng is not None and hours:
+        closed_speed = float(rng) / float(hours)
+
+    fast_speed: float | None = None
+    window_minutes = max(1.0, float(window_minutes))
+    if history:
+        measured = _fast_move_from_history(
+            history, now_ts=now_ts, window_seconds=window_minutes * 60.0
+        )
+        if measured is not None:
+            fast_speed = abs(measured[0]) / (window_minutes / 60.0)
+
+    defined = [v for v in (closed_speed, fast_speed) if v is not None]
+    return {
+        "closed_speed": closed_speed,
+        "fast_speed": fast_speed,
+        "speed": max(defined) if defined else None,
     }
 
 
@@ -903,20 +1025,30 @@ def universe_for_strategy(
     selected_symbols: list[str],
     fallback_symbols: list[str],
     dual_universe: bool = True,
+    vol_symbols: list[str] | None = None,
 ) -> list[str]:
     """Return the active screener universe for a strategy.
 
     Mirrors ``MarketService.get_screener_universe`` so the backtest routes
-    strategies to the same SC/MR lists live uses:
+    strategies to the same SC/MR/vol lists live uses:
 
       - ``spike_continuation`` / ``trend_pullback`` → SC (trending) list
       - ``mean_reversion`` / ``liquidity_sweep`` / ``vwap_reversion`` → MR (chop) list
-      - other / empty → union of both
+      - ``wick_rejection`` → vol list (dual and legacy mode)
+      - other / empty → union of SC and MR
 
     Falls back to the combined selected list, then to ``fallback_symbols``
-    (the configured symbol list) when the screener lists are empty.
+    (the configured symbol list) when the screener lists are empty.  Symbols
+    only on the vol list never reach the other strategies through the
+    fallback.
     """
     name = (strategy_name or "").strip().lower()
+    vol = list(vol_symbols or [])
+    if name == "wick_rejection" and vol:
+        return vol
+    if vol and name != "wick_rejection":
+        vol_only = set(vol) - set(sc_symbols) - set(mr_symbols)
+        selected_symbols = [s for s in selected_symbols if s not in vol_only]
     if dual_universe and name in ("spike_continuation", "trend_pullback") and sc_symbols:
         return list(sc_symbols)
     if dual_universe and name in (

@@ -21,6 +21,19 @@ interval:
 Scoring itself is delegated to :func:`app.services.screener.score_universe` —
 the exact function live uses — so the two cannot drift.
 
+**Candle visibility:** at an interval boundary ``ts`` only 1H candles that
+have *closed* by ``ts`` are used (open time ``<= ts − 1h``).  OKX ``ts`` is a
+bar's open time, so the candle opening at the boundary would carry the coming
+hour's high/low/close (look-ahead).  Price samples are stamped with the
+candle's close time.
+
+**Vol universe** (``vol_enabled``, wick_rejection plan §3.5): ranked on speed
+from the same 1H candles.  The fast-speed term is a close-to-close 1H move, so
+a coin spiking during hour H enters the backtest's vol list at H+1, while live
+(screener every tick, poll-cadence samples) can list it before H:59.  The
+backtest undercounts fresh-spike entries rather than inventing them; recorded
+in the provenance.
+
 **Data limitation:** the live screener's ``max_spread_pct`` filter reads live
 bid/ask, which OHLCV cannot reproduce.  When that filter is enabled the
 backtest skips it and records the omission in the schedule provenance; the
@@ -51,6 +64,7 @@ logger = logging.getLogger(__name__)
 # The screener's 24h lookback is expressed in 1H candles.
 _LOOKBACK_MS = 24 * 60 * 60 * 1000
 _UNIVERSE_TIMEFRAME = "1H"
+_UNIVERSE_BAR_MS = 60 * 60 * 1000
 
 
 @dataclass(slots=True)
@@ -61,6 +75,7 @@ class UniverseInterval:
     sc: list[str] = field(default_factory=list)
     mr: list[str] = field(default_factory=list)
     selected: list[str] = field(default_factory=list)
+    vol: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -107,6 +122,7 @@ class UniverseSchedule:
             selected_symbols=interval.selected,
             fallback_symbols=[],
             dual_universe=self.dual_universe,
+            vol_symbols=interval.vol,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -118,7 +134,7 @@ class UniverseSchedule:
             "interval_count": len(self.intervals),
             "all_symbols": self.all_symbols,
             "intervals": [
-                {"ts": i.ts, "sc": i.sc, "mr": i.mr, "selected": i.selected}
+                {"ts": i.ts, "sc": i.sc, "mr": i.mr, "vol": i.vol, "selected": i.selected}
                 for i in self.intervals
             ],
             "diagnostics": self.diagnostics,
@@ -260,7 +276,8 @@ def _price_history_at(
     bars_needed = int(round(window_minutes * 60_000 / (60 * 60 * 1000))) + 1
     bars_needed = max(4, bars_needed)
     window = candles[max(0, idx - bars_needed + 1): idx + 1]
-    return deque((c.ts / 1000.0, c.close) for c in window)
+    # Stamp each sample with the candle's close time (OKX ts is the open).
+    return deque(((c.ts + _UNIVERSE_BAR_MS) / 1000.0, c.close) for c in window)
 
 
 async def build_universe_schedule(
@@ -328,6 +345,22 @@ async def build_universe_schedule(
                 if bool(cfg.get("fast_lane_enabled", False))
                 else "disabled"
             ),
+            "candle_visibility": "closed 1H candles only (open ts <= interval ts - 1h)",
+            "vol_universe": (
+                {
+                    "max_symbols": int(cfg.get("vol_max_symbols") or 8),
+                    "min_speed_pct_per_hour": float(cfg.get("vol_min_speed_pct_per_hour") or 0.0),
+                    "min_vol_ratio": float(cfg.get("vol_min_vol_ratio") or 0.0),
+                    # §3.5 parity limitation.
+                    "fast_speed": (
+                        "1H close-to-close from candles: a coin spiking during "
+                        "hour H enters the vol list at H+1 (live can list it "
+                        "before H:59)"
+                    ),
+                }
+                if bool(cfg.get("vol_enabled", False))
+                else "disabled"
+            ),
             "spread_filter": (
                 "skipped (live bid/ask unavailable historically)"
                 if float(cfg.get("max_spread_pct") or 0.0) > 0
@@ -371,32 +404,36 @@ async def build_universe_schedule(
     activity_lookback_hours = float(cfg.get("activity_lookback_hours") or 0.0)
     activity_tf_ms = timeframe_to_ms(str(cfg.get("activity_timeframe") or "1H"))
     fast_lane_enabled = bool(cfg.get("fast_lane_enabled", False))
+    vol_enabled = bool(cfg.get("vol_enabled", False))
     fast_window_minutes = max(1.0, float(cfg.get("fast_move_window_minutes") or 60.0))
     vol_history: dict[str, Any] = {}
     for ts in boundaries:
+        # Only candles closed by the boundary: the newest usable bar opened
+        # one bar earlier (OKX ts = open time).
+        closed_ts = ts - _UNIVERSE_BAR_MS
         tickers: list[dict[str, Any]] = []
         activity: dict[str, dict[str, Any]] = {}
         price_history: dict[str, deque] = {}
         for symbol, candles in symbol_candles.items():
-            ticker = _ticker_at(candles, symbol_ts[symbol], ts)
+            ticker = _ticker_at(candles, symbol_ts[symbol], closed_ts)
             if ticker is None:
                 continue
             ticker["instId"] = symbol
             tickers.append(ticker)
-            if fast_lane_enabled:
+            if fast_lane_enabled or vol_enabled:
                 # Reconstruct the lane's price deque from the same 1H candles —
                 # no extra fetch, and identical code path to live.
                 price_history[symbol] = _price_history_at(
                     candles,
                     symbol_ts[symbol],
-                    ts,
+                    closed_ts,
                     window_minutes=fast_window_minutes,
                 )
             if activity_lookback_hours > 0:
                 act = _activity_at(
                     candles,
                     symbol_ts[symbol],
-                    ts,
+                    closed_ts,
                     lookback_hours=activity_lookback_hours,
                     timeframe_ms=activity_tf_ms,
                     vol_ccy_24h=ticker.get("volCcy24h"),
@@ -429,6 +466,8 @@ async def build_universe_schedule(
             # so volCcy24h here is already quote-currency — do not re-convert.
             vol_ccy_is_quote=True,
             fast_lane=fast_lane,
+            price_history=price_history if vol_enabled else None,
+            now_ts=ts / 1000.0,
         )
         schedule.intervals.append(
             UniverseInterval(
@@ -436,6 +475,7 @@ async def build_universe_schedule(
                 sc=list(result["sc"]),
                 mr=list(result["mr"]),
                 selected=list(result["selected"]),
+                vol=list(result.get("vol") or []),
             )
         )
         schedule.candidate_count = max(schedule.candidate_count, result["base_candidate_count"])

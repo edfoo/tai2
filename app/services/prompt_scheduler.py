@@ -204,6 +204,7 @@ class PromptScheduler:
                 new_symbols: list[str] = list(getattr(market_service, "symbols", []))
                 sc_symbols: list[str] = list(getattr(market_service, "_screener_sc_symbols", []) or [])
                 mr_symbols: list[str] = list(getattr(market_service, "_screener_mr_symbols", []) or [])
+                vol_symbols: list[str] = list(getattr(market_service, "_screener_vol_symbols", []) or [])
                 runtime_config = getattr(self._app.state, "runtime_config", None)
                 if runtime_config is not None:
                     runtime_config["trading_pairs"] = new_symbols
@@ -211,6 +212,7 @@ class PromptScheduler:
                     # Expose dual-universe lists for UI / debugging.
                     runtime_config["_screener_sc_symbols"] = sc_symbols
                     runtime_config["_screener_mr_symbols"] = mr_symbols
+                    runtime_config["_screener_vol_symbols"] = vol_symbols
                 try:
                     from app.db.postgres import set_enabled_trading_pairs as _set_pairs
                     await _set_pairs(new_symbols)
