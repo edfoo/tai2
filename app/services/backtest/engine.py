@@ -51,7 +51,10 @@ from app.services.strategies.mean_reversion import MeanReversionStrategy
 from app.services.strategies.spike_continuation import SpikeContinuationStrategy
 from app.services.strategies.trend_pullback import TrendPullbackStrategy
 from app.services.strategies.vwap_reversion import VWAPReversionStrategy
-from app.services.strategies.wick_rejection import WickRejectionStrategy
+from app.services.strategies.wick_rejection import (
+    WickRejectionStrategy,
+    backtest_entry_timing,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -208,6 +211,22 @@ class BacktestEngine:
             )
             self._eval_mode = "closed"
 
+        # wick_rejection enters seconds before a 1H close: only a finer_ltf
+        # step that lands in its entry window can produce trades (§3.7).
+        self._wr_timing: dict[str, Any] | None = None
+        _wr_cfg = (self._config.launcher_config.get("strategies") or {}).get("wick_rejection")
+        if isinstance(_wr_cfg, dict) and bool(_wr_cfg.get("enabled", False)):
+            self._wr_timing = backtest_entry_timing(
+                _wr_cfg,
+                evaluation_mode=self._eval_mode,
+                evaluation_timeframe=self._eval_tf,
+            )
+            if not self._wr_timing["supported"]:
+                logger.warning(
+                    "Backtest: wick_rejection will produce zero trades — %s",
+                    self._wr_timing["reason"],
+                )
+
         # Warn if any enabled strategy config requires footprint data — it's
         # never available in backtest (no historical trade tape), so the filter
         # is silently skipped. This makes backtests with that flag a lower
@@ -232,6 +251,8 @@ class BacktestEngine:
         t0 = time.monotonic()
         result = BacktestResult(config=self._config, started_at=started.isoformat())
         data_provenance: list[dict[str, Any]] = []
+        if self._wr_timing is not None:
+            data_provenance.append(dict(self._wr_timing))
 
         def _capture_fetch_provenance() -> None:
             metadata = getattr(self._fetcher, "last_fetch_provenance", None)

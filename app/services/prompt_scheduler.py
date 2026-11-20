@@ -13,6 +13,14 @@ from app.services.prompt_runner import (
     fetch_llm_decision,
     prepare_prompt_payload,
 )
+from app.services.wick_rejection_trigger import (
+    WickRejectionTrigger,
+    launcher_execution_context,
+)
+
+# Strategies the regular tick never evaluates: they enter from their own
+# clock-aligned trigger (wick_rejection plan §3.6).
+TRIGGER_ONLY_STRATEGIES = frozenset({"wick_rejection"})
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +58,12 @@ class PromptScheduler:
         # Minimum gap between consecutive ticks to avoid busy-looping while
         # positions are settling after close orders land on OKX.
         self._consecutive_min_delay: float = 60.0
+        # Held around each order execution, shared with the wick_rejection
+        # trigger so balance sequencing and _pending_notional stay correct.
+        self.execute_lock = asyncio.Lock()
+        self._wr_trigger = WickRejectionTrigger(
+            app, self.execute_lock, is_enabled=lambda: self._enabled
+        )
 
     async def start(self) -> None:
         async with self._lock:
@@ -57,10 +71,14 @@ class PromptScheduler:
             if self._task is None or self._task.done():
                 self._task = asyncio.create_task(self._run(), name="prompt-scheduler")
                 logger.info("Prompt scheduler started (interval=%ss)", self._interval)
+            # Independent of the tick cadence (and of launcher.schedule =
+            # "on_close"); it does nothing unless wick_rejection is enabled.
+            self._wr_trigger.start()
 
     async def stop(self) -> None:
         async with self._lock:
             self._enabled = False
+            await self._wr_trigger.stop()
             if self._task is not None:
                 self._task.cancel()
                 try:
@@ -413,35 +431,25 @@ class PromptScheduler:
                     # (passing {} causes execution_enabled to always read as False).
                     _ms = market_service or getattr(self._app.state, "market_service", None)
                     if _ms:
-                        # runtime_config stores execution as flat keys
-                        # (execution_enabled, execution_trade_mode, …) — the
-                        # same mapping PromptBuilder does when building context.
-                        _launcher_context: dict[str, Any] = {
-                            "symbol": sym,
-                            "execution": {
-                                "enabled": bool(_rc.get("execution_enabled", False)),
-                                "trade_mode": _rc.get("execution_trade_mode") or "isolated",
-                                "order_type": _rc.get("execution_order_type") or "market",
-                                "min_size": _rc.get("execution_min_size"),
-                                "min_sizes": _rc.get("execution_min_sizes") or {},
-                            },
-                            "guardrails": _rc.get("guardrails") or {},
-                            "risk_locks": _rc.get("risk_locks") or {},
-                        }
-                        await asyncio.wait_for(
-                            _ms.handle_llm_decision(decision, _launcher_context),
-                            timeout=_EXEC_TIMEOUT,
-                        )
+                        _launcher_context = launcher_execution_context(_rc, sym)
+                        # Held per order (not for the whole phase) so the
+                        # wick_rejection trigger can slot in at H:59.
+                        async with self.execute_lock:
+                            await asyncio.wait_for(
+                                _ms.handle_llm_decision(decision, _launcher_context),
+                                timeout=_EXEC_TIMEOUT,
+                            )
                     logger.info(
                         "Launcher decision for %s action=%s",
                         sym,
                         decision.get("action"),
                     )
                 else:
-                    await asyncio.wait_for(
-                        apply_llm_decision(self._app, bundle, decision, prompt_id),
-                        timeout=_EXEC_TIMEOUT,
-                    )
+                    async with self.execute_lock:
+                        await asyncio.wait_for(
+                            apply_llm_decision(self._app, bundle, decision, prompt_id),
+                            timeout=_EXEC_TIMEOUT,
+                        )
                     logger.info(
                         "Prompt scheduler decision for %s action=%s confidence=%s prompt_id=%s",
                         sym,
@@ -503,10 +511,22 @@ class PromptScheduler:
         """
         if market_service is None:
             return []
+        # Trigger-only strategies (wick_rejection) never run from the tick:
+        # its timing is not clock-aligned and would race the trigger.
+        names = [
+            str(getattr(st, "name", ""))
+            for st in (getattr(market_service, "_strategies", None) or [])
+        ]
+        tick_strategies = [n for n in names if n and n not in TRIGGER_ONLY_STRATEGIES]
         results: list[tuple[str, None, dict[str, Any], None]] = []
         for symbol in symbols:
             try:
-                decisions = market_service.build_launcher_decisions(symbol)
+                if names:
+                    decisions = market_service.build_launcher_decisions(
+                        symbol, strategies=tick_strategies
+                    )
+                else:
+                    decisions = market_service.build_launcher_decisions(symbol)
             except Exception as exc:  # pragma: no cover - defensive
                 logger.debug("Launcher decision build failed for %s: %s", symbol, exc)
                 decisions = []

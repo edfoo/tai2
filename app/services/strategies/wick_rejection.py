@@ -265,3 +265,61 @@ class WickRejectionStrategy:
             rationale=rationale,
             rank_score=metrics.rank_score,
         )
+
+
+def backtest_entry_timing(
+    config: dict[str, Any] | None, *, evaluation_mode: str, evaluation_timeframe: str | None
+) -> dict[str, Any]:
+    """Describe when a backtest can enter wick_rejection (plan §3.7).
+
+    WR needs a forming candle and a step moment inside
+    ``[min_seconds_to_close, max_seconds_to_close]`` before the analysis bar
+    closes.  Backtest moments are eval-candle closes, so the candidates are
+    ``k × eval step`` seconds before the close (``k ≥ 1``).  The first moment in
+    the window (the largest) is where entries land; live enters at
+    ``entry_seconds_before_close`` instead (recorded as a parity gap).
+
+    Returns a provenance dict with ``supported`` and, when unsupported, the
+    reason WR produces zero trades.
+    """
+    cfg = merged_config(config, STRATEGY_NAME)
+    live_s = _f(cfg.get("entry_seconds_before_close"))
+    out: dict[str, Any] = {
+        "kind": "wick_rejection_entry_timing",
+        "evaluation_mode": evaluation_mode,
+        "evaluation_timeframe": evaluation_timeframe,
+        "live_seconds_before_close": live_s,
+        "backtest_seconds_before_close": None,
+        "supported": False,
+        "reason": "",
+    }
+    if evaluation_mode != "finer_ltf":
+        out["reason"] = (
+            f"evaluation_mode={evaluation_mode!r} has no forming candle; "
+            "wick_rejection needs finer_ltf with a 1m evaluation timeframe"
+        )
+        return out
+    step_s = timeframe_to_ms(evaluation_timeframe or "1m") / 1000.0
+    bar_s = timeframe_to_ms(str(cfg.get("analysis_timeframe") or "1H")) / 1000.0
+    min_s = _f(cfg.get("min_seconds_to_close")) or 0.0
+    max_s = _f(cfg.get("max_seconds_to_close"))
+    if max_s is None:
+        max_s = bar_s
+    fits = [
+        k * step_s for k in range(1, int(bar_s // step_s) + 1)
+        if min_s <= k * step_s <= max_s and k * step_s < bar_s
+    ] if step_s > 0 else []
+    if not fits:
+        out["reason"] = (
+            f"no {evaluation_timeframe} step lands {min_s:g}–{max_s:g}s before the "
+            f"{cfg.get('analysis_timeframe') or '1H'} close; use a 1m evaluation timeframe"
+        )
+        return out
+    out["supported"] = True
+    out["backtest_seconds_before_close"] = max(fits)
+    if live_s is not None and live_s != max(fits):
+        out["reason"] = (
+            f"parity gap: backtest enters {max(fits):g}s before the close "
+            f"(eval-candle close), live {live_s:g}s"
+        )
+    return out

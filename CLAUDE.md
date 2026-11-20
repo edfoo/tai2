@@ -68,7 +68,7 @@ uv run pytest
 ```
 - `pytest-xdist` runs with `-n auto` by default (see `pyproject.toml`); the suite takes ~15s.
 - Tests marked `network` hit live services and are skipped by default.
-- All tests must pass (936 passing, 0 pre-existing failures as of 2026-11-20). Any failure is a regression.
+- All tests must pass (958 passing, 0 pre-existing failures as of 2026-11-20). Any failure is a regression.
 
 ---
 
@@ -85,6 +85,7 @@ app/
                            #   launcher, handle_llm_decision (guardrails + sizing + orders),
                            #   trade management, fill reconciliation, legacy position strategies
     prompt_scheduler.py    # Scheduler tick: screener → snapshot → decisions → sort → execute
+    wick_rejection_trigger.py  # Clock-aligned hourly entry for wick_rejection (owned by the scheduler)
     launcher_tp_sl.py      # resolve_launcher_tp_sl — shared live + backtest TP/SL resolution
     trade_management_rules.py  # Pure breakeven/trailing/partial-TP rules (shared with simulator)
     trade_management.py    # TP/SL calculation helpers (compute_tp_sl_pct, R:R checks)
@@ -153,6 +154,8 @@ logs/app.log               # Rotating log file (5 MB × 5 backups), created at r
 5. After entry: `_check_trade_management` (software stop, breakeven, partial TP, trailing, time stop, cooldown; positions of strategies that own their exits — `StrategyExitParams`, currently wick_rejection — get `compute_strategy_exit` instead, even with global trade management off), `_check_strategy_regime_exits` (MR), and `_check_spike_continuation_rollover_exits` (SC) manage the position.
 
 With `launcher.schedule="on_close"`, the scheduler waits for all positions to close before the next tick.
+
+**`wick_rejection` is trigger-only:** the tick skips it (`TRIGGER_ONLY_STRATEGIES`). `WickRejectionTrigger` (started/stopped with the scheduler) wakes at `H:00 − entry_seconds_before_close`, refetches 1H candles, takes the websocket (or REST) price, calls `build_launcher_decisions(sym, strategies=["wick_rejection"], price=P)` (forming candle patched to `P`), ranks and caps the entries, and executes them under the scheduler's shared `execute_lock`.
 
 ### LLM flow (dormant)
 `prompt_builder` → `llm_service` / OpenRouter → `prompt_runner.apply_llm_decision` → `handle_llm_decision()`.

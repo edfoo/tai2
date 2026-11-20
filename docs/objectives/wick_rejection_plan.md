@@ -1,6 +1,6 @@
 # Design: Hourly Wick Rejection Short (`wick_rejection`)
 
-**Status:** In progress — Phase 1 done 2026-11-19 (closed-candle alignment + `forming_candle` + `as_of_ts`, live and backtest); Phase 2 done 2026-11-20 (strategy funnel, defaults, registration; disabled by default); Phase 3 done 2026-11-20 (TP/stop units, protection modes, per-strategy leverage + margin sizing, live and backtest); Phase 4 done 2026-11-20 (strategy-owned exits: time stop, software emergency stop, own re-entry cooldown, live and backtest); Phase 5 done 2026-11-20 (`vol` screener universe, live and backtest; also fixed a 1H look-ahead in the backtest universe). Redesigned 2026-11-18 from the manual-trade analysis (§1.1); vol screener §3.5; optional momentum entry mode §3.8 / Phase 9.
+**Status:** In progress — Phase 1 done 2026-11-19 (closed-candle alignment + `forming_candle` + `as_of_ts`, live and backtest); Phase 2 done 2026-11-20 (strategy funnel, defaults, registration; disabled by default); Phase 3 done 2026-11-20 (TP/stop units, protection modes, per-strategy leverage + margin sizing, live and backtest); Phase 4 done 2026-11-20 (strategy-owned exits: time stop, software emergency stop, own re-entry cooldown, live and backtest); Phase 5 done 2026-11-20 (`vol` screener universe, live and backtest; also fixed a 1H look-ahead in the backtest universe); Phase 6 done 2026-11-20 (clock trigger at H:59:20, WR removed from the scheduler tick, backtest entry-timing diagnostics). Redesigned 2026-11-18 from the manual-trade analysis (§1.1); vol screener §3.5; optional momentum entry mode §3.8 / Phase 9.
 **Date:** 2026-10-28 (revised 2026-11-18)
 **Scope:** New launcher strategy with a clock-aligned entry trigger, forming-candle
 exposure, strategy-owned exits (TP + emergency stop + time stop), per-strategy
@@ -786,13 +786,61 @@ cooldown, and the live split with global management on and off.
 
 Tests: `tests/test_screener_vol.py` (19).
 
-### Phase 6 — Clock trigger *(depends on 1–5)*
+### Phase 6 — Clock trigger ✅ *(done 2026-11-20)*
 
 17. **New `app/services/wick_rejection_trigger.py`** — the §3.6 loop, started and
     stopped with the scheduler; shared execute lock with `PromptScheduler`.
 18. **`prompt_scheduler._collect_launcher_decisions`** — exclude WR.
 19. **`backtest/engine.py`** — WR zero-trade diagnostics for unsupported eval
     modes; provenance for the 60 s vs 40 s entry gap.
+
+**As built.**
+
+- **`app/services/wick_rejection_trigger.py`.** `WickRejectionTrigger` is
+  owned by `PromptScheduler`: started and stopped with it, so it only runs
+  while the scheduler is on (`auto_prompt_enabled`), and each cycle also
+  checks `launcher.mode == "launcher_only"`, WR `enabled` and the scheduler's
+  enabled flag (the daily-loss lock clears it). It sleeps to
+  `next_trigger_ts(now, entry_seconds_before_close)` (wall-clock UTC), then
+  `run_once()`:
+  1. symbols = `get_screener_universe("wick_rejection")` (the vol list);
+  2. per symbol, concurrently: `refresh_timeframe_candles(sym, "1H")` (one
+     REST call, refreshes the shared `_latest_ohlcv_tf` cache) and
+     `fetch_trigger_price` (websocket ticker if its `ts` is at most
+     `ws_price_max_age_seconds` old, else one REST `/market/ticker`); logs
+     `WR trigger: prices SYM=P (ws|rest, age)`;
+  3. if fewer than `min_seconds_to_close` seconds remain → `late`, no entries;
+  4. `build_launcher_decisions(sym, strategies=["wick_rejection"], price=P)`;
+  5. rank by `_rank_score`; slots = `max_concurrent_positions` − open WR
+     positions (`_launcher_in_position`); `max_total_margin_pct` × equity caps
+     the summed `_margin_usd` (open WR margins are now stored on
+     `_launcher_in_position[...]["margin_usd"]`);
+  6. execute sequentially through `handle_llm_decision` with
+     `launcher_execution_context` (shared with the scheduler), re-checking the
+     time left before each order; waiting for the execute lock is bounded by
+     the window;
+  7. one summary line: `WR trigger: ok | checked n | signals … | entries … |
+     dropped SYM: reason`. Per-symbol funnel vetoes are WR's own debug lines.
+- **Snapshot path.** `build_launcher_decisions(..., price=)` →
+  `_launcher_evaluate_signals(..., forming_price=)` →
+  `_build_closed_candle_snapshot(..., forming_price=, ensure_timeframes=)`:
+  each forming candle gets `close = P`, `high = max(high, P)`,
+  `low = min(low, P)`, and a missing `timeframes["1H"]` block is built from the
+  cache. `P` is also the decision's last price. The regular path is unchanged.
+- **Scheduler.** `_collect_launcher_decisions` evaluates every strategy except
+  `TRIGGER_ONLY_STRATEGIES` (`wick_rejection`). `execute_lock` is held around
+  each order (not the whole execute phase), so a tick cannot block the trigger
+  for long. `launcher.schedule = "on_close"` does not affect the trigger.
+- **Backtest.** `wick_rejection.backtest_entry_timing()` finds the eval steps
+  inside the entry window. The engine logs a warning when there are none
+  (closed mode, 5m eval, a window narrower than the step) and adds a
+  `wick_rejection_entry_timing` entry to `data_provenance`, including the
+  60 s (backtest) vs 40 s (live) gap.
+- **Still open.** A WR position open across an app restart is re-hydrated
+  without its strategy (Phase 4 known gap): it falls back to global trade
+  management and does not count toward `max_concurrent_positions`.
+
+Tests: `tests/test_wick_rejection_trigger.py` (22).
 
 ### Phase 7 — UI *(depends on 2–6)*
 

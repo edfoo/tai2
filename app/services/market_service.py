@@ -3898,7 +3898,11 @@ class MarketService:
         return None
 
     def _launcher_evaluate_signals(
-        self, symbol: str, strategies: Iterable[str] | None = None
+        self,
+        symbol: str,
+        strategies: Iterable[str] | None = None,
+        *,
+        forming_price: float | None = None,
     ) -> list[StrategySignal]:
         """Return all strategy signals for a symbol (concurrent evaluation).
 
@@ -3918,14 +3922,22 @@ class MarketService:
         ``last_price`` from the ticker is still used for TP/SL placement.
 
         ``strategies`` limits evaluation to those strategy names (the
-        wick_rejection trigger evaluates only itself).
+        wick_rejection trigger evaluates only itself).  ``forming_price``
+        patches the forming candles with the trigger's current price (see
+        ``_build_closed_candle_snapshot``).
         """
         snapshot = self._last_full_snapshot
         if not snapshot:
             return []
         # Build a snapshot trimmed to closed candles so strategies see the
         # same indicator values the backtest would compute.
-        snapshot = self._build_closed_candle_snapshot(snapshot, symbol)
+        if forming_price is not None:
+            snapshot = self._build_closed_candle_snapshot(
+                snapshot, symbol, forming_price=forming_price,
+                ensure_timeframes=self._requested_analysis_timeframes(),
+            )
+        else:
+            snapshot = self._build_closed_candle_snapshot(snapshot, symbol)
         strategies_cfg = self._launcher_config.get("strategies") or {}
         only = {str(n) for n in strategies} if strategies is not None else None
         signals: list[StrategySignal] = []
@@ -4021,8 +4033,30 @@ class MarketService:
         )
         return block
 
+    @staticmethod
+    def _patch_forming(
+        forming: dict[str, Any] | None, price: float | None
+    ) -> dict[str, Any] | None:
+        """Return ``forming`` with ``close = price`` and high/low widened to it."""
+        if forming is None or price is None or price <= 0:
+            return forming
+        patched = dict(forming)
+        patched["close"] = price
+        try:
+            patched["high"] = max(float(forming.get("high")), price)
+            patched["low"] = min(float(forming.get("low")), price)
+        except (TypeError, ValueError):
+            patched["high"] = patched["low"] = price
+        return patched
+
     def _build_closed_candle_snapshot(
-        self, snapshot: dict[str, Any], symbol: str, *, now_ms: float | None = None
+        self,
+        snapshot: dict[str, Any],
+        symbol: str,
+        *,
+        now_ms: float | None = None,
+        forming_price: float | None = None,
+        ensure_timeframes: Iterable[str] = (),
     ) -> dict[str, Any]:
         """Return a shallow-copied snapshot whose candles are all closed at ``now_ms``.
 
@@ -4042,6 +4076,13 @@ class MarketService:
         preserved, plus ``as_of_ts`` (the split moment).  The real-time
         ticker / last_price are NOT changed — they are used downstream for
         TP/SL placement and order sizing.
+
+        ``forming_price`` (the wick_rejection trigger's current price) becomes
+        each forming candle's close, with its high/low widened to include it,
+        so the candle reflects the price at the trigger moment rather than at
+        the last candle fetch.  ``ensure_timeframes`` builds a ``timeframes``
+        block from the cached candles when the snapshot has none for that bar
+        yet (a symbol that just joined the universe).
         """
         market_data: dict[str, Any] = snapshot.get("market_data") or {}
         sym_data = market_data.get(symbol) or {}
@@ -4064,7 +4105,7 @@ class MarketService:
             for key in ("ohlcv_htf", "htf_indicators", "ohlcv_htf_bar", "adx_htf", "choppiness_htf"):
                 if key in indicators:
                     new_indicators[key] = indicators[key]
-        new_indicators["forming_candle"] = forming
+        new_indicators["forming_candle"] = self._patch_forming(forming, forming_price)
         htf_bar, _ = self._HTF_MAP.get(self._ohlc_bar, ("", 0))
         try:
             self._closed_htf_layer(new_indicators, indicators.get("ohlcv_htf"), htf_bar, now)
@@ -4076,7 +4117,11 @@ class MarketService:
         # candles (``_latest_ohlcv_tf[(symbol, tf)]``) with its own forming
         # candle removed, plus that bar's own closed HTF layer.
         new_timeframes: dict[str, dict[str, Any]] = {}
-        for tf, block in (sym_data.get("timeframes") or {}).items():
+        tf_blocks: dict[str, Any] = dict(sym_data.get("timeframes") or {})
+        for tf in ensure_timeframes:
+            if tf and tf not in tf_blocks and self._latest_ohlcv_tf.get((symbol, tf)):
+                tf_blocks[tf] = {}
+        for tf, block in tf_blocks.items():
             new_block: dict[str, Any] = dict(block or {})
             tf_rows = self._latest_ohlcv_tf.get((symbol, tf)) or []
             tf_closed, tf_forming = self._split_forming_candle(tf_rows, timeframe_to_ms(tf), now)
@@ -4094,7 +4139,7 @@ class MarketService:
             except Exception as exc:  # pragma: no cover - defensive
                 self._emit_debug(f"Closed-candle tf recompute failed for {symbol} ({tf}): {exc}")
                 new_block = dict(block or {})
-            new_block["forming_candle"] = tf_forming
+            new_block["forming_candle"] = self._patch_forming(tf_forming, forming_price)
             new_timeframes[tf] = new_block
 
         # Shallow-copy the snapshot and patch only the target symbol's indicators.
@@ -4234,7 +4279,11 @@ class MarketService:
             logger.warning("Launcher close error for %s: %s", symbol, exc)
 
     def build_launcher_decisions(
-        self, symbol: str, strategies: Iterable[str] | None = None
+        self,
+        symbol: str,
+        strategies: Iterable[str] | None = None,
+        *,
+        price: float | None = None,
     ) -> list[dict[str, Any]]:
         """Build decision dicts for all strategies that fire on a symbol.
 
@@ -4247,6 +4296,10 @@ class MarketService:
         ``launcher_tp_sl.resolve_strategy_sizing``) override
         ``launcher.notional_usd`` and carry ``_leverage_override`` /
         ``_margin_usd``; ``_protection`` says which protection orders apply.
+
+        ``price`` (wick_rejection trigger) is the current price measured by the
+        caller: it replaces the cached last price and becomes the forming
+        candle's close.
         """
         gov = self._launcher_config
         snapshot = self._last_full_snapshot
@@ -4263,12 +4316,14 @@ class MarketService:
 
         launcher_notional = self._extract_float(gov.get("notional_usd"))
 
-        last_price = self.get_last_price(symbol)
+        last_price = price if price is not None and price > 0 else self.get_last_price(symbol)
         if not last_price or last_price <= 0:
             self._emit_debug(f"Launcher: {symbol} no last price — skipping")
             return []
 
-        signals = self._launcher_evaluate_signals(symbol, strategies)
+        signals = self._launcher_evaluate_signals(
+            symbol, strategies, forming_price=price if price and price > 0 else None
+        )
         if not signals:
             return []
 
@@ -6733,6 +6788,53 @@ class MarketService:
             return {}
         self._latest_ticker[symbol] = data[0]
         return data[0]
+
+    async def fetch_trigger_price(
+        self, symbol: str, *, max_age_seconds: float = 5.0
+    ) -> tuple[float | None, str, float | None]:
+        """Return ``(price, source, age_seconds)`` for a time-critical entry.
+
+        Uses the public-websocket ticker (``_latest_ticker``) when its ``ts`` is
+        at most ``max_age_seconds`` old, otherwise one REST ``/market/ticker``
+        call (which also refreshes the cache).  ``(None, reason, age)`` when
+        neither is available.
+        """
+        now = time.time()
+        cached = self._latest_ticker.get(symbol) or {}
+        ws_px = self._extract_float(cached.get("last"))
+        ws_ts = self._extract_float(cached.get("ts"))
+        ws_age = (now - ws_ts / 1000.0) if ws_ts else None
+        if ws_px and ws_px > 0 and ws_age is not None and ws_age <= max_age_seconds:
+            return ws_px, "ws", ws_age
+        if not self._market_api:
+            return None, "no_market_api", ws_age
+        try:
+            response = await self._guarded_to_thread(
+                self._market_api_sem, self._market_api.get_ticker, symbol
+            )
+        except Exception as exc:  # pragma: no cover - network safety
+            self._emit_debug(f"Trigger price REST fetch failed for {symbol}: {exc}")
+            return None, "rest_failed", ws_age
+        data = self._safe_data(response)
+        if not data or not isinstance(data[0], dict):
+            return None, "rest_empty", ws_age
+        px = self._extract_float(data[0].get("last"))
+        if not px or px <= 0:
+            return None, "rest_empty", ws_age
+        self._latest_ticker[symbol] = data[0]
+        rest_ts = self._extract_float(data[0].get("ts"))
+        return px, "rest", (time.time() - rest_ts / 1000.0) if rest_ts else None
+
+    async def refresh_timeframe_candles(self, symbol: str, bar: str) -> int:
+        """Refetch ``bar`` candles for ``symbol`` into ``_latest_ohlcv_tf``.
+
+        Returns the number of rows now cached (the fetch falls back to the
+        previous cache on error).
+        """
+        rows = await self._fetch_ohlcv_bar(
+            symbol, bar, self._latest_ohlcv_tf, cache_key=(symbol, bar)
+        )
+        return len(rows or [])
 
     async def _fetch_funding_rate(self, symbol: str) -> dict[str, Any]:
         """Return current funding-rate metadata for the provided instrument."""
@@ -11741,6 +11843,10 @@ class MarketService:
                 "side": entry_side,
                 "pos_side": pos_side,
                 "strategy": decision.get("_strategy_name"),
+                # Strategy-sized entries (wick_rejection): the trigger sums
+                # this for max_total_margin_pct.
+                "margin_usd": self._extract_float(decision.get("_margin_usd")),
+                "opened_at": time.time(),
             }
             self._seed_trade_mgmt_state(
                 symbol=symbol,
