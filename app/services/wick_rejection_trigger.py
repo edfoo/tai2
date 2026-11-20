@@ -17,8 +17,18 @@ list):
    execute lock shared with ``PromptScheduler``;
 5. logs one summary line.
 
-It is a watch loop with a single evaluation (``entry_mode="clock"``) so the
-optional momentum mode (§3.8) can add a cadence later.  Nothing runs unless
+Momentum entry mode (§3.8, ``entry_mode`` = ``"momentum"`` /
+``"momentum_or_clock"``, ``run_watch``): wakes at ``watch_seconds_before_close``
+instead, records the public trade tape (``MarketService.start_wr_tape``),
+computes ``wr_momentum.compute_momentum`` every
+``momentum_eval_interval_seconds`` and enters a symbol the first time its
+measures pass inside ``momentum_entry_max_seconds_to_close`` and the strategy
+funnel agrees (the measures travel to the strategy, which applies the same
+gate as the backtest).  Symbols with a tape gap are excluded from momentum for
+the hour; ``momentum_or_clock`` gives the symbols not entered by
+``entry_seconds_before_close`` the clock evaluation.
+
+Nothing runs unless
 ``launcher.mode == "launcher_only"`` and wick_rejection is enabled.  A late
 entry is worse than none: symbols are dropped once fewer than
 ``min_seconds_to_close`` seconds remain.
@@ -34,6 +44,12 @@ from typing import Any, Awaitable, Callable
 
 from app.services.strategies.defaults import merged_config
 from app.services.strategies.wick_rejection import STRATEGY_NAME
+from app.services.strategies.wr_momentum import (
+    ENTRY_MODES,
+    MomentumMeasures,
+    compute_momentum,
+    momentum_entry_ok,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +73,22 @@ def next_trigger_ts(now: float, lead_seconds: float) -> float:
 
 def seconds_to_hour_close(now: float) -> float:
     return (now // _HOUR_S + 1) * _HOUR_S - now
+
+
+def entry_mode(cfg: dict[str, Any]) -> str:
+    mode = str(cfg.get("entry_mode") or "clock").lower()
+    return mode if mode in ENTRY_MODES else "clock"
+
+
+def wake_lead_seconds(cfg: dict[str, Any]) -> float:
+    """Seconds before the hour the trigger wakes: the clock entry time, or the
+    watch start in a momentum mode."""
+    if entry_mode(cfg) == "clock":
+        return float(cfg.get("entry_seconds_before_close") or 40.0)
+    return max(
+        float(cfg.get("watch_seconds_before_close") or 300.0),
+        float(cfg.get("entry_seconds_before_close") or 40.0),
+    )
 
 
 def launcher_execution_context(runtime_config: dict[str, Any], symbol: str) -> dict[str, Any]:
@@ -87,6 +119,7 @@ class TriggerResult:
 
     status: str = "ok"  # ok | skipped | late
     reason: str = ""
+    mode: str = "clock"
     checked: list[str] = field(default_factory=list)
     prices: dict[str, tuple[float | None, str, float | None]] = field(default_factory=dict)
     signals: list[str] = field(default_factory=list)
@@ -96,8 +129,9 @@ class TriggerResult:
     def summary(self) -> str:
         if self.status == "skipped":
             return f"WR trigger: skipped ({self.reason})"
+        label = "WR trigger" if self.mode == "clock" else f"WR trigger ({self.mode})"
         parts = [
-            f"WR trigger: {self.status}",
+            f"{label}: {self.status}",
             f"checked {len(self.checked)}",
             f"signals {len(self.signals)} {self.signals or ''}".rstrip(),
             f"entries {len(self.executed)} {self.executed or ''}".rstrip(),
@@ -131,6 +165,9 @@ class WickRejectionTrigger:
         self._task: asyncio.Task | None = None
         self.last_result: TriggerResult | None = None
         self.last_run_at: float | None = None
+        # Momentum watch state for the LIVE page: {"active", "mode", "symbols":
+        # {sym: {"status", "measures"}}}.
+        self.watch: dict[str, Any] = {"active": False, "symbols": {}}
 
     # ── Lifecycle ───────────────────────────────────────────────────────
 
@@ -153,10 +190,13 @@ class WickRejectionTrigger:
         while True:
             try:
                 cfg = self._wr_config()
-                lead = float(cfg.get("entry_seconds_before_close") or 40.0)
+                lead = wake_lead_seconds(cfg)
                 now = self._clock()
                 await self._sleep(max(0.0, next_trigger_ts(now, lead) - now))
-                result = await self.run_once()
+                if entry_mode(self._wr_config()) == "clock":
+                    result = await self.run_once()
+                else:
+                    result = await self.run_watch()
                 if not (result.status == "skipped" and result.reason == "disabled"):
                     self.last_result = result
                     self.last_run_at = self._clock()
@@ -187,8 +227,7 @@ class WickRejectionTrigger:
         if not self.is_armed():
             return None
         now = self._clock()
-        lead = float(self._wr_config().get("entry_seconds_before_close") or 40.0)
-        return max(0.0, next_trigger_ts(now, lead) - now)
+        return max(0.0, next_trigger_ts(now, wake_lead_seconds(self._wr_config())) - now)
 
     # ── One cycle ───────────────────────────────────────────────────────
 
@@ -206,9 +245,10 @@ class WickRejectionTrigger:
         else:
             logger.info(message)
 
-    async def run_once(self) -> TriggerResult:
-        """Evaluate and execute one trigger cycle now."""
-        result = TriggerResult()
+    def _preflight(
+        self, result: TriggerResult
+    ) -> tuple[dict[str, Any], Any, dict[str, Any], list[str]] | None:
+        """Common gates; returns ``(runtime_config, ms, cfg, symbols)`` or None."""
         rc = self._runtime_config()
         gov = rc.get("launcher") or {}
         ms = getattr(self._app.state, "market_service", None)
@@ -219,19 +259,35 @@ class WickRejectionTrigger:
             or not self._is_enabled()
         ):
             result.status, result.reason = "skipped", "disabled"
-            return result
+            return None
         if ms is None:
             result.status, result.reason = "skipped", "no market service"
-            return result
-
-        min_s = float(cfg.get("min_seconds_to_close") or 0.0)
-        max_age = float(cfg.get("ws_price_max_age_seconds") or 5.0)
-        tf = str(cfg.get("analysis_timeframe") or "1H")
+            return None
         symbols = [s for s in ms.get_screener_universe(STRATEGY_NAME) if s]
         result.checked = list(symbols)
         if not symbols:
             result.status, result.reason = "skipped", "empty universe"
+            return None
+        return rc, ms, cfg, symbols
+
+    async def run_once(self) -> TriggerResult:
+        """Evaluate and execute one clock trigger cycle now."""
+        result = TriggerResult()
+        pre = self._preflight(result)
+        if pre is None:
             return result
+        rc, ms, cfg, symbols = pre
+        await self._clock_entry(symbols, result, rc, ms, cfg)
+        return result
+
+    async def _clock_entry(
+        self, symbols: list[str], result: TriggerResult,
+        rc: dict[str, Any], ms: Any, cfg: dict[str, Any],
+    ) -> None:
+        """§3.6 clock evaluation of ``symbols`` (no momentum measures)."""
+        min_s = float(cfg.get("min_seconds_to_close") or 0.0)
+        max_age = float(cfg.get("ws_price_max_age_seconds") or 5.0)
+        tf = str(cfg.get("analysis_timeframe") or "1H")
 
         # ── 1. Data, concurrently: candles + price per symbol ──────────
         async def _gather(sym: str) -> tuple[str, tuple[float | None, str, float | None]]:
@@ -251,7 +307,7 @@ class WickRejectionTrigger:
         price_txt = ", ".join(
             f"{s}={p[0]:g} ({p[1]}, {p[2]:.1f}s)" if p[0] and p[2] is not None
             else f"{s}={p[0]} ({p[1]})"
-            for s, p in result.prices.items()
+            for s, p in result.prices.items() if s in symbols
         )
         self._log(f"WR trigger: prices {price_txt}")
 
@@ -259,7 +315,7 @@ class WickRejectionTrigger:
         if left < min_s:
             result.status = "late"
             result.reason = f"data ready {left:.1f}s before close < {min_s:g}s"
-            return result
+            return
 
         # ── 2. Decisions (all launcher guards apply) ────────────────────
         decisions: list[tuple[str, dict[str, Any]]] = []
@@ -273,10 +329,19 @@ class WickRejectionTrigger:
                     decisions.append((sym, d))
             except Exception as exc:  # pragma: no cover - defensive
                 result.dropped[sym] = f"decision error: {exc}"
-        result.signals = [s for s, _ in decisions]
+        result.signals.extend(s for s, _ in decisions)
+        await self._execute_ranked(decisions, result, rc, ms, cfg)
 
+    async def _execute_ranked(
+        self, decisions: list[tuple[str, dict[str, Any]]], result: TriggerResult,
+        rc: dict[str, Any], ms: Any, cfg: dict[str, Any],
+    ) -> None:
+        """Rank by ``rank_score``, apply the slot and margin caps, execute."""
+        min_s = float(cfg.get("min_seconds_to_close") or 0.0)
         # ── 3. Rank, slots, margin budget ───────────────────────────────
-        decisions.sort(key=lambda sd: float(sd[1].get("_rank_score") or 0.0), reverse=True)
+        decisions = sorted(
+            decisions, key=lambda sd: float(sd[1].get("_rank_score") or 0.0), reverse=True
+        )
         open_wr = [
             v for k, v in getattr(ms, "_launcher_in_position", {}).items()
             if str((v or {}).get("strategy") or str(k).split(":", 1)[0]) == STRATEGY_NAME
@@ -328,6 +393,7 @@ class WickRejectionTrigger:
                 )
                 if ok:
                     result.executed.append(sym)
+                    result.dropped.pop(sym, None)
                 else:
                     result.dropped[sym] = "not executed (see execution log)"
             except asyncio.TimeoutError:
@@ -336,6 +402,133 @@ class WickRejectionTrigger:
                 result.dropped[sym] = f"execution error: {exc}"
             finally:
                 self._lock.release()
+
+    # ── Momentum mode (§3.8) ────────────────────────────────────────────
+
+    async def run_watch(self) -> TriggerResult:
+        """One momentum watch window: from ``watch_seconds_before_close`` to
+        ``min_seconds_to_close`` before the hour.
+
+        Records the trade tape, computes the measures every
+        ``momentum_eval_interval_seconds``, and enters a symbol the first
+        time its measures pass inside ``momentum_entry_max_seconds_to_close``
+        (and the strategy funnel agrees).  ``momentum_or_clock``: symbols not
+        entered by ``entry_seconds_before_close`` get the clock evaluation.
+        """
+        result = TriggerResult()
+        pre = self._preflight(result)
+        if pre is None:
+            return result
+        rc, ms, cfg, symbols = pre
+        mode = entry_mode(cfg)
+        result.mode = mode
+        watch_s = float(cfg.get("watch_seconds_before_close") or 300.0)
+        entry_max = float(cfg.get("momentum_entry_max_seconds_to_close") or 120.0)
+        min_s = float(cfg.get("min_seconds_to_close") or 0.0)
+        interval = max(0.5, float(cfg.get("momentum_eval_interval_seconds") or 2.0))
+        clock_lead = float(cfg.get("entry_seconds_before_close") or 40.0)
+        tf = str(cfg.get("analysis_timeframe") or "1H")
+
+        ms.start_wr_tape(symbols, watch_s + 120.0)
+        state: dict[str, dict[str, Any]] = {s: {"status": "watching", "measures": None} for s in symbols}
+        self.watch = {"active": True, "mode": mode, "symbols": state}
+        pending = list(symbols)
+        gapped: dict[str, str] = {}
+        early_logged: set[str] = set()
+        last_refresh: dict[str, float] = {}
+        last_veto: dict[str, str] = {}
+
+        async def _refresh(sym: str) -> None:
+            try:
+                await ms.refresh_timeframe_candles(sym, tf)
+                last_refresh[sym] = self._clock()
+            except Exception as exc:  # pragma: no cover - network safety
+                self._log(f"WR momentum: {sym} candle refresh failed: {exc}")
+
+        try:
+            await asyncio.gather(*(_refresh(s) for s in symbols), return_exceptions=True)
+            while pending:
+                now = self._clock()
+                left = seconds_to_hour_close(now)
+                if left < min_s or left > watch_s + 60.0:
+                    break
+                if mode == "momentum_or_clock" and left <= clock_lead:
+                    self._log(
+                        f"WR momentum: clock fallback for {len(pending)} symbol(s) "
+                        f"{pending} at {left:.0f}s to close"
+                    )
+                    for sym in pending:
+                        state[sym]["status"] = "clock fallback"
+                    await self._clock_entry(list(pending), result, rc, ms, cfg)
+                    pending = [s for s in pending if s not in result.executed]
+                    break
+
+                candidates: list[tuple[str, MomentumMeasures]] = []
+                for sym in list(pending):
+                    tape, gap = ms.wr_tape(sym)
+                    if gap:
+                        if sym not in gapped:
+                            gapped[sym] = gap
+                            self._log(f"WR momentum: {sym} excluded this hour — tape gap ({gap})")
+                        state[sym]["status"] = f"tape gap: {gap}"
+                        if mode == "momentum":
+                            pending.remove(sym)
+                            result.dropped[sym] = f"tape gap ({gap})"
+                        continue
+                    m = compute_momentum(tape, int(now * 1000), watch_s)
+                    ok, fails = momentum_entry_ok(m, cfg)
+                    state[sym]["measures"] = m.describe() if m else None
+                    state[sym]["status"] = "momentum ok" if ok else "; ".join(fails)
+                    if not ok or m is None:
+                        continue
+                    if left > entry_max:
+                        if sym not in early_logged:
+                            early_logged.add(sym)
+                            self._log(
+                                f"WR momentum: {sym} passed {left:.0f}s before close, before "
+                                f"the {entry_max:g}s entry window — not traded: {m.describe()}"
+                            )
+                        continue
+                    candidates.append((sym, m))
+
+                decisions: list[tuple[str, dict[str, Any]]] = []
+                for sym, m in candidates:
+                    if self._clock() - last_refresh.get(sym, 0.0) >= 10.0:
+                        await _refresh(sym)
+                    try:
+                        ds = ms.build_launcher_decisions(
+                            sym, strategies=[STRATEGY_NAME], price=m.last_px, momentum=m
+                        )
+                    except Exception as exc:  # pragma: no cover - defensive
+                        ds = []
+                        self._log(f"WR momentum: {sym} decision error: {exc}")
+                    verdict = "signal" if ds else "funnel veto (see strategy log)"
+                    if ds or last_veto.get(sym) != verdict:
+                        self._log(
+                            f"WR momentum: {sym} {left:.0f}s to close → {verdict}: {m.describe()}"
+                        )
+                        last_veto[sym] = verdict
+                    decisions.extend((sym, d) for d in ds)
+                if decisions:
+                    result.signals.extend(s for s, _ in decisions if s not in result.signals)
+                    await self._execute_ranked(decisions, result, rc, ms, cfg)
+                    for sym in list(pending):
+                        if sym in result.executed:
+                            pending.remove(sym)
+                            state[sym]["status"] = "entered"
+                await self._sleep(interval)
+
+            for sym in pending:
+                if sym in result.executed:
+                    continue
+                st = state.get(sym) or {}
+                self._log(
+                    f"WR momentum: {sym} no entry this hour — {st.get('status')}; "
+                    f"last measures: {st.get('measures') or 'none'}"
+                )
+        finally:
+            ms.stop_wr_tape()
+            self.watch["active"] = False
         return result
 
 
@@ -353,6 +546,8 @@ def _snapshot_equity(ms: Any) -> float | None:
 
 __all__ = [
     "TriggerResult",
+    "entry_mode",
+    "wake_lead_seconds",
     "WickRejectionTrigger",
     "launcher_execution_context",
     "next_trigger_ts",

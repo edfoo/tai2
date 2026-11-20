@@ -245,23 +245,30 @@ async def fetch_trade_history_records(
 ) -> list[dict[str, float | int | str]]:
     """Return timestamped public trade-tape records in ``[start_ts, end_ts]``.
 
-    OKX ``/api/v5/market/history-trades`` returns recent public trades
-    (newest first, up to 100 per page, ~3 months of history).  Each record is
-    ``{"ts": int, "px": float, "sz": float, "side": "buy"|"sell"}``.  ``after``
-    is advanced to the oldest timestamp from each page to walk backward.
+    OKX ``/api/v5/market/history-trades`` returns public trades newest first,
+    up to 100 per page, about 3 months back.  Each record is
+    ``{"ts": int, "px": float, "sz": float, "side": "buy"|"sell"}``.
 
-    The tape is used to estimate the effective bid-ask spread (Corwin-Schultz
-    / Roll), which is a *spread* estimate — not order-book depth or impact.
+    Pages walk backward by **timestamp** (``type=2``; without it OKX reads
+    ``after`` as a trade ID).  ``after`` is exclusive and many trades can share
+    one millisecond, so a page can end part-way through a millisecond: the next
+    cursor is ``oldest + 1`` (that millisecond is fetched again) and records
+    are deduplicated by ``tradeId``.  When a single millisecond holds a full
+    page the cursor moves past it and the overflow is lost (logged).
+
+    The tape feeds the spread estimate (Corwin-Schultz / Roll) and the
+    wick_rejection momentum tape replay.
     """
     if end_ts <= start_ts:
         return []
-    cursor = int(end_ts)
-    records: dict[int, dict[str, float | int | str]] = {}
+    page = min(max(limit, 1), 100)
+    cursor = int(end_ts) + 1  # after is exclusive; include end_ts
+    records: dict[str, dict[str, float | int | str]] = {}
     for _ in range(max(1, max_pages)):
         try:
             raw = await _get(
                 "/api/v5/market/history-trades",
-                {"instId": symbol, "after": str(cursor), "limit": str(min(max(limit, 1), 100))},
+                {"instId": symbol, "type": "2", "after": str(cursor), "limit": str(page)},
             )
         except Exception as exc:
             _log.warning("Trade-tape fetch failed for %s: %s", symbol, exc)
@@ -278,20 +285,29 @@ async def fetch_trade_history_records(
                 continue
             timestamps.append(timestamp)
             if start_ts <= timestamp <= end_ts:
-                # Keep the last-seen record per timestamp (dedupe collisions).
-                records[timestamp] = {
-                    "ts": timestamp,
-                    "px": price,
-                    "sz": size,
-                    "side": str(row.get("side") or ""),
-                }
+                side = str(row.get("side") or "")
+                trade_id = str(row.get("tradeId") or "")
+                key = trade_id or f"{timestamp}:{price}:{size}:{side}"
+                order = int(trade_id) if trade_id.isdigit() else 0
+                records[key] = {"ts": timestamp, "px": price, "sz": size, "side": side,
+                                "_order": order}
         if not timestamps:
             break
         oldest = min(timestamps)
-        if oldest <= start_ts or oldest >= cursor:
+        if oldest < start_ts or len(raw) < page:
             break
-        cursor = oldest
-    return [records[ts] for ts in sorted(records)]
+        nxt = oldest + 1
+        if nxt >= cursor:
+            _log.warning(
+                "Trade-tape %s: more than %d trades at ts=%d; overflow skipped",
+                symbol, page, oldest,
+            )
+            nxt = oldest
+        cursor = nxt
+    ordered = sorted(records.values(), key=lambda r: (int(r["ts"]), int(r["_order"])))
+    for r in ordered:
+        r.pop("_order", None)
+    return ordered
 
 
 # ---------------------------------------------------------------------------

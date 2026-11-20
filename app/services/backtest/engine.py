@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections import deque
 from datetime import datetime, timezone
 from typing import Any, Callable
 
@@ -46,14 +47,21 @@ from app.services.backtest.spread import estimate_spread_series, roll_spread_bps
 from app.services.backtest.universe import UniverseSchedule, build_universe_schedule
 from app.services.launcher_tp_sl import LauncherTpSl, resolve_launcher_tp_sl
 from app.services.strategies import Strategy, StrategyHelpers
+from app.services.strategies.defaults import merged_config
 from app.services.strategies.liquidity_sweep import LiquiditySweepStrategy
 from app.services.strategies.mean_reversion import MeanReversionStrategy
 from app.services.strategies.spike_continuation import SpikeContinuationStrategy
 from app.services.strategies.trend_pullback import TrendPullbackStrategy
 from app.services.strategies.vwap_reversion import VWAPReversionStrategy
 from app.services.strategies.wick_rejection import (
+    STRATEGY_NAME as WR_NAME,
     WickRejectionStrategy,
     backtest_entry_timing,
+)
+from app.services.strategies.wr_momentum import (
+    attach_momentum,
+    compute_momentum,
+    tape_from_candles,
 )
 
 logger = logging.getLogger(__name__)
@@ -710,6 +718,10 @@ class BacktestEngine:
         # acc[symbol]             → current in-progress LTF accumulator, or None.
         closed_window: dict[str, list[Candle]] = {s: [] for s in self._symbols}
         acc: dict[str, dict[str, Any] | None] = {s: None for s in self._symbols}
+        # Recent eval candles per symbol — the wick_rejection momentum mode's
+        # 1m approximation of the live trade tape (plan §3.8).
+        eval_ms = timeframe_ms(self._eval_tf) if self._eval_tf else ltf_ms
+        recent_eval: dict[str, deque[Candle]] = {s: deque(maxlen=16) for s in self._symbols}
 
         # Pre-seed closed_window with LTF candles whose ts < the first eval
         # candle's LTF bucket.  This gives indicators enough warmup history
@@ -790,6 +802,7 @@ class BacktestEngine:
             # Evaluate strategies for each symbol using the incomplete LTF candle.
             step_snapshots: dict[str, dict[str, Any]] = {}
             for symbol, eval_candle in step_candles.items():
+                recent_eval[symbol].append(eval_candle)
                 cur = acc[symbol]
                 if cur is None:
                     continue  # no accumulator yet (shouldn't happen)
@@ -824,7 +837,13 @@ class BacktestEngine:
                         or not self._simulator.can_enter(symbol, eval_candle.ts)
                     ):
                         continue
-                    signal = strategy.evaluate(symbol, snapshot, strat_cfg, self._helpers)
+                    if strategy.name == WR_NAME:
+                        signal = self._evaluate_wick_rejection(
+                            strategy, symbol, snapshot, strat_cfg,
+                            recent_eval[symbol], eval_candle.ts + eval_ms,
+                        )
+                    else:
+                        signal = strategy.evaluate(symbol, snapshot, strat_cfg, self._helpers)
                     if signal is None:
                         continue
                     # Resolve TP/SL and direction-flip from signal (shared with live).
@@ -925,6 +944,36 @@ class BacktestEngine:
         if not candles_by_symbol:
             return None
         return compute_equal_weight_buy_and_hold(candles_by_symbol, self._config.initial_capital)
+
+    def _evaluate_wick_rejection(
+        self,
+        strategy: Strategy,
+        symbol: str,
+        snapshot: dict[str, Any],
+        strat_cfg: dict[str, Any],
+        recent: Any,
+        now_ms: int,
+    ) -> Any:
+        """wick_rejection with its momentum entry mode (plan §3.8).
+
+        ``clock``: plain evaluation.  Momentum modes: the measures come from
+        ``compute_momentum`` on a tape built from the recent eval candles (the
+        1m approximation) and are attached to the snapshot, so the strategy
+        applies the same gate and window as live.  ``momentum_or_clock`` falls
+        back to the clock evaluation when the momentum one does not fire.
+        """
+        cfg = merged_config(strat_cfg, WR_NAME)
+        mode = str(cfg.get("entry_mode") or "clock").lower()
+        if mode not in ("momentum", "momentum_or_clock"):
+            return strategy.evaluate(symbol, snapshot, strat_cfg, self._helpers)
+        watch_s = float(cfg.get("watch_seconds_before_close") or 300.0)
+        measures = compute_momentum(tape_from_candles(recent), now_ms, watch_s)
+        signal = strategy.evaluate(
+            symbol, attach_momentum(snapshot, symbol, measures), strat_cfg, self._helpers
+        )
+        if signal is None and mode == "momentum_or_clock":
+            signal = strategy.evaluate(symbol, snapshot, strat_cfg, self._helpers)
+        return signal
 
     def _compute_tp_sl(
         self,

@@ -9,6 +9,11 @@ Funnel (§3.1), each stage vetoes before the next:
   0. ``enabled``
   1. A forming candle is present on the analysis block.
   2. Entry window: ``min_seconds_to_close <= seconds_to_close <= max_seconds_to_close``.
+     Momentum entry mode (§3.8, ``entry_mode`` ≠ ``"clock"``): when the caller
+     attached ``sym_data["wr_momentum"]`` the window ends at
+     ``momentum_entry_max_seconds_to_close`` instead and the measures must pass
+     ``wr_momentum.momentum_entry_ok``; without measures the clock rules apply
+     (``"momentum_or_clock"``) or nothing enters (``"momentum"``).
   3. Forming candle is green (``require_forming_green``).
   4. Range ``(H − L) / L × 100 >= min_candle_range_pct``.
   5. High offset ``(H − P) / (H − L) × 100 <= max_high_offset_pct``.
@@ -33,6 +38,7 @@ from app.services.screener import timeframe_to_ms
 
 from . import StrategyHelpers, StrategySignal, resolve_analysis_block
 from .defaults import merged_config
+from .wr_momentum import MomentumMeasures, momentum_entry_ok
 
 STRATEGY_NAME = "wick_rejection"
 
@@ -165,10 +171,28 @@ class WickRejectionStrategy:
         seconds_to_close = (f_ts + bar_ms - as_of) / 1000.0
         min_s = _f(cfg.get("min_seconds_to_close")) or 0.0
         max_s = _f(cfg.get("max_seconds_to_close"))
+        # Momentum entry mode (§3.8): measures attached by the caller
+        # (``wr_momentum.attach_momentum``) make this a momentum evaluation,
+        # with its own, earlier window.  Without measures the clock rules
+        # apply, except in pure "momentum" mode, which never enters on them.
+        mode = str(cfg.get("entry_mode") or "clock").lower()
+        mom_raw = sym_data.get("wr_momentum") if mode != "clock" else None
+        momentum: MomentumMeasures | None = None
+        if isinstance(mom_raw, dict):
+            if not mom_raw.get("missing"):
+                momentum = MomentumMeasures.from_dict(mom_raw)
+            max_s = _f(cfg.get("momentum_entry_max_seconds_to_close"))
+        elif mode == "momentum":
+            return None
         if seconds_to_close < min_s or (max_s is not None and seconds_to_close > max_s):
             return None
 
         tag = f"WickRejection {symbol}"
+        if isinstance(mom_raw, dict):
+            ok, fails = momentum_entry_ok(momentum, cfg)
+            if not ok:
+                helpers.emit_debug(f"{tag}: veto momentum ({'; '.join(fails)})")
+                return None
 
         # ── 3. Forming green ────────────────────────────────────────────
         if bool(cfg.get("require_forming_green", True)) and not p > f_o:
@@ -256,6 +280,10 @@ class WickRejectionStrategy:
             f"{offset_pct:.0f}% of {range_pct:.1f}% range, body "
             f"{ratio_max:.1f}x ({age_txt})"
         )
+        if momentum is not None:
+            rationale += f"; momentum: {momentum.describe()}"
+        elif mode != "clock":
+            rationale += "; clock entry"
         helpers.emit_debug(f"{tag}: SIGNAL sell — {rationale}")
         return StrategySignal(
             direction="sell",
@@ -321,5 +349,19 @@ def backtest_entry_timing(
         out["reason"] = (
             f"parity gap: backtest enters {max(fits):g}s before the close "
             f"(eval-candle close), live {live_s:g}s"
+        )
+    mode = str(cfg.get("entry_mode") or "clock").lower()
+    out["entry_mode"] = mode
+    if mode in ("momentum", "momentum_or_clock"):
+        mom_max = _f(cfg.get("momentum_entry_max_seconds_to_close")) or 0.0
+        out["momentum_seconds_before_close"] = [
+            k * step_s for k in range(1, int(bar_s // step_s) + 1)
+            if min_s <= k * step_s <= mom_max and k * step_s < bar_s
+        ]
+        out["momentum"] = (
+            "1m approximation: measures from a tape built out of the eval candles "
+            "(minute-resolution returns, secs_since_high to within a candle, no buy "
+            "share); live uses the websocket trade tape every "
+            f"{cfg.get('momentum_eval_interval_seconds')}s"
         )
     return out

@@ -2442,6 +2442,16 @@ def register_pages(app: FastAPI) -> None:
             if secs is None:
                 wr_trigger_label.set_visibility(False)
                 return
+            watch = getattr(trigger, "watch", None) or {}
+            if watch.get("active"):
+                syms = watch.get("symbols") or {}
+                wr_trigger_label.set_text(f"| WR watching {len(syms)} ({watch.get('mode')})")
+                wr_trigger_tooltip.set_text("\n".join(
+                    f"{sym}: {st.get('status')}" + (f" — {st['measures']}" if st.get("measures") else "")
+                    for sym, st in syms.items()
+                ) or "No symbols")
+                wr_trigger_label.set_visibility(True)
+                return
             mins, s = divmod(int(secs), 60)
             text = f"| WR trigger in {mins}:{s:02d}"
             last = getattr(trigger, "last_result", None)
@@ -4850,6 +4860,59 @@ def register_pages(app: FastAPI) -> None:
                                 "Forming candle must be green", value=bool(_wr_cfg["require_forming_green"]),
                             ).props("dense color=primary")
 
+                        # ── Momentum entry mode (§3.8) ──────────────────
+                        ui.label("Momentum entry mode (optional)").classes("text-xs font-semibold text-slate-600 mt-3")
+                        ui.label(
+                            "clock = one entry at the trigger time above. momentum = watch the trade tape "
+                            "from the watch start and enter the first moment the price has stalled near the "
+                            "high, inside the momentum entry window; no entry otherwise. momentum_or_clock = "
+                            "as momentum, then the clock entry for symbols that did not trigger. Blank "
+                            "thresholds are off. The backtest uses a 1m approximation (entries 120 s or 60 s "
+                            "before the close)."
+                        ).classes("text-[11px] text-slate-400 mb-2")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-start mt-1"):
+                            wr_entry_mode_select = ui.select(
+                                ["clock", "momentum", "momentum_or_clock"], label="Entry mode",
+                                value=str(_wr_cfg.get("entry_mode") or "clock"),
+                            ).classes("w-44").props("dense")
+                            wr_watch_seconds_input = ui.number(
+                                label="Watch from (s before close)", value=float(_wr_cfg["watch_seconds_before_close"]),
+                                min=30, max=1800, step=10, format="%.0f",
+                            ).classes("w-44").props("dense")
+                            wr_mom_entry_max_input = ui.number(
+                                label="Momentum window max (s)", value=float(_wr_cfg["momentum_entry_max_seconds_to_close"]),
+                                min=10, max=1800, step=5, format="%.0f",
+                            ).classes("w-44").props("hint='Entries only from here to Window min' persistent-hint dense")
+                            wr_mom_interval_input = ui.number(
+                                label="Evaluate every (s)", value=float(_wr_cfg["momentum_eval_interval_seconds"]),
+                                min=0.5, max=30, step=0.5, format="%.1f",
+                            ).classes("w-36").props("dense")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-start mt-1"):
+                            def _opt_val(key: str) -> float | None:
+                                v = _wr_cfg.get(key)
+                                return float(v) if v is not None else None
+
+                            wr_stall_input = ui.number(
+                                label="Min seconds since high", value=_opt_val("stall_min_seconds"),
+                                min=0, max=1800, step=5, format="%.0f",
+                            ).classes("w-44").props("clearable dense")
+                            wr_max_below_high_input = ui.number(
+                                label="Max % below high", value=_opt_val("max_below_high_pct"),
+                                min=0, max=20, step=0.1, format="%.2f",
+                            ).classes("w-44").props("clearable dense")
+                            wr_min_ret_input = ui.number(
+                                label="Min 60 s return (%)", value=_opt_val("min_ret_60s"),
+                                min=-20, max=20, step=0.1, format="%.2f",
+                            ).classes("w-44").props("clearable dense")
+                            wr_max_ret_input = ui.number(
+                                label="Max 60 s return (%)", value=_opt_val("max_ret_60s"),
+                                min=-20, max=20, step=0.1, format="%.2f",
+                            ).classes("w-44").props("clearable dense hint='Off by default' persistent-hint")
+                            wr_max_buy_share_input = ui.number(
+                                label="Max 60 s buy share", value=_opt_val("max_buy_share_60s"),
+                                min=0, max=1, step=0.05, format="%.2f",
+                            ).classes("w-44").props("clearable dense hint='Off by default; live only' persistent-hint")
+
                         # ── Exits ───────────────────────────────────────
                         ui.separator().classes("my-2")
                         ui.label("Exits · owned by the strategy").classes("text-xs font-bold text-slate-700")
@@ -4958,6 +5021,18 @@ def register_pages(app: FastAPI) -> None:
                     "max_high_offset_pct": _num(wr_max_offset_input, d["max_high_offset_pct"]),
                     "min_candle_range_pct": _num(wr_min_range_input, d["min_candle_range_pct"]),
                     "require_forming_green": bool(wr_require_green_switch.value),
+                    "entry_mode": str(wr_entry_mode_select.value or "clock"),
+                    "watch_seconds_before_close": _num(wr_watch_seconds_input, d["watch_seconds_before_close"]),
+                    "momentum_entry_max_seconds_to_close": _num(
+                        wr_mom_entry_max_input, d["momentum_entry_max_seconds_to_close"]
+                    ),
+                    "momentum_eval_interval_seconds": _num(wr_mom_interval_input, d["momentum_eval_interval_seconds"]),
+                    # Blank = condition off.
+                    "stall_min_seconds": _num(wr_stall_input, None),
+                    "max_below_high_pct": _num(wr_max_below_high_input, None),
+                    "min_ret_60s": _num(wr_min_ret_input, None),
+                    "max_ret_60s": _num(wr_max_ret_input, None),
+                    "max_buy_share_60s": _num(wr_max_buy_share_input, None),
                     "tp_pct": _num(wr_tp_input, d["tp_pct"]),
                     "tp_unit": str(wr_tp_unit_select.value or "price"),
                     "emergency_stop_mode": str(wr_stop_mode_select.value or "exchange"),
@@ -5017,6 +5092,15 @@ def register_pages(app: FastAPI) -> None:
                 wr_max_offset_input.value = d["max_high_offset_pct"]
                 wr_min_range_input.value = d["min_candle_range_pct"]
                 wr_require_green_switch.value = d["require_forming_green"]
+                wr_entry_mode_select.value = d["entry_mode"]
+                wr_watch_seconds_input.value = d["watch_seconds_before_close"]
+                wr_mom_entry_max_input.value = d["momentum_entry_max_seconds_to_close"]
+                wr_mom_interval_input.value = d["momentum_eval_interval_seconds"]
+                wr_stall_input.value = d["stall_min_seconds"]
+                wr_max_below_high_input.value = d["max_below_high_pct"]
+                wr_min_ret_input.value = d["min_ret_60s"]
+                wr_max_ret_input.value = d["max_ret_60s"]
+                wr_max_buy_share_input.value = d["max_buy_share_60s"]
                 wr_tp_input.value = d["tp_pct"]
                 wr_tp_unit_select.value = d["tp_unit"]
                 wr_stop_mode_select.value = d["emergency_stop_mode"]

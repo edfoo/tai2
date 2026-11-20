@@ -140,35 +140,70 @@ async def test_funding_history_records_are_paginated_and_range_filtered(monkeypa
     assert calls[1][1]["after"] == "200"
 
 
-@pytest.mark.asyncio
-async def test_trade_history_records_are_paginated_and_range_filtered(monkeypatch) -> None:
-    import app.services.okx_metrics as module
-
-    pages = [
-        [
-            {"ts": "300", "px": "100.5", "sz": "2", "side": "buy"},
-            {"ts": "200", "px": "100.0", "sz": "1", "side": "sell"},
-        ],
-        [
-            {"ts": "200", "px": "100.0", "sz": "1", "side": "sell"},
-            {"ts": "100", "px": "99.5", "sz": "3", "side": "buy"},
-        ],
-    ]
-    calls = []
+def _fake_okx_history_trades(rows: list[dict[str, str]]):
+    """A fake ``/market/history-trades`` with OKX's ``type=2`` semantics:
+    newest first, ``after`` exclusive (trades with ts < after), ``limit`` cap."""
+    calls: list[dict[str, str]] = []
+    ordered = sorted(rows, key=lambda r: (int(r["ts"]), int(r["tradeId"])), reverse=True)
 
     async def fake_get(path, params):
-        calls.append((path, params))
-        return pages.pop(0)
+        assert path == "/api/v5/market/history-trades"
+        assert params["type"] == "2"  # after is a timestamp, not a trade ID
+        calls.append(dict(params))
+        after = int(params["after"])
+        return [r for r in ordered if int(r["ts"]) < after][: int(params["limit"])]
 
+    return fake_get, calls
+
+
+@pytest.mark.asyncio
+async def test_trade_history_records_keep_every_trade(monkeypatch) -> None:
+    """Recorded OKX page (BTC, up to 38 trades in one ms) served in pages just
+    larger than the busiest millisecond (as 100 vs 38 live): every trade in
+    range comes back once, in tradeId order, although page boundaries split
+    milliseconds."""
+    from collections import Counter
+    import json
+    from pathlib import Path
+
+    import app.services.okx_metrics as module
+
+    rows = json.loads(
+        (Path(__file__).parent / "fixtures" / "okx_history_trades_btc.json").read_text()
+    )["data"]
+    fake_get, calls = _fake_okx_history_trades(rows)
+    monkeypatch.setattr(module, "_get", fake_get)
+    page = max(Counter(r["ts"] for r in rows).values()) + 2
+    ts = sorted(int(r["ts"]) for r in rows)
+    start, end = ts[5], ts[-5]
+
+    result = await module.fetch_trade_history_records(
+        "BTC-USDT-SWAP", start, end, limit=page, max_pages=500
+    )
+
+    expected = sorted(
+        (r for r in rows if start <= int(r["ts"]) <= end),
+        key=lambda r: (int(r["ts"]), int(r["tradeId"])),
+    )
+    assert len(result) == len(expected)
+    assert [(x["ts"], x["px"], x["sz"], x["side"]) for x in result] == [
+        (int(r["ts"]), float(r["px"]), float(r["sz"]), r["side"]) for r in expected
+    ]
+    assert calls[0]["after"] == str(end + 1)
+    assert len(calls) >= 3  # several pages, boundaries inside milliseconds
+
+
+@pytest.mark.asyncio
+async def test_trade_history_records_overflowing_millisecond_terminates(monkeypatch) -> None:
+    import app.services.okx_metrics as module
+
+    rows = [{"tradeId": str(i), "ts": "500", "px": "1", "sz": "1", "side": "buy"} for i in range(10)]
+    rows += [{"tradeId": "100", "ts": "400", "px": "1", "sz": "1", "side": "sell"}]
+    fake_get, calls = _fake_okx_history_trades(rows)
     monkeypatch.setattr(module, "_get", fake_get)
 
-    result = await module.fetch_trade_history_records("BTC-USDT-SWAP", 150, 350)
+    result = await module.fetch_trade_history_records("X", 300, 600, limit=5, max_pages=20)
 
-    assert result == [
-        {"ts": 200, "px": 100.0, "sz": 1.0, "side": "sell"},
-        {"ts": 300, "px": 100.5, "sz": 2.0, "side": "buy"},
-    ]
-    assert len(calls) == 2
-    assert calls[0][0] == "/api/v5/market/history-trades"
-    assert calls[0][1]["after"] == "350"
-    assert calls[1][1]["after"] == "200"
+    assert len(calls) < 20
+    assert [r["ts"] for r in result][0] == 400
+    assert sum(1 for r in result if r["ts"] == 500) == 5  # overflow beyond one page lost

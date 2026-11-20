@@ -68,7 +68,7 @@ uv run pytest
 ```
 - `pytest-xdist` runs with `-n auto` by default (see `pyproject.toml`); the suite takes ~15s.
 - Tests marked `network` hit live services and are skipped by default.
-- All tests must pass (980 passing, 0 pre-existing failures as of 2026-11-20). Any failure is a regression.
+- All tests must pass (1017 passing, 0 pre-existing failures as of 2026-11-20). Any failure is a regression.
 
 ---
 
@@ -155,7 +155,7 @@ logs/app.log               # Rotating log file (5 MB × 5 backups), created at r
 
 With `launcher.schedule="on_close"`, the scheduler waits for all positions to close before the next tick.
 
-**`wick_rejection` is trigger-only:** the tick skips it (`TRIGGER_ONLY_STRATEGIES`). `WickRejectionTrigger` (started/stopped with the scheduler) wakes at `H:00 − entry_seconds_before_close`, refetches 1H candles, takes the websocket (or REST) price, calls `build_launcher_decisions(sym, strategies=["wick_rejection"], price=P)` (forming candle patched to `P`), ranks and caps the entries, and executes them under the scheduler's shared `execute_lock`.
+**`wick_rejection` is trigger-only:** the tick skips it (`TRIGGER_ONLY_STRATEGIES`). `WickRejectionTrigger` (started/stopped with the scheduler) wakes at `H:00 − entry_seconds_before_close`, refetches 1H candles, takes the websocket (or REST) price, calls `build_launcher_decisions(sym, strategies=["wick_rejection"], price=P)` (forming candle patched to `P`), ranks and caps the entries, and executes them under the scheduler's shared `execute_lock`. With `entry_mode` = `momentum` / `momentum_or_clock` (default `clock`) it instead wakes at `watch_seconds_before_close`, records the public trade tape (`MarketService.start_wr_tape`), and passes `compute_momentum` measures to the strategy (`build_launcher_decisions(..., momentum=)`), which applies the momentum gate itself — the backtest feeds it measures from 1m candles (`wr_momentum.tape_from_candles`).
 
 ### LLM flow (dormant)
 `prompt_builder` → `llm_service` / OpenRouter → `prompt_runner.apply_llm_decision` → `handle_llm_decision()`.
@@ -199,6 +199,7 @@ Parity is a core design rule: logic is written **once** and shared, never mirror
 - Screener: `screener.py` (see below).
 - Guardrails: the backtest receives `guardrails_config` separately from `launcher_config` / `strategy_config`, matching the live `runtime_config` split.
 - Candle visibility: a snapshot describes one moment (`as_of_ts`). Tf blocks and HTF layers hold only candles **closed** by then (`ts + bar_ms <= as_of_ts`; OKX `ts` is the bar's *open* time, so `ts <= now` would leak the bar's final values). Backtest moment = close of the step candle (`build`: `ts + ltf_ms`; finer_ltf: `current_ts + eval_ms`). In finer_ltf the in-progress tf bar is aggregated from eval candles as `forming_candle`. Pinned by `tests/test_forming_candle.py`.
+- Trade tape: `okx_metrics.fetch_trade_history_records` pages `/market/history-trades` by timestamp (`type=2`; `after` is exclusive, many trades share a millisecond → cursor `oldest + 1`, dedupe by `tradeId`).
 - Backtest history: OKX `/market/candles` only serves the newest 1,440 candles; `HistoricalDataFetcher._fetch_range` continues on `/market/history-candles` for older data. Never page historical ranges on the recent endpoint alone.
 - Live per-timeframe candles live in `_latest_ohlcv_tf[(symbol, bar)]` — pass `cache_key=(symbol, bar)` to `_fetch_ohlcv_bar`.
 

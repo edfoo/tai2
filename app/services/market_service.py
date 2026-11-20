@@ -60,6 +60,7 @@ from app.services.strategies.spike_continuation import SpikeContinuationStrategy
 from app.services.strategies.trend_pullback import TrendPullbackStrategy
 from app.services.strategies.vwap_reversion import VWAPReversionStrategy
 from app.services.strategies.wick_rejection import WickRejectionStrategy
+from app.services.strategies.wr_momentum import MOMENTUM_MISSING, attach_momentum
 
 
 def _ensure_httpx_proxies_compat() -> None:
@@ -395,6 +396,15 @@ class MarketService:
         self._missing_isolated_wallet_symbols: set[str] = set()
         self._position_tiers: dict[str, dict[str, Any]] = {}
         self._subscribed_symbols: set[str] = set()
+        # wick_rejection momentum mode (plan §3.8): per-symbol public trade
+        # tape recorded only during the trigger's watch window.  ``_ws_epoch``
+        # changes on every public websocket (re)connect/disconnect so a tape
+        # that spans one is detected as having a gap.
+        self._ws_epoch: int = 0
+        self._wr_tape: dict[str, Deque[dict[str, Any]]] = {}
+        self._wr_tape_symbols: set[str] = set()
+        self._wr_tape_keep_ms: float = 420_000.0
+        self._wr_tape_meta: dict[str, Any] = {}
         self._available_symbols: list[str] = []
         self._instrument_specs: dict[str, dict[str, float]] = {}
         self._poll_interval = max(1, self.settings.poll_interval)
@@ -665,6 +675,7 @@ class MarketService:
                 channels = self._build_channel_args(self.symbols)
                 await self._ws_client.subscribe(channels, self._handle_ws_message)
                 self._subscribed_symbols = set(self.symbols)
+                self._ws_epoch += 1
                 delay = 5.0  # reset backoff on successful connect
                 logger.info("Public WS connected and subscribed to %s", list(self._subscribed_symbols))
 
@@ -688,6 +699,7 @@ class MarketService:
                     await self._ws_client.stop()
                     self._ws_client = None
                     self._subscribed_symbols.clear()
+                    self._ws_epoch += 1
 
                 logger.warning("Public WS consume() returned; reconnecting in %.0fs", delay)
             except asyncio.CancelledError:
@@ -702,6 +714,7 @@ class MarketService:
                         pass
                     self._ws_client = None
                     self._subscribed_symbols.clear()
+                    self._ws_epoch += 1
 
             await asyncio.sleep(delay)
             delay = min(delay * 2, 120.0)  # cap at 2 minutes
@@ -944,6 +957,8 @@ class MarketService:
                     fp_buf.append(
                         {"ts": ts_epoch, "px": px_val, "vol": vol_val, "side": side_val}
                     )
+                if px_val and symbol in self._wr_tape_symbols:
+                    self._record_wr_trade(symbol, entry, px_val, vol_val)
             elif channel == "funding-rate" and isinstance(entry, dict):
                 self._latest_funding[symbol] = entry
             elif channel == "open-interest" and isinstance(entry, dict):
@@ -954,6 +969,54 @@ class MarketService:
                 continue
             if self._should_emit_ws_debug(channel, symbol):
                 self._emit_debug(f"WS update: {channel}::{symbol}", mirror_logger=False)
+
+    # ── wick_rejection momentum tape (plan §3.8) ─────────────────────────
+
+    def start_wr_tape(self, symbols: Iterable[str], keep_seconds: float) -> None:
+        """Start recording the public trade tape for ``symbols`` (fresh tapes).
+
+        Symbols not subscribed on the public websocket right now are marked
+        as gapped for this recording.
+        """
+        syms = {str(s) for s in symbols if s}
+        self._wr_tape = {s: deque() for s in syms}
+        self._wr_tape_symbols = syms
+        self._wr_tape_keep_ms = max(60.0, float(keep_seconds)) * 1000.0
+        self._wr_tape_meta = {
+            "started_ms": time.time() * 1000.0,
+            "epoch": self._ws_epoch,
+            "subscribed": syms & set(self._subscribed_symbols),
+        }
+
+    def stop_wr_tape(self) -> None:
+        """Stop recording and drop the tapes."""
+        self._wr_tape_symbols = set()
+        self._wr_tape = {}
+        self._wr_tape_meta = {}
+
+    def _record_wr_trade(self, symbol: str, entry: dict[str, Any], px: float, sz: float) -> None:
+        tape = self._wr_tape.get(symbol)
+        if tape is None:
+            return
+        ts_ms = self._extract_float(entry.get("ts")) or time.time() * 1000.0
+        tape.append({"ts": int(ts_ms), "px": px, "sz": sz,
+                     "side": str(entry.get("side") or "")})
+        cutoff = ts_ms - self._wr_tape_keep_ms
+        while tape and tape[0]["ts"] < cutoff:
+            tape.popleft()
+
+    def wr_tape(self, symbol: str) -> tuple[list[dict[str, Any]], str | None]:
+        """Return ``(tape, gap_reason)``; ``gap_reason`` is ``None`` when the
+        tape is continuous since recording started."""
+        tape = self._wr_tape.get(symbol)
+        if tape is None:
+            return [], "not recorded"
+        meta = self._wr_tape_meta
+        if symbol not in meta.get("subscribed", set()):
+            return list(tape), "not subscribed at watch start"
+        if meta.get("epoch") != self._ws_epoch:
+            return list(tape), "websocket reconnected during the watch"
+        return list(tape), None
 
     def _should_emit_ws_debug(self, channel: str, symbol: str) -> bool:
         """Throttle websocket debug logging so repeated updates do not spam the log sink."""
@@ -3944,6 +4007,7 @@ class MarketService:
         strategies: Iterable[str] | None = None,
         *,
         forming_price: float | None = None,
+        momentum: Any = None,
     ) -> list[StrategySignal]:
         """Return all strategy signals for a symbol (concurrent evaluation).
 
@@ -3979,6 +4043,12 @@ class MarketService:
             )
         else:
             snapshot = self._build_closed_candle_snapshot(snapshot, symbol)
+        if momentum is not None:
+            # wick_rejection momentum mode: ``momentum`` is a MomentumMeasures
+            # or MOMENTUM_MISSING (tape gap) — see wr_momentum.attach_momentum.
+            snapshot = attach_momentum(
+                snapshot, symbol, None if momentum is MOMENTUM_MISSING else momentum
+            )
         strategies_cfg = self._launcher_config.get("strategies") or {}
         only = {str(n) for n in strategies} if strategies is not None else None
         signals: list[StrategySignal] = []
@@ -4342,6 +4412,7 @@ class MarketService:
         strategies: Iterable[str] | None = None,
         *,
         price: float | None = None,
+        momentum: Any = None,
     ) -> list[dict[str, Any]]:
         """Build decision dicts for all strategies that fire on a symbol.
 
@@ -4357,7 +4428,9 @@ class MarketService:
 
         ``price`` (wick_rejection trigger) is the current price measured by the
         caller: it replaces the cached last price and becomes the forming
-        candle's close.
+        candle's close.  ``momentum`` (wick_rejection momentum mode) attaches
+        the trigger's momentum measures — or ``MOMENTUM_MISSING`` — so the
+        strategy applies its momentum gate and window.
         """
         gov = self._launcher_config
         snapshot = self._last_full_snapshot
@@ -4380,7 +4453,8 @@ class MarketService:
             return []
 
         signals = self._launcher_evaluate_signals(
-            symbol, strategies, forming_price=price if price and price > 0 else None
+            symbol, strategies, forming_price=price if price and price > 0 else None,
+            momentum=momentum,
         )
         if not signals:
             return []

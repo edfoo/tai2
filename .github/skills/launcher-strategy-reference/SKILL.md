@@ -254,6 +254,14 @@ shows the resulting USDT risk.
 ### Loosen when
 - few signals on clearly exhausted candles → raise `max_high_offset_pct` or lower `min_body_ratio`
 
+### Momentum entry mode (optional, off)
+`entry_mode`: `clock` (default) | `momentum` | `momentum_or_clock`. Watches the
+trade tape from `watch_seconds_before_close` and enters inside
+`momentum_entry_max_seconds_to_close` once the price has stalled
+(`stall_min_seconds` since the high, within `max_below_high_pct`, `ret_60s >=
+min_ret_60s`). Thresholds came from 33 trades — sweep clock vs
+`momentum_or_clock` in the backtest (1m approximation) before using it live.
+
 ### Backtest note
 Needs `evaluation_mode="finer_ltf"` with 1m eval candles: it enters at the
 close of the 1m step 60 s before the hour (live: 40 s). Closed-candle mode is

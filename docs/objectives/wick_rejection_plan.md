@@ -1,6 +1,6 @@
 # Design: Hourly Wick Rejection Short (`wick_rejection`)
 
-**Status:** In progress — Phase 1 done 2026-11-19 (closed-candle alignment + `forming_candle` + `as_of_ts`, live and backtest); Phase 2 done 2026-11-20 (strategy funnel, defaults, registration; disabled by default); Phase 3 done 2026-11-20 (TP/stop units, protection modes, per-strategy leverage + margin sizing, live and backtest); Phase 4 done 2026-11-20 (strategy-owned exits: time stop, software emergency stop, own re-entry cooldown, live and backtest); Phase 5 done 2026-11-20 (`vol` screener universe, live and backtest; also fixed a 1H look-ahead in the backtest universe); Phase 6 done 2026-11-20 (clock trigger at H:59:20, WR removed from the scheduler tick, backtest entry-timing diagnostics; restart re-hydration restores WR positions); Phase 7 done 2026-11-20 (STRATEGY card with risk read-out, CFG vol inputs, LIVE trigger countdown); Phase 8 done 2026-11-20 (parity tests, strategy reference). Redesigned 2026-11-18 from the manual-trade analysis (§1.1); vol screener §3.5; optional momentum entry mode §3.8 / Phase 9.
+**Status:** In progress — Phase 1 done 2026-11-19 (closed-candle alignment + `forming_candle` + `as_of_ts`, live and backtest); Phase 2 done 2026-11-20 (strategy funnel, defaults, registration; disabled by default); Phase 3 done 2026-11-20 (TP/stop units, protection modes, per-strategy leverage + margin sizing, live and backtest); Phase 4 done 2026-11-20 (strategy-owned exits: time stop, software emergency stop, own re-entry cooldown, live and backtest); Phase 5 done 2026-11-20 (`vol` screener universe, live and backtest; also fixed a 1H look-ahead in the backtest universe); Phase 6 done 2026-11-20 (clock trigger at H:59:20, WR removed from the scheduler tick, backtest entry-timing diagnostics; restart re-hydration restores WR positions); Phase 7 done 2026-11-20 (STRATEGY card with risk read-out, CFG vol inputs, LIVE trigger countdown); Phase 8 done 2026-11-20 (parity tests, strategy reference); Phase 9 done 2026-11-20 except tape replay (momentum entry mode, live tape, 1m backtest approximation, trade-tape pagination fix). Redesigned 2026-11-18 from the manual-trade analysis (§1.1); vol screener §3.5; optional momentum entry mode §3.8 / Phase 9.
 **Date:** 2026-10-28 (revised 2026-11-18)
 **Scope:** New launcher strategy with a clock-aligned entry trigger, forming-candle
 exposure, strategy-owned exits (TP + emergency stop + time stop), per-strategy
@@ -955,7 +955,7 @@ Docs: a Wick Rejection section in
 covered `forming_candle`, the vol universe, the trigger, owned exits and
 per-strategy sizing from Phases 1–6.
 
-### Phase 9 — Momentum entry mode *(optional; after the clock mode has run live)*
+### Phase 9 — Momentum entry mode ✅ *(done 2026-11-20, tape replay deferred; off by default)*
 
 27. **New `app/services/strategies/wr_momentum.py`** — pure
     `compute_momentum(tape, now_ms, window_s)` and
@@ -980,6 +980,65 @@ per-strategy sizing from Phases 1–6.
     `momentum_or_clock`, never enters in `momentum` mode without a trigger;
     tape-gap symbols excluded; live/backtest parity of the measures on the same
     1m-derived tape.
+
+**As built.**
+
+- **`strategies/wr_momentum.py`** (pure): `compute_momentum(tape, now_ms,
+  window_s)` → `MomentumMeasures` (§3.8 table; `ret_N` from the last trade at
+  or before `now − N s`, `None` when the tape is shorter; `secs_since_high`
+  from the *first* print of the window high; `rate_ratio_60s` `None` under a
+  minute of tape); `momentum_entry_ok(m, cfg)` (blank threshold = off; an
+  enabled condition with a missing measure fails); `tape_from_candles` (each
+  1m candle → open, first extreme, second extreme, close — green goes via the
+  low first); `attach_momentum` / `MOMENTUM_MISSING`.
+- **The gate lives in the strategy**, so live and backtest share it: measures
+  in `sym_data["wr_momentum"]` make the evaluation a momentum one — window
+  `min_seconds_to_close`..`momentum_entry_max_seconds_to_close`, and the
+  measures must pass. Without measures: clock rules (`momentum_or_clock`) or
+  no entry (`momentum`). A tape gap attaches `{"missing": True}` → veto.
+  `clock` mode ignores measures.
+- **Live tape** (`MarketService.start_wr_tape` / `wr_tape` / `stop_wr_tape`):
+  `{ts, px, sz, side}` per trade from the public `trades` channel, only for the
+  watched symbols and only during the watch, pruned to `watch + 120 s`. Gap =
+  the symbol was not subscribed at the watch start, or `_ws_epoch` changed (any
+  public websocket connect/disconnect). `build_launcher_decisions(...,
+  momentum=)` passes the measures through.
+- **Trigger** (`run_watch`): wakes at `H:00 − watch_seconds_before_close`,
+  refreshes 1H candles once, records the tape and every
+  `momentum_eval_interval_seconds` computes the measures for each pending
+  symbol. A pass before the entry window is logged once and not traded;
+  inside it the symbol's candles are refreshed (at most every 10 s) and the
+  decision is built with `price` = last tape trade and the measures; signals go
+  through the same rank / `max_concurrent_positions` / `max_total_margin_pct`
+  / execute step as the clock path (`_execute_ranked`). `momentum_or_clock`:
+  at `entry_seconds_before_close` the remaining symbols get the clock
+  evaluation (`_clock_entry`) and the watch ends. Gapped symbols are excluded
+  from momentum (dropped in `momentum`, clock-only in `momentum_or_clock`).
+  Each symbol not entered gets a final log line with its last measures and
+  failing conditions. `trigger.watch` holds per-symbol status for the LIVE
+  page.
+- **Backtest** (`BacktestEngine._evaluate_wick_rejection`): keeps the last 16
+  eval candles per symbol, builds `tape_from_candles` and evaluates with the
+  measures at the step close; `momentum_or_clock` re-evaluates without
+  measures if that does not fire. With defaults, momentum entries can land on
+  the steps 120 s and 60 s before the close; clock entries on the 60 s step.
+  `backtest_entry_timing` records `entry_mode`, the momentum step moments and
+  the approximation note in `data_provenance`.
+- **Trade-tape pagination** (`okx_metrics.fetch_trade_history_records`):
+  `type=2`; verified against OKX that `after` is exclusive and up to 38 BTC
+  trades share one millisecond, so the cursor is `oldest + 1` with dedupe by
+  `tradeId` (a millisecond holding a whole page is skipped past and logged);
+  a short page ends the walk; output in `(ts, tradeId)` order. Test replays a
+  recorded page (`tests/fixtures/okx_history_trades_btc.json`) through a fake
+  with OKX's semantics. This also changes the backtest spread estimate
+  (previously one trade per millisecond, and the walk could stop early).
+- **UI**: entry mode and momentum fields on the Wick Rejection card (blank
+  threshold = off); LIVE shows `WR watching n (mode)` with each symbol's
+  status and measures in the tooltip during the watch.
+- **Deferred:** tape replay (`wr_momentum_tape`) — §3.8 makes it conditional on
+  the 1m approximation looking promising (Verification step 8).
+
+Tests: `tests/test_wr_momentum.py` (36), `tests/test_okx_metrics.py` (pagination, 2).
 
 ---
 
