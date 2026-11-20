@@ -23,6 +23,7 @@ Implementations live in:
 - `app/services/strategies/trend_pullback.py`
 - `app/services/strategies/liquidity_sweep.py`
 - `app/services/strategies/spike_continuation.py`
+- `app/services/strategies/wick_rejection.py` (entry timing: `app/services/wick_rejection_trigger.py`)
 
 ## Mean Reversion
 
@@ -188,6 +189,75 @@ Ride a fresh spike before it exhausts.
 
 ### Loosen when
 - too few breakout entries occur in clearly expanding volatility regimes
+
+## Wick Rejection
+
+Differs from every other strategy: it is **trigger-only**, owns its **exits**
+and its **sizing**, and trades only the screener's **vol** universe. Plan and
+as-built notes: `docs/objectives/wick_rejection_plan.md`.
+
+### Best regime
+- fast, high-volume coins (vol universe, ranked on % per hour; needs
+  `screener.vol_enabled`, otherwise it falls back to the combined list)
+- a strong green 1H candle trading at or near its high in the final minute
+- recent hours already printed a big green body (blow-off, not a fresh trend)
+
+### Core idea
+Short seconds before the 1H close, betting the candle closes below the
+current price (the wick forms as late buyers stop). The scheduler tick never
+evaluates it (`TRIGGER_ONLY_STRATEGIES`); `WickRejectionTrigger` wakes at
+H:00 − `entry_seconds_before_close`, takes the websocket price (REST if stale),
+patches the forming candle with it, ranks signals by `rank_score` and enters
+up to `max_concurrent_positions` / `max_total_margin_pct`.
+
+### Funnel (vetoes in order)
+1. forming 1H candle present and `as_of_ts` known
+2. seconds to close inside `min_seconds_to_close`..`max_seconds_to_close`
+3. forming candle green (`require_forming_green`)
+4. range `(H − L)/L ≥ min_candle_range_pct` (zero range vetoes)
+5. high offset `(H − P)/(H − L) ≤ max_high_offset_pct` (price above the recorded high counts as the new high)
+6. at least `min_big_bodies` green bodies ≥ `min_body_ratio` × avg |body| of the prior `body_avg_window`, within `setup_lookback_candles` (+ the forming candle if `setup_include_forming`)
+7. optional `htf_regime_preference` (default off)
+
+### TP/SL and exits (strategy-owned)
+- TP `tp_pct` in `price` or `margin` units (margin % ÷ leverage actually used)
+- emergency stop `exchange` (OKX SL order), `software` (bot closes at market,
+  unprotected while the app is down) or `off` (needs `disable_protection`)
+- time stop `max_hold_minutes` closes **win or lose**; own `reentry_cooldown_minutes`
+- global breakeven/partial/trailing are skipped unless `use_global_trade_management`
+- R:R guard skipped (`skip_rr_guard`) — a tiny TP against a wide stop is by design
+- survives restarts via `_rehydrate_open_positions` (needs Postgres)
+
+### Sizing
+`margin_usdt` (or `margin_pct` of equity) × `leverage`, independent of
+`launcher.notional_usd`. Leverage is clamped to guardrail min/max with the
+margin kept; `max_position_pct` still caps the position. The STRATEGY card
+shows the resulting USDT risk.
+
+### Main failure mode
+- the candle keeps squeezing through the close (continuation, not rejection)
+  → the emergency stop or the time stop at a loss
+- late entries: price fetched too close to the close, or slippage on thin books
+- low hit rate cannot pay for the wide stop: the edge relies on many small TPs
+
+### Most important parameters
+- `max_high_offset_pct`, `min_candle_range_pct`
+- `min_body_ratio`, `setup_lookback_candles`
+- `tp_pct` / `emergency_stop_pct` (and their units)
+- `max_hold_minutes`
+- `leverage`, `margin_usdt`, `max_concurrent_positions`
+
+### Tighten when
+- stops hit on candles that were still accelerating → lower `max_high_offset_pct`, raise `min_body_ratio`
+- many trades on quiet coins → raise `vol_min_speed_pct_per_hour` / `min_candle_range_pct`
+
+### Loosen when
+- few signals on clearly exhausted candles → raise `max_high_offset_pct` or lower `min_body_ratio`
+
+### Backtest note
+Needs `evaluation_mode="finer_ltf"` with 1m eval candles: it enters at the
+close of the 1m step 60 s before the hour (live: 40 s). Closed-candle mode is
+unsupported and recorded in `data_provenance`.
 
 ## Shared guidance
 

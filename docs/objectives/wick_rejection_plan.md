@@ -1,6 +1,6 @@
 # Design: Hourly Wick Rejection Short (`wick_rejection`)
 
-**Status:** In progress — Phase 1 done 2026-11-19 (closed-candle alignment + `forming_candle` + `as_of_ts`, live and backtest); Phase 2 done 2026-11-20 (strategy funnel, defaults, registration; disabled by default); Phase 3 done 2026-11-20 (TP/stop units, protection modes, per-strategy leverage + margin sizing, live and backtest); Phase 4 done 2026-11-20 (strategy-owned exits: time stop, software emergency stop, own re-entry cooldown, live and backtest); Phase 5 done 2026-11-20 (`vol` screener universe, live and backtest; also fixed a 1H look-ahead in the backtest universe); Phase 6 done 2026-11-20 (clock trigger at H:59:20, WR removed from the scheduler tick, backtest entry-timing diagnostics; restart re-hydration restores WR positions); Phase 7 done 2026-11-20 (STRATEGY card with risk read-out, CFG vol inputs, LIVE trigger countdown). Redesigned 2026-11-18 from the manual-trade analysis (§1.1); vol screener §3.5; optional momentum entry mode §3.8 / Phase 9.
+**Status:** In progress — Phase 1 done 2026-11-19 (closed-candle alignment + `forming_candle` + `as_of_ts`, live and backtest); Phase 2 done 2026-11-20 (strategy funnel, defaults, registration; disabled by default); Phase 3 done 2026-11-20 (TP/stop units, protection modes, per-strategy leverage + margin sizing, live and backtest); Phase 4 done 2026-11-20 (strategy-owned exits: time stop, software emergency stop, own re-entry cooldown, live and backtest); Phase 5 done 2026-11-20 (`vol` screener universe, live and backtest; also fixed a 1H look-ahead in the backtest universe); Phase 6 done 2026-11-20 (clock trigger at H:59:20, WR removed from the scheduler tick, backtest entry-timing diagnostics; restart re-hydration restores WR positions); Phase 7 done 2026-11-20 (STRATEGY card with risk read-out, CFG vol inputs, LIVE trigger countdown); Phase 8 done 2026-11-20 (parity tests, strategy reference). Redesigned 2026-11-18 from the manual-trade analysis (§1.1); vol screener §3.5; optional momentum entry mode §3.8 / Phase 9.
 **Date:** 2026-10-28 (revised 2026-11-18)
 **Scope:** New launcher strategy with a clock-aligned entry trigger, forming-candle
 exposure, strategy-owned exits (TP + emergency stop + time stop), per-strategy
@@ -892,7 +892,7 @@ Tests: `tests/test_wick_rejection_trigger.py` (22).
 
 Tests: `tests/test_wick_rejection_ui.py` (6).
 
-### Phase 8 — Docs + tests *(depends on all)*
+### Phase 8 — Docs + tests ✅ *(done 2026-11-20)*
 
 24. `.github/skills/launcher-strategy-reference/SKILL.md` — WR section.
 25. `CLAUDE.md` — `forming_candle`, the vol universe, the WR trigger,
@@ -925,6 +925,35 @@ Tests: `tests/test_wick_rejection_ui.py` (6).
     - `test_backtest_universe.py`, `test_sweep_catalog.py`,
       `test_live_backtest_parity.py` — WR signal and exit parity on a 1m fixture;
       same-candle TP + stop → stop.
+
+**As built.** Most of step 26 was written with each phase, in per-phase files
+rather than the files named above:
+
+| Plan item | Where |
+|---|---|
+| strategy funnel, `body_ratio`, `rank_score` | `tests/test_wick_rejection.py` (zero-range veto added now) |
+| unit conversion, margin modes, `tp_only`, `disable_protection`, `skip_rr_guard`, leverage override, clamp, `max_position_pct` log | `tests/test_wick_rejection_execution.py` |
+| `compute_strategy_exit`, opted-out global rules (live + simulator), same-candle TP + stop | `tests/test_wick_rejection_exits.py` |
+| trigger timing, vol-only/WR-only evaluation, ranking and caps, ws/REST price, forming patch, tick excludes WR | `tests/test_wick_rejection_trigger.py` |
+| vol screener cases | `tests/test_screener_vol.py` |
+| backtest universe, sweep catalog | `tests/test_screener_vol.py`, `tests/test_sweep_catalog.py` |
+| restart, UI helpers | `tests/test_wick_rejection_rehydration.py`, `tests/test_wick_rejection_ui.py` |
+
+Added in this phase, in `tests/test_live_backtest_parity.py`:
+- **decision parity** — the real strategy on one hourly fixture through
+  `build_launcher_decisions` and `BacktestEngine._compute_tp_sl`: the same
+  signal, TP/SL prices, leverage, margin, notional and exit params, over six
+  configs (defaults, software stop, stop off, margin TP / price stop, leverage
+  clamp, `pct_equity`);
+- **exit-timing parity** — the simulator closes on the first 1m candle where
+  `compute_strategy_exit` says close (time stop and emergency stop). The
+  backtest's `candle.ts − entry_ts` equals the time since the fill (entry and
+  exit both at candle closes), so it matches the live wall-clock hold.
+
+Docs: a Wick Rejection section in
+`.github/skills/launcher-strategy-reference/SKILL.md`; `CLAUDE.md` already
+covered `forming_candle`, the vol universe, the trigger, owned exits and
+per-strategy sizing from Phases 1–6.
 
 ### Phase 9 — Momentum entry mode *(optional; after the clock mode has run live)*
 

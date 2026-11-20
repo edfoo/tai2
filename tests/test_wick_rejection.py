@@ -183,6 +183,15 @@ class TestFunnel:
         assert _eval(_snapshot(closed=closed, forming=forming), log) is None
         assert any("veto range" in m for m in log)
 
+    def test_zero_range_vetoes(self) -> None:
+        closed = _closed_hours(12, big_at=10)
+        o = closed[-1]["close"]
+        forming = _forming(closed, open_=o, high=o, low=o, price=o)
+        log: list[str] = []
+        snap = _snapshot(closed=closed, forming=forming)
+        assert _eval(snap, log, require_forming_green=False, min_candle_range_pct=0.0) is None
+        assert any("zero range" in m for m in log)
+
     def test_high_offset_vetoes(self) -> None:
         closed = _closed_hours(12, big_at=10)
         o = closed[-1]["close"]

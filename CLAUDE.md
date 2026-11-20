@@ -68,7 +68,7 @@ uv run pytest
 ```
 - `pytest-xdist` runs with `-n auto` by default (see `pyproject.toml`); the suite takes ~15s.
 - Tests marked `network` hit live services and are skipped by default.
-- All tests must pass (971 passing, 0 pre-existing failures as of 2026-11-20). Any failure is a regression.
+- All tests must pass (980 passing, 0 pre-existing failures as of 2026-11-20). Any failure is a regression.
 
 ---
 
@@ -202,7 +202,7 @@ Parity is a core design rule: logic is written **once** and shared, never mirror
 - Backtest history: OKX `/market/candles` only serves the newest 1,440 candles; `HistoricalDataFetcher._fetch_range` continues on `/market/history-candles` for older data. Never page historical ranges on the recent endpoint alone.
 - Live per-timeframe candles live in `_latest_ohlcv_tf[(symbol, bar)]` — pass `cache_key=(symbol, bar)` to `_fetch_ohlcv_bar`.
 
-Covered by `tests/test_live_backtest_parity.py` and `tests/test_forming_candle.py` — extend them when touching any of the above.
+Covered by `tests/test_live_backtest_parity.py` (incl. wick_rejection decision — TP/SL, leverage, margin, exit params — and exit-timing parity) and `tests/test_forming_candle.py` — extend them when touching any of the above.
 
 ---
 
