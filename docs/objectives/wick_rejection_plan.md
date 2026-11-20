@@ -1,6 +1,6 @@
 # Design: Hourly Wick Rejection Short (`wick_rejection`)
 
-**Status:** In progress — Phase 1 done 2026-11-19 (closed-candle alignment + `forming_candle` + `as_of_ts`, live and backtest); Phase 2 done 2026-11-20 (strategy funnel, defaults, registration; disabled by default); Phase 3 done 2026-11-20 (TP/stop units, protection modes, per-strategy leverage + margin sizing, live and backtest). Redesigned 2026-11-18 from the manual-trade analysis (§1.1); vol screener §3.5; optional momentum entry mode §3.8 / Phase 9.
+**Status:** In progress — Phase 1 done 2026-11-19 (closed-candle alignment + `forming_candle` + `as_of_ts`, live and backtest); Phase 2 done 2026-11-20 (strategy funnel, defaults, registration; disabled by default); Phase 3 done 2026-11-20 (TP/stop units, protection modes, per-strategy leverage + margin sizing, live and backtest); Phase 4 done 2026-11-20 (strategy-owned exits: time stop, software emergency stop, own re-entry cooldown, live and backtest). Redesigned 2026-11-18 from the manual-trade analysis (§1.1); vol screener §3.5; optional momentum entry mode §3.8 / Phase 9.
 **Date:** 2026-10-28 (revised 2026-11-18)
 **Scope:** New launcher strategy with a clock-aligned entry trigger, forming-candle
 exposure, strategy-owned exits (TP + emergency stop + time stop), per-strategy
@@ -682,7 +682,7 @@ clamping, protection modes, simulator sizing including the tier cap,
 `build_launcher_decisions` forwarding and the filter, and execution in cross
 and isolated modes (size, OKX leverage, attached TP/SL algos, caps).
 
-### Phase 4 — Strategy-owned exits *(parallel with 2, 3)*
+### Phase 4 — Strategy-owned exits ✅ *(done 2026-11-20)*
 
 9. **`trade_management_rules.py`** — `StrategyExitParams` +
    `compute_strategy_exit()` (time stop, software emergency stop).
@@ -692,6 +692,45 @@ and isolated modes (size, OKX leverage, attached TP/SL algos, caps).
     positions-refresh loop (not only the scheduler tick).
 11. **`backtest/simulator.py`** — the same split per position; 1m fill-order
     rule from §3.7.
+
+**As built.**
+
+- **One rule, parameters fixed at entry.** `resolve_launcher_tp_sl` returns
+  `strategy_exit: StrategyExitParams` for strategies with owned exits
+  (`max_hold_seconds`, `software_stop_pct`, `reentry_cooldown_seconds`,
+  `use_global_trade_management`). The software stop is a price % converted at
+  the clamped leverage (35% margin at 3× = 11.67%). Live carries it on the
+  decision as `_strategy_exit` into `_seed_trade_mgmt_state`; the backtest
+  passes it to `Simulator.open_position`. Both call
+  `compute_strategy_exit(params, is_long, entry_price, held_seconds, high, low)`.
+  Later config edits do not change an open position's exits.
+- **Live.** Owned-exit positions are seeded even when global trade
+  management is off, and `_check_trade_management` (positions-refresh loop,
+  every 10 s) runs for them in that case. It closes at market on the software
+  stop or the time stop, logs `TradeMgmt emergency_stop|time_stop: SYMBOL
+  [wick_rejection] …`, and skips the global rules unless
+  `use_global_trade_management` is set. Untracked positions are not
+  auto-seeded while global management is off.
+- **Backtest.** `Simulator._apply_exits`: software stop first (filled at the
+  stop, or the open on a gap), then the TP/SL algos (exchange stop already
+  fills before the TP), then the time stop at the candle close. Hold time is
+  `candle.ts − entry_ts`, so a 60-minute hold entered on the H:58 1m candle
+  closes on the (H+1):58 candle, 60 minutes after entry. Close reasons
+  `emergency_stop` / `time_stop`.
+- **Re-entry cooldown.** When an owned-exit position closes, its own
+  `reentry_cooldown_minutes` (default 55) replaces the global
+  `reentry_cooldown_seconds`, live (`_clear_trade_mgmt_state`) and backtest
+  (`can_enter`). Measured from the close, per symbol.
+- `wick_rejection` added to `runner.DEFAULT_STRATEGIES`.
+- **Known gap.** After an app restart, re-hydration cannot tell which strategy
+  opened a position (`executed_trades` stores no strategy), so a WR position
+  open across a restart falls back to global trade management and loses its
+  time stop; the exchange TP/SL orders stay in place. To fix with the trigger
+  work (Phase 6) or by storing the strategy on the trade row.
+
+Tests: `tests/test_wick_rejection_exits.py` (25): the rule, the resolver
+params, simulator fill order, time stop, global rules skipped/opt-in,
+cooldown, and the live split with global management on and off.
 
 ### Phase 5 — Dedicated `vol` universe *(parallel with 2–4)*
 

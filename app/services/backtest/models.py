@@ -10,6 +10,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+from app.services.trade_management_rules import StrategyExitParams
+
 
 # ── Candle ──────────────────────────────────────────────────────────────
 
@@ -101,6 +103,9 @@ class SimPosition:
     initial_size: float | None = None
     breakeven_done: bool = False
     partial_done: bool = False
+    # Strategy-owned exits fixed at entry (wick_rejection §3.2); runtime only,
+    # not persisted.
+    strategy_exit: StrategyExitParams | None = None
 
     @property
     def is_open(self) -> bool:

@@ -68,7 +68,7 @@ uv run pytest
 ```
 - `pytest-xdist` runs with `-n auto` by default (see `pyproject.toml`); the suite takes ~15s.
 - Tests marked `network` hit live services and are skipped by default.
-- All tests must pass (892 passing, 0 pre-existing failures as of 2026-11-20). Any failure is a regression.
+- All tests must pass (917 passing, 0 pre-existing failures as of 2026-11-20). Any failure is a regression.
 
 ---
 
@@ -150,7 +150,7 @@ logs/app.log               # Rotating log file (5 MB × 5 backups), created at r
    - Runs every enabled strategy whose screener universe contains the symbol (`_strategy_allowed_on_symbol`).
 3. Per signal: skip if the `strategy:symbol` key is in-flight (`_launcher_entering`), already tracked (`_launcher_in_position`), or in re-entry cooldown; then `resolve_launcher_tp_sl()` produces action/TP/SL (static, ATR, structural, dynamic TP, direction flip).
 4. The decision dict (`notional_usd` from `launcher.notional_usd`, `_decision_origin: "launcher"`, `_strategy_name`) is passed straight to `handle_llm_decision()`, so **all guardrails, sizing and order/TP-SL placement are shared with the LLM path**.
-5. After entry: `_check_trade_management` (software stop, breakeven, partial TP, trailing, time stop, cooldown), `_check_strategy_regime_exits` (MR), and `_check_spike_continuation_rollover_exits` (SC) manage the position.
+5. After entry: `_check_trade_management` (software stop, breakeven, partial TP, trailing, time stop, cooldown; positions of strategies that own their exits — `StrategyExitParams`, currently wick_rejection — get `compute_strategy_exit` instead, even with global trade management off), `_check_strategy_regime_exits` (MR), and `_check_spike_continuation_rollover_exits` (SC) manage the position.
 
 With `launcher.schedule="on_close"`, the scheduler waits for all positions to close before the next tick.
 
@@ -192,7 +192,7 @@ With `launcher.schedule="on_close"`, the scheduler waits for all positions to cl
 Parity is a core design rule: logic is written **once** and shared, never mirrored by hand.
 - Strategy evaluation: the same strategy classes, evaluated on closed candles in both.
 - TP/SL resolution: `launcher_tp_sl.resolve_launcher_tp_sl`.
-- Trade management: `trade_management_rules.py`.
+- Trade management: `trade_management_rules.py` (global rules and `compute_strategy_exit` for strategy-owned exits).
 - Screener: `screener.py` (see below).
 - Guardrails: the backtest receives `guardrails_config` separately from `launcher_config` / `strategy_config`, matching the live `runtime_config` split.
 - Candle visibility: a snapshot describes one moment (`as_of_ts`). Tf blocks and HTF layers hold only candles **closed** by then (`ts + bar_ms <= as_of_ts`; OKX `ts` is the bar's *open* time, so `ts <= now` would leak the bar's final values). Backtest moment = close of the step candle (`build`: `ts + ltf_ms`; finer_ltf: `current_ts + eval_ms`). In finer_ltf the in-progress tf bar is aggregated from eval candles as `forming_candle`. Pinned by `tests/test_forming_candle.py`.

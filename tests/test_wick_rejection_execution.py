@@ -280,9 +280,16 @@ class TestBuildLauncherDecisions:
         assert wr["_rank_score"] == 2.5
         assert wr["take_profit"] == pytest.approx(99.5)
         assert wr["stop_loss"] == pytest.approx(107.0)
+        assert wr["_strategy_exit"] == {
+            "max_hold_seconds": 3600.0,
+            "software_stop_pct": None,
+            "reentry_cooldown_seconds": 3300.0,
+            "use_global_trade_management": False,
+        }
         other = by_name["vwap_reversion"]
         assert other["notional_usd"] == 50.0
         assert other["_leverage_override"] is None
+        assert other["_strategy_exit"] is None
 
     def test_wr_needs_no_launcher_notional(self, monkeypatch: pytest.MonkeyPatch) -> None:
         service, _, _ = self._setup(monkeypatch, launcher_notional=None)

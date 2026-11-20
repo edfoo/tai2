@@ -635,6 +635,7 @@ class BacktestEngine:
                         notional=resolved.notional_override,
                         leverage=resolved.leverage_override,
                         margin=resolved.margin_usd,
+                        strategy_exit=resolved.strategy_exit,
                     )
 
             # Update simulator (check TP/SL, record equity).
@@ -839,6 +840,7 @@ class BacktestEngine:
                         notional=resolved.notional_override,
                         leverage=resolved.leverage_override,
                         margin=resolved.margin_usd,
+                        strategy_exit=resolved.strategy_exit,
                     )
 
             # Update simulator (check TP/SL at eval granularity, record equity).

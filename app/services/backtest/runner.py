@@ -32,6 +32,7 @@ DEFAULT_STRATEGIES = (
     "trend_pullback",
     "vwap_reversion",
     "spike_continuation",
+    "wick_rejection",
 )
 
 # Canonical LTF→HTF map (a superset of ``data_fetcher.htf_for``, which only

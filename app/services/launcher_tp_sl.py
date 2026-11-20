@@ -14,6 +14,7 @@ from typing import Any
 
 from app.services.strategies import resolve_analysis_block
 from app.services.strategies.defaults import merged_config
+from app.services.trade_management_rules import StrategyExitParams
 
 
 def _extract_float(value: Any) -> float | None:
@@ -108,6 +109,9 @@ class LauncherTpSl:
     # Strategy sizing was configured but could not be resolved (no equity /
     # margin) — the caller must skip the entry rather than fall back.
     sizing_failed: bool = False
+    # Strategy-owned exits (time stop, software emergency stop, own re-entry
+    # cooldown), fixed at entry; None → global trade management only.
+    strategy_exit: StrategyExitParams | None = None
 
 
 def resolve_launcher_tp_sl(
@@ -152,6 +156,7 @@ def resolve_launcher_tp_sl(
     protection = "full"
     leverage_override = margin_usd = notional_override = None
     sizing_failed = False
+    strategy_exit: StrategyExitParams | None = None
     if owned_exits:
         from app.services.strategies.wick_rejection import exit_price_pcts
 
@@ -166,11 +171,21 @@ def resolve_launcher_tp_sl(
             _exit_cfg["leverage"] = leverage_override
         tp_pct, sl_pct = exit_price_pcts(_exit_cfg)
         stop_mode = str(merged.get("emergency_stop_mode") or "exchange").strip().lower()
+        software_stop_pct = sl_pct if stop_mode == "software" else None
         if stop_mode in ("software", "off"):
             protection = "tp_only"
             sl_pct = None
+        strategy_exit = StrategyExitParams(
+            max_hold_seconds=max(0.0, (_extract_float(merged.get("max_hold_minutes")) or 0.0) * 60.0),
+            software_stop_pct=software_stop_pct,
+            reentry_cooldown_seconds=max(
+                0.0, (_extract_float(merged.get("reentry_cooldown_minutes")) or 0.0) * 60.0
+            ),
+            use_global_trade_management=bool(merged.get("use_global_trade_management", False)),
+        )
         debug_lines.append(
-            f"strategy exits: tp={tp_pct}% stop={sl_pct}% ({stop_mode}) "
+            f"strategy exits: tp={tp_pct}% stop={sl_pct if sl_pct is not None else software_stop_pct}% "
+            f"({stop_mode}) hold={strategy_exit.max_hold_seconds:.0f}s "
             f"lev={leverage_override} margin={margin_usd} notional={notional_override}"
         )
 
@@ -338,4 +353,5 @@ def resolve_launcher_tp_sl(
         margin_usd=margin_usd,
         notional_override=notional_override,
         sizing_failed=sizing_failed,
+        strategy_exit=strategy_exit,
     )

@@ -1,6 +1,14 @@
 # Change Log
 
 ## 2026-11-20
+- **Phase 4 — wick_rejection strategy-owned exits (live + backtest):**
+  - New `StrategyExitParams` / `compute_strategy_exit()` in `trade_management_rules.py`: software emergency stop (adverse price % from entry) and time stop (`max_hold_minutes`, win or lose). Parameters are resolved once at entry by `resolve_launcher_tp_sl` (`LauncherTpSl.strategy_exit`, margin units at the clamped leverage) and travel with the position.
+  - Live: decisions carry `_strategy_exit`; `_seed_trade_mgmt_state` seeds such positions even with global trade management off, and `_check_trade_management` closes them on the stop or time stop and skips the global breakeven/partial/trailing/time-stop rules (unless `use_global_trade_management`). `_trade_mgmt_full_close` takes a `reason`.
+  - Backtest: `Simulator._apply_exits` checks the software stop before the TP (conservative same-candle fill), then the TP/SL algos, then the time stop at the candle close.
+  - The strategy's own `reentry_cooldown_minutes` replaces the global re-entry cooldown after its positions close, live and backtest.
+  - `wick_rejection` added to `runner.DEFAULT_STRATEGIES`.
+  - Known gap: a WR position open across an app restart is re-hydrated without its strategy and falls back to global trade management.
+  - Tests: `tests/test_wick_rejection_exits.py` (25).
 - **New launcher strategy `wick_rejection` (Phase 2 of `docs/objectives/wick_rejection_plan.md`), disabled by default:** `app/services/strategies/wick_rejection.py` shorts a strong green 1H candle in the last 10–90 s before it closes. The funnel checks the forming candle (green, range ≥ 1.5%, price within 20% of the range from the high) and a big-body setup (a green body ≥ 3× the prior 8-candle average in the last 4 closed hours or the forming one), with an opt-in HTF regime gate. Time to close is measured from `snapshot["as_of_ts"]`, so live and backtest agree. Signals carry a new optional `StrategySignal.rank_score` and price-percent TP/stop from `exit_price_pcts()` (0.5% TP, 35% margin stop at 5× = 7%).
 - `DEFAULT_WICK_REJECTION` in `strategies/defaults.py` holds the full §5 config shape, including keys used by later phases (sizing, trigger, momentum mode). Registered in `MarketService._strategies`, the backtest `_AVAILABLE_STRATEGIES` and `STRATEGY_SWEEP_PARAMS`. Not yet safe to enable live: TP/SL plumbing, strategy-owned exits and the clock trigger are Phases 3, 4 and 6.
 - Tests: `tests/test_wick_rejection.py` (32).

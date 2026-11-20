@@ -42,8 +42,10 @@ from app.services.screener import (
     universe_for_strategy,
 )
 from app.services.trade_management_rules import (
+    StrategyExitParams,
     compute_breakeven_sl,
     compute_far_tp,
+    compute_strategy_exit,
     compute_trailing_sl,
     should_ratchet_sl,
 )
@@ -2287,11 +2289,21 @@ class MarketService:
         entry_price: float | None = None,
         tp_price: float | None = None,
         sl_price: float | None = None,
+        strategy_exit: dict[str, Any] | None = None,
     ) -> None:
-        """Initialise trade-management state for a newly opened launcher position."""
+        """Initialise trade-management state for a newly opened launcher position.
+
+        ``strategy_exit`` (``StrategyExitParams.to_dict()``) marks a position
+        whose strategy owns its exits (wick_rejection §3.2): it is seeded even
+        when global trade management is disabled, and
+        ``_check_trade_management`` applies ``compute_strategy_exit`` to it
+        instead of (or, with ``use_global_trade_management``, as well as) the
+        global rules.
+        """
         symbol_key = symbol.upper()
         tm = self._trade_mgmt_config()
-        if not tm.get("enabled"):
+        exit_params = StrategyExitParams.from_dict(strategy_exit)
+        if not tm.get("enabled") and exit_params is None:
             return
         # Prefer explicit prices; fall back to attached algo orders / protection cache.
         if tp_price is None or sl_price is None:
@@ -2328,6 +2340,7 @@ class MarketService:
             "risk_pct": risk_pct,
             "breakeven_done": False,
             "partial_done": False,
+            "strategy_exit": exit_params.to_dict() if exit_params else None,
             "initial_contracts": None,
             # Peak favorable excursion (best unrealized PnL reached during the
             # trade), tracked so the performance summary can flag stop-outs
@@ -2344,7 +2357,7 @@ class MarketService:
         """Clear trade-management state and optionally start a re-entry cooldown."""
         symbol_key = symbol.upper()
         had_state = symbol_key in self._trade_mgmt_state
-        self._trade_mgmt_state.pop(symbol_key, None)
+        old_state = self._trade_mgmt_state.pop(symbol_key, None) or {}
         self._trade_mgmt_partial_closing.discard(symbol_key)
         self._trade_mgmt_time_closing.discard(symbol_key)
         self._trade_mgmt_be_updating.discard(symbol_key)
@@ -2353,8 +2366,14 @@ class MarketService:
         self._trade_mgmt_rollover_closing.discard(symbol_key)
         if not had_state:
             return
-        tm = self._trade_mgmt_config()
-        cooldown_sec = self._extract_float(tm.get("reentry_cooldown_seconds")) or 0.0
+        # A strategy that owns its exits uses its own re-entry cooldown
+        # (wick_rejection ``reentry_cooldown_minutes``) instead of the global one.
+        owned = StrategyExitParams.from_dict(old_state.get("strategy_exit"))
+        if owned is not None:
+            cooldown_sec = owned.reentry_cooldown_seconds
+        else:
+            tm = self._trade_mgmt_config()
+            cooldown_sec = self._extract_float(tm.get("reentry_cooldown_seconds")) or 0.0
         if cooldown_sec > 0:
             self._reentry_cooldown_until[symbol_key] = time.time() + cooldown_sec
             self._emit_debug(
@@ -2401,7 +2420,13 @@ class MarketService:
           software_stop_loss_enabled – bool (default True), market-close when pnl_pct <= -sl_pct
         """
         tm = self._trade_mgmt_config()
-        if not tm.get("enabled"):
+        global_enabled = bool(tm.get("enabled"))
+        # Strategy-owned exits (wick_rejection §3.2) run even when global
+        # trade management is off.
+        if not global_enabled and not any(
+            isinstance(st, dict) and st.get("strategy_exit")
+            for st in self._trade_mgmt_state.values()
+        ):
             return
         snapshot = self._last_full_snapshot
         if not snapshot:
@@ -2513,6 +2538,8 @@ class MarketService:
             if not pos_val or pos_val == 0:
                 continue
             state = self._trade_mgmt_state.get(symbol)
+            if state is None and not global_enabled:
+                continue
             if state is None:
                 # Auto-seed for positions that opened before trade_mgmt was enabled,
                 # or for positions whose launcher tracking was lost.
@@ -2646,6 +2673,57 @@ class MarketService:
             trade_mode = str(pos.get("mgnMode") or "").lower() or "isolated"
             action = "BUY" if is_long else "SELL"
             close_side = "sell" if is_long else "buy"
+
+            # ── Strategy-owned exits (wick_rejection §3.2) ───────────────
+            # Time stop + software emergency stop from the params fixed at
+            # entry.  The global rules are skipped unless the strategy sets
+            # ``use_global_trade_management``.
+            owned_exit = StrategyExitParams.from_dict(state.get("strategy_exit"))
+            if owned_exit is not None:
+                if symbol in self._trade_mgmt_time_closing:
+                    continue
+                entry_ts = state.get("entry_ts") or 0.0
+                held_sec = time.time() - entry_ts if entry_ts else 0.0
+                exit_decision = compute_strategy_exit(
+                    owned_exit,
+                    is_long=is_long,
+                    entry_price=entry_price,
+                    held_seconds=held_sec,
+                    high=last_price,
+                    low=last_price,
+                )
+                if exit_decision.close:
+                    if exit_decision.reason == "emergency_stop":
+                        detail = (
+                            f"price {last_price:g} crossed software stop "
+                            f"{exit_decision.stop_price:g} ({owned_exit.software_stop_pct:g}% "
+                            f"from entry {entry_price:g})"
+                        )
+                    else:
+                        detail = (
+                            f"held {held_sec:.0f}s >= {owned_exit.max_hold_seconds:.0f}s "
+                            f"(pnl {pnl_pct:+.2f}%)"
+                        )
+                    strat_label = state.get("strategy") or "strategy"
+                    self._emit_debug(
+                        f"TradeMgmt {exit_decision.reason}: {symbol} [{strat_label}] "
+                        f"{detail} — closing"
+                    )
+                    self._trade_mgmt_time_closing.add(symbol)
+                    asyncio.create_task(
+                        self._trade_mgmt_full_close(
+                            symbol=symbol,
+                            close_side=close_side,
+                            pos_side=resolved_pos_side,
+                            contracts=abs(pos_val),
+                            trade_mode=trade_mode,
+                            reason=str(exit_decision.reason),
+                        ),
+                        name=f"trade-mgmt-{exit_decision.reason}-{symbol}",
+                    )
+                    continue
+                if not (global_enabled and owned_exit.use_global_trade_management):
+                    continue
 
             # ── Software-stop loss ────────────────────────────────────────
             # Market-close when the monitored PnL crosses the SL threshold instead
@@ -2999,8 +3077,9 @@ class MarketService:
         pos_side: str | None,
         contracts: float,
         trade_mode: str,
+        reason: str = "time_stop",
     ) -> None:
-        """Fully close a position (time-stop)."""
+        """Fully close a position (time-stop, software stop, strategy exits)."""
         symbol_key = symbol.upper()
         coid = self._generate_client_order_id("tm-t")
         try:
@@ -3021,7 +3100,7 @@ class MarketService:
                 order_result = result[0] if isinstance(result, tuple) else result
                 if order_result:
                     self._emit_debug(f"TradeMgmt time-stop: {symbol_key} close accepted")
-                    self._clear_trade_mgmt_state(symbol_key, reason="time_stop")
+                    self._clear_trade_mgmt_state(symbol_key, reason=reason)
                 else:
                     self._emit_debug(f"TradeMgmt time-stop: {symbol_key} close rejected")
         except Exception as exc:
@@ -4274,6 +4353,9 @@ class MarketService:
                 "_leverage_override": resolved.leverage_override,
                 "_margin_usd": resolved.margin_usd,
                 "_rank_score": signal.rank_score,
+                "_strategy_exit": (
+                    resolved.strategy_exit.to_dict() if resolved.strategy_exit else None
+                ),
             })
 
         return decisions
@@ -11647,6 +11729,7 @@ class MarketService:
                 entry_price=executed_price or last_price,
                 tp_price=take_profit_price,
                 sl_price=stop_loss_price,
+                strategy_exit=decision.get("_strategy_exit"),
             )
 
         await self._record_trade_execution(

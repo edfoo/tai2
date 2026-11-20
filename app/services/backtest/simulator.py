@@ -39,6 +39,8 @@ from app.services.indicator_service import htf_regime_allows
 from app.services.strategies import resolve_analysis_block
 from app.services.strategies.defaults import merged_config
 from app.services.trade_management_rules import (
+    StrategyExitParams,
+    compute_strategy_exit,
     compute_trade_management_decision,
     resolve_tm_params,
 )
@@ -199,6 +201,9 @@ class Simulator:
         self._cash = initial_capital
         self._pm_strategies: list[PositionManagementStrategy] = []  # future phase
         self._last_close_ts: dict[str, int] = {}
+        # Re-entry cooldown set by the last closed position on a symbol when
+        # its strategy owns its exits (live: ``_clear_trade_mgmt_state``).
+        self._last_close_cooldown: dict[str, float] = {}
         self._recent_candles: dict[str, list[Candle]] = {}
         # Rolling equity history (ts, equity) for the daily-loss lockout.
         self._equity_history: list[tuple[int, float]] = []
@@ -271,14 +276,21 @@ class Simulator:
         return False
 
     def can_enter(self, symbol: str, entry_ts: int) -> bool:
-        """Return whether live-style re-entry cooldown permits a new entry."""
+        """Return whether live-style re-entry cooldown permits a new entry.
+
+        When the last position closed on *symbol* had strategy-owned exits,
+        its own ``reentry_cooldown_seconds`` applies instead of the global one.
+        """
         _g = self._guardrails()
-        cooldown_seconds = float(
-            self._tm.get("reentry_cooldown_seconds")
-            or _g.get("min_hold_seconds")
-            or _g.get("cooldown_seconds")
-            or 0.0
-        )
+        if symbol in self._last_close_cooldown:
+            cooldown_seconds = self._last_close_cooldown[symbol]
+        else:
+            cooldown_seconds = float(
+                self._tm.get("reentry_cooldown_seconds")
+                or _g.get("min_hold_seconds")
+                or _g.get("cooldown_seconds")
+                or 0.0
+            )
         if cooldown_seconds <= 0:
             return True
         last_close_ts = self._last_close_ts.get(symbol)
@@ -453,6 +465,7 @@ class Simulator:
         notional: float | None = None,
         leverage: float | None = None,
         margin: float | None = None,
+        strategy_exit: StrategyExitParams | None = None,
     ) -> SimPosition | None:
         """Open a new simulated position, or return None if a guardrail blocks.
 
@@ -641,6 +654,7 @@ class Simulator:
             initial_size=size,
             entry_fee=entry_fee,
             slippage_cost=entry_slippage,
+            strategy_exit=strategy_exit,
         )
         self._cash -= entry_fee
         # Entry-time hook for position-management strategies (future phase).
@@ -695,6 +709,12 @@ class Simulator:
             self._open_positions.remove(position)
             self._closed_positions.append(position)
             self._last_close_ts[position.symbol] = close_ts
+            if position.strategy_exit is not None:
+                self._last_close_cooldown[position.symbol] = (
+                    position.strategy_exit.reentry_cooldown_seconds
+                )
+            else:
+                self._last_close_cooldown.pop(position.symbol, None)
             return
 
         # Partial close: realise PnL on the closed fraction, keep remainder open.
@@ -830,10 +850,9 @@ class Simulator:
             self._settle_funding(position, candle.ts)
             position.candles_held += 1
             self._track_excursion(position, candle)
-            if self._check_tp_sl(position, candle):
-                continue  # position was closed
-            # 1b. Trade management (breakeven / partial / time-stop).
-            if self._apply_trade_management(position, candle):
+            # TP/SL, then trade management (breakeven / partial / time-stop)
+            # or the strategy's own exits.
+            if self._apply_exits(position, candle):
                 continue
             # 1c. Max-hold-time timeout — close at candle close.
             if self._max_hold_candles > 0 and position.candles_held >= self._max_hold_candles:
@@ -880,10 +899,9 @@ class Simulator:
             self._settle_funding(position, candle.ts)
             position.candles_held += 1
             self._track_excursion(position, candle)
-            if self._check_tp_sl(position, candle):
-                continue
-            # 1b. Trade management (breakeven / partial / time-stop).
-            if self._apply_trade_management(position, candle):
+            # TP/SL, then trade management (breakeven / partial / time-stop)
+            # or the strategy's own exits.
+            if self._apply_exits(position, candle):
                 continue
             # 1c. Max-hold-time timeout — close at candle close.
             if self._max_hold_candles > 0 and position.candles_held >= self._max_hold_candles:
@@ -909,6 +927,48 @@ class Simulator:
         )
         if ts:
             self._equity_history.append((ts, eq))
+
+    def _apply_exits(self, position: SimPosition, candle: Candle) -> bool:
+        """Run the exits for one position on one candle; True if it closed.
+
+        Global positions: TP/SL algos, then global trade management.
+        Strategy-owned exits (wick_rejection §3.2/§3.7), via the shared
+        ``compute_strategy_exit``: software emergency stop first (a candle
+        touching both it and the TP fills the stop), then the TP/SL algos, then
+        the time stop at the candle close.  The global rules run only with
+        ``use_global_trade_management``.
+
+        Hold time is ``candle.ts − entry_ts``: both are open times of the same
+        step timeframe, so it equals the time from the entry (the entry
+        candle's close) to this candle's close.
+        """
+        owned = position.strategy_exit
+        if owned is None:
+            if self._check_tp_sl(position, candle):
+                return True
+            return self._apply_trade_management(position, candle)
+
+        decision = compute_strategy_exit(
+            owned,
+            is_long=position.is_long,
+            entry_price=position.entry_price,
+            held_seconds=(candle.ts - position.entry_ts) / 1000.0,
+            high=candle.high,
+            low=candle.low,
+        )
+        if decision.reason == "emergency_stop" and decision.stop_price is not None:
+            stop = decision.stop_price
+            fill = min(candle.open, stop) if position.is_long else max(candle.open, stop)
+            self._close_position(position, fill, candle.ts, "emergency_stop")
+            return True
+        if self._check_tp_sl(position, candle):
+            return True
+        if decision.reason == "time_stop":
+            self._close_position(position, candle.close, candle.ts, "time_stop")
+            return True
+        if owned.use_global_trade_management:
+            return self._apply_trade_management(position, candle)
+        return False
 
     def _apply_trade_management(self, position: SimPosition, candle: Candle) -> bool:
         """Apply breakeven / partial TP / trailing / software-stop / time-stop.

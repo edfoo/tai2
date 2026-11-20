@@ -386,3 +386,92 @@ def compute_trade_management_decision(
         d.timeout = True
 
     return d
+
+
+# ── Strategy-owned exits (wick_rejection §3.2) ─────────────────────────────
+#
+# Strategies that own their exits (``emergency_stop_mode`` in their defaults)
+# get a time stop, an optional software emergency stop and their own re-entry
+# cooldown.  The parameters are resolved once at entry by
+# ``launcher_tp_sl.resolve_launcher_tp_sl`` (margin units converted at the
+# leverage actually used) and travel with the position, so live and the
+# simulator evaluate the identical rule below.
+
+
+@dataclass(slots=True, frozen=True)
+class StrategyExitParams:
+    """Exit parameters fixed at entry for a strategy-owned-exit position."""
+
+    max_hold_seconds: float = 0.0          # 0 = no time stop
+    software_stop_pct: float | None = None  # adverse price % from entry; None = off
+    reentry_cooldown_seconds: float = 0.0
+    # True → the global trade-management rules also run for the position.
+    use_global_trade_management: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "max_hold_seconds": self.max_hold_seconds,
+            "software_stop_pct": self.software_stop_pct,
+            "reentry_cooldown_seconds": self.reentry_cooldown_seconds,
+            "use_global_trade_management": self.use_global_trade_management,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | None) -> "StrategyExitParams | None":
+        if not isinstance(data, dict):
+            return None
+        stop = _extract_float(data.get("software_stop_pct"))
+        return cls(
+            max_hold_seconds=max(0.0, _extract_float(data.get("max_hold_seconds")) or 0.0),
+            software_stop_pct=stop if stop is not None and stop > 0 else None,
+            reentry_cooldown_seconds=max(
+                0.0, _extract_float(data.get("reentry_cooldown_seconds")) or 0.0
+            ),
+            use_global_trade_management=bool(data.get("use_global_trade_management", False)),
+        )
+
+
+@dataclass(slots=True, frozen=True)
+class StrategyExitDecision:
+    close: bool = False
+    reason: str | None = None        # "emergency_stop" | "time_stop"
+    stop_price: float | None = None  # the software-stop level (emergency_stop only)
+
+
+def software_stop_price(
+    params: StrategyExitParams, *, is_long: bool, entry_price: float
+) -> float | None:
+    """Price at which the software emergency stop triggers, or None when off."""
+    if params.software_stop_pct is None or entry_price <= 0:
+        return None
+    pct = params.software_stop_pct / 100.0
+    return entry_price * (1.0 - pct) if is_long else entry_price * (1.0 + pct)
+
+
+def compute_strategy_exit(
+    params: StrategyExitParams,
+    *,
+    is_long: bool,
+    entry_price: float,
+    held_seconds: float,
+    high: float,
+    low: float,
+) -> StrategyExitDecision:
+    """Decide whether a strategy-owned-exit position must close now.
+
+    ``high`` / ``low`` are the adverse-side extremes seen since the last check:
+    live passes the current price for both, the simulator the 1m candle's
+    high and low.  The emergency stop is checked first; the time stop closes
+    after ``max_hold_seconds`` win or lose (no R condition).
+
+    The simulator checks the emergency stop **before** the TP so a candle that
+    touches both fills the stop (conservative, §3.7), and the time stop after
+    the TP.  Callers that need that split read ``reason``.
+    """
+    stop = software_stop_price(params, is_long=is_long, entry_price=entry_price)
+    if stop is not None:
+        if (is_long and low <= stop) or (not is_long and high >= stop):
+            return StrategyExitDecision(close=True, reason="emergency_stop", stop_price=stop)
+    if params.max_hold_seconds > 0 and held_seconds >= params.max_hold_seconds:
+        return StrategyExitDecision(close=True, reason="time_stop")
+    return StrategyExitDecision()
