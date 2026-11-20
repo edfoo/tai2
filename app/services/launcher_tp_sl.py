@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.services.strategies import resolve_analysis_block
+from app.services.strategies.defaults import merged_config
 
 
 def _extract_float(value: Any) -> float | None:
@@ -22,6 +23,65 @@ def _extract_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def clamp_leverage_to_guardrails(
+    leverage: float, guardrails_config: dict[str, Any] | None
+) -> float:
+    """Clamp a strategy leverage to ``[min_leverage, max_leverage]``.
+
+    Reads the guardrails the same way ``handle_llm_decision`` does: a missing
+    ``min_leverage`` is 0, a missing or non-positive ``max_leverage`` is
+    ``max(min_leverage, 1)``, and an inverted pair is swapped.
+    """
+    g = guardrails_config or {}
+    min_lev = _extract_float(g.get("min_leverage")) or 0.0
+    max_lev = _extract_float(g.get("max_leverage"))
+    if max_lev is None or max_lev <= 0:
+        max_lev = max(min_lev, 1.0)
+    if max_lev < min_lev:
+        min_lev, max_lev = max_lev, min_lev
+    return max(min(leverage, max_lev), min_lev, 1.0)
+
+
+def resolve_strategy_sizing(
+    strat_cfg: dict[str, Any],
+    guardrails_config: dict[str, Any] | None,
+    equity: float | None,
+) -> tuple[float | None, float | None, float | None, list[str]]:
+    """Per-strategy leverage + margin sizing (wick_rejection plan §3.4).
+
+    Returns ``(leverage, margin_usd, notional_usd, debug_lines)``.  All three
+    are ``None`` when the strategy sets no ``leverage``.  ``leverage`` is
+    clamped to the guardrails; notional is ``margin × clamped leverage`` so
+    the margin at risk stays as configured when the clamp changes it.
+    ``margin_usd``/``notional_usd`` are ``None`` when ``pct_equity`` mode has
+    no equity to size from.
+    """
+    lines: list[str] = []
+    lev_cfg = _extract_float(strat_cfg.get("leverage"))
+    if lev_cfg is None or lev_cfg <= 0:
+        return None, None, None, lines
+    lev = clamp_leverage_to_guardrails(lev_cfg, guardrails_config)
+    if abs(lev - lev_cfg) > 1e-9:
+        lines.append(
+            f"leverage {lev_cfg:g}x clamped to {lev:g}x by guardrails "
+            f"(margin kept, notional recomputed)"
+        )
+    mode = str(strat_cfg.get("margin_mode") or "fixed_usdt").strip().lower()
+    margin: float | None
+    if mode == "pct_equity":
+        pct = _extract_float(strat_cfg.get("margin_pct")) or 0.0
+        if equity is None or equity <= 0 or pct <= 0:
+            lines.append(f"margin_pct={pct:g}% but equity unavailable — cannot size")
+            return lev, None, None, lines
+        margin = equity * pct / 100.0
+    else:
+        margin = _extract_float(strat_cfg.get("margin_usdt"))
+        if margin is None or margin <= 0:
+            lines.append("margin_usdt not configured — cannot size")
+            return lev, None, None, lines
+    return lev, margin, margin * lev, lines
 
 
 @dataclass(slots=True)
@@ -37,6 +97,17 @@ class LauncherTpSl:
     flip_tp_sl_active: bool = False
     dynamic_tp_source: str = "static"
     debug_lines: list[str] = field(default_factory=list)
+    # "full" (TP + SL required), "tp_only" (TP order only; SL handled in
+    # software or off) or "none" (no protection orders).
+    protection: str = "full"
+    # Per-strategy sizing (wick_rejection §3.4); None → launcher.notional_usd
+    # and the guardrail leverage.
+    leverage_override: float | None = None
+    margin_usd: float | None = None
+    notional_override: float | None = None
+    # Strategy sizing was configured but could not be resolved (no equity /
+    # margin) — the caller must skip the entry rather than fall back.
+    sizing_failed: bool = False
 
 
 def resolve_launcher_tp_sl(
@@ -49,6 +120,7 @@ def resolve_launcher_tp_sl(
     launcher_config: dict[str, Any],
     guardrails_config: dict[str, Any],
     sym_data: dict[str, Any] | None,
+    equity: float | None = None,
 ) -> LauncherTpSl:
     """Resolve a strategy signal's TP/SL prices exactly as the live launcher does.
 
@@ -57,6 +129,12 @@ def resolve_launcher_tp_sl(
     fallback, PnL%-mode conversion, Mean Reversion dynamic-TP, and the
     per-strategy direction-flip (``flip_launcher_direction`` /
     ``flip_tp_sl``).
+
+    Strategies with strategy-owned exits (``emergency_stop_mode`` in their
+    defaults — wick_rejection) resolve TP and the emergency stop from their own
+    config with unit conversion at the effective leverage, skip the PnL% mode,
+    and may request TP-only protection.  ``equity`` is only used for
+    ``margin_mode = "pct_equity"`` sizing.
     """
     gov = launcher_config or {}
     strategies_cfg = gov.get("strategies") or {}
@@ -67,6 +145,34 @@ def resolve_launcher_tp_sl(
     # TP/SL from the strategy signal, falling back to launcher-level.
     tp_pct = signal_tp_pct if signal_tp_pct is not None else _extract_float(gov.get("tp_pct"))
     sl_pct = signal_sl_pct if signal_sl_pct is not None else _extract_float(gov.get("sl_pct"))
+
+    # Strategy-owned exits + per-strategy sizing (wick_rejection §3.2–3.4).
+    merged = merged_config(strat_cfg, strategy_name)
+    owned_exits = "emergency_stop_mode" in merged
+    protection = "full"
+    leverage_override = margin_usd = notional_override = None
+    sizing_failed = False
+    if owned_exits:
+        from app.services.strategies.wick_rejection import exit_price_pcts
+
+        leverage_override, margin_usd, notional_override, _size_lines = resolve_strategy_sizing(
+            merged, guardrails_config, equity
+        )
+        debug_lines.extend(_size_lines)
+        sizing_failed = leverage_override is not None and notional_override is None
+        # Margin-unit targets convert at the leverage actually used.
+        _exit_cfg = dict(merged)
+        if leverage_override is not None:
+            _exit_cfg["leverage"] = leverage_override
+        tp_pct, sl_pct = exit_price_pcts(_exit_cfg)
+        stop_mode = str(merged.get("emergency_stop_mode") or "exchange").strip().lower()
+        if stop_mode in ("software", "off"):
+            protection = "tp_only"
+            sl_pct = None
+        debug_lines.append(
+            f"strategy exits: tp={tp_pct}% stop={sl_pct}% ({stop_mode}) "
+            f"lev={leverage_override} margin={margin_usd} notional={notional_override}"
+        )
 
     # Mean Reversion opt-out: if both adaptive sizing modes are explicitly
     # disabled and static TP/SL are both blank, do not attach protection.
@@ -82,6 +188,13 @@ def resolve_launcher_tp_sl(
             disable_protection = True
             tp_pct = None
             sl_pct = None
+    # Generic opt-out (any strategy): no TP/SL orders at all.
+    if bool(merged.get("disable_protection", False)):
+        disable_protection = True
+        tp_pct = None
+        sl_pct = None
+    if disable_protection:
+        protection = "none"
 
     # PnL% mode: when enabled, the strategy TP/SL fields are interpreted
     # as Floating PnL % on margin (after leverage). Convert them to price
@@ -97,6 +210,7 @@ def resolve_launcher_tp_sl(
     _uses_struct = bool(strat_cfg.get("use_structural_sizing", False))
     if (
         _pnl_pct_mode
+        and not owned_exits
         and _guard_leverage
         and _guard_leverage > 0
         and not _uses_atr
@@ -214,9 +328,14 @@ def resolve_launcher_tp_sl(
         tp_price=tp_price,
         sl_price=sl_price,
         disable_protection=disable_protection,
-        skip_rr_guard=flip_tp_sl_active,
+        skip_rr_guard=flip_tp_sl_active or bool(merged.get("skip_rr_guard", False)),
         flipped=flipped,
         flip_tp_sl_active=flip_tp_sl_active,
         dynamic_tp_source=dynamic_tp_source,
         debug_lines=debug_lines,
+        protection=protection,
+        leverage_override=leverage_override,
+        margin_usd=margin_usd,
+        notional_override=notional_override,
+        sizing_failed=sizing_failed,
     )

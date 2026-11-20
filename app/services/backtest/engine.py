@@ -606,6 +606,8 @@ class BacktestEngine:
                         signal, candle.close, self._config.launcher_config,
                         snapshot=snapshot, strat_cfg=strat_cfg,
                     )
+                    if resolved.sizing_failed:
+                        continue
                     if not _passes_protection_guard(
                         resolved=resolved,
                         guardrails_config=self._guardrails_config,
@@ -630,6 +632,9 @@ class BacktestEngine:
                         tp_price=resolved.tp_price,
                         sl_price=resolved.sl_price,
                         strategy_name=strategy.name,
+                        notional=resolved.notional_override,
+                        leverage=resolved.leverage_override,
+                        margin=resolved.margin_usd,
                     )
 
             # Update simulator (check TP/SL, record equity).
@@ -805,6 +810,8 @@ class BacktestEngine:
                         signal, eval_candle.close, self._config.launcher_config,
                         snapshot=snapshot, strat_cfg=strat_cfg,
                     )
+                    if resolved.sizing_failed:
+                        continue
                     if not _passes_protection_guard(
                         resolved=resolved,
                         guardrails_config=self._guardrails_config,
@@ -829,6 +836,9 @@ class BacktestEngine:
                         tp_price=resolved.tp_price,
                         sl_price=resolved.sl_price,
                         strategy_name=strategy.name,
+                        notional=resolved.notional_override,
+                        leverage=resolved.leverage_override,
+                        margin=resolved.margin_usd,
                     )
 
             # Update simulator (check TP/SL at eval granularity, record equity).
@@ -925,6 +935,7 @@ class BacktestEngine:
             launcher_config=launcher_config,
             guardrails_config=guardrails_config,
             sym_data=sym_data,
+            equity=self._simulator.equity(self._current_prices),
         )
 
 
@@ -1012,13 +1023,18 @@ def _passes_protection_guard(
     resolved: LauncherTpSl,
     guardrails_config: dict[str, Any],
 ) -> bool:
-    """Return whether an entry has the protection required by live config."""
+    """Return whether an entry has the protection required by live config.
+
+    ``protection == "tp_only"`` needs only the TP (live: ``require_stop``).
+    """
     guardrails = guardrails_config or {}
     if not bool(guardrails.get("require_protection", False)) or resolved.disable_protection:
         return True
+    has_tp = isinstance(resolved.tp_price, (int, float)) and resolved.tp_price > 0
+    if resolved.protection == "tp_only":
+        return has_tp
     return (
-        isinstance(resolved.tp_price, (int, float))
-        and resolved.tp_price > 0
+        has_tp
         and isinstance(resolved.sl_price, (int, float))
         and resolved.sl_price > 0
     )

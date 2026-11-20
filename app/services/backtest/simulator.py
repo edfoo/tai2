@@ -450,11 +450,22 @@ class Simulator:
         tp_price: float | None = None,
         sl_price: float | None = None,
         strategy_name: str = "",
+        notional: float | None = None,
+        leverage: float | None = None,
+        margin: float | None = None,
     ) -> SimPosition | None:
         """Open a new simulated position, or return None if a guardrail blocks.
 
         Size is derived from ``notional_per_trade / entry_price``, subject to
         the live daily-loss lockout and portfolio free-equity cap.
+
+        Per-strategy sizing (wick_rejection §3.4, resolved by
+        ``launcher_tp_sl.resolve_strategy_sizing``): ``notional`` replaces
+        ``notional_per_trade`` and ``leverage`` (already clamped to the
+        guardrails) replaces the guardrail ``max_leverage``.  When an
+        instrument tier caps leverage lower, the notional is recomputed as
+        ``margin × tier leverage`` so the margin at risk stays as configured
+        (live: ``handle_llm_decision``).
         """
         guardrails = self._strategy_config.get("guardrails") or {}
         instrument_specs = self._strategy_config.get("instrument_specs") or {}
@@ -469,6 +480,11 @@ class Simulator:
         # so total deployed notional never exceeds account equity.
         current_equity = self._equity_history[-1][1] if self._equity_history else self._cash
         max_leverage = _to_positive_float(guardrails.get("max_leverage")) or 1.0
+        base_notional = self._notional_per_trade
+        if notional is not None and notional > 0:
+            base_notional = notional
+        if leverage is not None and leverage > 0:
+            max_leverage = leverage
         if self._margin_mode == "cross":
             # Cross margin: all account equity backs all positions, so headroom
             # is equity * leverage minus already-deployed notional (no per-
@@ -478,12 +494,12 @@ class Simulator:
             )
             if headroom <= 0:
                 return None
-            requested_notional = min(self._notional_per_trade, headroom)
+            requested_notional = min(base_notional, headroom)
         else:
             free_margin = max(current_equity - self.used_initial_margin(), 0.0)
             if free_margin <= 0:
                 return None
-            requested_notional = min(self._notional_per_trade, free_margin * max_leverage)
+            requested_notional = min(base_notional, free_margin * max_leverage)
         instrument_tiers = [
             tier for tier in instrument.get("position_tiers", [])
             if isinstance(tier, dict)
@@ -495,13 +511,18 @@ class Simulator:
         if tier_leverage_caps:
             max_leverage = min(max_leverage, max(tier_leverage_caps))
         max_leverage = max(max_leverage, 1.0)
+        if (
+            margin is not None and margin > 0 and notional is not None
+            and leverage is not None and max_leverage < leverage
+        ):
+            base_notional = min(base_notional, margin * max_leverage)
         if self._margin_mode == "cross":
             requested_notional = min(
-                self._notional_per_trade,
+                base_notional,
                 max(current_equity * max_leverage - self.open_position_notional(), 0.0),
             )
         else:
-            requested_notional = min(self._notional_per_trade, free_margin * max_leverage)
+            requested_notional = min(base_notional, free_margin * max_leverage)
 
         size, _actual_notional = compute_order_size(
             requested_notional=requested_notional,
@@ -527,13 +548,15 @@ class Simulator:
         tier_imr = _to_positive_float(selected_tier.get("initial_margin_ratio"))
         margin_ratio = max(tier_imr or (1.0 / effective_leverage), 1.0 / effective_leverage)
         if effective_leverage < max_leverage:
+            if margin is not None and margin > 0 and notional is not None:
+                base_notional = min(base_notional, margin * effective_leverage)
             if self._margin_mode == "cross":
                 requested_notional = min(
-                    self._notional_per_trade,
+                    base_notional,
                     max(current_equity * effective_leverage - self.open_position_notional(), 0.0),
                 )
             else:
-                requested_notional = min(self._notional_per_trade, free_margin * effective_leverage)
+                requested_notional = min(base_notional, free_margin * effective_leverage)
             size, _actual_notional = compute_order_size(
                 requested_notional=requested_notional,
                 entry_price=entry_price,

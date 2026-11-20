@@ -68,7 +68,7 @@ uv run pytest
 ```
 - `pytest-xdist` runs with `-n auto` by default (see `pyproject.toml`); the suite takes ~15s.
 - Tests marked `network` hit live services and are skipped by default.
-- All tests must pass (854 passing, 0 pre-existing failures as of 2026-11-20). Any failure is a regression.
+- All tests must pass (892 passing, 0 pre-existing failures as of 2026-11-20). Any failure is a regression.
 
 ---
 
@@ -213,7 +213,7 @@ Covered by `tests/test_live_backtest_parity.py` and `tests/test_forming_candle.p
 - Bootstrap `minSz` floor: `_t1_min_sz * ct_val * last_price`
 
 ### Decision sizing interface (launcher + LLM)
-- Decisions carry **`notional_usd`** (dollar value, e.g. `150.0`) — never contracts or base tokens. The launcher takes it from `launcher.notional_usd`.
+- Decisions carry **`notional_usd`** (dollar value, e.g. `150.0`) — never contracts or base tokens. The launcher takes it from `launcher.notional_usd`, unless the strategy sizes itself (`leverage` + `margin_mode`, currently wick_rejection): then `launcher_tp_sl.resolve_strategy_sizing` gives notional = margin × clamped leverage, and the decision carries `_leverage_override` / `_margin_usd`, which `handle_llm_decision` uses as the order size and OKX leverage (independent of `llm_notional_mode`).
 - Bot converts: `raw_size = notional_usd / last_price`, then `okx_sz = raw_size / ct_val`
 - Legacy fallback fields: `position_size` (base tokens) → `equity_pct` → leverage-scaled
 

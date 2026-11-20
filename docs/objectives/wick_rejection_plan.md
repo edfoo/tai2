@@ -1,6 +1,6 @@
 # Design: Hourly Wick Rejection Short (`wick_rejection`)
 
-**Status:** In progress — Phase 1 done 2026-11-19 (closed-candle alignment + `forming_candle` + `as_of_ts`, live and backtest); Phase 2 done 2026-11-20 (strategy funnel, defaults, registration; disabled by default). Redesigned 2026-11-18 from the manual-trade analysis (§1.1); vol screener §3.5; optional momentum entry mode §3.8 / Phase 9.
+**Status:** In progress — Phase 1 done 2026-11-19 (closed-candle alignment + `forming_candle` + `as_of_ts`, live and backtest); Phase 2 done 2026-11-20 (strategy funnel, defaults, registration; disabled by default); Phase 3 done 2026-11-20 (TP/stop units, protection modes, per-strategy leverage + margin sizing, live and backtest). Redesigned 2026-11-18 from the manual-trade analysis (§1.1); vol screener §3.5; optional momentum entry mode §3.8 / Phase 9.
 **Date:** 2026-10-28 (revised 2026-11-18)
 **Scope:** New launcher strategy with a clock-aligned entry trigger, forming-candle
 exposure, strategy-owned exits (TP + emergency stop + time stop), per-strategy
@@ -610,7 +610,7 @@ boundaries, `body_ratio`, exit unit conversion, registries, and a finer_ltf
 backtest snapshot that fires at minute 58 without seeing the minute-59 dump
 and stays silent mid-hour.
 
-### Phase 3 — TP/SL, sizing and guardrail plumbing *(parallel with 2, 4)*
+### Phase 3 — TP/SL, sizing and guardrail plumbing ✅ *(done 2026-11-20)*
 
 6. **`launcher_tp_sl.py`**
    - WR TP/stop resolution with `tp_unit` / `emergency_stop_unit` conversion (§3.2).
@@ -622,6 +622,65 @@ and stays silent mid-hour.
 8. **`market_service._execute_decision` / `handle_llm_decision`** — apply the
    leverage override (with margin-preserving re-clamp), the `tp_only` protection
    path, and the logged `max_position_pct` cap.
+
+As built:
+
+- **Resolver (`launcher_tp_sl.py`).** A strategy has *strategy-owned exits*
+  when `emergency_stop_mode` is in its defaults (only WR). For those,
+  `resolve_launcher_tp_sl` takes TP and the stop from config via
+  `exit_price_pcts`. Margin units convert at the **clamped** leverage (35%
+  margin at a clamped 3× is an 11.7% stop, not 7%). It ignores the launcher's
+  PnL% mode. `software`/`off` stop → `protection="tp_only"`, no SL price.
+  `disable_protection` (any strategy, OR'd with the MR rule) →
+  `protection="none"`. `skip_rr_guard` is read from any strategy's config.
+- **Sizing (`resolve_strategy_sizing`).** Leverage is clamped to the guardrail
+  `[min_leverage, max_leverage]` (read like `handle_llm_decision`), and margin
+  comes from `fixed_usdt` or `pct_equity` × equity. Notional is
+  `margin × clamped leverage`. `pct_equity` with no equity → `sizing_failed`,
+  and the entry is skipped (never a silent fallback to `launcher.notional_usd`).
+  `LauncherTpSl` gained `protection`, `leverage_override`, `margin_usd`,
+  `notional_override` and `sizing_failed`.
+- **`build_launcher_decisions(symbol, strategies=None)`.** Equity comes from
+  `snapshot["account"]`. Decisions carry `notional_usd` (override or
+  `launcher.notional_usd`), `_leverage_override`, `_margin_usd`, `_protection`
+  and `_rank_score`. `launcher.notional_usd` is now checked per signal, so WR
+  works without it.
+- **`handle_llm_decision`.**
+  - A launcher decision with `_leverage_override` + `_margin_usd` sizes as
+    `margin × leverage`, bypassing both the exec-layer formula and
+    `llm_notional_mode` (`pre_leverage` would have multiplied by `max_leverage`
+    again).
+  - OKX leverage = the strategy leverage (re-clamped; tier cap applied with the
+    notional shrunk so margin stays as configured).
+  - `leverage_override_reason = "strategy leverage Nx"` so the min-leverage
+    guard (notional ÷ equity) doesn't block.
+  - `max_position_pct` and the margin caps still clip, with a log line.
+  - `_protection="tp_only"` strips the SL and requires only the TP
+    (`require_stop`).
+- **Isolated-margin limits are margin budgets for strategy-sized entries.** A
+  new isolated position goes through the wallet-bootstrap cap
+  (`isolated_wallet_bootstrap_pct`, default 25% of the USDT balance), which the
+  code applies to **notional**. For WR that would have turned 20 USDT × 5 into
+  a ~29 USDT position on a 117 USDT account. For strategy-sized entries the
+  bootstrap budget, the balance cap and the fallback seed are converted to
+  notional with the strategy leverage. Other entries are unchanged.
+- **Backtest.** The engine passes the simulator's equity, skips
+  `sizing_failed`, and passes `notional`/`leverage`/`margin` to
+  `Simulator.open_position`. That replaces `notional_per_trade` and the
+  guardrail `max_leverage`, and keeps margin when an instrument tier caps
+  leverage. `_passes_protection_guard` accepts `tp_only` with a TP only.
+- **Config to check before going live.** `max_leverage` must be ≥ the WR
+  `leverage` (otherwise it is clamped, margin kept). `max_position_pct` (a
+  fraction of equity, applied to notional) must be ≥ `margin × leverage ÷
+  equity`, otherwise every WR entry is cut.
+- Not in this phase: WR's own `reentry_cooldown_minutes` (Phase 4, with the
+  exits), and `max_concurrent_positions` / `max_total_margin_pct` (Phase 6,
+  in the trigger).
+
+Tests: `tests/test_wick_rejection_execution.py` (38): resolver, sizing and
+clamping, protection modes, simulator sizing including the tier cap,
+`build_launcher_decisions` forwarding and the filter, and execution in cross
+and isolated modes (size, OKX leverage, attached TP/SL algos, caps).
 
 ### Phase 4 — Strategy-owned exits *(parallel with 2, 3)*
 

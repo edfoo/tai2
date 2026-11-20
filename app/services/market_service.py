@@ -3803,7 +3803,9 @@ class MarketService:
             return f"open {side} position on symbol"
         return None
 
-    def _launcher_evaluate_signals(self, symbol: str) -> list[StrategySignal]:
+    def _launcher_evaluate_signals(
+        self, symbol: str, strategies: Iterable[str] | None = None
+    ) -> list[StrategySignal]:
         """Return all strategy signals for a symbol (concurrent evaluation).
 
         All enabled strategies are evaluated; each can fire independently.
@@ -3820,6 +3822,9 @@ class MarketService:
         RSI/ADX hit transient extremes mid-candle that revert by candle close
         (see /memories/repo/backtest_live_divergence.md).  The real-time
         ``last_price`` from the ticker is still used for TP/SL placement.
+
+        ``strategies`` limits evaluation to those strategy names (the
+        wick_rejection trigger evaluates only itself).
         """
         snapshot = self._last_full_snapshot
         if not snapshot:
@@ -3828,8 +3833,11 @@ class MarketService:
         # same indicator values the backtest would compute.
         snapshot = self._build_closed_candle_snapshot(snapshot, symbol)
         strategies_cfg = self._launcher_config.get("strategies") or {}
+        only = {str(n) for n in strategies} if strategies is not None else None
         signals: list[StrategySignal] = []
         for strategy in self._strategies:
+            if only is not None and strategy.name not in only:
+                continue
             if not self._strategy_allowed_on_symbol(strategy.name, symbol):
                 continue
             strat_cfg = strategies_cfg.get(strategy.name) or {}
@@ -4131,12 +4139,20 @@ class MarketService:
         except Exception as exc:
             logger.warning("Launcher close error for %s: %s", symbol, exc)
 
-    def build_launcher_decisions(self, symbol: str) -> list[dict[str, Any]]:
+    def build_launcher_decisions(
+        self, symbol: str, strategies: Iterable[str] | None = None
+    ) -> list[dict[str, Any]]:
         """Build decision dicts for all strategies that fire on a symbol.
 
         Called by PromptScheduler._tick() in launcher_only mode.  Returns a
         list of decisions compatible with handle_llm_decision(), one per
         firing strategy.  Multiple strategies can fire concurrently.
+        ``strategies`` limits evaluation to those strategy names.
+
+        Strategies with their own sizing (``leverage`` + margin, see
+        ``launcher_tp_sl.resolve_strategy_sizing``) override
+        ``launcher.notional_usd`` and carry ``_leverage_override`` /
+        ``_margin_usd``; ``_protection`` says which protection orders apply.
         """
         gov = self._launcher_config
         snapshot = self._last_full_snapshot
@@ -4151,19 +4167,24 @@ class MarketService:
         }
         symbol_upper = symbol.upper()
 
-        notional_usd = self._extract_float(gov.get("notional_usd"))
-        if not notional_usd or notional_usd <= 0:
-            self._emit_debug(f"Launcher: notional_usd not configured — skipping {symbol}")
-            return []
+        launcher_notional = self._extract_float(gov.get("notional_usd"))
 
         last_price = self.get_last_price(symbol)
         if not last_price or last_price <= 0:
             self._emit_debug(f"Launcher: {symbol} no last price — skipping")
             return []
 
-        signals = self._launcher_evaluate_signals(symbol)
+        signals = self._launcher_evaluate_signals(symbol, strategies)
         if not signals:
             return []
+
+        account_block = snapshot.get("account") or {}
+        account_equity = self._extract_float(
+            account_block.get("account_equity")
+            or account_block.get("total_eq_usd")
+            or account_block.get("total_equity")
+            or account_block.get("total_account_value")
+        )
 
         decisions: list[dict[str, Any]] = []
         for signal in signals:
@@ -4211,14 +4232,23 @@ class MarketService:
                 launcher_config=gov,
                 guardrails_config=self._guardrails_config,
                 sym_data=sym_data,
+                equity=account_equity,
             )
+            for line in resolved.debug_lines:
+                self._emit_debug(f"Launcher {line}: {symbol} [{signal.strategy_name}]")
+            if resolved.sizing_failed:
+                self._emit_debug(
+                    f"Launcher: {symbol} [{signal.strategy_name}] strategy sizing unresolved — skipping"
+                )
+                continue
+            notional_usd = resolved.notional_override or launcher_notional
+            if not notional_usd or notional_usd <= 0:
+                self._emit_debug(f"Launcher: notional_usd not configured — skipping {symbol}")
+                continue
             action = resolved.action
             tp_price = resolved.tp_price
             sl_price = resolved.sl_price
             _disable_protection = resolved.disable_protection
-
-            for line in resolved.debug_lines:
-                self._emit_debug(f"Launcher {line}: {symbol} [{signal.strategy_name}]")
 
             self._emit_debug(
                 f"Launcher signal: {symbol} {action} [{signal.strategy_name}] "
@@ -4240,6 +4270,10 @@ class MarketService:
                 "_strategy_name": signal.strategy_name,
                 "_disable_protection": _disable_protection,
                 "_skip_rr_guard": resolved.skip_rr_guard,
+                "_protection": resolved.protection,
+                "_leverage_override": resolved.leverage_override,
+                "_margin_usd": resolved.margin_usd,
+                "_rank_score": signal.rank_score,
             })
 
         return decisions
@@ -9563,6 +9597,24 @@ class MarketService:
             max_leverage = max(min_leverage or 0.0, 1.0)
         if max_leverage < min_leverage:
             min_leverage, max_leverage = max_leverage, min_leverage
+        # Per-strategy leverage + margin sizing (wick_rejection plan §3.4).
+        # Resolved (and clamped) in launcher_tp_sl; re-clamped here in case
+        # the guardrails changed between build and execution.  Sizing becomes
+        # margin × leverage, independent of llm_notional_mode.
+        _strategy_leverage: float | None = None
+        _strategy_margin: float | None = None
+        if _is_launcher_decision:
+            _lev_req = self._extract_float(decision.get("_leverage_override"))
+            _margin_req = self._extract_float(decision.get("_margin_usd"))
+            if _lev_req and _lev_req > 0 and _margin_req and _margin_req > 0:
+                _strategy_leverage = max(min(_lev_req, max_leverage), min_leverage, 1.0)
+                if abs(_strategy_leverage - _lev_req) > 1e-9:
+                    self._emit_debug(
+                        f"{symbol} strategy leverage {_lev_req:g}x clamped to "
+                        f"{_strategy_leverage:g}x by guardrails (margin kept)"
+                    )
+                _strategy_margin = _margin_req
+                leverage_override_reason = f"strategy leverage {_strategy_leverage:g}x"
         confidence_gate = self._extract_float(guardrails.get("min_leverage_confidence_gate"))
         if confidence_gate is None:
             confidence_gate = 0.5
@@ -9808,6 +9860,7 @@ class MarketService:
             and available_margin_usd > 0
             and max_leverage > 0
             and llm_notional_mode != "pre_leverage"  # pre-leverage semantics differ
+            and _strategy_margin is None  # strategy sizing is explicit
         ):
             _max_safe = available_margin_usd * max_leverage
             if guardrail_notional_cap and guardrail_notional_cap > 0:
@@ -9832,6 +9885,8 @@ class MarketService:
                     f"× (1−risk={risk_score_value:.2f}) = {_computed:.2f}"
                 )
                 llm_notional_usd = _computed
+        if _strategy_margin is not None and _strategy_leverage and last_price and last_price > 0:
+            llm_notional_usd = _strategy_margin * _strategy_leverage
         if llm_notional_usd and llm_notional_usd > 0 and last_price and last_price > 0:
             # LLM expressed position size as a dollar amount — convert directly to
             # base-token units and skip the leverage-scaling path entirely.  All
@@ -9843,7 +9898,14 @@ class MarketService:
             #   pre_leverage — notional_usd is the MARGIN to commit;
             #     the bot multiplies by max_leverage to get position notional
             #     raw_size = notional_usd × max_leverage / price
-            if llm_notional_mode == "pre_leverage":
+            if _strategy_margin is not None:
+                raw_size = llm_notional_usd / last_price
+                self._emit_debug(
+                    f"{symbol} sizing from strategy margin={_strategy_margin:.2f} "
+                    f"× {_strategy_leverage:g}x = notional {llm_notional_usd:.2f} "
+                    f"→ raw_size={raw_size:.6f} base-tokens"
+                )
+            elif llm_notional_mode == "pre_leverage":
                 effective_leverage = max(max_leverage, 1.0) if max_leverage and max_leverage > 0 else 1.0
                 raw_size = (llm_notional_usd * effective_leverage) / last_price
                 self._emit_debug(
@@ -10181,17 +10243,27 @@ class MarketService:
                 if bootstrap_pct is None or bootstrap_pct <= 0:
                     bootstrap_pct = self.ISOLATED_WALLET_BOOTSTRAP_PCT
                 bootstrap_pct = min(max(bootstrap_pct, 0.0), 1.0)
+                # Balance-based limits below are margin budgets.  OKX isolated
+                # margin is notional ÷ leverage, so for strategy-sized entries
+                # (explicit margin × leverage) convert them to notional with
+                # the strategy leverage.  Other entries keep the historical
+                # notional semantics (factor 1).
+                _budget_to_notional = (
+                    _strategy_leverage
+                    if _strategy_margin is not None and _strategy_leverage
+                    else 1.0
+                )
                 if (wallet_cap is None or wallet_cap <= 0) and bootstrap_pct > 0:
                     baseline = fallback_margin or account_equity
                     if baseline and baseline > 0:
-                        wallet_cap = baseline * bootstrap_pct
+                        wallet_cap = baseline * bootstrap_pct * _budget_to_notional
                 # Cap wallet_cap by the actual available quote-currency balance
                 # (e.g., real USDT, not just USD-equivalent of all assets).
                 # Without this, the system sizes the order against the configured
                 # seed limit while OKX has less of the specific margin currency
                 # available, causing code-51008 "insufficient USDT balance".
                 if wallet_cap and wallet_cap > 0 and quote_margin_candidates:
-                    actual_quote_balance = max(quote_margin_candidates)
+                    actual_quote_balance = max(quote_margin_candidates) * _budget_to_notional
                     if actual_quote_balance > 0 and actual_quote_balance < wallet_cap:
                         self._emit_debug(
                             f"{symbol} isolated seed cap reduced from {wallet_cap:.4f} to "
@@ -10221,14 +10293,19 @@ class MarketService:
                 if bootstrap_pct > 0 and quote_margin_candidates:
                     actual_quote_balance = max(quote_margin_candidates)
                     if actual_quote_balance > 0:
-                        bootstrap_budget = actual_quote_balance * bootstrap_pct
+                        bootstrap_budget = actual_quote_balance * bootstrap_pct * _budget_to_notional
                         if bootstrap_budget > 0 and (wallet_cap is None or wallet_cap > bootstrap_budget):
                             _prev_cap_str = f"{wallet_cap:.4f}" if wallet_cap is not None else "None"
+                            _lev_note = (
+                                f" × strategy leverage {_budget_to_notional:g}x"
+                                if _budget_to_notional != 1.0
+                                else ""
+                            )
                             self._emit_debug(
                                 f"{symbol} bootstrap notional cap: "
                                 f"{_prev_cap_str} → {bootstrap_budget:.4f} "
                                 f"(bootstrap_pct={bootstrap_pct:.2f} × "
-                                f"quote_balance={actual_quote_balance:.4f})"
+                                f"quote_balance={actual_quote_balance:.4f}{_lev_note})"
                             )
                             self._record_execution_feedback(
                                 symbol,
@@ -10526,6 +10603,14 @@ class MarketService:
             and str(decision.get("_decision_origin") or "").lower() == "launcher"
             and bool(decision.get("_disable_protection"))
         )
+        # TP-only launcher entry (wick_rejection software/off emergency stop):
+        # place the TP algo, no SL order, and don't require one.
+        _launcher_tp_only_entry = (
+            not reduce_only
+            and not _launcher_no_protection_entry
+            and str(decision.get("_decision_origin") or "").lower() == "launcher"
+            and str(decision.get("_protection") or "").lower() == "tp_only"
+        )
         if _alternator_entry:
             if take_profit_price or stop_loss_price:
                 self._emit_debug(
@@ -10553,7 +10638,19 @@ class MarketService:
             stop_loss_ratio = None
             require_protection = False
 
-        if require_protection and not reduce_only and not _alternator_entry and not _launcher_no_protection_entry and (stop_loss_price is None or not isinstance(stop_loss_price, (int, float)) or stop_loss_price <= 0):
+        if _launcher_tp_only_entry:
+            if stop_loss_price is not None:
+                self._emit_debug(
+                    f"{symbol} launcher TP-only entry: no SL order (stop {stop_loss_price} "
+                    f"handled in software or off)"
+                )
+            stop_loss_price = None
+            requested_stop_loss = None
+            stop_loss_ratio = None
+        # Whether an SL order is required (TP-only entries need only the TP).
+        require_stop = require_protection and not _launcher_tp_only_entry
+
+        if require_stop and not reduce_only and not _alternator_entry and not _launcher_no_protection_entry and (stop_loss_price is None or not isinstance(stop_loss_price, (int, float)) or stop_loss_price <= 0):
             self._record_execution_feedback(
                 symbol,
                 "Blocked: stop-loss required",
@@ -10606,7 +10703,8 @@ class MarketService:
         _skip_rr = bool(decision.get("_skip_rr_guard"))
         if _skip_rr:
             self._emit_debug(
-                f"{symbol}: flip_tp_sl active — bypassing R:R guardrail for this trade"
+                f"{symbol}: _skip_rr_guard set (flip_tp_sl or strategy skip_rr_guard) "
+                f"— bypassing R:R guardrail for this trade"
             )
         if (
             _require_rr
@@ -10694,6 +10792,12 @@ class MarketService:
         if guardrail_notional_cap and guardrail_notional_cap > 0 and last_price:
             contract_cap = guardrail_notional_cap / last_price
             if contract_cap and contract_cap > 0 and raw_size > contract_cap:
+                if _strategy_margin is not None:
+                    self._emit_debug(
+                        f"{symbol} strategy notional {raw_size * last_price:.2f} capped to "
+                        f"{guardrail_notional_cap:.2f} by max_position_pct / margin limits "
+                        f"(margin {_strategy_margin:.2f} × {_strategy_leverage:g}x not reached)"
+                    )
                 raw_size = contract_cap
                 clipped_by_cap = True
                 symbol_limit_active = (
@@ -11020,6 +11124,25 @@ class MarketService:
                         },
                     )
 
+        if (
+            _strategy_margin is not None
+            and _strategy_leverage
+            and tier_max_leverage_used
+            and 0 < tier_max_leverage_used < _strategy_leverage
+            and last_price
+            and last_price > 0
+        ):
+            # The OKX tier caps leverage below the strategy's: keep the margin
+            # at risk as configured by shrinking the notional.
+            _tier_size = _strategy_margin * tier_max_leverage_used / last_price
+            if raw_size > _tier_size:
+                self._emit_debug(
+                    f"{symbol} OKX tier caps leverage at {tier_max_leverage_used:g}x "
+                    f"(< strategy {_strategy_leverage:g}x): notional "
+                    f"{raw_size * last_price:.2f} → {_tier_size * last_price:.2f} (margin kept)"
+                )
+                raw_size = _tier_size
+
         if raw_size < min_size:
             self._emit_debug(
                 f"Execution skipped for {symbol}: computed size {raw_size:.6f} below minimum {min_size}"
@@ -11110,6 +11233,10 @@ class MarketService:
                 fallback = min_leverage
             if fallback:
                 target_leverage = max(fallback, 1.0)
+        if not reduce_only and _strategy_leverage is not None:
+            target_leverage = _strategy_leverage
+            if tier_max_leverage_used and tier_max_leverage_used > 0:
+                target_leverage = min(target_leverage, tier_max_leverage_used)
 
         attach_algo_orders: list[dict[str, Any]] | None = None
         attachments_take_profit = None
@@ -11123,7 +11250,7 @@ class MarketService:
         else:
             attachments_take_profit = requested_take_profit
             attachments_stop_loss = requested_stop_loss
-            if require_protection and attachments_stop_loss is None:
+            if require_stop and attachments_stop_loss is None:
                 self._record_execution_feedback(
                     symbol,
                     "Blocked: stop-loss required by guardrail",
@@ -11189,7 +11316,7 @@ class MarketService:
                         kind="stop-loss",
                         stage="pre-order attachment",
                     )
-                    if require_protection and attachments_stop_loss is None:
+                    if require_stop and attachments_stop_loss is None:
                         self._record_execution_feedback(
                             symbol,
                             "Blocked: stop-loss rejected by guardrail",
