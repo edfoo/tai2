@@ -57,7 +57,7 @@ uv sync
 uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 - Bind `0.0.0.0` (not a single IP) so `localhost` works — the backtest CLI scripts default to `http://localhost:8000`.
-- Do **not** use `--reload` outside local dev: each restart wipes in-memory launcher/trade-management state (`_launcher_in_position`, `_trade_mgmt_state`), which is only partly re-hydrated by `_rehydrate_open_positions`.
+- Do **not** use `--reload` outside local dev: each restart wipes in-memory launcher/trade-management state (`_launcher_in_position`, `_trade_mgmt_state`), which is only partly re-hydrated by `_rehydrate_open_positions` (needs Postgres; restores wick_rejection positions from the entry row's `strategy` column, with their own exits with the time stop counted from the DB entry time).
 - Background services are disabled automatically under pytest (`PYTEST_CURRENT_TEST`).
 
 ## Running tests
@@ -68,7 +68,7 @@ uv run pytest
 ```
 - `pytest-xdist` runs with `-n auto` by default (see `pyproject.toml`); the suite takes ~15s.
 - Tests marked `network` hit live services and are skipped by default.
-- All tests must pass (958 passing, 0 pre-existing failures as of 2026-11-20). Any failure is a regression.
+- All tests must pass (965 passing, 0 pre-existing failures as of 2026-11-20). Any failure is a regression.
 
 ---
 

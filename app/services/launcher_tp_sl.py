@@ -114,6 +114,36 @@ class LauncherTpSl:
     strategy_exit: StrategyExitParams | None = None
 
 
+def strategy_exit_params(
+    merged: dict[str, Any], leverage: float | None
+) -> StrategyExitParams | None:
+    """Exit parameters for a strategy that owns its exits, at ``leverage``.
+
+    ``merged`` is the strategy's ``merged_config``; None when the strategy has
+    no ``emergency_stop_mode`` (global trade management only).  The software
+    stop converts margin units at ``leverage`` (the leverage actually used);
+    without one, the config ``leverage``.  Used at entry and when a position is
+    re-hydrated after a restart.
+    """
+    if "emergency_stop_mode" not in merged:
+        return None
+    from app.services.strategies.wick_rejection import exit_price_pcts
+
+    cfg = dict(merged)
+    if leverage is not None and leverage > 0:
+        cfg["leverage"] = leverage
+    _tp, sl_pct = exit_price_pcts(cfg)
+    stop_mode = str(merged.get("emergency_stop_mode") or "exchange").strip().lower()
+    return StrategyExitParams(
+        max_hold_seconds=max(0.0, (_extract_float(merged.get("max_hold_minutes")) or 0.0) * 60.0),
+        software_stop_pct=sl_pct if stop_mode == "software" else None,
+        reentry_cooldown_seconds=max(
+            0.0, (_extract_float(merged.get("reentry_cooldown_minutes")) or 0.0) * 60.0
+        ),
+        use_global_trade_management=bool(merged.get("use_global_trade_management", False)),
+    )
+
+
 def resolve_launcher_tp_sl(
     *,
     strategy_name: str,
@@ -171,21 +201,14 @@ def resolve_launcher_tp_sl(
             _exit_cfg["leverage"] = leverage_override
         tp_pct, sl_pct = exit_price_pcts(_exit_cfg)
         stop_mode = str(merged.get("emergency_stop_mode") or "exchange").strip().lower()
-        software_stop_pct = sl_pct if stop_mode == "software" else None
         if stop_mode in ("software", "off"):
             protection = "tp_only"
             sl_pct = None
-        strategy_exit = StrategyExitParams(
-            max_hold_seconds=max(0.0, (_extract_float(merged.get("max_hold_minutes")) or 0.0) * 60.0),
-            software_stop_pct=software_stop_pct,
-            reentry_cooldown_seconds=max(
-                0.0, (_extract_float(merged.get("reentry_cooldown_minutes")) or 0.0) * 60.0
-            ),
-            use_global_trade_management=bool(merged.get("use_global_trade_management", False)),
-        )
+        strategy_exit = strategy_exit_params(merged, leverage_override)
+        software_stop_pct = strategy_exit.software_stop_pct if strategy_exit else None
         debug_lines.append(
             f"strategy exits: tp={tp_pct}% stop={sl_pct if sl_pct is not None else software_stop_pct}% "
-            f"({stop_mode}) hold={strategy_exit.max_hold_seconds:.0f}s "
+            f"({stop_mode}) hold={strategy_exit.max_hold_seconds if strategy_exit else 0:.0f}s "
             f"lev={leverage_override} margin={margin_usd} notional={notional_override}"
         )
 

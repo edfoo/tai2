@@ -1,6 +1,6 @@
 # Design: Hourly Wick Rejection Short (`wick_rejection`)
 
-**Status:** In progress — Phase 1 done 2026-11-19 (closed-candle alignment + `forming_candle` + `as_of_ts`, live and backtest); Phase 2 done 2026-11-20 (strategy funnel, defaults, registration; disabled by default); Phase 3 done 2026-11-20 (TP/stop units, protection modes, per-strategy leverage + margin sizing, live and backtest); Phase 4 done 2026-11-20 (strategy-owned exits: time stop, software emergency stop, own re-entry cooldown, live and backtest); Phase 5 done 2026-11-20 (`vol` screener universe, live and backtest; also fixed a 1H look-ahead in the backtest universe); Phase 6 done 2026-11-20 (clock trigger at H:59:20, WR removed from the scheduler tick, backtest entry-timing diagnostics). Redesigned 2026-11-18 from the manual-trade analysis (§1.1); vol screener §3.5; optional momentum entry mode §3.8 / Phase 9.
+**Status:** In progress — Phase 1 done 2026-11-19 (closed-candle alignment + `forming_candle` + `as_of_ts`, live and backtest); Phase 2 done 2026-11-20 (strategy funnel, defaults, registration; disabled by default); Phase 3 done 2026-11-20 (TP/stop units, protection modes, per-strategy leverage + margin sizing, live and backtest); Phase 4 done 2026-11-20 (strategy-owned exits: time stop, software emergency stop, own re-entry cooldown, live and backtest); Phase 5 done 2026-11-20 (`vol` screener universe, live and backtest; also fixed a 1H look-ahead in the backtest universe); Phase 6 done 2026-11-20 (clock trigger at H:59:20, WR removed from the scheduler tick, backtest entry-timing diagnostics; restart re-hydration restores WR positions). Redesigned 2026-11-18 from the manual-trade analysis (§1.1); vol screener §3.5; optional momentum entry mode §3.8 / Phase 9.
 **Date:** 2026-10-28 (revised 2026-11-18)
 **Scope:** New launcher strategy with a clock-aligned entry trigger, forming-candle
 exposure, strategy-owned exits (TP + emergency stop + time stop), per-strategy
@@ -722,11 +722,17 @@ and isolated modes (size, OKX leverage, attached TP/SL algos, caps).
   `reentry_cooldown_seconds`, live (`_clear_trade_mgmt_state`) and backtest
   (`can_enter`). Measured from the close, per symbol.
 - `wick_rejection` added to `runner.DEFAULT_STRATEGIES`.
-- **Known gap.** After an app restart, re-hydration cannot tell which strategy
-  opened a position (`executed_trades` stores no strategy), so a WR position
-  open across a restart falls back to global trade management and loses its
-  time stop; the exchange TP/SL orders stay in place. To fix with the trigger
-  work (Phase 6) or by storing the strategy on the trade row.
+- **Restart gap (fixed 2026-11-20, after Phase 6).** `_rehydrate_open_positions`
+  now reads the `strategy` column of the most recent unreconciled entry
+  (`FETCH_UNRECONCILED_SQL` selects it). For a strategy that owns its exits
+  (wick_rejection) it restores the `strategy:SYMBOL` key with the position's
+  margin and the exits via `launcher_tp_sl.strategy_exit_params()` (current config, software
+  stop at the position's `lever`), with `entry_ts` = the DB entry time so the
+  time stop counts from the real entry. Re-hydration still needs Postgres;
+  without it a WR position open across a restart stays unmanaged (as for
+  every launcher position). Other strategies keep the symbol-only key on
+  purpose: restoring `mean_reversion:SYMBOL` would re-enable MR's regime-breakdown
+  close (and SC's rollover close), which have never applied after a restart.
 
 Tests: `tests/test_wick_rejection_exits.py` (25): the rule, the resolver
 params, simulator fill order, time stop, global rules skipped/opt-in,
@@ -836,9 +842,7 @@ Tests: `tests/test_screener_vol.py` (19).
   (closed mode, 5m eval, a window narrower than the step) and adds a
   `wick_rejection_entry_timing` entry to `data_provenance`, including the
   60 s (backtest) vs 40 s (live) gap.
-- **Still open.** A WR position open across an app restart is re-hydrated
-  without its strategy (Phase 4 known gap): it falls back to global trade
-  management and does not count toward `max_concurrent_positions`.
+- The restart gap noted in Phase 4 is fixed (see Phase 4 *As built*).
 
 Tests: `tests/test_wick_rejection_trigger.py` (22).
 

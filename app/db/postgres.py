@@ -88,7 +88,7 @@ UPDATE_ENTRY_FEE_SQL = (
 )
 
 FETCH_UNRECONCILED_SQL = """
-    SELECT id, timestamp, symbol, side, okx_order_id
+    SELECT id, timestamp, symbol, side, okx_order_id, strategy
     FROM executed_trades
     WHERE symbol = $1
       AND side = $2
@@ -104,7 +104,7 @@ FETCH_UNRECONCILED_SQL = """
 # been stored is no longer a candidate — making the pass idempotent (without
 # this, the same entry fill was re-stored on every reconcile run).
 FETCH_UNRECONCILED_FEE_UNSET_SQL = """
-    SELECT id, timestamp, symbol, side, okx_order_id
+    SELECT id, timestamp, symbol, side, okx_order_id, strategy
     FROM executed_trades
     WHERE symbol = $1
       AND side = $2

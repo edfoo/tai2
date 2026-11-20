@@ -31,7 +31,7 @@ from app.db.postgres import (
 )
 from app.lib.volume_profile import value_area
 from app.models.trade import ExecutedTrade
-from app.services.launcher_tp_sl import resolve_launcher_tp_sl
+from app.services.launcher_tp_sl import resolve_launcher_tp_sl, strategy_exit_params
 from app.services.screener import (
     build_candidates,
     compute_recent_activity,
@@ -1639,11 +1639,37 @@ class MarketService:
                 continue
 
             avg_px = self._extract_float(pos.get("avgPx"))
-            strat_key = f"{symbol}"
+            # The most recent unreconciled entry is the one this position came
+            # from.  For a strategy that owns its exits (wick_rejection) its
+            # ``strategy`` restores the per-strategy key, the exits (time stop
+            # measured from the DB entry time, software stop) and the
+            # trigger's position and margin counts.  Every other position keeps
+            # the legacy symbol-only key: restoring e.g. ``mean_reversion:SYM``
+            # would re-enable strategy-specific exits (MR regime breakdown, SC
+            # rollover) that have never applied after a restart.
+            entry_row = candidates[-1] if isinstance(candidates[-1], dict) else {}
+            strategy = str(entry_row.get("strategy") or "").strip()
+            if strategy not in {s.name for s in self._strategies}:
+                strategy = ""
+            entry_ts = self._row_epoch(entry_row.get("timestamp"))
+            lever = self._extract_float(pos.get("lever"))
+            pos_margin = self._extract_float(pos.get("margin")) or self._extract_float(
+                pos.get("imr")
+            )
+            strategy_exit = None
+            if strategy:
+                strat_cfg = (self._launcher_config.get("strategies") or {}).get(strategy) or {}
+                exit_params = strategy_exit_params(merged_config(strat_cfg, strategy), lever)
+                strategy_exit = exit_params.to_dict() if exit_params else None
+                if strategy_exit is None:
+                    strategy = ""
+            strat_key = f"{strategy}:{symbol}" if strategy else f"{symbol}"
             self._launcher_in_position[strat_key] = {
                 "side": side,
                 "pos_side": pos_side or None,
-                "strategy": "",
+                "strategy": strategy,
+                "margin_usd": pos_margin if strategy else None,
+                "opened_at": entry_ts,
             }
             # Recover the live TP/SL from OKX so the re-hydrated position gets
             # full trade-management (breakeven / partial / time-stop all need
@@ -1674,14 +1700,26 @@ class MarketService:
             self._seed_trade_mgmt_state(
                 symbol=symbol,
                 side=side,
+                strategy_name=strategy,
                 entry_price=avg_px,
                 tp_price=_tp,
                 sl_price=_sl,
+                strategy_exit=strategy_exit,
+                entry_ts=entry_ts,
             )
             rehydrated += 1
+            _exit_txt = ""
+            if strategy_exit:
+                _held = time.time() - entry_ts if entry_ts else None
+                _exit_txt = (
+                    f", strategy exits hold={strategy_exit['max_hold_seconds']:.0f}s "
+                    f"held={f'{_held:.0f}s' if _held is not None else 'unknown'} "
+                    f"software_stop={strategy_exit['software_stop_pct']}"
+                )
             self._emit_debug(
                 f"Re-hydrated launcher tracking for open position {symbol} "
-                f"({side}, entry={avg_px}, tp={_tp}, sl={_sl})"
+                f"[{strategy or 'unknown strategy'}] "
+                f"({side}, entry={avg_px}, tp={_tp}, sl={_sl}{_exit_txt})"
             )
             # If neither TP nor SL could be recovered from OKX or the cached
             # protection block, the revived position is UNMANAGED: breakeven /
@@ -2292,6 +2330,7 @@ class MarketService:
         tp_price: float | None = None,
         sl_price: float | None = None,
         strategy_exit: dict[str, Any] | None = None,
+        entry_ts: float | None = None,
     ) -> None:
         """Initialise trade-management state for a newly opened launcher position.
 
@@ -2336,7 +2375,9 @@ class MarketService:
             "side": side,
             "strategy": strategy_name,
             "entry_price": entry_price,
-            "entry_ts": time.time(),
+            # Re-hydration passes the DB entry time so a time stop keeps
+            # counting from the real entry, not from the restart.
+            "entry_ts": entry_ts if entry_ts and entry_ts > 0 else time.time(),
             "tp_price": tp_price,
             "sl_price": sl_price,
             "risk_pct": risk_pct,
@@ -4032,6 +4073,23 @@ class MarketService:
             _sw_lows[-1].get("price") if _sw_lows and isinstance(_sw_lows[-1], dict) else None
         )
         return block
+
+    @staticmethod
+    def _row_epoch(value: Any) -> float | None:
+        """Epoch seconds from a DB timestamp (datetime, ISO string or number)."""
+        if value is None:
+            return None
+        if hasattr(value, "timestamp"):
+            try:
+                return float(value.timestamp())
+            except (TypeError, ValueError, OSError):
+                return None
+        if isinstance(value, (int, float)):
+            return float(value) / 1000.0 if value > 1e12 else float(value)
+        try:
+            return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            return None
 
     @staticmethod
     def _patch_forming(
