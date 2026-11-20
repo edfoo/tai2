@@ -295,8 +295,21 @@ class BacktestEngine:
                         "timeframe": "screener_universe",
                         **dict(universe_provenance),
                     })
-                # Union of every selected symbol + the configured fallback.
-                selected_union = self._universe_schedule.all_symbols
+                # Union of the symbols the enabled strategies can be routed
+                # to (not every selected symbol: e.g. wick_rejection alone
+                # needs only the vol list) + the configured fallback.
+                _strat_cfgs = self._config.launcher_config.get("strategies") or {}
+                _enabled = [
+                    s.name for s in self._strategies
+                    if (_strat_cfgs.get(s.name) or {}).get("enabled", False)
+                ]
+                selected_union = self._universe_schedule.symbols_for(_enabled)
+                if len(selected_union) < len(self._universe_schedule.all_symbols):
+                    logger.info(
+                        "Screener universe: fetching %d of %d selected symbols "
+                        "(routed to %s)", len(selected_union),
+                        len(self._universe_schedule.all_symbols), _enabled,
+                    )
                 merged: list[str] = []
                 for sym in [*self._config.symbols, *selected_union]:
                     if sym and sym not in merged:

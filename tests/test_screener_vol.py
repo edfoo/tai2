@@ -266,3 +266,17 @@ class TestBacktestUniverse:
         )])
         assert sched.universe_at(1, "wick_rejection") == ["V"]
         assert "V" not in (sched.universe_at(1, "") or [])
+
+
+def test_schedule_symbols_for_routes_like_the_step_gate() -> None:
+    """The engine fetches only symbols an enabled strategy can be routed to."""
+    from app.services.backtest.universe import UniverseInterval, UniverseSchedule
+
+    sched = UniverseSchedule(intervals=[
+        UniverseInterval(ts=1, sc=["S1"], mr=["M1"], vol=["V1", "S1"], selected=["S1", "M1", "V1"]),
+        UniverseInterval(ts=2, sc=["S2"], mr=["M1"], vol=[], selected=["S2", "M1"]),
+    ])
+    assert sched.symbols_for(["wick_rejection"]) == ["V1", "S1", "S2", "M1"]  # no vol at ts=2 → selected
+    assert sched.symbols_for(["mean_reversion"]) == ["M1"]
+    assert sched.symbols_for(["spike_continuation", "vwap_reversion"]) == ["S1", "M1", "S2"]
+    assert sched.symbols_for([]) == sched.all_symbols

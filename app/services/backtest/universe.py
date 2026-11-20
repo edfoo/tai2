@@ -103,6 +103,28 @@ class UniverseSchedule:
                 seen.setdefault(sym, None)
         return list(seen)
 
+    def symbols_for(self, strategy_names: list[str]) -> list[str]:
+        """Union, over every interval, of the symbols ``strategy_names`` can be
+        routed to (``universe_for_strategy``) — the fetch list when only some
+        lists matter (e.g. wick_rejection alone needs only the vol list).
+        Falls back to :attr:`all_symbols` when no names are given."""
+        if not strategy_names:
+            return self.all_symbols
+        seen: dict[str, None] = {}
+        for interval in self.intervals:
+            for name in strategy_names:
+                for sym in universe_for_strategy(
+                    name,
+                    sc_symbols=interval.sc,
+                    mr_symbols=interval.mr,
+                    selected_symbols=interval.selected,
+                    fallback_symbols=[],
+                    dual_universe=self.dual_universe,
+                    vol_symbols=interval.vol,
+                ):
+                    seen.setdefault(sym, None)
+        return list(seen)
+
     def universe_at(self, ts: int, strategy_name: str = "") -> list[str] | None:
         """Return the strategy's universe at ``ts``, or None if before the first interval.
 
