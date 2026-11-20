@@ -68,7 +68,7 @@ uv run pytest
 ```
 - `pytest-xdist` runs with `-n auto` by default (see `pyproject.toml`); the suite takes ~15s.
 - Tests marked `network` hit live services and are skipped by default.
-- All tests must pass (965 passing, 0 pre-existing failures as of 2026-11-20). Any failure is a regression.
+- All tests must pass (971 passing, 0 pre-existing failures as of 2026-11-20). Any failure is a regression.
 
 ---
 
@@ -293,13 +293,13 @@ Covered by `tests/test_live_backtest_parity.py` and `tests/test_forming_candle.p
 |---|---|---|
 | `/`, `/live` | LIVE | Real-time positions, balances, ticker, decision/insight feed, risk-lock card |
 | `/ta` | TA | Indicators, funding, CVD, order book |
-| `/strategy` | STRATEGY | Launcher strategy cards (enable + params), trade management, legacy position strategies |
+| `/strategy` | STRATEGY | Launcher strategy cards (enable + params; Wick Rejection shows a live risk read-out), trade management, legacy position strategies |
 | `/history` | HISTORY | Executed trades |
 | `/performance` | PERFORMANCE | Performance summary |
 | `/backtest` | BACKTEST | Single runs and parameter sweeps, results/reports |
 | `/debug` | DEBUG | Application logs (live, filterable), WebSocket events |
 | `/prompt` | PROMPT | LLM prompt editing/preview (LLM path) |
-| `/cfg` | CFG | Runtime config: launcher mode, screener, guardrails, execution, trading pairs, model |
+| `/cfg` | CFG | Runtime config: launcher mode, screener (incl. vol universe), guardrails, execution, trading pairs, model |
 
 ---
 

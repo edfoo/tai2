@@ -111,6 +111,11 @@ class PromptScheduler:
             logger.info("Prompt scheduler trigger mode set to '%s'", mode)
 
     @property
+    def wr_trigger(self) -> WickRejectionTrigger:
+        """The wick_rejection clock trigger owned by this scheduler."""
+        return self._wr_trigger
+
+    @property
     def is_ticking(self) -> bool:
         """True while a _tick() coroutine is currently executing."""
         return self._tick_running

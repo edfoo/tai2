@@ -130,6 +130,7 @@ class WickRejectionTrigger:
         self._sleep = sleep
         self._task: asyncio.Task | None = None
         self.last_result: TriggerResult | None = None
+        self.last_run_at: float | None = None
 
     # ── Lifecycle ───────────────────────────────────────────────────────
 
@@ -156,7 +157,9 @@ class WickRejectionTrigger:
                 now = self._clock()
                 await self._sleep(max(0.0, next_trigger_ts(now, lead) - now))
                 result = await self.run_once()
-                self.last_result = result
+                if not (result.status == "skipped" and result.reason == "disabled"):
+                    self.last_result = result
+                    self.last_run_at = self._clock()
                 if result.status != "skipped" or result.reason != "disabled":
                     self._log(result.summary())
                 # Step past the trigger second so the next target is next hour.
@@ -166,6 +169,26 @@ class WickRejectionTrigger:
             except Exception as exc:  # pragma: no cover - defensive
                 logger.exception("Wick rejection trigger cycle failed: %s", exc)
                 await self._sleep(5.0)
+
+    # ── Status (LIVE page) ──────────────────────────────────────────────
+
+    def is_armed(self) -> bool:
+        """True when the task runs and the next cycle would evaluate WR."""
+        if self._task is None or self._task.done() or not self._is_enabled():
+            return False
+        gov = self._runtime_config().get("launcher") or {}
+        return (
+            str(gov.get("mode") or "disabled").lower() == "launcher_only"
+            and bool(((gov.get("strategies") or {}).get(STRATEGY_NAME) or {}).get("enabled"))
+        )
+
+    def seconds_until_next(self) -> float | None:
+        """Seconds to the next trigger, or None when not armed."""
+        if not self.is_armed():
+            return None
+        now = self._clock()
+        lead = float(self._wr_config().get("entry_seconds_before_close") or 40.0)
+        return max(0.0, next_trigger_ts(now, lead) - now)
 
     # ── One cycle ───────────────────────────────────────────────────────
 

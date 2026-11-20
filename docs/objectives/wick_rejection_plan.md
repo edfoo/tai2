@@ -1,6 +1,6 @@
 # Design: Hourly Wick Rejection Short (`wick_rejection`)
 
-**Status:** In progress — Phase 1 done 2026-11-19 (closed-candle alignment + `forming_candle` + `as_of_ts`, live and backtest); Phase 2 done 2026-11-20 (strategy funnel, defaults, registration; disabled by default); Phase 3 done 2026-11-20 (TP/stop units, protection modes, per-strategy leverage + margin sizing, live and backtest); Phase 4 done 2026-11-20 (strategy-owned exits: time stop, software emergency stop, own re-entry cooldown, live and backtest); Phase 5 done 2026-11-20 (`vol` screener universe, live and backtest; also fixed a 1H look-ahead in the backtest universe); Phase 6 done 2026-11-20 (clock trigger at H:59:20, WR removed from the scheduler tick, backtest entry-timing diagnostics; restart re-hydration restores WR positions). Redesigned 2026-11-18 from the manual-trade analysis (§1.1); vol screener §3.5; optional momentum entry mode §3.8 / Phase 9.
+**Status:** In progress — Phase 1 done 2026-11-19 (closed-candle alignment + `forming_candle` + `as_of_ts`, live and backtest); Phase 2 done 2026-11-20 (strategy funnel, defaults, registration; disabled by default); Phase 3 done 2026-11-20 (TP/stop units, protection modes, per-strategy leverage + margin sizing, live and backtest); Phase 4 done 2026-11-20 (strategy-owned exits: time stop, software emergency stop, own re-entry cooldown, live and backtest); Phase 5 done 2026-11-20 (`vol` screener universe, live and backtest; also fixed a 1H look-ahead in the backtest universe); Phase 6 done 2026-11-20 (clock trigger at H:59:20, WR removed from the scheduler tick, backtest entry-timing diagnostics; restart re-hydration restores WR positions); Phase 7 done 2026-11-20 (STRATEGY card with risk read-out, CFG vol inputs, LIVE trigger countdown). Redesigned 2026-11-18 from the manual-trade analysis (§1.1); vol screener §3.5; optional momentum entry mode §3.8 / Phase 9.
 **Date:** 2026-10-28 (revised 2026-11-18)
 **Scope:** New launcher strategy with a clock-aligned entry trigger, forming-candle
 exposure, strategy-owned exits (TP + emergency stop + time stop), per-strategy
@@ -846,7 +846,7 @@ Tests: `tests/test_screener_vol.py` (19).
 
 Tests: `tests/test_wick_rejection_trigger.py` (22).
 
-### Phase 7 — UI *(depends on 2–6)*
+### Phase 7 — UI ✅ *(done 2026-11-20)*
 
 20. **`pages.py` STRATEGY page** — "Wick Rejection" card with
     `_set_wr_defaults()`. Groups: setup (body ratio, lookback, avg window, min
@@ -858,6 +858,39 @@ Tests: `tests/test_wick_rejection_trigger.py` (22).
 22. **LIVE page** — show "next WR trigger in mm:ss" and the last trigger's summary.
 23. **`backtest/sweep_catalog.py`** — `"wick_rejection": "WR"` and a sweep block
     (§6).
+
+**As built.**
+
+- **STRATEGY page — "Wick Rejection" card** (after VWAP Reversion): enable
+  switch, *Set Recommended Defaults* (`_set_wr_defaults`), and four groups —
+  Setup (body ratio, average window, lookback, min big bodies, forming counts,
+  HTF regime gate), Entry (trigger seconds, entry window, websocket price age,
+  high offset, range, require green), Exits (TP + unit, emergency stop mode +
+  % + unit, max hold, re-entry cooldown, also use global trade management) and
+  Risk (leverage, margin mode/USDT/%, max open WR positions, max total WR
+  margin). `save_strategy_settings` **merges** the form into the saved WR
+  config, so keys without a field (momentum mode, `skip_rr_guard`,
+  `disable_protection`) are kept. Not exposed: `analysis_timeframe` (1H) and
+  the Phase 9 momentum keys.
+- **Risk read-out** under the Risk group, updated as fields change:
+  `launcher_tp_sl.wick_rejection_risk_summary()` uses the execution sizing and
+  exit maths — margin × leverage after the guardrail clamp, TP and
+  emergency-stop distance in USDT, the `max_position_pct` cap (OK / cut to),
+  how many positions `max_total_margin_pct` allows, and the worst case with
+  all of them stopped. Equity comes from the live snapshot.
+- **CFG page** — "Vol universe (Wick Rejection)" inputs (`vol_enabled`,
+  `vol_max_symbols`, `vol_min_speed_pct_per_hour`, `vol_min_vol_ratio`), saved
+  with the screener config (which is rebuilt on save, so they had to be added).
+- **LIVE page** — next to "Next prompt": `| WR trigger in m:ss (last: n
+  entries)` while the trigger is armed (`WickRejectionTrigger.is_armed()` /
+  `seconds_until_next()`, exposed as `PromptScheduler.wr_trigger`); the
+  tooltip shows the last cycle's summary and time.
+- Step 23 was already done in Phase 2.
+- Verified by rendering STRATEGY, CFG and LIVE and clicking Save with NiceGUI's
+  in-process `User` simulation (DB saves stubbed, OKX blocked); not added to
+  the suite, which has no UI test setup.
+
+Tests: `tests/test_wick_rejection_ui.py` (6).
 
 ### Phase 8 — Docs + tests *(depends on all)*
 

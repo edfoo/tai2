@@ -378,3 +378,70 @@ def resolve_launcher_tp_sl(
         sizing_failed=sizing_failed,
         strategy_exit=strategy_exit,
     )
+
+
+def wick_rejection_risk_summary(
+    cfg: dict[str, Any], guardrails_config: dict[str, Any] | None, equity: float | None
+) -> str:
+    """Plain-text risk read-out for the STRATEGY card (plan §3.3 / §7).
+
+    Uses the same sizing and exit maths as execution
+    (``resolve_strategy_sizing`` / ``exit_price_pcts``): margin, leverage after
+    the guardrail clamp, position size, TP and emergency-stop distance in
+    USDT, the ``max_position_pct`` cap and the worst case across the
+    concurrent positions.  ``cfg`` is a merged wick_rejection config.
+    """
+    from app.services.strategies.wick_rejection import exit_price_pcts
+
+    guards = guardrails_config or {}
+    lev, margin, notional, _ = resolve_strategy_sizing(cfg, guards, equity)
+    lines: list[str] = []
+    eq_txt = f"{equity:,.2f} USDT" if equity else "unknown"
+    lines.append(f"Account equity: {eq_txt}")
+    if lev is None:
+        return "\n".join(lines + ["No leverage configured — launcher sizing applies."])
+    if margin is None or notional is None:
+        return "\n".join(lines + [
+            "Margin is a % of equity and equity is unknown: entries are skipped until it is."
+        ])
+    cfg_lev = _extract_float(cfg.get("leverage")) or lev
+    clamp = (
+        f" (clamped from {cfg_lev:g}× by guardrail min/max leverage)"
+        if abs(cfg_lev - lev) > 1e-9 else ""
+    )
+    lines.append(
+        f"Per entry: margin {margin:,.2f} USDT × {lev:g}× = position {notional:,.2f} USDT{clamp}"
+    )
+    tp_pct, sl_pct = exit_price_pcts({**cfg, "leverage": lev})
+    if tp_pct:
+        lines.append(f"Take profit: {tp_pct:.2f}% price ≈ +{notional * tp_pct / 100:,.2f} USDT")
+    mode = str(cfg.get("emergency_stop_mode") or "exchange").lower()
+    stop_loss: float | None = None
+    if sl_pct:
+        stop_loss = notional * sl_pct / 100
+        where = "OKX stop order" if mode == "exchange" else "bot closes at market; unprotected while the app is down"
+        lines.append(
+            f"Emergency stop ({mode}): {sl_pct:.2f}% price ≈ −{stop_loss:,.2f} USDT "
+            f"({stop_loss / margin * 100:.0f}% of margin; {where})"
+        )
+    else:
+        lines.append("Emergency stop: OFF — the loss is limited only by the time stop and liquidation")
+    max_pos = _extract_float(guards.get("max_position_pct"))
+    if max_pos and max_pos > 0 and equity:
+        cap = max_pos * equity
+        verdict = "OK" if notional <= cap + 1e-9 else f"position cut to {cap:,.2f} USDT"
+        lines.append(f"Guardrail max_position_pct {max_pos:g} × equity = {cap:,.2f} USDT cap → {verdict}")
+    n = int(_extract_float(cfg.get("max_concurrent_positions")) or 1)
+    total_pct = _extract_float(cfg.get("max_total_margin_pct"))
+    if equity and total_pct and total_pct > 0:
+        fit = int((equity * total_pct / 100 + 1e-9) // margin) if margin > 0 else n
+        if fit < n:
+            lines.append(
+                f"Total margin cap {total_pct:g}% of equity fits {fit} of {n} positions"
+            )
+            n = max(0, fit)
+    if stop_loss is not None and n > 0:
+        worst = stop_loss * n
+        pct = f" ({worst / equity * 100:.1f}% of equity)" if equity else ""
+        lines.append(f"Worst case, {n} position(s) all stopped: −{worst:,.2f} USDT{pct}")
+    return "\n".join(lines)

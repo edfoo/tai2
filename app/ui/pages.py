@@ -55,7 +55,9 @@ from app.services.openrouter_service import (
     list_openrouter_models,
 )
 from app.services.prompt_utils import sanitize_prompt_text
+from app.services.launcher_tp_sl import wick_rejection_risk_summary
 from app.services.strategies.defaults import (
+    merged_config,
     screener_defaults,
     strategy_defaults,
     trade_management_defaults,
@@ -517,6 +519,10 @@ def register_pages(app: FastAPI) -> None:
                             "text-xs text-slate-500"
                         )
                         prompt_elapsed_label.set_visibility(False)
+                        wr_trigger_label = ui.label("").classes("text-xs text-slate-500")
+                        wr_trigger_label.set_visibility(False)
+                        with wr_trigger_label:
+                            wr_trigger_tooltip = ui.tooltip("").classes("text-xs whitespace-pre-line")
                         notice = (
                             ui.label("· Snapshot stale")
                             .classes("text-xs font-semibold text-red-600 uppercase tracking-wide")
@@ -2429,8 +2435,34 @@ def register_pages(app: FastAPI) -> None:
         page_client.on_disconnect(_t_ws.deactivate)
         page_client.on_delete(_t_ws.deactivate)
 
+        def _update_wr_trigger_status(scheduler: Any) -> None:
+            """'WR trigger in mm:ss' plus the last trigger's summary (tooltip)."""
+            trigger = getattr(scheduler, "wr_trigger", None) if scheduler else None
+            secs = trigger.seconds_until_next() if trigger is not None else None
+            if secs is None:
+                wr_trigger_label.set_visibility(False)
+                return
+            mins, s = divmod(int(secs), 60)
+            text = f"| WR trigger in {mins}:{s:02d}"
+            last = getattr(trigger, "last_result", None)
+            last_at = getattr(trigger, "last_run_at", None)
+            if last is not None:
+                text += f" (last: {len(last.executed)} entries)"
+                when = (
+                    datetime.fromtimestamp(last_at, tz=timezone.utc).strftime("%H:%M:%S UTC")
+                    if last_at else "?"
+                )
+                wr_trigger_tooltip.set_text(
+                    f"Last trigger {when}\n" + last.summary().replace(" | ", "\n")
+                )
+            else:
+                wr_trigger_tooltip.set_text("No trigger has run since the app started.")
+            wr_trigger_label.set_text(text)
+            wr_trigger_label.set_visibility(True)
+
         def _update_next_prompt_countdown() -> None:
             scheduler = getattr(app.state, "prompt_scheduler", None)
+            _update_wr_trigger_status(scheduler)
             if scheduler is None:
                 next_prompt_label.set_text("Next prompt: --")
                 prompt_elapsed_label.set_visibility(False)
@@ -4719,6 +4751,288 @@ def register_pages(app: FastAPI) -> None:
                 vr_vol_lookback_input.value = d["volume_lookback"]
                 ui.notify("VWAP Reversion fields set to recommended defaults — click Save to persist", color="info")
 
+            # ── Wick Rejection ────────────────────────────────────────────────────
+            _wr_saved = ((config.get("launcher") or {}).get("strategies") or {}).get("wick_rejection") or {}
+            _wr_cfg = merged_config(_wr_saved, "wick_rejection")
+            with ui.card().classes("w-full rounded-lg border border-slate-200 mb-1"):
+                with ui.row().classes("w-full items-center gap-2 flex-nowrap"):
+                    wr_enabled_switch = ui.switch(
+                        value=bool(_wr_saved.get("enabled", False)),
+                    ).props("dense color=primary")
+                    with ui.expansion("Wick Rejection").classes("flex-1 text-sm font-medium"):
+                        ui.label(
+                            "Hourly wick short: in the last seconds before a 1H candle closes, "
+                            "shorts a strong green candle trading near its high, betting the close "
+                            "prints below the current price. Runs only from its own clock trigger "
+                            "(H:59:20 by default), never from the scheduler tick, on the screener's "
+                            "vol (speed) universe — enable 'Vol universe' on the CFG page. Owns its "
+                            "exits (TP, emergency stop, time stop) and its own leverage and margin."
+                        ).classes("text-xs text-slate-500 mb-2")
+                        with ui.row().classes("w-full items-center gap-2 mb-2"):
+                            ui.button(
+                                "Set Recommended Defaults",
+                                icon="tune",
+                                on_click=lambda _: _set_wr_defaults(),
+                            ).props("dense flat color=primary size=sm").tooltip(
+                                "Fill all fields with the recommended Wick Rejection configuration. "
+                                "You still need to click Save to persist."
+                            )
+
+                        # ── Setup ───────────────────────────────────────
+                        ui.separator().classes("my-2")
+                        ui.label("Setup · big green bodies in the recent hours").classes("text-xs font-bold text-slate-700")
+                        ui.label(
+                            "A candle counts as 'big' when its green body is at least the ratio times "
+                            "the average |body| of the candles before it. The forming candle (measured "
+                            "to the current price) can count too."
+                        ).classes("text-[11px] text-slate-400 mb-2")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-start mt-1"):
+                            wr_min_body_ratio_input = ui.number(
+                                label="Min body ratio (×)", value=float(_wr_cfg["min_body_ratio"]),
+                                min=0.5, max=20.0, step=0.5, format="%.1f",
+                            ).classes("w-44").props("hint='Your manual rule was 5×' persistent-hint dense")
+                            wr_body_avg_window_input = ui.number(
+                                label="Average window (candles)", value=int(_wr_cfg["body_avg_window"]),
+                                min=2, max=48, step=1, precision=0,
+                            ).classes("w-44").props("dense")
+                            wr_setup_lookback_input = ui.number(
+                                label="Setup lookback (closed 1H)", value=int(_wr_cfg["setup_lookback_candles"]),
+                                min=0, max=24, step=1, precision=0,
+                            ).classes("w-44").props("dense")
+                            wr_min_big_bodies_input = ui.number(
+                                label="Min big bodies", value=int(_wr_cfg["min_big_bodies"]),
+                                min=0, max=10, step=1, precision=0,
+                            ).classes("w-44").props("dense")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-center mt-1"):
+                            wr_include_forming_switch = ui.switch(
+                                "Forming candle counts", value=bool(_wr_cfg["setup_include_forming"]),
+                            ).props("dense color=primary")
+                            wr_htf_regime_select = ui.select(
+                                ["off", "chop", "trend"], label="HTF regime gate",
+                                value=str(_wr_cfg.get("htf_regime_preference") or "off"),
+                            ).classes("w-44").props("dense")
+
+                        # ── Entry ───────────────────────────────────────
+                        ui.separator().classes("my-2")
+                        ui.label("Entry · the forming candle at trigger time").classes("text-xs font-bold text-slate-700")
+                        ui.label(
+                            "The trigger fires this many seconds before the hour; a symbol is only "
+                            "entered while the time to close is inside the window (a late entry is worse "
+                            "than none). The high offset is (high − price) / (high − low): 0% = at the high."
+                        ).classes("text-[11px] text-slate-400 mb-2")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-start mt-1"):
+                            wr_entry_seconds_input = ui.number(
+                                label="Trigger (s before close)", value=float(_wr_cfg["entry_seconds_before_close"]),
+                                min=5, max=300, step=5, format="%.0f",
+                            ).classes("w-44").props("hint='40 → H:59:20' persistent-hint dense")
+                            wr_min_seconds_input = ui.number(
+                                label="Window min (s to close)", value=float(_wr_cfg["min_seconds_to_close"]),
+                                min=0, max=600, step=5, format="%.0f",
+                            ).classes("w-44").props("dense")
+                            wr_max_seconds_input = ui.number(
+                                label="Window max (s to close)", value=float(_wr_cfg["max_seconds_to_close"]),
+                                min=0, max=3600, step=5, format="%.0f",
+                            ).classes("w-44").props("hint='Backtest enters 60 s before close (1m eval)' persistent-hint dense")
+                            wr_ws_age_input = ui.number(
+                                label="Max websocket price age (s)", value=float(_wr_cfg["ws_price_max_age_seconds"]),
+                                min=0.5, max=60, step=0.5, format="%.1f",
+                            ).classes("w-44").props("hint='Older → one REST ticker call' persistent-hint dense")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-start mt-1"):
+                            wr_max_offset_input = ui.number(
+                                label="Max high offset (% of range)", value=float(_wr_cfg["max_high_offset_pct"]),
+                                min=0, max=100, step=1, format="%.0f",
+                            ).classes("w-44").props("hint='Your manual rule was 5–10%' persistent-hint dense")
+                            wr_min_range_input = ui.number(
+                                label="Min candle range (%)", value=float(_wr_cfg["min_candle_range_pct"]),
+                                min=0, max=50, step=0.25, format="%.2f",
+                            ).classes("w-44").props("dense")
+                            wr_require_green_switch = ui.switch(
+                                "Forming candle must be green", value=bool(_wr_cfg["require_forming_green"]),
+                            ).props("dense color=primary")
+
+                        # ── Exits ───────────────────────────────────────
+                        ui.separator().classes("my-2")
+                        ui.label("Exits · owned by the strategy").classes("text-xs font-bold text-slate-700")
+                        ui.label(
+                            "'margin' units are % PnL on margin, converted at the leverage actually "
+                            "used (35% at 5× = 7% price). Emergency stop: exchange = OKX SL order "
+                            "(protects while the app is down); software = no SL order, the bot closes "
+                            "at market (unprotected while the app is down); off = no stop. The time "
+                            "stop closes win or lose. Global breakeven/partial/trailing are skipped "
+                            "unless 'Also use global trade management' is on."
+                        ).classes("text-[11px] text-slate-400 mb-2")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-start mt-1"):
+                            wr_tp_input = ui.number(
+                                label="Take profit (%)", value=float(_wr_cfg["tp_pct"]),
+                                min=0.05, max=50, step=0.05, format="%.2f",
+                            ).classes("w-44").props("dense")
+                            wr_tp_unit_select = ui.select(
+                                ["price", "margin"], label="TP unit", value=str(_wr_cfg["tp_unit"]),
+                            ).classes("w-32").props("dense")
+                            wr_stop_mode_select = ui.select(
+                                ["exchange", "software", "off"], label="Emergency stop",
+                                value=str(_wr_cfg["emergency_stop_mode"]),
+                            ).classes("w-36").props("dense")
+                            wr_stop_input = ui.number(
+                                label="Emergency stop (%)", value=float(_wr_cfg["emergency_stop_pct"]),
+                                min=0.5, max=100, step=0.5, format="%.1f",
+                            ).classes("w-44").props("dense")
+                            wr_stop_unit_select = ui.select(
+                                ["margin", "price"], label="Stop unit", value=str(_wr_cfg["emergency_stop_unit"]),
+                            ).classes("w-32").props("dense")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-start mt-1"):
+                            wr_max_hold_input = ui.number(
+                                label="Max hold (min, 0 = off)", value=float(_wr_cfg["max_hold_minutes"]),
+                                min=0, max=1440, step=5, format="%.0f",
+                            ).classes("w-44").props("dense")
+                            wr_cooldown_input = ui.number(
+                                label="Re-entry cooldown (min)", value=float(_wr_cfg["reentry_cooldown_minutes"]),
+                                min=0, max=1440, step=5, format="%.0f",
+                            ).classes("w-44").props("hint='After a WR close on the symbol' persistent-hint dense")
+                            wr_use_global_tm_switch = ui.switch(
+                                "Also use global trade management",
+                                value=bool(_wr_cfg["use_global_trade_management"]),
+                            ).props("dense color=primary")
+
+                        # ── Risk / sizing ───────────────────────────────
+                        ui.separator().classes("my-2")
+                        ui.label("Risk · leverage and margin per entry").classes("text-xs font-bold text-slate-700")
+                        ui.label(
+                            "Position = margin × leverage, independent of the launcher notional. The "
+                            "leverage is clamped to the guardrail min/max leverage with the margin kept. "
+                            "The guardrail max_position_pct still caps the position."
+                        ).classes("text-[11px] text-slate-400 mb-2")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-start mt-1"):
+                            wr_leverage_input = ui.number(
+                                label="Leverage (×)", value=float(_wr_cfg["leverage"]),
+                                min=1, max=125, step=1, format="%.0f",
+                            ).classes("w-36").props("dense")
+                            wr_margin_mode_select = ui.select(
+                                {"fixed_usdt": "Fixed USDT", "pct_equity": "% of equity"},
+                                label="Margin mode", value=str(_wr_cfg["margin_mode"]),
+                            ).classes("w-40").props("dense")
+                            wr_margin_usdt_input = ui.number(
+                                label="Margin (USDT)", value=float(_wr_cfg["margin_usdt"]),
+                                min=1, max=100000, step=1, format="%.2f",
+                            ).classes("w-36").props("dense")
+                            wr_margin_pct_input = ui.number(
+                                label="Margin (% equity)", value=float(_wr_cfg["margin_pct"]),
+                                min=0.5, max=100, step=0.5, format="%.1f",
+                            ).classes("w-36").props("dense")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-start mt-1"):
+                            wr_max_concurrent_input = ui.number(
+                                label="Max open WR positions", value=int(_wr_cfg["max_concurrent_positions"]),
+                                min=1, max=20, step=1, precision=0,
+                            ).classes("w-44").props("hint='Best rank_score first' persistent-hint dense")
+                            wr_max_total_margin_input = ui.number(
+                                label="Max total WR margin (% equity)", value=float(_wr_cfg["max_total_margin_pct"]),
+                                min=1, max=500, step=5, format="%.0f",
+                            ).classes("w-44").props("dense")
+                        wr_risk_label = ui.label("").classes(
+                            "w-full text-xs text-slate-600 mt-2 whitespace-pre-line"
+                        )
+                    _active_badge_wr = ui.badge("Active", color="positive").bind_visibility_from(
+                        wr_enabled_switch, "value"
+                    )
+
+            def _wr_form_values() -> dict[str, Any]:
+                """Current card values as a wick_rejection config (unsaved)."""
+                def _num(widget: Any, default: Any, cast: Any = float) -> Any:
+                    try:
+                        return cast(widget.value) if widget.value not in (None, "") else default
+                    except (TypeError, ValueError):
+                        return default
+
+                d = strategy_defaults("wick_rejection")
+                return {
+                    "min_body_ratio": _num(wr_min_body_ratio_input, d["min_body_ratio"]),
+                    "body_avg_window": _num(wr_body_avg_window_input, d["body_avg_window"], int),
+                    "setup_lookback_candles": _num(wr_setup_lookback_input, d["setup_lookback_candles"], int),
+                    "min_big_bodies": _num(wr_min_big_bodies_input, d["min_big_bodies"], int),
+                    "setup_include_forming": bool(wr_include_forming_switch.value),
+                    "htf_regime_preference": str(wr_htf_regime_select.value or "off"),
+                    "entry_seconds_before_close": _num(wr_entry_seconds_input, d["entry_seconds_before_close"]),
+                    "min_seconds_to_close": _num(wr_min_seconds_input, d["min_seconds_to_close"]),
+                    "max_seconds_to_close": _num(wr_max_seconds_input, d["max_seconds_to_close"]),
+                    "ws_price_max_age_seconds": _num(wr_ws_age_input, d["ws_price_max_age_seconds"]),
+                    "max_high_offset_pct": _num(wr_max_offset_input, d["max_high_offset_pct"]),
+                    "min_candle_range_pct": _num(wr_min_range_input, d["min_candle_range_pct"]),
+                    "require_forming_green": bool(wr_require_green_switch.value),
+                    "tp_pct": _num(wr_tp_input, d["tp_pct"]),
+                    "tp_unit": str(wr_tp_unit_select.value or "price"),
+                    "emergency_stop_mode": str(wr_stop_mode_select.value or "exchange"),
+                    "emergency_stop_pct": _num(wr_stop_input, d["emergency_stop_pct"]),
+                    "emergency_stop_unit": str(wr_stop_unit_select.value or "margin"),
+                    "max_hold_minutes": _num(wr_max_hold_input, d["max_hold_minutes"]),
+                    "reentry_cooldown_minutes": _num(wr_cooldown_input, d["reentry_cooldown_minutes"]),
+                    "use_global_trade_management": bool(wr_use_global_tm_switch.value),
+                    "leverage": _num(wr_leverage_input, d["leverage"]),
+                    "margin_mode": str(wr_margin_mode_select.value or "fixed_usdt"),
+                    "margin_usdt": _num(wr_margin_usdt_input, d["margin_usdt"]),
+                    "margin_pct": _num(wr_margin_pct_input, d["margin_pct"]),
+                    "max_concurrent_positions": _num(wr_max_concurrent_input, d["max_concurrent_positions"], int),
+                    "max_total_margin_pct": _num(wr_max_total_margin_input, d["max_total_margin_pct"]),
+                }
+
+            def _wr_update_risk(*_args: Any) -> None:
+                """Show margin at risk, position size, stop loss in USDT and the caps."""
+                _ms = getattr(app.state, "market_service", None)
+                _acct = ((getattr(_ms, "_last_full_snapshot", None) or {}).get("account") or {}) if _ms else {}
+                _equity = None
+                for _k in ("account_equity", "total_eq_usd", "total_equity"):
+                    try:
+                        _v = float(_acct.get(_k))
+                    except (TypeError, ValueError):
+                        continue
+                    if _v > 0:
+                        _equity = _v
+                        break
+                _guards = config.get("guardrails") or {}
+                wr_risk_label.text = wick_rejection_risk_summary(
+                    merged_config(_wr_form_values(), "wick_rejection"), _guards, _equity
+                )
+
+            for _w in (
+                wr_tp_input, wr_tp_unit_select, wr_stop_mode_select, wr_stop_input,
+                wr_stop_unit_select, wr_leverage_input, wr_margin_mode_select,
+                wr_margin_usdt_input, wr_margin_pct_input, wr_max_concurrent_input,
+                wr_max_total_margin_input,
+            ):
+                _w.on_value_change(_wr_update_risk)
+            _wr_update_risk()
+
+            def _set_wr_defaults() -> None:
+                """Fill all Wick Rejection fields with the recommended configuration."""
+                d = strategy_defaults("wick_rejection")
+                wr_min_body_ratio_input.value = d["min_body_ratio"]
+                wr_body_avg_window_input.value = d["body_avg_window"]
+                wr_setup_lookback_input.value = d["setup_lookback_candles"]
+                wr_min_big_bodies_input.value = d["min_big_bodies"]
+                wr_include_forming_switch.value = d["setup_include_forming"]
+                wr_htf_regime_select.value = d["htf_regime_preference"]
+                wr_entry_seconds_input.value = d["entry_seconds_before_close"]
+                wr_min_seconds_input.value = d["min_seconds_to_close"]
+                wr_max_seconds_input.value = d["max_seconds_to_close"]
+                wr_ws_age_input.value = d["ws_price_max_age_seconds"]
+                wr_max_offset_input.value = d["max_high_offset_pct"]
+                wr_min_range_input.value = d["min_candle_range_pct"]
+                wr_require_green_switch.value = d["require_forming_green"]
+                wr_tp_input.value = d["tp_pct"]
+                wr_tp_unit_select.value = d["tp_unit"]
+                wr_stop_mode_select.value = d["emergency_stop_mode"]
+                wr_stop_input.value = d["emergency_stop_pct"]
+                wr_stop_unit_select.value = d["emergency_stop_unit"]
+                wr_max_hold_input.value = d["max_hold_minutes"]
+                wr_cooldown_input.value = d["reentry_cooldown_minutes"]
+                wr_use_global_tm_switch.value = d["use_global_trade_management"]
+                wr_leverage_input.value = d["leverage"]
+                wr_margin_mode_select.value = d["margin_mode"]
+                wr_margin_usdt_input.value = d["margin_usdt"]
+                wr_margin_pct_input.value = d["margin_pct"]
+                wr_max_concurrent_input.value = d["max_concurrent_positions"]
+                wr_max_total_margin_input.value = d["max_total_margin_pct"]
+                ui.notify("Wick Rejection fields set to recommended defaults — click Save to persist", color="info")
+
             # ── Trend Pullback ────────────────────────────────────────────────────
             _tp_cfg = ((config.get("launcher") or {}).get("strategies") or {}).get("trend_pullback") or {}
             with ui.card().classes("w-full rounded-lg border border-slate-200 mb-1"):
@@ -6267,6 +6581,13 @@ def register_pages(app: FastAPI) -> None:
                 "require_min_volume": bool(vr_require_min_vol_switch.value),
                 "min_volume_ratio": float(vr_min_vol_ratio_input.value or 0.7),
                 "volume_lookback": int(vr_vol_lookback_input.value or 20),
+            }
+            # Merge into the saved WR config so keys without a field here
+            # (momentum mode, skip_rr_guard, …) are kept.
+            _strategies_cfg["wick_rejection"] = {
+                **(_strategies_cfg.get("wick_rejection") or {}),
+                **_wr_form_values(),
+                "enabled": bool(wr_enabled_switch.value),
             }
             _strategies_cfg["trend_pullback"] = {
                 "enabled": bool(tp_enabled_switch.value),
@@ -7852,6 +8173,47 @@ def register_pages(app: FastAPI) -> None:
                 ).classes("w-full md:w-48").props(
                     "hint='Cap on lane admissions per run, ranked by absolute move. Bounds the extra candle fetches.' persistent-hint"
                 )
+            ui.label("Vol universe (Wick Rejection)").classes("text-xs font-semibold text-slate-600 mt-2")
+            ui.label(
+                "A third list ranked on speed (% per hour): the larger of the recent closed-candle range "
+                "per hour and the price move over the fast-move window above. It has its own gates "
+                "(Activity min ratio does not apply) and is added to the fetched symbols after SC and MR. "
+                "Only Wick Rejection trades it; symbols only on this list never reach the other strategies. "
+                "The volume gate needs recent-activity data, which is fetched for the Activity top-N "
+                "symbols and fast-lane symbols only."
+            ).classes("text-xs text-slate-500 mb-1")
+            with ui.row().classes("w-full flex-wrap gap-4 items-center"):
+                screener_vol_switch = ui.switch(
+                    "Enable vol universe",
+                    value=bool(screener_cfg.get("vol_enabled", False)),
+                ).classes("w-full md:w-48").props(
+                    "hint='Needed for Wick Rejection; without it WR uses the combined list.' persistent-hint"
+                )
+                screener_vol_max_input = ui.number(
+                    label="Vol max symbols",
+                    value=int(screener_cfg.get("vol_max_symbols") or 8),
+                    min=1,
+                    max=50,
+                    step=1,
+                ).classes("w-full md:w-48")
+                screener_vol_min_speed_input = ui.number(
+                    label="Vol min speed (%/h)",
+                    value=float(screener_cfg.get("vol_min_speed_pct_per_hour") or 1.0),
+                    min=0,
+                    max=50,
+                    step=0.25,
+                    format="%.2f",
+                ).classes("w-full md:w-48")
+                screener_vol_min_ratio_input = ui.number(
+                    label="Vol min volume ratio (×)",
+                    value=float(screener_cfg.get("vol_min_vol_ratio") or 0.5),
+                    min=0,
+                    max=20,
+                    step=0.1,
+                    format="%.2f",
+                ).classes("w-full md:w-48").props(
+                    "hint='Recent volume vs its own 24h average; missing data fails' persistent-hint"
+                )
             ui.separator().classes("w-full my-4")
             ui.label("Model, cadence, and prompt controls").classes("text-sm text-slate-500")
             with ui.row().classes("w-full flex-wrap gap-4"):
@@ -9186,6 +9548,11 @@ def register_pages(app: FastAPI) -> None:
                     (config.get("screener") or {}).get("fast_lane_sod_max_age_mult")
                     or _sc_def["fast_lane_sod_max_age_mult"]
                 ),
+                # Vol universe (wick_rejection).
+                "vol_enabled": bool(screener_vol_switch.value),
+                "vol_max_symbols": max(1, _coerce(screener_vol_max_input.value, _sc_def["vol_max_symbols"], int)),
+                "vol_min_speed_pct_per_hour": max(0.0, _coerce(screener_vol_min_speed_input.value, _sc_def["vol_min_speed_pct_per_hour"], float)),
+                "vol_min_vol_ratio": max(0.0, _coerce(screener_vol_min_ratio_input.value, _sc_def["vol_min_vol_ratio"], float)),
             }
             # Preserve signal fields from config (edited on STRATEGY page) and
             # only overwrite the operational fields managed on this page.
