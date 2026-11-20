@@ -33,6 +33,11 @@ from app.services.strategies.defaults import strategy_defaults
 _NON_SWEEP_KEYS = {
     "enabled",
     "flip_launcher_direction",
+    # wick_rejection live-trigger timing: the backtest steps on 1m candles and
+    # reads no websocket, so these never change a backtest result.
+    "entry_seconds_before_close",
+    "ws_price_max_age_seconds",
+    "momentum_eval_interval_seconds",
 }
 
 

@@ -228,6 +228,10 @@ class StrategySignal:
         Optional stop-loss % for this strategy.
     rationale:
         Human-readable reason for the signal (shown in logs/notifications).
+    rank_score:
+        Optional score for ordering simultaneous signals of one strategy
+        (higher = better).  Used by ``wick_rejection`` to pick which symbols
+        to enter when more fire than ``max_concurrent_positions`` allows.
     """
 
     direction: str
@@ -235,6 +239,7 @@ class StrategySignal:
     tp_pct: float | None = None
     sl_pct: float | None = None
     rationale: str = ""
+    rank_score: float | None = None
 
 
 @runtime_checkable

@@ -51,6 +51,7 @@ from app.services.strategies.mean_reversion import MeanReversionStrategy
 from app.services.strategies.spike_continuation import SpikeContinuationStrategy
 from app.services.strategies.trend_pullback import TrendPullbackStrategy
 from app.services.strategies.vwap_reversion import VWAPReversionStrategy
+from app.services.strategies.wick_rejection import WickRejectionStrategy
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +62,7 @@ _AVAILABLE_STRATEGIES: dict[str, Strategy] = {
     "liquidity_sweep": LiquiditySweepStrategy(),
     "vwap_reversion": VWAPReversionStrategy(),
     "trend_pullback": TrendPullbackStrategy(),
+    "wick_rejection": WickRejectionStrategy(),
 }
 
 

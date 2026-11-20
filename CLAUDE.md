@@ -68,7 +68,7 @@ uv run pytest
 ```
 - `pytest-xdist` runs with `-n auto` by default (see `pyproject.toml`); the suite takes ~15s.
 - Tests marked `network` hit live services and are skipped by default.
-- All tests must pass (820 passing, 0 pre-existing failures as of 2026-11-19). Any failure is a regression.
+- All tests must pass (854 passing, 0 pre-existing failures as of 2026-11-20). Any failure is a regression.
 
 ---
 
@@ -93,7 +93,7 @@ app/
       __init__.py          # Strategy protocol, StrategySignal, StrategyHelpers, shared helpers
       defaults.py          # Canonical defaults: strategies, trade management, screener
       mean_reversion.py, spike_continuation.py, trend_pullback.py,
-      liquidity_sweep.py, vwap_reversion.py, liquidity_helpers.py
+      liquidity_sweep.py, vwap_reversion.py, wick_rejection.py, liquidity_helpers.py
     indicator_service.py, okx_metrics.py, alert_service.py
     state_service.py       # Redis snapshot store + pub/sub
     okx_sdk_adapter.py     # Wraps OKX SDK for sub-account routing
@@ -173,6 +173,7 @@ With `launcher.schedule="on_close"`, the scheduler waits for all positions to cl
 | `trend_pullback` | SC (trending) | Enter pullbacks in established trends |
 | `liquidity_sweep` | MR (chop) | Fade stop-hunt sweeps of fractal swing levels |
 | `vwap_reversion` | MR (chop) | Revert intraday deviations back to VWAP |
+| `wick_rejection` | combined (own `vol` list planned) | Short a strong green 1H candle seconds before close (in progress, see `docs/objectives/wick_rejection_plan.md`) |
 
 - Config lives under `runtime_config["launcher"]["strategies"][<name>]`; defaults in `strategies/defaults.py` (`strategy_defaults()` / `merged_config()`).
 - Each strategy may set `analysis_timeframe`; the snapshot then exposes `sym_data["timeframes"][<tf>]` (read via `resolve_analysis_block`).

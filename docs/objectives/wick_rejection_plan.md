@@ -1,6 +1,6 @@
 # Design: Hourly Wick Rejection Short (`wick_rejection`)
 
-**Status:** In progress — Phase 1 done 2026-11-19 (closed-candle alignment + `forming_candle` + `as_of_ts`, live and backtest). Redesigned 2026-11-18 from the manual-trade analysis (§1.1); vol screener §3.5; optional momentum entry mode §3.8 / Phase 9.
+**Status:** In progress — Phase 1 done 2026-11-19 (closed-candle alignment + `forming_candle` + `as_of_ts`, live and backtest); Phase 2 done 2026-11-20 (strategy funnel, defaults, registration; disabled by default). Redesigned 2026-11-18 from the manual-trade analysis (§1.1); vol screener §3.5; optional momentum entry mode §3.8 / Phase 9.
 **Date:** 2026-10-28 (revised 2026-11-18)
 **Scope:** New launcher strategy with a clock-aligned entry trigger, forming-candle
 exposure, strategy-owned exits (TP + emergency stop + time stop), per-strategy
@@ -572,7 +572,7 @@ Tests: `tests/test_forming_candle.py` (no look-ahead in either mode, forming
 candle built from minutes so far, last-minute boundary, live trimming per
 timeframe, cache key regression, live ↔ backtest parity at the same moment).
 
-### Phase 2 — Strategy *(parallel with 3, 4)*
+### Phase 2 — Strategy ✅ *(done 2026-11-20)*
 
 3. **New `strategies/wick_rejection.py`** — the §3.1 funnel, `body_ratio` helper,
    `rank_score`.
@@ -580,6 +580,35 @@ timeframe, cache key regression, live ↔ backtest parity at the same moment).
    `DEFAULT_STRATEGY_CONFIG`.
 5. Register in `market_service._strategies`, `backtest/engine._AVAILABLE_STRATEGIES`,
    `backtest/runner.DEFAULT_STRATEGIES`.
+
+As built:
+
+- `StrategySignal` gained an optional `rank_score` (other strategies leave it
+  `None`).
+- `P` is the forming candle's close. `H`/`L` are widened by `P` so a price
+  above the recorded high counts as the new high. The trigger (Phase 6) will
+  patch the live price into the forming candle before evaluating.
+- `exit_price_pcts(cfg)` converts `tp_unit` / `emergency_stop_unit` to price
+  percent (default 0.5% TP, 35% margin ÷ 5× = 7% stop) and fills the signal's
+  `tp_pct` / `sl_pct`. Phase 3 still owns the TP/SL resolution in
+  `launcher_tp_sl` (which today rescales signal percentages by guard leverage).
+- Stages 1–2 (no forming candle, outside the entry window) veto silently,
+  since they veto on every tick; stages 3–7 log the measured value.
+- `STRATEGY_SWEEP_PARAMS["wick_rejection"]` is added (the catalogue test
+  requires every engine strategy). Live-trigger timing keys
+  (`entry_seconds_before_close`, `ws_price_max_age_seconds`,
+  `momentum_eval_interval_seconds`) are excluded from sweeps.
+- **Deferred:** `backtest/runner.DEFAULT_STRATEGIES` (unused in code; it seeds
+  "all strategies enabled") gets WR in Phase 4, once exits exist.
+- Universe routing is unchanged until Phase 5: WR falls back to the combined
+  screener list.
+- Not yet safe to enable live: the regular tick would evaluate it at random
+  times and the global trade management would manage it (Phases 3, 4, 6).
+
+Tests: `tests/test_wick_rejection.py` (32): every funnel stage and its
+boundaries, `body_ratio`, exit unit conversion, registries, and a finer_ltf
+backtest snapshot that fires at minute 58 without seeing the minute-59 dump
+and stays silent mid-hour.
 
 ### Phase 3 — TP/SL, sizing and guardrail plumbing *(parallel with 2, 4)*
 

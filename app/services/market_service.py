@@ -57,6 +57,7 @@ from app.services.strategies.mean_reversion import MeanReversionStrategy
 from app.services.strategies.spike_continuation import SpikeContinuationStrategy
 from app.services.strategies.trend_pullback import TrendPullbackStrategy
 from app.services.strategies.vwap_reversion import VWAPReversionStrategy
+from app.services.strategies.wick_rejection import WickRejectionStrategy
 
 
 def _ensure_httpx_proxies_compat() -> None:
@@ -528,6 +529,7 @@ class MarketService:
             LiquiditySweepStrategy(),
             VWAPReversionStrategy(),
             TrendPullbackStrategy(),
+            WickRejectionStrategy(),
         ]
         self._strategy_helpers = StrategyHelpers(
             extract_float=self._extract_float,

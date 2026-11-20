@@ -386,6 +386,60 @@ DEFAULT_TREND_PULLBACK: dict[str, Any] = {
     "require_completed_pullback": False,
 }
 
+# ── Wick Rejection ──────────────────────────────────────────────────────────
+# Hourly wick-rejection short, derived from the user's manual trades
+# (docs/objectives/wick_rejection_plan.md §1, §5).  Entry in the last seconds of
+# a strong green 1H candle; exits are strategy-owned (§3.2).  Keys used by
+# later phases (sizing, trigger, momentum mode) are defined here already so the
+# config shape is stable.
+DEFAULT_WICK_REJECTION: dict[str, Any] = {
+    "enabled": False,
+    "analysis_timeframe": "1H",
+    "htf_regime_preference": "off",
+    # Setup: big green bodies in the recent hours
+    "min_body_ratio": 3.0,             # green body ÷ avg |body| of the prior window (user's rule: 5)
+    "body_avg_window": 8,
+    "setup_lookback_candles": 4,       # closed 1H candles searched for a big body
+    "setup_include_forming": True,     # the forming candle (to current price) also counts
+    "min_big_bodies": 1,
+    # Entry
+    "entry_seconds_before_close": 40,  # live trigger time (H:00 − this)
+    "ws_price_max_age_seconds": 5,     # websocket price if fresher than this, else REST
+    # Momentum entry mode (§3.8, Phase 9) — off by default
+    "entry_mode": "clock",             # clock | momentum | momentum_or_clock
+    "watch_seconds_before_close": 300,
+    "momentum_entry_max_seconds_to_close": 120,
+    "momentum_eval_interval_seconds": 2,
+    "stall_min_seconds": 60,
+    "max_below_high_pct": 1.5,
+    "min_ret_60s": -1.0,
+    "max_ret_60s": None,               # "still pushing up" veto, off
+    "max_buy_share_60s": None,         # off
+    "min_seconds_to_close": 10,        # entry window gate (live + backtest)
+    "max_seconds_to_close": 90,
+    "require_forming_green": True,
+    "min_candle_range_pct": 1.5,
+    "max_high_offset_pct": 20.0,       # (H − P)/(H − L) × 100 (user's rule: 5–10)
+    # Exits (strategy-owned)
+    "use_global_trade_management": False,
+    "tp_pct": 0.5,
+    "tp_unit": "price",                # price | margin
+    "emergency_stop_mode": "exchange", # exchange | software | off
+    "emergency_stop_pct": 35.0,
+    "emergency_stop_unit": "margin",   # price | margin
+    "max_hold_minutes": 60,            # 0 = off
+    "reentry_cooldown_minutes": 55,
+    # Risk / sizing
+    "leverage": 5,
+    "margin_mode": "fixed_usdt",       # fixed_usdt | pct_equity
+    "margin_usdt": 20.0,
+    "margin_pct": 50.0,                # used when margin_mode == "pct_equity"
+    "max_concurrent_positions": 3,     # open WR positions at once, ranked by rank_score
+    "max_total_margin_pct": 100.0,     # summed WR margin cap, % of equity
+    "skip_rr_guard": True,
+    "disable_protection": False,       # required only for emergency_stop_mode == "off"
+}
+
 # Registry keyed by strategy name.
 DEFAULT_STRATEGY_CONFIG: dict[str, dict[str, Any]] = {
     "mean_reversion": DEFAULT_MEAN_REVERSION,
@@ -393,6 +447,7 @@ DEFAULT_STRATEGY_CONFIG: dict[str, dict[str, Any]] = {
     "liquidity_sweep": DEFAULT_LIQUIDITY_SWEEP,
     "vwap_reversion": DEFAULT_VWAP_REVERSION,
     "trend_pullback": DEFAULT_TREND_PULLBACK,
+    "wick_rejection": DEFAULT_WICK_REJECTION,
 }
 
 # ── Symbol screener ─────────────────────────────────────────────────────────
