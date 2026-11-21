@@ -93,6 +93,8 @@ class UniverseSchedule:
     candidate_count: int = 0
     diagnostics: list[str] = field(default_factory=list)
     provenance: dict[str, Any] = field(default_factory=dict)
+    # Sorted interval timestamps, cached for universe_at (runtime only).
+    _interval_ts: list[int] | None = field(default=None, repr=False, compare=False)
 
     @property
     def all_symbols(self) -> list[str]:
@@ -133,7 +135,12 @@ class UniverseSchedule:
         """
         if not self.intervals:
             return None
-        idx = bisect.bisect_right([i.ts for i in self.intervals], ts) - 1
+        # Cache the sorted interval timestamps (called per symbol per step).
+        cached = self._interval_ts
+        if cached is None or len(cached) != len(self.intervals):
+            cached = [i.ts for i in self.intervals]
+            self._interval_ts = cached
+        idx = bisect.bisect_right(cached, ts) - 1
         if idx < 0:
             return None
         interval = self.intervals[idx]

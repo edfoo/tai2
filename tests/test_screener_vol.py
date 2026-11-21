@@ -280,3 +280,91 @@ def test_schedule_symbols_for_routes_like_the_step_gate() -> None:
     assert sched.symbols_for(["mean_reversion"]) == ["M1"]
     assert sched.symbols_for(["spike_continuation", "vwap_reversion"]) == ["S1", "M1", "S2"]
     assert sched.symbols_for([]) == sched.all_symbols
+
+
+def test_swap_specs_cache_key_fits_filesystem() -> None:
+    from app.services.backtest.data_fetcher import swap_specs_cache_key
+
+    short = ["BTC-USDT-SWAP", "ETH-USDT-SWAP"]
+    assert swap_specs_cache_key(short) == "swap_specs_BTC-USDT-SWAP_ETH-USDT-SWAP"
+    many = sorted(f"SYM{i}-USDT-SWAP" for i in range(152))
+    key = swap_specs_cache_key(many)
+    assert len(key) < 60 and key.startswith("swap_specs_152_")
+    assert key == swap_specs_cache_key(list(many)) != swap_specs_cache_key(many[:-1])
+
+
+class _FlakyMarketAPI:
+    """Candles endpoint over 1m bars [0, n) newest first; fails on chosen calls."""
+
+    def __init__(self, n: int, fail_calls: set[int]) -> None:
+        self.n = n
+        self.fail_calls = fail_calls
+        self.calls = 0
+
+    def get_candlesticks(self, *, instId, bar, limit, after):
+        self.calls += 1
+        if self.calls in self.fail_calls:
+            raise TimeoutError("The read operation timed out")
+        after = int(after)
+        ts = [t for t in range(self.n - 1, -1, -1) if t * 60_000 < after][: int(limit)]
+        return {"code": "0", "data": [[str(t * 60_000), "1", "1", "1", "1", "1", "1", "1", "1"] for t in ts]}
+
+    def get_history_candlesticks(self, **kw):
+        return {"code": "0", "data": []}
+
+
+def _fetcher(tmp_path, api):
+    from app.services.backtest.data_fetcher import HistoricalDataFetcher
+
+    f = HistoricalDataFetcher(cache_dir=tmp_path)
+    f._api = api
+
+    async def _no_sleep(_s: float) -> None:
+        return None
+
+    f._retry_sleep = _no_sleep
+    return f
+
+
+def test_fetch_retries_transient_failure(tmp_path) -> None:
+    import asyncio
+
+    api = _FlakyMarketAPI(1000, fail_calls={2})
+    f = _fetcher(tmp_path, api)
+    candles = asyncio.run(f.fetch_candles("X-USDT-SWAP", "1m", 0, 999 * 60_000 + 1, warmup_candles=0))
+    assert len(candles) == 1000
+    assert list(tmp_path.glob("X-USDT-SWAP_1m_*.json"))
+
+
+def test_failed_fetch_is_not_cached(tmp_path) -> None:
+    import asyncio
+
+    api = _FlakyMarketAPI(1000, fail_calls={2, 3, 4})
+    f = _fetcher(tmp_path, api)
+    candles = asyncio.run(f.fetch_candles("X-USDT-SWAP", "1m", 0, 999 * 60_000 + 1, warmup_candles=0))
+    assert 0 < len(candles) < 1000
+    assert not list(tmp_path.glob("X-USDT-SWAP_1m_*.json"))
+
+
+def test_snapshot_needed_only_for_routed_or_open_symbols() -> None:
+    from app.services.backtest.engine import BacktestEngine
+    from app.services.backtest.models import BacktestConfig
+    from app.services.backtest.universe import UniverseInterval, UniverseSchedule
+
+    cfgs = {"wick_rejection": {"enabled": True}}
+    eng = BacktestEngine(BacktestConfig(
+        symbols=[], timeframe="1H", start_ts=0, end_ts=10,
+        strategy_names=["wick_rejection"], launcher_config={"strategies": cfgs},
+        universe_mode="screener",
+    ))
+    eng._universe_schedule = UniverseSchedule(intervals=[
+        UniverseInterval(ts=0, sc=["S"], mr=["M"], vol=["V"], selected=["S", "M", "V"]),
+    ])
+    assert eng._snapshot_needed("V", 5, cfgs)
+    assert not eng._snapshot_needed("S", 5, cfgs)
+    eng._simulator.open_position(
+        symbol="S", direction="short", entry_price=1.0, entry_ts=0, tp_price=None,
+        sl_price=None, strategy_name="wick_rejection", notional=10.0,
+    )
+    assert eng._snapshot_needed("S", 5, cfgs)  # open position keeps its exits fed
+    assert not eng._snapshot_needed("V", 5, {"wick_rejection": {"enabled": False}})

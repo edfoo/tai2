@@ -437,7 +437,7 @@ DEFAULT_WICK_REJECTION: dict[str, Any] = {
     "max_concurrent_positions": 3,     # open WR positions at once, ranked by rank_score
     "max_total_margin_pct": 100.0,     # summed WR margin cap, % of equity
     "skip_rr_guard": True,
-    "disable_protection": False,       # required only for emergency_stop_mode == "off"
+    "disable_protection": False,       # strips TP and SL; stop mode "off" is already TP-only
 }
 
 # Registry keyed by strategy name.

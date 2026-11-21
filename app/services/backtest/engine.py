@@ -619,6 +619,8 @@ class BacktestEngine:
             # Evaluate strategies for each symbol.
             step_snapshots: dict[str, dict[str, Any]] = {}
             for symbol, candle in step_candles.items():
+                if not self._snapshot_needed(symbol, candle.ts, strategies_cfg):
+                    continue
                 builder = snapshot_builders[symbol]
                 # The window includes all candles up to the current one.
                 candle_idx = start_indices[symbol] + step
@@ -819,6 +821,8 @@ class BacktestEngine:
                 cur = acc[symbol]
                 if cur is None:
                     continue  # no accumulator yet (shouldn't happen)
+                if not self._snapshot_needed(symbol, eval_candle.ts, strategies_cfg):
+                    continue
                 incomplete = Candle(
                     ts=cur["ts"],
                     open=cur["open"],
@@ -918,6 +922,27 @@ class BacktestEngine:
         return (
             not self._config.allow_concurrent_strategies_per_symbol
             and self._simulator.has_open_position(symbol)
+        )
+
+    def _snapshot_needed(
+        self, symbol: str, ts: int, strategies_cfg: dict[str, Any]
+    ) -> bool:
+        """Whether a step needs this symbol's snapshot.
+
+        Snapshots feed strategy evaluation and the strategy exits of open
+        positions.  In screener mode a symbol that no enabled strategy may
+        evaluate at ``ts`` and that holds no position is skipped — the result
+        is identical and a wide universe (e.g. 150 symbols × 1m steps) is not
+        rebuilt every step.
+        """
+        if self._config.universe_mode != "screener" or self._universe_schedule is None:
+            return True
+        if self._simulator.has_open_position(symbol):
+            return True
+        return any(
+            (strategies_cfg.get(st.name) or {}).get("enabled", False)
+            and self._symbol_in_universe(symbol, st.name, ts)
+            for st in self._strategies
         )
 
     def _symbol_in_universe(self, symbol: str, strategy_name: str, ts: int) -> bool:

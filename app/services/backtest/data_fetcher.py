@@ -82,6 +82,26 @@ def _parse_candle(row: list[Any]) -> Candle | None:
         return None
 
 
+_MAX_KEY_CHARS = 120
+# Attempts per candle page before a fetch is treated as failed (1 s, 2 s backoff).
+_FETCH_ATTEMPTS = 3
+
+
+def swap_specs_cache_key(normalized_symbols: list[str]) -> str:
+    """Cache file stem for an instrument-spec set.
+
+    Short sets keep the readable ``swap_specs_<SYM>_<SYM>…`` name (existing
+    caches stay valid); long ones (screener universes of 100+ symbols) would
+    exceed the filesystem's 255-byte name limit, so they use the count and a
+    hash of the sorted list.
+    """
+    key = "swap_specs_" + "_".join(normalized_symbols)
+    if len(key) <= _MAX_KEY_CHARS:
+        return key
+    digest = hashlib.sha256("_".join(normalized_symbols).encode("utf-8")).hexdigest()[:16]
+    return f"swap_specs_{len(normalized_symbols)}_{digest}"
+
+
 class HistoricalDataFetcher:
     """Fetches and caches historical OHLCV candles from OKX."""
 
@@ -92,6 +112,8 @@ class HistoricalDataFetcher:
         api_flag: str = "0",
     ) -> None:
         self._cache_dir = cache_dir or _DEFAULT_CACHE_DIR
+        self._last_fetch_failed = False
+        self._retry_sleep: Callable[[float], Any] = asyncio.sleep
         self._api = _build_market_api(api_flag)
         self._last_fetch_provenance: dict[str, Any] = {}
         self._last_funding_provenance: dict[str, Any] = {}
@@ -280,7 +302,7 @@ class HistoricalDataFetcher:
     async def fetch_instrument_specs(self, symbols: list[str]) -> dict[str, dict[str, Any]]:
         """Fetch/cache OKX contract value and size increments for requested swaps."""
         normalized_symbols = sorted(set(symbol.upper() for symbol in symbols))
-        key = "swap_specs_" + "_".join(normalized_symbols)
+        key = swap_specs_cache_key(normalized_symbols)
         path = self._cache_dir / f"{key}.json"
         specs: dict[str, dict[str, Any]] | None = None
         if path.exists():
@@ -424,7 +446,13 @@ class HistoricalDataFetcher:
             seen.add(c.ts)
             candles.append(c)
 
-        self._save_cache(cache_key, candles)
+        if getattr(self, "_last_fetch_failed", False):
+            logger.warning(
+                "Not caching %s: the fetch failed part-way (%d candles kept for this run only)",
+                cache_key, len(candles),
+            )
+        else:
+            self._save_cache(cache_key, candles)
         self._record_provenance(
             cache_key, symbol, timeframe, start_ts, end_ts, warmup_candles,
             candles, source="okx_market_api", cache_hit=False,
@@ -540,6 +568,7 @@ class HistoricalDataFetcher:
             extended_start = start_ts - warmup_candles * tf_ms
 
         request_count = 0
+        self._last_fetch_failed = False
         # Safety cap sized to the range (pages of up to _OKX_MAX_LIMIT, with
         # headroom for short pages), never below the old fixed cap.
         expected_pages = (max(0, end_ts - extended_start) // max(tf_ms, 1)) // _OKX_MAX_LIMIT
@@ -549,16 +578,28 @@ class HistoricalDataFetcher:
         while after_ts > extended_start and request_count < max_requests:
             request_count += 1
             endpoint = self._api.get_history_candlesticks if use_history else self._api.get_candlesticks
-            try:
-                response = await asyncio.to_thread(
-                    endpoint,
-                    instId=symbol,
-                    bar=timeframe,
-                    limit=_OKX_MAX_LIMIT,
-                    after=str(after_ts),
-                )
-            except Exception as exc:
-                logger.warning("Historical fetch failed for %s: %s", symbol, exc)
+            response = None
+            for attempt in range(_FETCH_ATTEMPTS):
+                try:
+                    response = await asyncio.to_thread(
+                        endpoint,
+                        instId=symbol,
+                        bar=timeframe,
+                        limit=_OKX_MAX_LIMIT,
+                        after=str(after_ts),
+                    )
+                    break
+                except Exception as exc:
+                    logger.warning(
+                        "Historical fetch failed for %s (attempt %d/%d): %s",
+                        symbol, attempt + 1, _FETCH_ATTEMPTS, exc,
+                    )
+                    if attempt + 1 < _FETCH_ATTEMPTS:
+                        await self._retry_sleep(2.0 ** attempt)
+            if response is None:
+                # A transient failure must not be cached as the symbol's
+                # history (the next run would silently keep the gap).
+                self._last_fetch_failed = True
                 break
 
             rows = _safe_data(response)

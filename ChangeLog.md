@@ -1,5 +1,14 @@
 # Change Log
 
+## 2026-11-21
+- **Backtest — fetch robustness and replay speed:**
+  - `HistoricalDataFetcher._fetch_range` retries each page up to 3 times with backoff. A fetch that still fails part-way is no longer cached; before, a timed-out fetch cached a truncated history (seen on LITE-USDT-SWAP 1m) and every later run reused it.
+  - Long `swap_specs_` cache keys are hashed (`swap_specs_cache_key`). With 150+ symbols the key went over the filesystem name limit (`[Errno 36] File name too long`).
+  - In screener mode the engine builds a snapshot only for symbols that an enabled strategy can trade at that step or that hold an open position (`_snapshot_needed`). This cut a 16-day finer_ltf 1m wick_rejection replay from about 3.5M snapshot builds.
+  - `UniverseSchedule` caches its interval timestamps.
+  - Corrected the `disable_protection` comment: stop mode `"off"` already gives TP-only protection, and `disable_protection` also removes the TP.
+  - Tests in `tests/test_screener_vol.py` (+4).
+
 ## 2026-11-20
 - **Backtest — screener mode fetches only routed symbols:** the engine downloaded candles for every symbol the screener selected in any interval (SC + MR + vol), even when the enabled strategies use only some lists. `UniverseSchedule.symbols_for(strategy_names)` returns the union of what `universe_for_strategy` routes the enabled strategies to, and the engine fetches that (logged when smaller). A wick_rejection-only run over 16 days: 152 of 171 symbols.
 - **Phase 9 — wick_rejection momentum entry mode (off by default):** `entry_mode` = `momentum` / `momentum_or_clock` watches the last `watch_seconds_before_close` of the hour on the public trade tape and enters when the price has stalled near the high inside `momentum_entry_max_seconds_to_close` (§3.8). Pure measures and conditions in `strategies/wr_momentum.py`; the gate and window are applied inside `WickRejectionStrategy` from `sym_data["wr_momentum"]`, fed by the live tape (`MarketService.start_wr_tape`/`wr_tape`, gap detection on websocket reconnects) and by a 1m-candle tape in the backtest (`BacktestEngine._evaluate_wick_rejection`). Trigger `run_watch` shares ranking/caps/execution with the clock path. UI: mode + thresholds on the card, watch status on LIVE. Tape replay deferred.

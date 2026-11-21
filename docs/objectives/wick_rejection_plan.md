@@ -254,8 +254,9 @@ vs a 7% stop. WR has three exits:
   `stop_loss_required` without bypassing guardrails. `"software"`: no SL order;
   the monitor closes at market when the level is crossed. This addresses the
   worry that a visible stop gets hunted, at the cost of protection while the
-  app is offline. `"off"`: no stop at all; needs `disable_protection = True`
-  (TP-only, §3.3) and is not recommended (see INIT, §1.1).
+  app is offline. `"off"`: no stop at all; TP-only protection
+  (§3.3; do not add `disable_protection`, which strips the TP too) and is not
+  recommended (see INIT, §1.1).
 - **Time stop** closes at market after `max_hold_minutes`, win or lose. No R
   condition. Data: p90 hold was 30 min, max 81 min, so 60 is the starting
   point and the sweep covers 15/30/60/120.
@@ -1090,7 +1091,7 @@ DEFAULT_WICK_REJECTION = {
     "max_concurrent_positions": 3,    # open WR positions at once, ranked by rank_score
     "max_total_margin_pct": 100.0,    # summed WR margin cap, % of equity
     "skip_rr_guard": True,
-    "disable_protection": False,      # required only for emergency_stop_mode == "off"
+    "disable_protection": False,      # strips TP and SL; stop mode "off" is already TP-only
 }
 ```
 
