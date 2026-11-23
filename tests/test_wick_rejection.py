@@ -347,3 +347,30 @@ class TestBacktestSnapshot:
         last_hour = T0 + (self.HOURS - 1) * H
         snap = self._snap(setup, last_hour + 30 * M)
         assert WickRejectionStrategy().evaluate(SYMBOL, snap, _cfg(), _helpers()) is None
+
+
+# ── Ranking and entry caps (shared by the live trigger and the backtest) ──────
+
+
+def test_select_ranked_entries_ranks_and_caps() -> None:
+    from app.services.strategies.wick_rejection import select_ranked_entries
+
+    cands = [("a", 1.0, 20.0), ("b", 3.0, 20.0), ("c", 2.0, 20.0), ("d", 2.0, 20.0)]
+    keep, drop = select_ranked_entries(
+        cands, open_positions=1, open_margin=20.0, equity=1000.0,
+        max_concurrent_positions=3, max_total_margin_pct=100.0,
+    )
+    assert keep == ["b", "c"]  # ties keep input order
+    assert set(drop) == {"d", "a"} and "max_concurrent_positions" in drop["d"]
+
+    keep, drop = select_ranked_entries(
+        cands, open_positions=0, open_margin=10.0, equity=100.0,
+        max_concurrent_positions=0, max_total_margin_pct=50.0,
+    )
+    assert keep == ["b", "c"] and "max_total_margin_pct" in drop["d"]
+
+    keep, _ = select_ranked_entries(
+        cands, open_positions=5, open_margin=0.0, equity=None,
+        max_concurrent_positions=None, max_total_margin_pct=50.0,
+    )
+    assert keep == ["b", "c", "d", "a"]  # no caps: everything, ranked

@@ -366,3 +366,58 @@ class TestBacktestTiming:
         assert engine._wr_timing is not None and not engine._wr_timing["supported"]
         assert BacktestEngine(BacktestConfig(symbols=["A"], timeframe="15m", start_ts=0,
                                              end_ts=1))._wr_timing is None
+
+
+# ── Entry caps: live trigger ↔ backtest parity ────────────────────────────────
+
+
+_CAP_RANKS = {"A-USDT-SWAP": 1.0, "B-USDT-SWAP": 3.0, "C-USDT-SWAP": 2.0,
+              "D-USDT-SWAP": 2.5, "E-USDT-SWAP": 0.5}
+
+
+def _backtest_cap_pick(cfg: dict[str, Any], open_wr: int, equity: float) -> list[str]:
+    """Symbols the backtest opens for one step's WR candidates."""
+    eng = BacktestEngine(BacktestConfig(
+        symbols=[], timeframe="1H", start_ts=0, end_ts=10, initial_capital=equity,
+        strategy_names=["wick_rejection"],
+        launcher_config={"strategies": {"wick_rejection": cfg}},
+    ))
+    for i in range(open_wr):
+        eng._simulator.open_position(
+            symbol=f"X{i}-USDT-SWAP", direction="short", entry_price=1.0, entry_ts=0,
+            tp_price=None, sl_price=None, strategy_name="wick_rejection",
+            notional=100.0, leverage=5.0, margin=20.0,
+        )
+        eng._current_prices[f"X{i}-USDT-SWAP"] = 1.0
+    pending = [
+        (dict(symbol=s, direction="short", entry_price=1.0, entry_ts=0, tp_price=None,
+              sl_price=None, strategy_name="wick_rejection", notional=100.0,
+              leverage=5.0, margin=20.0, strategy_exit=None), r, cfg)
+        for s, r in _CAP_RANKS.items()
+    ]
+    before = {p.symbol for p in eng._simulator.open_positions}
+    eng._open_ranked_wick_rejection(pending)
+    return [p.symbol for p in eng._simulator.open_positions if p.symbol not in before]
+
+
+@pytest.mark.parametrize(
+    "over, open_wr",
+    [
+        ({}, 0),                                            # default cap 3
+        ({"max_concurrent_positions": 3}, 2),               # one slot left
+        ({"max_concurrent_positions": 0}, 0),               # no cap
+        ({"max_concurrent_positions": 0, "max_total_margin_pct": 50.0}, 1),  # margin budget
+        ({"max_concurrent_positions": 3}, 3),               # full
+    ],
+)
+def test_entry_caps_match_backtest(over: dict[str, Any], open_wr: int) -> None:
+    equity = 100.0
+    cfg = _wr(**over)
+    ms = _FakeMS(list(_CAP_RANKS), _CAP_RANKS, {s: 1.0 for s in _CAP_RANKS})
+    ms._last_full_snapshot = {"account": {"total_eq_usd": equity}}
+    ms._launcher_in_position = {
+        f"wick_rejection:X{i}-USDT-SWAP": {"strategy": "wick_rejection", "margin_usd": 20.0}
+        for i in range(open_wr)
+    }
+    _run(_trigger(ms, cfg=cfg))
+    assert ms.executed == _backtest_cap_pick(cfg, open_wr, equity)

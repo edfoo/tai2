@@ -43,7 +43,7 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
 from app.services.strategies.defaults import merged_config
-from app.services.strategies.wick_rejection import STRATEGY_NAME
+from app.services.strategies.wick_rejection import STRATEGY_NAME, select_ranked_entries
 from app.services.strategies.wr_momentum import (
     ENTRY_MODES,
     MomentumMeasures,
@@ -338,38 +338,23 @@ class WickRejectionTrigger:
     ) -> None:
         """Rank by ``rank_score``, apply the slot and margin caps, execute."""
         min_s = float(cfg.get("min_seconds_to_close") or 0.0)
-        # ── 3. Rank, slots, margin budget ───────────────────────────────
-        decisions = sorted(
-            decisions, key=lambda sd: float(sd[1].get("_rank_score") or 0.0), reverse=True
-        )
+        # ── 3. Rank, slots, margin budget (shared with the backtest) ────
         open_wr = [
             v for k, v in getattr(ms, "_launcher_in_position", {}).items()
             if str((v or {}).get("strategy") or str(k).split(":", 1)[0]) == STRATEGY_NAME
         ]
-        max_conc = int(cfg.get("max_concurrent_positions") or 0)
-        slots = max(0, max_conc - len(open_wr)) if max_conc > 0 else len(decisions)
-        equity = _snapshot_equity(ms)
-        max_margin_pct = float(cfg.get("max_total_margin_pct") or 0.0)
-        margin_budget = (
-            equity * max_margin_pct / 100.0 if equity and max_margin_pct > 0 else None
+        keep, drop = select_ranked_entries(
+            [(i, float(d.get("_rank_score") or 0.0), float(d.get("_margin_usd") or 0.0))
+             for i, (_sym, d) in enumerate(decisions)],
+            open_positions=len(open_wr),
+            open_margin=sum(float((v or {}).get("margin_usd") or 0.0) for v in open_wr),
+            equity=_snapshot_equity(ms),
+            max_concurrent_positions=cfg.get("max_concurrent_positions"),
+            max_total_margin_pct=cfg.get("max_total_margin_pct"),
         )
-        margin_used = sum(float((v or {}).get("margin_usd") or 0.0) for v in open_wr)
-        chosen: list[tuple[str, dict[str, Any]]] = []
-        for sym, d in decisions:
-            if len(chosen) >= slots:
-                result.dropped[sym] = (
-                    f"max_concurrent_positions {max_conc} ({len(open_wr)} open)"
-                )
-                continue
-            margin = float(d.get("_margin_usd") or 0.0)
-            if margin_budget is not None and margin_used + margin > margin_budget + 1e-9:
-                result.dropped[sym] = (
-                    f"max_total_margin_pct {max_margin_pct:g}% "
-                    f"({margin_used:.2f}+{margin:.2f} > {margin_budget:.2f} USDT)"
-                )
-                continue
-            margin_used += margin
-            chosen.append((sym, d))
+        for i, reason in drop.items():
+            result.dropped[decisions[i][0]] = reason
+        chosen = [decisions[i] for i in keep]
 
         # ── 4. Execute sequentially under the shared lock ───────────────
         for sym, d in chosen:

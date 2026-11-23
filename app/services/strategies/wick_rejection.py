@@ -365,3 +365,46 @@ def backtest_entry_timing(
             f"{cfg.get('momentum_eval_interval_seconds')}s"
         )
     return out
+
+
+def select_ranked_entries(
+    candidates: list[tuple[Any, float, float]],
+    *,
+    open_positions: int,
+    open_margin: float,
+    equity: float | None,
+    max_concurrent_positions: Any,
+    max_total_margin_pct: Any,
+) -> tuple[list[Any], dict[Any, str]]:
+    """Rank one evaluation's WR entries and apply the position caps.
+
+    ``candidates`` are ``(key, rank_score, margin_usd)``.  Highest
+    ``rank_score`` first (stable for ties); at most
+    ``max_concurrent_positions − open_positions`` are kept (0 = no cap), and
+    the summed margin of open plus chosen entries stays within
+    ``max_total_margin_pct`` of ``equity`` (0 or unknown equity = no cap).
+    Returns ``(chosen keys in rank order, {dropped key: reason})``.  Shared by
+    the live trigger and the backtest so both cap entries the same way.
+    """
+    ranked = sorted(candidates, key=lambda c: float(c[1] or 0.0), reverse=True)
+    max_conc = int(_f(max_concurrent_positions) or 0)
+    slots = max(0, max_conc - int(open_positions)) if max_conc > 0 else len(ranked)
+    max_pct = _f(max_total_margin_pct) or 0.0
+    budget = equity * max_pct / 100.0 if equity and equity > 0 and max_pct > 0 else None
+    used = float(open_margin or 0.0)
+    chosen: list[Any] = []
+    dropped: dict[Any, str] = {}
+    for key, _score, margin in ranked:
+        if len(chosen) >= slots:
+            dropped[key] = f"max_concurrent_positions {max_conc} ({open_positions} open)"
+            continue
+        m = float(margin or 0.0)
+        if budget is not None and used + m > budget + 1e-9:
+            dropped[key] = (
+                f"max_total_margin_pct {max_pct:g}% "
+                f"({used:.2f}+{m:.2f} > {budget:.2f} USDT)"
+            )
+            continue
+        used += m
+        chosen.append(key)
+    return chosen, dropped

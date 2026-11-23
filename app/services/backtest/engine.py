@@ -57,6 +57,7 @@ from app.services.strategies.wick_rejection import (
     STRATEGY_NAME as WR_NAME,
     WickRejectionStrategy,
     backtest_entry_timing,
+    select_ranked_entries,
 )
 from app.services.strategies.wr_momentum import (
     attach_momentum,
@@ -618,6 +619,7 @@ class BacktestEngine:
 
             # Evaluate strategies for each symbol.
             step_snapshots: dict[str, dict[str, Any]] = {}
+            wr_pending: list[tuple[dict[str, Any], Any, dict[str, Any]]] = []
             for symbol, candle in step_candles.items():
                 if not self._snapshot_needed(symbol, candle.ts, strategies_cfg):
                     continue
@@ -668,7 +670,7 @@ class BacktestEngine:
                     ):
                         continue
                     direction = "long" if resolved.action == "BUY" else "short"
-                    self._simulator.open_position(
+                    entry = dict(
                         symbol=symbol,
                         direction=direction,
                         entry_price=candle.close,
@@ -681,6 +683,13 @@ class BacktestEngine:
                         margin=resolved.margin_usd,
                         strategy_exit=resolved.strategy_exit,
                     )
+                    if strategy.name == WR_NAME:
+                        # Ranked and capped across the step's symbols, as live.
+                        wr_pending.append((entry, signal.rank_score, strat_cfg))
+                        continue
+                    self._simulator.open_position(**entry)
+
+            self._open_ranked_wick_rejection(wr_pending)
 
             # Update simulator (check TP/SL, record equity).
             self._simulator.update_multi(step_candles)
@@ -816,6 +825,7 @@ class BacktestEngine:
 
             # Evaluate strategies for each symbol using the incomplete LTF candle.
             step_snapshots: dict[str, dict[str, Any]] = {}
+            wr_pending: list[tuple[dict[str, Any], Any, dict[str, Any]]] = []
             for symbol, eval_candle in step_candles.items():
                 recent_eval[symbol].append(eval_candle)
                 cur = acc[symbol]
@@ -886,7 +896,7 @@ class BacktestEngine:
                     ):
                         continue
                     direction = "long" if resolved.action == "BUY" else "short"
-                    self._simulator.open_position(
+                    entry = dict(
                         symbol=symbol,
                         direction=direction,
                         entry_price=eval_candle.close,
@@ -899,6 +909,13 @@ class BacktestEngine:
                         margin=resolved.margin_usd,
                         strategy_exit=resolved.strategy_exit,
                     )
+                    if strategy.name == WR_NAME:
+                        # Ranked and capped across the step's symbols, as live.
+                        wr_pending.append((entry, signal.rank_score, strat_cfg))
+                        continue
+                    self._simulator.open_position(**entry)
+
+            self._open_ranked_wick_rejection(wr_pending)
 
             # Update simulator (check TP/SL at eval granularity, record equity).
             self._simulator.update_multi(step_candles)
@@ -915,6 +932,28 @@ class BacktestEngine:
                 time.sleep(0)
 
         return candles_processed
+
+    def _open_ranked_wick_rejection(
+        self, pending: list[tuple[dict[str, Any], Any, dict[str, Any]]]
+    ) -> None:
+        """Open one step's wick_rejection entries like the live trigger does:
+        ranked by ``rank_score`` and capped by ``max_concurrent_positions`` /
+        ``max_total_margin_pct`` (``select_ranked_entries``, shared with live)."""
+        if not pending:
+            return
+        cfg = merged_config(pending[0][2], WR_NAME)
+        open_wr = [p for p in self._simulator.open_positions if p.strategy_name == WR_NAME]
+        keep, _dropped = select_ranked_entries(
+            [(i, float(score or 0.0), float(entry.get("margin") or 0.0))
+             for i, (entry, score, _cfg) in enumerate(pending)],
+            open_positions=len(open_wr),
+            open_margin=sum(p.initial_margin for p in open_wr),
+            equity=self._simulator.equity(self._current_prices),
+            max_concurrent_positions=cfg.get("max_concurrent_positions"),
+            max_total_margin_pct=cfg.get("max_total_margin_pct"),
+        )
+        for i in keep:
+            self._simulator.open_position(**pending[i][0])
 
     def _has_blocking_position(self, symbol: str, strategy_name: str) -> bool:
         if self._simulator.has_open_position(symbol, strategy_name):

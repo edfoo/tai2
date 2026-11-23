@@ -1,5 +1,8 @@
 # Change Log
 
+## 2026-11-23
+- **Fixed: the backtest ignored wick_rejection's position caps.** The live trigger ranks each hour's signals by `rank_score` and keeps at most `max_concurrent_positions` within `max_total_margin_pct`. The backtest opened every signal, so it took up to 6 entries in one hour, and sweeping `max_concurrent_positions` had no effect. The ranking and caps now live in `strategies/wick_rejection.select_ranked_entries`, which both call; the backtest collects a step's WR signals across symbols before opening them (`BacktestEngine._open_ranked_wick_rejection`). Parity test: `test_entry_caps_match_backtest` (live trigger vs backtest, 5 cases) plus a unit test.
+
 ## 2026-11-21
 - **Backtest — fetch robustness and replay speed:**
   - `HistoricalDataFetcher._fetch_range` retries each page up to 3 times with backoff. A fetch that still fails part-way is no longer cached; before, a timed-out fetch cached a truncated history (seen on LITE-USDT-SWAP 1m) and every later run reused it.
