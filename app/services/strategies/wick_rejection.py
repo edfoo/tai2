@@ -38,7 +38,7 @@ from app.services.screener import timeframe_to_ms
 
 from . import StrategyHelpers, StrategySignal, resolve_analysis_block
 from .defaults import merged_config
-from .wr_momentum import MomentumMeasures, momentum_entry_ok
+from .wr_momentum import ENTRY_MODES, MomentumMeasures, momentum_entry_ok
 
 STRATEGY_NAME = "wick_rejection"
 
@@ -408,3 +408,51 @@ def select_ranked_entries(
         used += m
         chosen.append(key)
     return chosen, dropped
+
+
+# ── Trigger timing (shared by the live trigger and the backtest) ────────────
+
+# The vol refresh runs at least this long before the trigger wakes, so the
+# snapshot for coins new to the list is ready by then.
+VOL_REFRESH_MIN_LEAD_SECONDS = 20.0
+
+
+def entry_mode(cfg: dict[str, Any]) -> str:
+    mode = str(cfg.get("entry_mode") or "clock").lower()
+    return mode if mode in ENTRY_MODES else "clock"
+
+
+def wake_lead_seconds(cfg: dict[str, Any]) -> float:
+    """Seconds before the hour the trigger wakes: the clock entry time, or the
+    watch start in a momentum mode."""
+    if entry_mode(cfg) == "clock":
+        return float(cfg.get("entry_seconds_before_close") or 40.0)
+    return max(
+        float(cfg.get("watch_seconds_before_close") or 300.0),
+        float(cfg.get("entry_seconds_before_close") or 40.0),
+    )
+
+
+def vol_refresh_lead_seconds(cfg: dict[str, Any]) -> float | None:
+    """Seconds before the hourly close the vol list is rescored, or None (off).
+
+    ``vol_refresh_seconds_before_close``, moved earlier when needed so it runs
+    at least ``VOL_REFRESH_MIN_LEAD_SECONDS`` before the trigger wakes.
+    """
+    raw = _f(cfg.get("vol_refresh_seconds_before_close"))
+    if raw is None or raw <= 0:
+        return None
+    return min(3599.0, max(raw, wake_lead_seconds(cfg) + VOL_REFRESH_MIN_LEAD_SECONDS))
+
+
+def backtest_vol_refresh_cut_seconds(cfg: dict[str, Any], eval_step_seconds: float = 60.0) -> int | None:
+    """Seconds before the close where the backtest cuts the hour in progress
+    for the refreshed vol list: the live refresh moment rounded *earlier* to
+    an eval-candle boundary (data the live refresh could not have seen is never
+    used).  None when the refresh is off."""
+    lead = vol_refresh_lead_seconds(cfg)
+    if lead is None:
+        return None
+    step = max(1.0, float(eval_step_seconds))
+    k = -(-lead // step)  # ceil
+    return int(k * step)

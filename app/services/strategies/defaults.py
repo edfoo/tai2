@@ -405,6 +405,12 @@ DEFAULT_WICK_REJECTION: dict[str, Any] = {
     # Entry
     "entry_seconds_before_close": 40,  # live trigger time (H:00 − this)
     "ws_price_max_age_seconds": 5,     # websocket price if fresher than this, else REST
+    # Rescore the vol list this many seconds before the hourly close, with the
+    # hour in progress included, so WR sees what is moving now (0 = off; the
+    # hourly screener's list, built on closed candles, is used).  Runs at least
+    # 20 s before the trigger wakes; the backtest cuts the hour at the same
+    # minute (§3.5).  Backtest 2026-10-24..11-09: +15.6 → +64.3 USDT.
+    "vol_refresh_seconds_before_close": 90,
     # Momentum entry mode (§3.8, Phase 9) — off by default
     "entry_mode": "clock",             # clock | momentum | momentum_or_clock
     "watch_seconds_before_close": 300,
@@ -510,6 +516,14 @@ DEFAULT_SCREENER: dict[str, Any] = {
     "vol_max_symbols": 8,
     "vol_min_speed_pct_per_hour": 1.0,
     "vol_min_vol_ratio": 0.5,
+    # 24h quote-volume floor for the vol list only (None = min_volume_usd).
+    # Coins between this and min_volume_usd are screened for the vol list but
+    # never reach the SC/MR lists.  Backtest (2026-10-24..11-09): 0.5M lifted
+    # the wick_rejection net from +15.6 to +42.3 USDT.
+    "vol_min_volume_usd": None,
+    # Of those thinner coins, how many get activity candles per run: the
+    # fastest by price-sample speed (no fetch needed to rank them).
+    "vol_activity_top_n": 40,
 }
 
 # ── Trade management (position-overlay) ─────────────────────────────────────

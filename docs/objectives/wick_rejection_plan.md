@@ -1,6 +1,6 @@
 # Design: Hourly Wick Rejection Short (`wick_rejection`)
 
-**Status:** In progress — Phase 1 done 2026-11-19 (closed-candle alignment + `forming_candle` + `as_of_ts`, live and backtest); Phase 2 done 2026-11-20 (strategy funnel, defaults, registration; disabled by default); Phase 3 done 2026-11-20 (TP/stop units, protection modes, per-strategy leverage + margin sizing, live and backtest); Phase 4 done 2026-11-20 (strategy-owned exits: time stop, software emergency stop, own re-entry cooldown, live and backtest); Phase 5 done 2026-11-20 (`vol` screener universe, live and backtest; also fixed a 1H look-ahead in the backtest universe); Phase 6 done 2026-11-20 (clock trigger at H:59:20, WR removed from the scheduler tick, backtest entry-timing diagnostics; restart re-hydration restores WR positions); Phase 7 done 2026-11-20 (STRATEGY card with risk read-out, CFG vol inputs, LIVE trigger countdown); Phase 8 done 2026-11-20 (parity tests, strategy reference); Phase 9 done 2026-11-20 except tape replay (momentum entry mode, live tape, 1m backtest approximation, trade-tape pagination fix). Redesigned 2026-11-18 from the manual-trade analysis (§1.1); vol screener §3.5; optional momentum entry mode §3.8 / Phase 9.
+**Status:** In progress — Phase 1 done 2026-11-19 (closed-candle alignment + `forming_candle` + `as_of_ts`, live and backtest); Phase 2 done 2026-11-20 (strategy funnel, defaults, registration; disabled by default); Phase 3 done 2026-11-20 (TP/stop units, protection modes, per-strategy leverage + margin sizing, live and backtest); Phase 4 done 2026-11-20 (strategy-owned exits: time stop, software emergency stop, own re-entry cooldown, live and backtest); Phase 5 done 2026-11-20 (`vol` screener universe, live and backtest; also fixed a 1H look-ahead in the backtest universe); Phase 6 done 2026-11-20 (clock trigger at H:59:20, WR removed from the scheduler tick, backtest entry-timing diagnostics; restart re-hydration restores WR positions); Phase 7 done 2026-11-20 (STRATEGY card with risk read-out, CFG vol inputs, LIVE trigger countdown); Phase 8 done 2026-11-20 (parity tests, strategy reference); Phase 9 done 2026-11-20 except tape replay (momentum entry mode, live tape, 1m backtest approximation, trade-tape pagination fix). Vol refresh before the entry and a thin-coin volume floor added 2026-11-24 (§3.5), from the missed-setup analysis. Redesigned 2026-11-18 from the manual-trade analysis (§1.1); vol screener §3.5; optional momentum entry mode §3.8 / Phase 9.
 **Date:** 2026-10-28 (revised 2026-11-18)
 **Scope:** New launcher strategy with a clock-aligned entry trigger, forming-candle
 exposure, strategy-owned exits (TP + emergency stop + time stop), per-strategy
@@ -370,13 +370,56 @@ vol_score = speed_norm × 0.50 + vol_ratio_norm × 0.30 + decay_norm × 0.20
 `universe_for_strategy` routes `wick_rejection` → `vol_symbols`, falling back to
 `selected`, then `fallback_symbols`.
 
+#### Refresh before the entry (added 2026-11-24)
+
+The hourly list ranks on closed candles, so a coin pumping in hour H only made
+the list at H+1 — after the setup. Of the user's 33 manual trades, CAP 11-08
+(+4.63) was missed this way, and the bot traded coins that had moved the
+*previous* hour (most of its stop-outs).
+
+- WR config `vol_refresh_seconds_before_close` (default 90; 0 = off). The
+  trigger wakes then — at least 20 s before its own wake, so momentum mode
+  refreshes before the watch — and calls `MarketService.refresh_wr_vol_list`:
+  tickers → candidates → activity **with the forming candle**
+  (`compute_recent_activity(include_forming=True)`, no cache) →
+  `score_universe`. Only the vol list changes. It stands for the rest of that
+  hour (`run_screener_if_due` keeps it). Coins new to the list get a snapshot
+  (`update_symbols`) before the entry.
+- Backtest: `build_universe_schedule(vol_refresh_seconds_before_close=)`
+  rescores each hour with a partial candle aggregated from the 1m eval
+  candles closed by the cut — the live refresh moment rounded *earlier* to a
+  minute (`backtest_vol_refresh_cut_seconds`: default 90 s → H:58:00), so no
+  data after the live refresh is used. Only coins that can reach the volume
+  floor need 1m data (fetched with the engine's arguments; shared cache).
+- Result, 2026-10-24..11-09, 7% stop / 0.75% TP: net +15.6 → +64.3 USDT
+  (212 trades, 94.8% win, worst hour −14.1 → −7.1). A version with ~1 min of
+  look-ahead gave +58.6; the clean one is not worse.
+
+#### Thin coins (added 2026-11-24)
+
+`vol_min_volume_usd` (default None = `min_volume_usd`) lowers the 24h volume
+floor for the vol list only. `build_candidates` keeps coins between the two
+floors marked `vol_only`; `score_universe` ranks them for the vol list and
+never for SC/MR (a fast-lane admission lifts the mark). 11 of the 33 manual
+trades were in coins under $10M (+2.05 net, TEM −7.47 among them). At $0.5M
+the closed-candle backtest went +15.6 → +42.3 USDT; slippage on these books is
+higher than the 5 bps assumed.
+
+Which candidates get activity candles is shared
+(`screener.activity_fetch_symbols`): the `activity_prefilter_top_n`
+highest-volume non-vol-only names, the fast lane, and the `vol_activity_top_n`
+(default 40) fastest thin coins by price-sample speed. Live fetches only these;
+the backtest keeps only these (closing an existing gap: the backtest used to
+compute activity for every candidate).
+
 #### Parity limitation
 
-Live re-runs the screener on every tick, so before H:59 `fast_speed` covers the
-current hour. The backtest rebuilds the universe only at hour boundaries from 1H
-candles, so a coin spiking during hour H enters the backtest's vol list at H+1.
-**Accepted:** the backtest misses some fresh-spike entries live would take; it
-undercounts rather than invents. Recorded in the schedule provenance.
+With the refresh off, live's `fast_speed` covers the current hour (price
+samples) while the backtest's comes from closed 1H candles, so a coin spiking
+in hour H enters the backtest's list at H+1. With the refresh on, both rank on
+the hour in progress; the backtest's partial hour ends at the minute boundary
+before the live refresh, and its price samples are hourly (the fast move is
+measured over the partial hour). Recorded in the schedule provenance.
 
 ### 3.6 Clock-aligned entry trigger (live)
 
@@ -1103,6 +1146,8 @@ Screener additions (`DEFAULT_SCREENER`, §3.5):
     "vol_min_speed_pct_per_hour": 1.0,
     "vol_min_vol_ratio": 0.5,
     # fast_speed reuses fast_move_window_minutes (default 60)
+    "vol_min_volume_usd": None,    # thin-coin floor for the vol list (2026-11-24)
+    "vol_activity_top_n": 40,
 ```
 
 ---
@@ -1158,7 +1203,7 @@ Screener additions (`DEFAULT_SCREENER`, §3.5):
 | **Leverage clamp** changes margin at risk | Recompute notional from margin after clamping; logged |
 | **Defaults looser than the stated rules** (3× vs 5×, 20% vs 5–10%) | Chosen from the traded data (§1.1); the sweep covers the stated values |
 | **VOL/SC overlap** — SC long and WR short on one symbol | Live: `_launcher_symbol_conflict` (`f833fca`) blocks it; backtest: `allow_concurrent_strategies_per_symbol=False` |
-| **Forming-mode screener parity** — live sees the current hour's spike, the backtest universe lags an hour | Accepted (§3.5): the backtest undercounts; recorded in provenance |
+| **Forming-mode screener parity** — live sees the current hour's spike, the backtest universe lags an hour | Fixed 2026-11-24 by the vol refresh (§3.5): both rescore with the hour in progress; the backtest cuts at the minute before the live refresh |
 | **Fetch cost** — vol adds up to 8 symbols per poll plus 8 REST calls per trigger | `vol_enabled` defaults to `False`; cap at 8 |
 | **Correlated losses** — several WR shorts at the same hour can all run against the position in a market-wide pump | `max_total_margin_pct` bounds the combined loss; the sweep compares `max_concurrent_positions` 1/3/5 on worst-hour loss, not only total PnL |
 | **Momentum mode overfits** — thresholds come from 33 trades with 5 losers | Off by default; 1m backtest on windows outside the user's period before enabling; vetoes the data doesn't support (`max_ret_60s`, `max_buy_share_60s`) stay off |

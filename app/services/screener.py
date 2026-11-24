@@ -112,6 +112,7 @@ def compute_recent_activity(
     vol_ccy_24h: float | None = None,
     hl_range_pct: float | None = None,
     as_of_ts: int | None = None,
+    include_forming: bool = False,
 ) -> dict[str, Any] | None:
     """Derive short-window activity features from raw OKX candle rows.
 
@@ -132,6 +133,11 @@ def compute_recent_activity(
         The ticker's 24h high-low range %, used to compute ``decay_ratio``.
     as_of_ts:
         Optional ms-epoch cutoff; candles after it are ignored (backtest use).
+    include_forming:
+        Keep the unconfirmed (forming) candle as the newest bar.  The
+        wick_rejection vol refresh (shortly before the hourly close) uses it so
+        the list ranks on the hour in progress; the backtest equivalent is a
+        partial candle cut at the same moment (``universe.py``).
 
     Returns
     -------
@@ -143,7 +149,7 @@ def compute_recent_activity(
     for row in candles or []:
         if not isinstance(row, (list, tuple)) or len(row) < 6:
             continue
-        if not _row_is_confirmed(row):
+        if not include_forming and not _row_is_confirmed(row):
             continue
         ts = _extract_float(row[0])
         o = _extract_float(row[1])
@@ -241,6 +247,10 @@ def build_candidates(
     cfg = cfg or {}
     universe_pattern = str(cfg.get("universe_filter") or "*-USDT-SWAP").strip().upper()
     min_volume_usd = float(cfg.get("min_volume_usd") or 0.0)
+    # Vol list (wick_rejection) may admit thinner coins than SC/MR: candidates
+    # between ``vol_min_volume_usd`` and ``min_volume_usd`` are kept but marked
+    # ``vol_only`` — score_universe ranks them for the vol list only.
+    floor = vol_volume_floor(cfg)
     max_spread_pct = float(cfg.get("max_spread_pct") or 0.0)
     vol_history_window = max(2, int(cfg.get("vol_history_window") or 8))
 
@@ -264,7 +274,7 @@ def build_candidates(
         # is comparable to min_volume_usd and to candle volCcyQuote sums.
         if vol_ccy_24h is not None and not vol_ccy_is_quote:
             vol_ccy_24h *= last
-        if vol_ccy_24h is None or vol_ccy_24h < min_volume_usd:
+        if vol_ccy_24h is None or vol_ccy_24h < floor:
             continue
         # Liquidity guard: reject wide-spread (thin book) symbols.
         # OKX tickers expose bidPx/askPx; spread = (ask-bid)/mid × 100.
@@ -313,9 +323,74 @@ def build_candidates(
                 "hl_range_pct": hl_range_pct,
                 "momentum_pct": momentum_pct,
                 "spread_pct": spread_pct,
+                "vol_only": vol_ccy_24h < min_volume_usd,
             }
         )
     return candidates
+
+
+def vol_volume_floor(cfg: dict[str, Any] | None) -> float:
+    """24h quote-volume floor of the candidate prefilter.
+
+    ``min_volume_usd``, lowered to ``vol_min_volume_usd`` when the vol list is
+    enabled and that is set (None = same as ``min_volume_usd``).
+    """
+    cfg = cfg or {}
+    main = float(cfg.get("min_volume_usd") or 0.0)
+    raw = cfg.get("vol_min_volume_usd")
+    if not bool(cfg.get("vol_enabled", False)) or raw is None or raw == "":
+        return main
+    try:
+        return min(main, max(0.0, float(raw)))
+    except (TypeError, ValueError):
+        return main
+
+
+def activity_fetch_symbols(
+    candidates: list[dict[str, Any]],
+    cfg: dict[str, Any],
+    *,
+    price_history: dict[str, deque] | None = None,
+    now_ts: float | None = None,
+) -> list[str]:
+    """Symbols that get recent-activity features (candles) this run.
+
+    Live fetches candles only for these; the backtest computes activity for
+    every candidate and keeps only these, so both rank on the same inputs.
+
+    * the ``activity_prefilter_top_n`` highest-24h-volume candidates that are
+      not ``vol_only``, plus every fast-lane admission (``_fast_lane``);
+    * with the vol list on, the ``vol_activity_top_n`` fastest ``vol_only``
+      candidates by price-sample speed (``compute_speed`` without activity),
+      so thin coins moving now get activity without fetching all of them.
+    """
+    cfg = cfg or {}
+    top_n = max(1, int(cfg.get("activity_prefilter_top_n") or 120))
+    main = [c for c in candidates if not c.get("vol_only")]
+    ranked = sorted(main, key=lambda c: c.get("vol_ccy_24h") or 0.0, reverse=True)[:top_n]
+    out = [c["symbol"] for c in ranked]
+    seen = set(out)
+    for c in candidates:
+        if c.get("_fast_lane") and c["symbol"] not in seen:
+            out.append(c["symbol"])
+            seen.add(c["symbol"])
+    vol_n = int(cfg.get("vol_activity_top_n") or 0)
+    if bool(cfg.get("vol_enabled", False)) and vol_n > 0:
+        window = float(cfg.get("fast_move_window_minutes") or 60.0)
+        now = float(now_ts if now_ts is not None else _now_seconds())
+        fast: list[tuple[float, str]] = []
+        for c in candidates:
+            if not c.get("vol_only") or c["symbol"] in seen:
+                continue
+            sp = compute_speed({}, (price_history or {}).get(c["symbol"]),
+                               now_ts=now, window_minutes=window)["fast_speed"]
+            if sp is not None:
+                fast.append((sp, c["symbol"]))
+        fast.sort(key=lambda t: (-t[0], t[1]))
+        for _sp, sym in fast[:vol_n]:
+            out.append(sym)
+            seen.add(sym)
+    return out
 
 
 # ── Fast lane: short-window move discovery ──────────────────────────────────
@@ -532,6 +607,10 @@ def merge_candidates(
         existing["fast_move_pct"] = candidate.get("fast_move_pct")
         existing["fast_span_seconds"] = candidate.get("fast_span_seconds")
         existing["fast_source"] = candidate.get("fast_source")
+        if existing.get("vol_only"):
+            # Admitted by the fast lane: eligible for SC/MR like any lane symbol.
+            existing["vol_only"] = False
+            existing["_fast_lane"] = True
     return list(by_symbol.values())
 
 
@@ -712,12 +791,21 @@ def score_universe(
             )
         )
 
+    # Candidates below min_volume_usd (vol_min_volume_usd) compete for the vol
+    # list only.
+    main = [c for c in candidates if not c.get("vol_only")]
+    vol_only_count = len(candidates) - len(main)
+
     spread_str = f", spread<={max_spread_pct:.2f}%" if max_spread_pct > 0 else ""
     activity_str = (
         f", activity={activity_lookback_hours:g}h" if activity_used else ""
     )
+    vol_only_str = (
+        f" + {vol_only_count} vol-only (vol>={vol_volume_floor(cfg):.0f} USD)"
+        if vol_only_count else ""
+    )
     diagnostics: list[str] = [
-        f"Screener: {len(candidates)} base candidates from {len(tickers)} tickers "
+        f"Screener: {len(main)} base candidates{vol_only_str} from {len(tickers)} tickers "
         f"(vol>={min_volume_usd:.0f} USD{spread_str}{activity_str}, dual={dual_universe})"
     ]
     if fast_lane_admitted:
@@ -771,12 +859,12 @@ def score_universe(
     # Computed over the ranking inputs so scores stay comparable whether we
     # rank on recent-window features or the 24h aggregates.
     max_vol_ratio = max(
-        (c["rank_vol_ratio"] for c in candidates if c["rank_vol_ratio"] is not None),
+        (c["rank_vol_ratio"] for c in main if c["rank_vol_ratio"] is not None),
         default=None,
     ) or 1.0
-    max_raw_vol = max(c["vol_ccy_24h"] for c in candidates) or 1.0
-    max_range = max(c["rank_range_pct"] for c in candidates) or 1.0
-    max_mom = max(c["rank_mom_pct"] for c in candidates) or 1.0
+    max_raw_vol = max((c["vol_ccy_24h"] for c in main), default=0.0) or 1.0
+    max_range = max((c["rank_range_pct"] for c in main), default=0.0) or 1.0
+    max_mom = max((c["rank_mom_pct"] for c in main), default=0.0) or 1.0
 
     def _norm_vol(c: dict[str, Any]) -> float:
         ratio = c["rank_vol_ratio"]
@@ -798,7 +886,7 @@ def score_universe(
     if dual_universe:
         # ── SC universe: expansion / momentum ──────────────────────
         sc_pool = [
-            c for c in candidates
+            c for c in main
             if c["rank_mom_pct"] >= sc_min_momentum_pct
             and c["rank_range_pct"] >= sc_min_hl_range_pct
             and (
@@ -819,7 +907,7 @@ def score_universe(
 
         # ── MR universe: chop / mean reversion ─────────────────────
         mr_pool = [
-            c for c in candidates
+            c for c in main
             if c["rank_range_pct"] >= mr_min_hl_range_pct
             and c["rank_mom_pct"] <= mr_max_momentum_pct
             and (
@@ -864,7 +952,7 @@ def score_universe(
     else:
         # ── Legacy single-list mode ────────────────────────────────
         legacy_pool = [
-            c for c in candidates
+            c for c in main
             if c["rank_mom_pct"] >= min_momentum_pct
             and c["rank_range_pct"] >= min_hl_range_pct
             and (
@@ -940,7 +1028,7 @@ def score_universe(
     # the "big 24h change, not moving now" picks the activity window removes.
     if activity_used:
         faded = [
-            c for c in candidates
+            c for c in main
             if c.get("decay_ratio") is not None
             and c["decay_ratio"] < 0.25
             and c["hl_range_pct"] >= mr_min_hl_range_pct
@@ -961,7 +1049,8 @@ def score_universe(
         "sc": sc_selected,
         "mr": mr_selected,
         "candidates": candidates,
-        "base_candidate_count": len(candidates),
+        "base_candidate_count": len(main),
+        "vol_only_count": vol_only_count,
         "ticker_count": len(tickers),
         "sc_pool_size": sc_pool_size,
         "mr_pool_size": mr_pool_size,

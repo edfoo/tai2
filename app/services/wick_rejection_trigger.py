@@ -43,9 +43,14 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
 from app.services.strategies.defaults import merged_config
-from app.services.strategies.wick_rejection import STRATEGY_NAME, select_ranked_entries
+from app.services.strategies.wick_rejection import (
+    STRATEGY_NAME,
+    entry_mode,
+    select_ranked_entries,
+    vol_refresh_lead_seconds,
+    wake_lead_seconds,
+)
 from app.services.strategies.wr_momentum import (
-    ENTRY_MODES,
     MomentumMeasures,
     compute_momentum,
     momentum_entry_ok,
@@ -73,22 +78,6 @@ def next_trigger_ts(now: float, lead_seconds: float) -> float:
 
 def seconds_to_hour_close(now: float) -> float:
     return (now // _HOUR_S + 1) * _HOUR_S - now
-
-
-def entry_mode(cfg: dict[str, Any]) -> str:
-    mode = str(cfg.get("entry_mode") or "clock").lower()
-    return mode if mode in ENTRY_MODES else "clock"
-
-
-def wake_lead_seconds(cfg: dict[str, Any]) -> float:
-    """Seconds before the hour the trigger wakes: the clock entry time, or the
-    watch start in a momentum mode."""
-    if entry_mode(cfg) == "clock":
-        return float(cfg.get("entry_seconds_before_close") or 40.0)
-    return max(
-        float(cfg.get("watch_seconds_before_close") or 300.0),
-        float(cfg.get("entry_seconds_before_close") or 40.0),
-    )
 
 
 def launcher_execution_context(runtime_config: dict[str, Any], symbol: str) -> dict[str, Any]:
@@ -165,6 +154,8 @@ class WickRejectionTrigger:
         self._task: asyncio.Task | None = None
         self.last_result: TriggerResult | None = None
         self.last_run_at: float | None = None
+        # Last vol-list refresh: {"at", "symbols", "added", "removed", "seconds"}.
+        self.last_vol_refresh: dict[str, Any] | None = None
         # Momentum watch state for the LIVE page: {"active", "mode", "symbols":
         # {sym: {"status", "measures"}}}.
         self.watch: dict[str, Any] = {"active": False, "symbols": {}}
@@ -192,7 +183,17 @@ class WickRejectionTrigger:
                 cfg = self._wr_config()
                 lead = wake_lead_seconds(cfg)
                 now = self._clock()
-                await self._sleep(max(0.0, next_trigger_ts(now, lead) - now))
+                wake = next_trigger_ts(now, lead)
+                refresh_lead = vol_refresh_lead_seconds(cfg)
+                if refresh_lead is not None and refresh_lead > lead:
+                    # Rescore the vol list first (skipped this hour when the
+                    # task starts after the refresh moment).
+                    refresh_at = wake - (refresh_lead - lead)
+                    if refresh_at > now:
+                        await self._sleep(refresh_at - now)
+                        await self.refresh_vol_list(timeout=max(1.0, wake - refresh_at))
+                        now = self._clock()
+                await self._sleep(max(0.0, wake - now))
                 if entry_mode(self._wr_config()) == "clock":
                     result = await self.run_once()
                 else:
@@ -228,6 +229,38 @@ class WickRejectionTrigger:
             return None
         now = self._clock()
         return max(0.0, next_trigger_ts(now, wake_lead_seconds(self._wr_config())) - now)
+
+    # ── Vol-list refresh ────────────────────────────────────────────────
+
+    async def refresh_vol_list(self, *, timeout: float = 60.0) -> dict[str, Any] | None:
+        """Have the market service rescore the vol list with the hour in
+        progress (``MarketService.refresh_wr_vol_list``) before the entry.
+
+        Skipped when WR would not run.  On failure or timeout the existing
+        list stands; the entry runs at its normal time either way.
+        """
+        rc = self._runtime_config()
+        gov = rc.get("launcher") or {}
+        ms = getattr(self._app.state, "market_service", None)
+        if (
+            str(gov.get("mode") or "disabled").lower() != "launcher_only"
+            or not bool(((gov.get("strategies") or {}).get(STRATEGY_NAME) or {}).get("enabled"))
+            or not self._is_enabled()
+            or ms is None
+            or not hasattr(ms, "refresh_wr_vol_list")
+        ):
+            return None
+        try:
+            out = await asyncio.wait_for(ms.refresh_wr_vol_list(), timeout=timeout)
+        except asyncio.TimeoutError:
+            self._log(f"WR vol refresh: timed out after {timeout:.0f}s — keeping the hourly list")
+            return None
+        except Exception as exc:  # pragma: no cover - network safety
+            self._log(f"WR vol refresh failed: {exc} — keeping the hourly list")
+            return None
+        if out is not None:
+            self.last_vol_refresh = {"at": self._clock(), **out}
+        return out
 
     # ── One cycle ───────────────────────────────────────────────────────
 

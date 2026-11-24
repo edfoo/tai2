@@ -45,6 +45,7 @@ from app.services.backtest.simulator import Simulator
 from app.services.backtest.snapshot_builder import SnapshotBuilder
 from app.services.backtest.spread import estimate_spread_series, roll_spread_bps
 from app.services.backtest.universe import UniverseSchedule, build_universe_schedule
+from app.services.screener import timeframe_to_ms
 from app.services.launcher_tp_sl import LauncherTpSl, resolve_launcher_tp_sl
 from app.services.strategies import Strategy, StrategyHelpers
 from app.services.strategies.defaults import merged_config
@@ -57,6 +58,7 @@ from app.services.strategies.wick_rejection import (
     STRATEGY_NAME as WR_NAME,
     WickRejectionStrategy,
     backtest_entry_timing,
+    backtest_vol_refresh_cut_seconds,
     select_ranked_entries,
 )
 from app.services.strategies.wr_momentum import (
@@ -223,6 +225,9 @@ class BacktestEngine:
         # wick_rejection enters seconds before a 1H close: only a finer_ltf
         # step that lands in its entry window can produce trades (§3.7).
         self._wr_timing: dict[str, Any] | None = None
+        # WR vol refresh: seconds before the close where the universe rebuild
+        # cuts the hour in progress (None = closed-candle vol lists).
+        self._wr_vol_refresh_cut: int | None = None
         _wr_cfg = (self._config.launcher_config.get("strategies") or {}).get("wick_rejection")
         if isinstance(_wr_cfg, dict) and bool(_wr_cfg.get("enabled", False)):
             self._wr_timing = backtest_entry_timing(
@@ -234,6 +239,11 @@ class BacktestEngine:
                 logger.warning(
                     "Backtest: wick_rejection will produce zero trades — %s",
                     self._wr_timing["reason"],
+                )
+            elif self._eval_mode == "finer_ltf":
+                self._wr_vol_refresh_cut = backtest_vol_refresh_cut_seconds(
+                    merged_config(_wr_cfg, WR_NAME),
+                    timeframe_to_ms(self._eval_tf) / 1000.0,
                 )
 
         # Warn if any enabled strategy config requires footprint data — it's
@@ -289,6 +299,9 @@ class BacktestEngine:
                     progress_cb=lambda done, total, msg: progress_cb(
                         BacktestProgress(phase="fetch", current=done, total=total, message=msg)
                     ) if progress_cb else None,
+                    vol_refresh_seconds_before_close=self._wr_vol_refresh_cut,
+                    refresh_timeframe=self._eval_tf,
+                    refresh_warmup_candles=self._config.warmup_candles,
                 )
                 universe_provenance = getattr(self._fetcher, "last_universe_provenance", None)
                 if universe_provenance:

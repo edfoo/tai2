@@ -68,7 +68,7 @@ uv run pytest
 ```
 - `pytest-xdist` runs with `-n auto` by default (see `pyproject.toml`); the suite takes ~15s.
 - Tests marked `network` hit live services and are skipped by default.
-- All tests must pass (1030 passing, 0 pre-existing failures as of 2026-11-24). Any failure is a regression.
+- All tests must pass (1048 passing, 0 pre-existing failures as of 2026-11-24). Any failure is a regression.
 
 ---
 
@@ -155,7 +155,7 @@ logs/app.log               # Rotating log file (5 MB × 5 backups), created at r
 
 With `launcher.schedule="on_close"`, the scheduler waits for all positions to close before the next tick.
 
-**`wick_rejection` is trigger-only:** the tick skips it (`TRIGGER_ONLY_STRATEGIES`). `WickRejectionTrigger` (started/stopped with the scheduler) wakes at `H:00 − entry_seconds_before_close`, refetches 1H candles, takes the websocket (or REST) price, calls `build_launcher_decisions(sym, strategies=["wick_rejection"], price=P)` (forming candle patched to `P`), ranks and caps the entries, and executes them under the scheduler's shared `execute_lock`. With `entry_mode` = `momentum` / `momentum_or_clock` (default `clock`) it instead wakes at `watch_seconds_before_close`, records the public trade tape (`MarketService.start_wr_tape`), and passes `compute_momentum` measures to the strategy (`build_launcher_decisions(..., momentum=)`), which applies the momentum gate itself — the backtest feeds it measures from 1m candles (`wr_momentum.tape_from_candles`).
+**`wick_rejection` is trigger-only:** the tick skips it (`TRIGGER_ONLY_STRATEGIES`). `WickRejectionTrigger` (started/stopped with the scheduler) first rescores the vol list (`vol_refresh_seconds_before_close`, see the screener section), then wakes at `H:00 − entry_seconds_before_close`, refetches 1H candles, takes the websocket (or REST) price, calls `build_launcher_decisions(sym, strategies=["wick_rejection"], price=P)` (forming candle patched to `P`), ranks and caps the entries, and executes them under the scheduler's shared `execute_lock`. With `entry_mode` = `momentum` / `momentum_or_clock` (default `clock`) it instead wakes at `watch_seconds_before_close`, records the public trade tape (`MarketService.start_wr_tape`), and passes `compute_momentum` measures to the strategy (`build_launcher_decisions(..., momentum=)`), which applies the momentum gate itself — the backtest feeds it measures from 1m candles (`wr_momentum.tape_from_candles`).
 
 ### LLM flow (dormant)
 `prompt_builder` → `llm_service` / OpenRouter → `prompt_runner.apply_llm_decision` → `handle_llm_decision()`.
@@ -282,6 +282,9 @@ Covered by `tests/test_live_backtest_parity.py` (incl. wick_rejection decision �
 - `Candle.quote_volume` (OKX `volCcyQuote`) is required for the volume filter; legacy caches fall back to `volume × close`.
 - **Volume units:** OKX's raw ticker `volCcy24h` is **base-currency** volume, not USDT. `build_candidates()` converts it via `volCcy24h × last` unless `vol_ccy_is_quote=True`. Live passes `False`; the backtest passes `True` because `_ticker_at()` already sums `volCcyQuote`. Never compare raw `volCcy24h` against `min_volume_usd` — it silently excludes high-priced symbols and admits low-priced ones on token counts.
 - **Vol universe (`vol_enabled`, default off):** a third list ranked on speed (`compute_speed`: max of closed-candle range/hour and price-sample move/hour), own gates and cap, built in dual and legacy mode and appended to `selected`. Routes `wick_rejection` only; symbols that are only on the vol list never reach other strategies (`universe_for_strategy(vol_symbols=)`, `_strategy_allowed_on_symbol`).
+  - `vol_min_volume_usd` lowers the volume floor for the vol list only: `build_candidates` marks those coins `vol_only` and SC/MR never rank them.
+  - Which candidates get activity candles is `screener.activity_fetch_symbols` (live fetches these; the backtest keeps only these).
+  - **Refresh before the entry:** WR's `vol_refresh_seconds_before_close` (default 90) makes the trigger call `MarketService.refresh_wr_vol_list` first (activity includes the forming candle; the list stands for the rest of the hour). The backtest equivalent is `build_universe_schedule(vol_refresh_seconds_before_close=)`, which rescores each hour on a partial candle from 1m candles cut at `backtest_vol_refresh_cut_seconds` (never after the live refresh moment).
 - **Backtest universe candle visibility:** each interval uses only 1H candles closed by the boundary (open `<= boundary − 1h`); price samples are stamped with close time. Never select by `ts <= boundary` (that reads the coming hour).
 - The live `max_spread_pct` filter is **skipped** historically (no bid/ask in OHLCV) and recorded in the schedule provenance.
 - **Screener defaults live in `app/services/strategies/defaults.py`** (`DEFAULT_SCREENER` / `screener_defaults()`), not inline in `main.py`. `main.py` bootstraps `runtime_config["screener"]` from it and the CFG page merges saved config over it — change defaults there, never in the UI or lifespan.

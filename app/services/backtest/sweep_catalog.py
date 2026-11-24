@@ -291,6 +291,8 @@ STRATEGY_SWEEP_PARAMS: dict[str, dict[str, str]] = {
         "min_ret_60s": "-2.0, -1.0, -0.5",
         "max_ret_60s": "0.5, 1.0",
         "max_buy_share_60s": "0.5, 0.6, 0.7",
+        # Vol list rescored before the close with the hour in progress (0 = off).
+        "vol_refresh_seconds_before_close": "0, 90, 180",
     },
 }
 

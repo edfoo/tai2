@@ -4847,6 +4847,13 @@ def register_pages(app: FastAPI) -> None:
                                 label="Max websocket price age (s)", value=float(_wr_cfg["ws_price_max_age_seconds"]),
                                 min=0.5, max=60, step=0.5, format="%.1f",
                             ).classes("w-44").props("hint='Older → one REST ticker call' persistent-hint dense")
+                            wr_vol_refresh_input = ui.number(
+                                label="Vol list refresh (s before close)",
+                                value=float(_wr_cfg.get("vol_refresh_seconds_before_close") or 0),
+                                min=0, max=1800, step=10, format="%.0f",
+                            ).classes("w-44").props(
+                                "hint='Rescore the vol list with the hour in progress; 0 = off' persistent-hint dense"
+                            )
                         with ui.row().classes("w-full flex-wrap gap-4 items-start mt-1"):
                             wr_max_offset_input = ui.number(
                                 label="Max high offset (% of range)", value=float(_wr_cfg["max_high_offset_pct"]),
@@ -5018,6 +5025,7 @@ def register_pages(app: FastAPI) -> None:
                     "min_seconds_to_close": _num(wr_min_seconds_input, d["min_seconds_to_close"]),
                     "max_seconds_to_close": _num(wr_max_seconds_input, d["max_seconds_to_close"]),
                     "ws_price_max_age_seconds": _num(wr_ws_age_input, d["ws_price_max_age_seconds"]),
+                    "vol_refresh_seconds_before_close": _num(wr_vol_refresh_input, d["vol_refresh_seconds_before_close"]),
                     "max_high_offset_pct": _num(wr_max_offset_input, d["max_high_offset_pct"]),
                     "min_candle_range_pct": _num(wr_min_range_input, d["min_candle_range_pct"]),
                     "require_forming_green": bool(wr_require_green_switch.value),
@@ -5089,6 +5097,7 @@ def register_pages(app: FastAPI) -> None:
                 wr_min_seconds_input.value = d["min_seconds_to_close"]
                 wr_max_seconds_input.value = d["max_seconds_to_close"]
                 wr_ws_age_input.value = d["ws_price_max_age_seconds"]
+                wr_vol_refresh_input.value = d["vol_refresh_seconds_before_close"]
                 wr_max_offset_input.value = d["max_high_offset_pct"]
                 wr_min_range_input.value = d["min_candle_range_pct"]
                 wr_require_green_switch.value = d["require_forming_green"]
@@ -8298,6 +8307,25 @@ def register_pages(app: FastAPI) -> None:
                 ).classes("w-full md:w-48").props(
                     "hint='Recent volume vs its own 24h average; missing data fails' persistent-hint"
                 )
+                _vol_min_vol = screener_cfg.get("vol_min_volume_usd")
+                screener_vol_min_volume_input = ui.number(
+                    label="Vol min 24h volume (M USDT)",
+                    value=(float(_vol_min_vol) / 1_000_000 if _vol_min_vol not in (None, "") else None),
+                    min=0,
+                    step=0.1,
+                    format="%.2f",
+                ).classes("w-full md:w-48").props(
+                    "clearable hint='Vol list only; blank = Min 24h volume. Thinner coins never reach SC/MR' persistent-hint"
+                )
+                screener_vol_activity_top_n_input = ui.number(
+                    label="Vol activity top-N (thin coins)",
+                    value=int(screener_cfg.get("vol_activity_top_n") or 40),
+                    min=0,
+                    max=300,
+                    step=5,
+                ).classes("w-full md:w-48").props(
+                    "hint='Coins below Min 24h volume that get activity candles, fastest first' persistent-hint"
+                )
             ui.separator().classes("w-full my-4")
             ui.label("Model, cadence, and prompt controls").classes("text-sm text-slate-500")
             with ui.row().classes("w-full flex-wrap gap-4"):
@@ -9637,6 +9665,11 @@ def register_pages(app: FastAPI) -> None:
                 "vol_max_symbols": max(1, _coerce(screener_vol_max_input.value, _sc_def["vol_max_symbols"], int)),
                 "vol_min_speed_pct_per_hour": max(0.0, _coerce(screener_vol_min_speed_input.value, _sc_def["vol_min_speed_pct_per_hour"], float)),
                 "vol_min_vol_ratio": max(0.0, _coerce(screener_vol_min_ratio_input.value, _sc_def["vol_min_vol_ratio"], float)),
+                "vol_min_volume_usd": (
+                    None if screener_vol_min_volume_input.value in (None, "")
+                    else max(0.0, _coerce(screener_vol_min_volume_input.value, 0.0, float)) * 1_000_000
+                ),
+                "vol_activity_top_n": max(0, _coerce(screener_vol_activity_top_n_input.value, _sc_def["vol_activity_top_n"], int)),
             }
             # Preserve signal fields from config (edited on STRATEGY page) and
             # only overwrite the operational fields managed on this page.

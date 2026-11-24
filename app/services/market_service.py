@@ -33,6 +33,7 @@ from app.lib.volume_profile import value_area
 from app.models.trade import ExecutedTrade
 from app.services.launcher_tp_sl import resolve_launcher_tp_sl, strategy_exit_params
 from app.services.screener import (
+    activity_fetch_symbols,
     build_candidates,
     compute_recent_activity,
     fast_lane_candidates,
@@ -425,6 +426,10 @@ class MarketService:
         self._screener_mr_symbols: list[str] = []
         # Vol universe (speed-ranked, wick_rejection plan §3.5).
         self._screener_vol_symbols: list[str] = []
+        # Vol list rescored shortly before the hourly close by the WR trigger
+        # (``refresh_wr_vol_list``): {"hour_ts", "symbols", "at"}.  It stands
+        # for the rest of that hour, even if the hourly screener runs again.
+        self._wr_vol_refresh: dict[str, Any] | None = None
         # Rolling 24h volume history for spike detection (symbol → deque of vol samples).
         self._screener_vol_history: dict[str, deque] = {}
         # Rolling short-window PRICE history for fast-lane discovery
@@ -5813,6 +5818,8 @@ class MarketService:
         self,
         candidates: list[dict[str, Any]],
         cfg: dict[str, Any],
+        *,
+        include_forming: bool = False,
     ) -> dict[str, dict[str, Any]]:
         """Fetch short-window candles for the prefiltered candidates.
 
@@ -5826,6 +5833,12 @@ class MarketService:
         Results are cached for ``activity_cache_seconds`` so repeated
         ``force=True`` scheduler ticks inside the same window do not refetch.
 
+        Which symbols get candles is decided by the shared
+        :func:`activity_fetch_symbols` (the backtest applies the same choice).
+
+        ``include_forming`` (WR vol refresh) keeps the candle in progress and
+        bypasses the cache.
+
         Returns ``symbol → compute_recent_activity()`` (symbols whose fetch
         failed are simply absent, and the scorer falls back to 24h features).
         """
@@ -5833,25 +5846,19 @@ class MarketService:
         if lookback_hours <= 0 or not candidates:
             return {}
         bar = self._normalize_bar(str(cfg.get("activity_timeframe") or "1H"))
-        top_n = max(1, int(cfg.get("activity_prefilter_top_n") or 120))
         cache_ttl = max(0.0, float(cfg.get("activity_cache_seconds") or 300.0))
+        if include_forming:
+            cache_ttl = 0.0
 
-        # Pre-rank by 24h volume so the cap keeps the liquid names.  Fast-lane
-        # symbols bypass the cap: they were admitted precisely because their 24h
-        # volume is too low to win a volume-ranked slot, so capping them would
-        # defeat the lane. They are bounded by ``fast_lane_max_symbols`` instead.
-        ranked = sorted(
-            candidates, key=lambda c: c.get("vol_ccy_24h") or 0.0, reverse=True
-        )[:top_n]
-        by_volume = {c["symbol"] for c in ranked}
-        extra = [
-            c for c in candidates
-            if c.get("_fast_lane") and c["symbol"] not in by_volume
-        ]
-        if extra:
-            ranked = ranked + extra
-
+        # The ``activity_prefilter_top_n`` highest-volume names, every fast-lane
+        # admission (bounded by ``fast_lane_max_symbols``) and, for the vol
+        # list, the fastest thin (``vol_only``) coins.
         now = time.time()
+        wanted = set(activity_fetch_symbols(
+            candidates, cfg, price_history=self._screener_price_history, now_ts=now,
+        ))
+        ranked = [c for c in candidates if c["symbol"] in wanted]
+
         cache = self._screener_activity_cache
         # Drop expired entries so the cache cannot grow unbounded.
         if cache_ttl > 0:
@@ -5887,6 +5894,7 @@ class MarketService:
                 timeframe_ms=tf_ms,
                 vol_ccy_24h=c.get("vol_ccy_24h"),
                 hl_range_pct=c.get("hl_range_pct"),
+                include_forming=include_forming,
             )
             if act is not None and cache_ttl > 0:
                 cache[key] = (now, act)
@@ -6018,12 +6026,20 @@ class MarketService:
         selected: list[str] = result["selected"]
         sc_selected: list[str] = result["sc"]
         mr_selected: list[str] = result["mr"]
+        vol_selected = list(result.get("vol") or [])
+        refreshed = self._current_wr_vol_refresh(now)
+        if refreshed is not None:
+            # The WR trigger rescored the vol list for this hour with the hour
+            # in progress; a closed-candle list must not replace it.
+            core = set(sc_selected) | set(mr_selected)
+            vol_selected = refreshed
+            selected = list(dict.fromkeys([*(s for s in selected if s in core), *refreshed]))
 
         self._screener_last_run = now
         self._screener_selected_symbols = selected
         self._screener_sc_symbols = sc_selected
         self._screener_mr_symbols = mr_selected
-        self._screener_vol_symbols = list(result.get("vol") or [])
+        self._screener_vol_symbols = vol_selected
 
         # Prune vol history and activity caches for symbols no longer in universe.
         active_universe = {str(t.get("instId", "")).upper() for t in tickers if isinstance(t, dict)}
@@ -6043,6 +6059,78 @@ class MarketService:
             return False
         await self.update_symbols(selected)
         return True
+
+    def _current_wr_vol_refresh(self, now: float | None = None) -> list[str] | None:
+        """The vol list refreshed for the current hour, or None."""
+        r = self._wr_vol_refresh
+        if not r:
+            return None
+        t = time.time() if now is None else float(now)
+        if int(r.get("hour_ts") or -1) != int(t // 3600) * 3600:
+            return None
+        return list(r.get("symbols") or [])
+
+    async def refresh_wr_vol_list(self) -> dict[str, Any] | None:
+        """Rescore the vol list with the hour in progress (WR trigger, §3.5).
+
+        Called by ``WickRejectionTrigger`` ``vol_refresh_seconds_before_close``
+        before the hourly close.  Same pipeline as ``run_screener_if_due``
+        (tickers → candidates → activity → ``score_universe``), but the
+        activity candles keep the forming candle, so a coin pumping in this
+        hour can make the list before WR evaluates it.  Only the vol list
+        changes; SC/MR are untouched.  Coins new to the list get a snapshot
+        (``update_symbols``) so the trigger can evaluate them.
+
+        Returns ``{"symbols", "added", "removed", "seconds"}`` or None when the
+        screener or the vol list is off or no tickers came back.
+        """
+        cfg = self._screener_config or {}
+        if not cfg.get("enabled") or not cfg.get("vol_enabled"):
+            return None
+        t0 = time.time()
+        tickers = await self._fetch_all_swap_tickers()
+        if not tickers:
+            self._emit_debug("WR vol refresh: no tickers returned from OKX")
+            return None
+        self._record_screener_price_samples(tickers)
+        candidates = build_candidates(
+            tickers, cfg, vol_history=self._screener_vol_history,
+            update_vol_history=False, vol_ccy_is_quote=False,
+        )
+        fast_lane = fast_lane_candidates(
+            tickers, self._screener_price_history, cfg, vol_ccy_is_quote=False,
+        )
+        candidates = merge_candidates(candidates, fast_lane)
+        activity = await self._fetch_recent_activity(candidates, cfg, include_forming=True)
+        now = time.time()
+        result = score_universe(
+            tickers, cfg, vol_history=self._screener_vol_history,
+            update_vol_history=False, activity=activity, candidates=candidates,
+            fast_lane=fast_lane, price_history=self._screener_price_history, now_ts=now,
+        )
+        vol = list(result.get("vol") or [])
+        previous = list(self._screener_vol_symbols)
+        self._wr_vol_refresh = {"hour_ts": int(now // 3600) * 3600, "symbols": vol, "at": now}
+        self._screener_vol_symbols = vol
+        core = set(self._screener_sc_symbols) | set(self._screener_mr_symbols)
+        selected = list(dict.fromkeys(
+            [*(s for s in self._screener_selected_symbols if s in core), *vol]
+        ))
+        self._screener_selected_symbols = selected
+        added = [s for s in vol if s not in previous]
+        removed = [s for s in previous if s not in vol]
+        for line in result["diagnostics"]:
+            if "VOL" in line:
+                self._emit_debug(f"WR vol refresh: {line}")
+        if selected and any(s not in self.symbols for s in vol):
+            await self.update_symbols(selected)
+        out = {"symbols": vol, "added": added, "removed": removed,
+               "seconds": round(time.time() - t0, 2)}
+        self._emit_debug(
+            f"WR vol refresh: {len(vol)} symbols in {out['seconds']:.1f}s "
+            f"(+{added or '[]'} -{removed or '[]'})"
+        )
+        return out
 
     def is_symbol_blocked(self, symbol: str, guardrails: dict[str, Any] | None = None) -> str | None:
         """Return a human-readable reason string if the symbol cannot be traded right now

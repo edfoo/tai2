@@ -29,10 +29,19 @@ candle's close time.
 
 **Vol universe** (``vol_enabled``, wick_rejection plan §3.5): ranked on speed
 from the same 1H candles.  The fast-speed term is a close-to-close 1H move, so
-a coin spiking during hour H enters the backtest's vol list at H+1, while live
-(screener every tick, poll-cadence samples) can list it before H:59.  The
-backtest undercounts fresh-spike entries rather than inventing them; recorded
-in the provenance.
+on closed candles a coin spiking during hour H enters the vol list at H+1.
+
+**Vol refresh** (``vol_refresh_seconds_before_close``): live rescores the vol
+list shortly before each hourly close with the hour in progress
+(``MarketService.refresh_wr_vol_list``).  The backtest reproduces it by
+rescoring each hour with a *partial* candle for that hour, aggregated from the
+eval (1m) candles that closed by the cut — the live refresh moment rounded
+earlier to a minute — and replaces the interval's vol list with the result.
+Only coins that can reach the volume floor need 1m data.
+
+**Activity inputs:** live computes activity only for
+``screener.activity_fetch_symbols``; the backtest computes it for every
+candidate and keeps the same subset.
 
 **Data limitation:** the live screener's ``max_spread_pct`` filter reads live
 bid/ask, which OHLCV cannot reproduce.  When that filter is enabled the
@@ -51,12 +60,15 @@ from typing import Any
 from app.services.backtest.data_fetcher import HistoricalDataFetcher
 from app.services.backtest.models import Candle
 from app.services.screener import (
+    activity_fetch_symbols,
+    build_candidates,
     compute_recent_activity,
     fast_lane_candidates,
     merge_candidates,
     score_universe,
     timeframe_to_ms,
     universe_for_strategy,
+    vol_volume_floor,
 )
 
 logger = logging.getLogger(__name__)
@@ -309,6 +321,169 @@ def _price_history_at(
     return deque(((c.ts + _UNIVERSE_BAR_MS) / 1000.0, c.close) for c in window)
 
 
+def _activity_subset(
+    activity: dict[str, dict[str, Any]],
+    candidates: list[dict[str, Any]],
+    cfg: dict[str, Any],
+    price_history: dict[str, deque],
+    now_ts: float,
+) -> dict[str, dict[str, Any]] | None:
+    """Keep the activity live would have fetched (``activity_fetch_symbols``)."""
+    if not activity:
+        return None
+    keep = set(activity_fetch_symbols(candidates, cfg, price_history=price_history, now_ts=now_ts))
+    out = {s: a for s, a in activity.items() if s in keep}
+    return out or None
+
+
+def _partial_hours(
+    candles: list[Candle], cut_offset_ms: int, step_ms: int
+) -> dict[int, Candle]:
+    """Hour open → candle of that hour's eval candles closed by
+    ``hour + cut_offset_ms`` (open + volume summed, high/low extremes)."""
+    out: dict[int, list[float]] = {}
+    for c in candles:
+        hour = c.ts - c.ts % _UNIVERSE_BAR_MS
+        if c.ts + step_ms > hour + cut_offset_ms:
+            continue
+        agg = out.get(hour)
+        if agg is None:
+            out[hour] = [c.open, c.high, c.low, c.close, c.volume, c.effective_quote_volume]
+        else:
+            agg[1] = max(agg[1], c.high)
+            agg[2] = min(agg[2], c.low)
+            agg[3] = c.close
+            agg[4] += c.volume
+            agg[5] += c.effective_quote_volume
+    return {
+        h: Candle(ts=h, open=a[0], high=a[1], low=a[2], close=a[3], volume=a[4], quote_volume=a[5])
+        for h, a in out.items()
+    }
+
+
+async def _refresh_vol_lists(
+    schedule: "UniverseSchedule",
+    *,
+    fetcher: HistoricalDataFetcher,
+    cfg: dict[str, Any],
+    symbol_candles: dict[str, list[Candle]],
+    symbol_ts: dict[str, list[int]],
+    start_ts: int,
+    end_ts: int,
+    cut_seconds_before_close: int,
+    timeframe: str,
+    warmup_candles: int,
+    progress_cb: Any | None,
+) -> None:
+    """Replace each interval's vol list with the WR vol refresh's (see module doc).
+
+    Interval ``ts = H`` serves the steps of hour H, whose WR entries come
+    after the refresh.  It is rescored on the closed candles through H − 1
+    plus hour H's partial candle (eval candles closed by the cut), so nothing
+    after the live refresh moment is used.  Price samples and ``now`` sit at
+    the hour's close, as in the closed-candle pass, so the fast-speed term is
+    the move over the partial hour.
+    """
+    step_ms = timeframe_to_ms(timeframe)
+    cut_offset_ms = _UNIVERSE_BAR_MS - int(cut_seconds_before_close) * 1000
+    if cut_offset_ms < step_ms:
+        schedule.diagnostics.append("Universe vol refresh: cut leaves no eval candle; skipped")
+        return
+    floor = vol_volume_floor(cfg)
+    if bool(cfg.get("fast_lane_enabled", False)):
+        floor = min(floor, float(cfg.get("fast_lane_min_volume_usd") or 0.0))
+    boundaries = [iv.ts for iv in schedule.intervals]
+
+    # Coins that can reach the floor: 24h volume with the full hour (an upper
+    # bound on the partial hour's) or over the window ending one hour earlier.
+    need: list[str] = []
+    for symbol, candles in symbol_candles.items():
+        ts_list = symbol_ts[symbol]
+        for b in boundaries:
+            hit = False
+            for closed in (b, b - _UNIVERSE_BAR_MS):
+                tk = _ticker_at(candles, ts_list, closed)
+                if tk is not None and tk["volCcy24h"] >= floor:
+                    hit = True
+                    break
+            if hit:
+                need.append(symbol)
+                break
+
+    partial: dict[str, dict[int, Candle]] = {}
+    for i, symbol in enumerate(need):
+        fine = await fetcher.fetch_candles(
+            symbol=symbol, timeframe=timeframe, start_ts=start_ts, end_ts=end_ts,
+            warmup_candles=warmup_candles,
+        )
+        partial[symbol] = _partial_hours(fine or [], cut_offset_ms, step_ms)
+        if progress_cb:
+            progress_cb(i + 1, len(need), f"vol refresh data: {symbol}")
+
+    lookback = float(cfg.get("activity_lookback_hours") or 0.0)
+    act_tf_ms = timeframe_to_ms(str(cfg.get("activity_timeframe") or "1H"))
+    window_minutes = max(1.0, float(cfg.get("fast_move_window_minutes") or 60.0))
+    fast_lane_enabled = bool(cfg.get("fast_lane_enabled", False))
+    changed = 0
+    for iv in schedule.intervals:
+        b = iv.ts
+        tickers: list[dict[str, Any]] = []
+        activity: dict[str, dict[str, Any]] = {}
+        price_history: dict[str, deque] = {}
+        for symbol in need:
+            candles, ts_list = symbol_candles[symbol], symbol_ts[symbol]
+            idx = bisect.bisect_left(ts_list, b)
+            p = partial[symbol].get(b)
+            if idx < len(ts_list) and ts_list[idx] == b and p is not None:
+                cc, tt = candles[:idx] + [p], ts_list[:idx] + [b]
+            else:
+                cc, tt = candles[:idx], ts_list[:idx]
+            tk = _ticker_at(cc, tt, b)
+            if tk is None:
+                continue
+            tk["instId"] = symbol
+            tickers.append(tk)
+            price_history[symbol] = _price_history_at(cc, tt, b, window_minutes=window_minutes)
+            if lookback > 0:
+                act = _activity_at(
+                    cc, tt, b, lookback_hours=lookback, timeframe_ms=act_tf_ms,
+                    vol_ccy_24h=tk.get("volCcy24h"),
+                    hl_range_pct=(
+                        (tk["high24h"] - tk["low24h"]) / tk["open24h"] * 100.0
+                        if tk.get("open24h") else None
+                    ),
+                )
+                if act is not None:
+                    activity[symbol] = act
+        now_s = (b + _UNIVERSE_BAR_MS) / 1000.0
+        fast_lane = (
+            fast_lane_candidates(tickers, price_history, cfg, now_ts=now_s, vol_ccy_is_quote=True)
+            if fast_lane_enabled else []
+        )
+        candidates = merge_candidates(
+            build_candidates(tickers, cfg, vol_history=None, update_vol_history=False,
+                             vol_ccy_is_quote=True),
+            fast_lane,
+        )
+        result = score_universe(
+            tickers, cfg, vol_history=None, update_vol_history=False,
+            activity=_activity_subset(activity, candidates, cfg, price_history, now_s),
+            candidates=candidates, vol_ccy_is_quote=True, fast_lane=fast_lane,
+            price_history=price_history, now_ts=now_s,
+        )
+        vol = list(result.get("vol") or [])
+        if vol != iv.vol:
+            changed += 1
+        core = set(iv.sc) | set(iv.mr)
+        iv.vol = vol
+        iv.selected = list(dict.fromkeys([*(s for s in iv.selected if s in core), *vol]))
+    schedule.diagnostics.append(
+        f"Universe vol refresh: hour cut {cut_seconds_before_close}s before close "
+        f"({timeframe}); {len(need)} symbols can reach the volume floor; "
+        f"{changed}/{len(schedule.intervals)} vol lists changed"
+    )
+
+
 async def build_universe_schedule(
     *,
     fetcher: HistoricalDataFetcher,
@@ -317,6 +492,9 @@ async def build_universe_schedule(
     screener_config: dict[str, Any],
     candidate_symbols: list[str] | None = None,
     progress_cb: Any | None = None,
+    vol_refresh_seconds_before_close: int | None = None,
+    refresh_timeframe: str = "1m",
+    refresh_warmup_candles: int = 0,
 ) -> UniverseSchedule:
     """Reconstruct the screener universe over ``[start_ts, end_ts]``.
 
@@ -334,6 +512,13 @@ async def build_universe_schedule(
         for speed.
     progress_cb:
         Optional ``(done, total, message)`` callback for UI progress.
+    vol_refresh_seconds_before_close:
+        Rescore each hour's vol list with that hour cut this many seconds
+        before its close (the WR vol refresh; ``wick_rejection.
+        backtest_vol_refresh_cut_seconds``).  None = closed candles only.
+    refresh_timeframe, refresh_warmup_candles:
+        The eval candles the partial hour is built from, fetched with the
+        engine's own arguments so its cache is shared.
     """
     cfg = dict(screener_config or {})
     interval_minutes = max(1, int(cfg.get("interval_minutes") or 60))
@@ -380,11 +565,19 @@ async def build_universe_schedule(
                     "max_symbols": int(cfg.get("vol_max_symbols") or 8),
                     "min_speed_pct_per_hour": float(cfg.get("vol_min_speed_pct_per_hour") or 0.0),
                     "min_vol_ratio": float(cfg.get("vol_min_vol_ratio") or 0.0),
-                    # §3.5 parity limitation.
+                    "min_volume_usd": vol_volume_floor(cfg),
+                    "activity_top_n": int(cfg.get("vol_activity_top_n") or 0),
                     "fast_speed": (
                         "1H close-to-close from candles: a coin spiking during "
-                        "hour H enters the vol list at H+1 (live can list it "
-                        "before H:59)"
+                        "hour H enters the vol list at H+1"
+                        if not vol_refresh_seconds_before_close else
+                        f"refreshed each hour with the hour cut "
+                        f"{int(vol_refresh_seconds_before_close)}s before close "
+                        f"({refresh_timeframe} candles)"
+                    ),
+                    "refresh_seconds_before_close": (
+                        int(vol_refresh_seconds_before_close)
+                        if vol_refresh_seconds_before_close else None
                     ),
                 }
                 if bool(cfg.get("vol_enabled", False))
@@ -485,14 +678,20 @@ async def build_universe_schedule(
                 now_ts=ts / 1000.0,
                 vol_ccy_is_quote=True,
             )
+        # _ticker_at() sums Candle.effective_quote_volume (OKX volCcyQuote),
+        # so volCcy24h here is already quote-currency — do not re-convert.
+        candidates = merge_candidates(
+            build_candidates(tickers, cfg, vol_history=vol_history,
+                             update_vol_history=True, vol_ccy_is_quote=True),
+            fast_lane,
+        )
         result = score_universe(
             tickers,
             cfg,
             vol_history=vol_history,
-            update_vol_history=True,
-            activity=activity or None,
-            # _ticker_at() sums Candle.effective_quote_volume (OKX volCcyQuote),
-            # so volCcy24h here is already quote-currency — do not re-convert.
+            update_vol_history=False,
+            activity=_activity_subset(activity, candidates, cfg, price_history, ts / 1000.0),
+            candidates=candidates,
             vol_ccy_is_quote=True,
             fast_lane=fast_lane,
             price_history=price_history if vol_enabled else None,
@@ -508,6 +707,21 @@ async def build_universe_schedule(
             )
         )
         schedule.candidate_count = max(schedule.candidate_count, result["base_candidate_count"])
+
+    if vol_enabled and vol_refresh_seconds_before_close:
+        await _refresh_vol_lists(
+            schedule,
+            fetcher=fetcher,
+            cfg=cfg,
+            symbol_candles=symbol_candles,
+            symbol_ts=symbol_ts,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            cut_seconds_before_close=int(vol_refresh_seconds_before_close),
+            timeframe=refresh_timeframe,
+            warmup_candles=refresh_warmup_candles,
+            progress_cb=progress_cb,
+        )
 
     schedule.diagnostics.append(
         f"Universe screener: {len(schedule.intervals)} intervals over "
