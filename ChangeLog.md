@@ -1,5 +1,8 @@
 # Change Log
 
+## 2026-11-24
+- **Fixed: the backtest screener used a stale coin list.** `HistoricalDataFetcher.fetch_swap_universe` cached OKX's SWAP list once and reused it indefinitely, so coins listed since then were never screened. The cached copy dated from 2026-09-26 (477 symbols against 536 now), which dropped BTW, CT and AXIS from the wick_rejection window replay (CT was the best manual trade, +13.6 USDT). The list is now refetched once it is more than `SWAP_UNIVERSE_MAX_AGE_SECONDS` (24h) old. A refresh keeps previously cached symbols, so coins delisted since are still screened in older windows. If the refresh fails the stale list is used, recorded as `stale_file_cache` with `cache_age_hours` in the provenance. Tests in `tests/test_backtest_data_fetcher.py` (+2).
+
 ## 2026-11-23
 - **Fixed: the backtest ignored wick_rejection's position caps.** The live trigger ranks each hour's signals by `rank_score` and keeps at most `max_concurrent_positions` within `max_total_margin_pct`. The backtest opened every signal, so it took up to 6 entries in one hour, and sweeping `max_concurrent_positions` had no effect. The ranking and caps now live in `strategies/wick_rejection.select_ranked_entries`, which both call; the backtest collects a step's WR signals across symbols before opening them (`BacktestEngine._open_ranked_wick_rejection`). Parity test: `test_entry_caps_match_backtest` (live trigger vs backtest, 5 cases) plus a unit test.
 

@@ -86,6 +86,10 @@ _MAX_KEY_CHARS = 120
 # Attempts per candle page before a fetch is treated as failed (1 s, 2 s backoff).
 _FETCH_ATTEMPTS = 3
 
+# The swap list gains new listings every week: a cached copy older than this is
+# refreshed, or newly listed coins never enter the backtest screener universe.
+SWAP_UNIVERSE_MAX_AGE_SECONDS = 24 * 3600
+
 
 def swap_specs_cache_key(normalized_symbols: list[str]) -> str:
     """Cache file stem for an instrument-spec set.
@@ -248,23 +252,34 @@ class HistoricalDataFetcher:
         return records
 
     async def fetch_swap_universe(self, *, force: bool = False) -> list[str]:
-        """Fetch/cache the full list of live OKX SWAP instrument ids.
+        """Fetch/cache the full list of OKX USDT SWAP instrument ids.
 
         Used by the screener-universe mode to reconstruct the same candidate
-        pool live screens over.  Cached to a single file (the instrument list
-        changes rarely) so repeated backtests don't re-hit the API.
+        pool live screens over.  The cached file is reused for
+        ``SWAP_UNIVERSE_MAX_AGE_SECONDS``; after that (or with ``force``) the
+        list is refetched, so coins listed since the last fetch are screened.
+        A refresh keeps the cached symbols too (union): OKX only lists live
+        instruments, and a coin delisted since then may still have traded in
+        the backtest window (symbols with no candles are skipped anyway).  If
+        the refresh fails the stale cache is used and the provenance says so.
         """
         path = self._cache_dir / "swap_universe.json"
-        symbols: list[str] | None = None
-        if path.exists() and not force:
+        cached: list[str] | None = None
+        age_s: float | None = None
+        if path.exists():
             try:
-                cached = json.loads(path.read_text(encoding="utf-8"))
-                if isinstance(cached, list):
-                    symbols = [str(s).upper() for s in cached if s]
+                raw = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(raw, list):
+                    cached = [str(s).upper() for s in raw if s]
+                    age_s = max(0.0, datetime.now(timezone.utc).timestamp() - path.stat().st_mtime)
             except (OSError, ValueError):
-                symbols = None
-        source = "file_cache" if symbols is not None else "okx_public_api"
-        if symbols is None:
+                cached = None
+        fresh_enough = (
+            cached is not None and age_s is not None and age_s < SWAP_UNIVERSE_MAX_AGE_SECONDS
+        )
+        if fresh_enough and not force:
+            symbols, source = cached, "file_cache"
+        else:
             from app.services.okx_metrics import _get
 
             try:
@@ -272,24 +287,35 @@ class HistoricalDataFetcher:
             except Exception as exc:
                 logger.warning("Swap-universe fetch failed: %s", exc)
                 rows = []
-            symbols = sorted({
+            fetched = {
                 str(row.get("instId") or "").upper()
                 for row in rows
                 if str(row.get("instId") or "").upper().endswith("-USDT-SWAP")
-            })
-            if symbols:
+            }
+            if fetched:
+                symbols = sorted(fetched | set(cached or []))
+                source = "okx_public_api"
                 try:
                     self._cache_dir.mkdir(parents=True, exist_ok=True)
                     path.write_text(json.dumps(symbols), encoding="utf-8")
+                    age_s = 0.0
                 except OSError as exc:
                     logger.warning("Failed to cache swap universe: %s", exc)
+            elif cached is not None:
+                logger.warning(
+                    "Swap-universe refresh failed; using cached list (%.1fh old) — "
+                    "coins listed since then are missing from the screener universe",
+                    (age_s or 0.0) / 3600.0,
+                )
+                symbols, source = cached, "stale_file_cache"
             else:
-                source = "unavailable"
+                symbols, source = [], "unavailable"
         payload = json.dumps(symbols, separators=(",", ":")).encode("ascii")
         self._last_universe_provenance = {
             "source": source,
-            "cache_hit": source == "file_cache",
+            "cache_hit": source in ("file_cache", "stale_file_cache"),
             "cache_key": "swap_universe",
+            "cache_age_hours": round(age_s / 3600.0, 2) if age_s is not None else None,
             "symbol_count": len(symbols),
             "content_sha256": hashlib.sha256(payload).hexdigest(),
         }

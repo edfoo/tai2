@@ -112,3 +112,66 @@ async def test_funding_and_instrument_specs_are_cached_and_fingerprinted(tmp_pat
     assert cached.last_funding_provenance["source"] == "file_cache"
     assert await cached.fetch_instrument_specs(["BTC-USDT-SWAP"]) == specs
     assert cached.last_instrument_provenance["source"] == "file_cache"
+
+def _swap_rows(*ids: str) -> list[dict[str, str]]:
+    return [{"instId": i} for i in ids]
+
+
+@pytest.mark.asyncio
+async def test_swap_universe_refreshes_stale_cache_and_keeps_delisted(tmp_path, monkeypatch) -> None:
+    import json
+    import os
+
+    import app.services.okx_metrics as okx_metrics
+    from app.services.backtest import data_fetcher as df
+
+    calls: list[str] = []
+
+    async def fake_get(path, _params):
+        calls.append(path)
+        return _swap_rows("BTC-USDT-SWAP", "NEW-USDT-SWAP", "BTC-USD-SWAP")
+
+    monkeypatch.setattr(okx_metrics, "_get", fake_get)
+    cache = tmp_path / "swap_universe.json"
+    cache.write_text(json.dumps(["BTC-USDT-SWAP", "GONE-USDT-SWAP"]), encoding="utf-8")
+    fetcher = HistoricalDataFetcher(cache_dir=tmp_path)
+
+    # Fresh cache: reused, no API call.
+    assert await fetcher.fetch_swap_universe() == ["BTC-USDT-SWAP", "GONE-USDT-SWAP"]
+    assert calls == []
+    assert fetcher.last_universe_provenance["source"] == "file_cache"
+
+    # Stale cache: refetched; new listing added, delisted coin kept, non-USDT dropped.
+    old = cache.stat().st_mtime - df.SWAP_UNIVERSE_MAX_AGE_SECONDS - 60
+    os.utime(cache, (old, old))
+    syms = await fetcher.fetch_swap_universe()
+    assert syms == ["BTC-USDT-SWAP", "GONE-USDT-SWAP", "NEW-USDT-SWAP"]
+    assert len(calls) == 1
+    prov = fetcher.last_universe_provenance
+    assert prov["source"] == "okx_public_api" and prov["cache_age_hours"] == 0.0
+    assert json.loads(cache.read_text(encoding="utf-8")) == syms
+
+
+@pytest.mark.asyncio
+async def test_swap_universe_falls_back_to_stale_cache_when_refresh_fails(tmp_path, monkeypatch) -> None:
+    import json
+    import os
+
+    import app.services.okx_metrics as okx_metrics
+    from app.services.backtest import data_fetcher as df
+
+    async def failing_get(_path, _params):
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(okx_metrics, "_get", failing_get)
+    cache = tmp_path / "swap_universe.json"
+    cache.write_text(json.dumps(["BTC-USDT-SWAP"]), encoding="utf-8")
+    old = cache.stat().st_mtime - df.SWAP_UNIVERSE_MAX_AGE_SECONDS - 3600
+    os.utime(cache, (old, old))
+    fetcher = HistoricalDataFetcher(cache_dir=tmp_path)
+
+    assert await fetcher.fetch_swap_universe() == ["BTC-USDT-SWAP"]
+    prov = fetcher.last_universe_provenance
+    assert prov["source"] == "stale_file_cache"
+    assert prov["cache_hit"] is True
+    assert prov["cache_age_hours"] > 24
