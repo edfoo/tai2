@@ -258,6 +258,8 @@ STRATEGY_SWEEP_PARAMS: dict[str, dict[str, str]] = {
         "max_seconds_to_close": "60, 90, 120",
         "min_candle_range_pct": "1.0, 1.5, 2.5",
         "max_high_offset_pct": "10, 20, 30",
+        "max_prior_rise_pct": "5, 8, 12",
+        "prior_rise_hours": "12, 24, 48",
         "min_body_ratio": "2.0, 3.0, 5.0",
         "body_avg_window": "6, 8, 12",
         "setup_lookback_candles": "2, 4, 6",

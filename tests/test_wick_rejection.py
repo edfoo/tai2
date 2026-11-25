@@ -22,6 +22,7 @@ from app.services.strategies.wick_rejection import (
     WickRejectionStrategy,
     body_ratio,
     exit_price_pcts,
+    prior_rise_pct,
 )
 
 SYMBOL = "TEST-USDT-SWAP"
@@ -106,6 +107,17 @@ class TestBodyRatio:
     def test_zero_average_body_is_none(self) -> None:
         flat = [{"open": 1.0, "close": 1.0} for _ in range(8)] + [{"open": 1.0, "close": 2.0}]
         assert body_ratio(flat, 8, 8) is None
+
+
+class TestPriorRisePct:
+    def test_definition(self) -> None:
+        closed = [{"close": c} for c in (100.0, 50.0, 60.0, 55.0)]
+        assert prior_rise_pct(closed, 2) == pytest.approx(10.0)  # 55 / 50
+        assert prior_rise_pct(closed, 3) == pytest.approx(-45.0)
+
+    def test_insufficient_history(self) -> None:
+        assert prior_rise_pct([{"close": 1.0}] * 3, 3) is None
+        assert prior_rise_pct([{"close": 1.0}] * 3, 0) is None
 
 
 class TestExitPricePcts:
@@ -235,6 +247,31 @@ class TestFunnel:
         snap = _snapshot(closed=closed, forming=_forming(closed), adx_htf=40.0, chop_htf=30.0)
         assert _eval(snap) is not None  # "off" by default
         assert _eval(snap, htf_regime_preference="chop") is None
+
+    def test_prior_rise_off_by_default(self) -> None:
+        closed = _closed_hours(30, big_at=28)
+        closed[-25]["close"] = 50.0  # +100% over the prior 24h
+        assert _eval(_snapshot(closed=closed, forming=_forming(closed))) is not None
+
+    def test_prior_rise_gate(self) -> None:
+        closed = _closed_hours(30, big_at=28)
+        snap = _snapshot(closed=closed, forming=_forming(closed))
+        assert _eval(snap, max_prior_rise_pct=8.0) is not None  # ~1% rise
+        ref = closed[-1]["close"] / 1.10  # last closed close is +10% on the close 24h before
+        closed[-25]["close"] = ref
+        log: list[str] = []
+        assert _eval(_snapshot(closed=closed, forming=_forming(closed)), log, max_prior_rise_pct=8.0) is None
+        assert any("prior 24h rise 10.0% > 8%" in m for m in log)
+        assert _eval(_snapshot(closed=closed, forming=_forming(closed)), max_prior_rise_pct=12.0) is not None
+        # A shorter window no longer reaches back to the low reference close.
+        assert _eval(_snapshot(closed=closed, forming=_forming(closed)),
+                     max_prior_rise_pct=8.0, prior_rise_hours=12) is not None
+
+    def test_prior_rise_unknown_history_vetoes(self) -> None:
+        closed = _closed_hours(20, big_at=18)
+        log: list[str] = []
+        assert _eval(_snapshot(closed=closed, forming=_forming(closed)), log, max_prior_rise_pct=8.0) is None
+        assert any("prior rise unknown" in m for m in log)
 
     def test_rank_score_prefers_bigger_body_and_closer_to_high(self) -> None:
         closed = _closed_hours(12, big_at=10)

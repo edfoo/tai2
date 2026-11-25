@@ -216,6 +216,7 @@ up to `max_concurrent_positions` / `max_total_margin_pct`.
 3. forming candle green (`require_forming_green`)
 4. range `(H − L)/L ≥ min_candle_range_pct` (zero range vetoes)
 5. high offset `(H − P)/(H − L) ≤ max_high_offset_pct` (price above the recorded high counts as the new high)
+5b. optional prior rise: last closed close ≤ `max_prior_rise_pct` above the close `prior_rise_hours` (24) candles earlier (default off; too little history vetoes)
 6. at least `min_big_bodies` green bodies ≥ `min_body_ratio` × avg |body| of the prior `body_avg_window`, within `setup_lookback_candles` (+ the forming candle if `setup_include_forming`)
 7. optional `htf_regime_preference` (default off)
 
@@ -249,6 +250,7 @@ shows the resulting USDT risk.
 
 ### Tighten when
 - stops hit on candles that were still accelerating → lower `max_high_offset_pct`, raise `min_body_ratio`
+- stops cluster on coins in a sustained uptrend (already up several % over the prior 24h) → set `max_prior_rise_pct`
 - many trades on quiet coins → raise `vol_min_speed_pct_per_hour` / `min_candle_range_pct`
 
 ### Loosen when

@@ -1,5 +1,8 @@
 # Change Log
 
+## 2026-11-25
+- **wick_rejection: opt-in prior-rise gate.** `max_prior_rise_pct` (default None = off) skips a coin whose last closed 1H close is more than that above the close `prior_rise_hours` (default 24) candles earlier; with too little history it vetoes. Pure helper `prior_rise_pct` in `strategies/wick_rejection.py`, used by the strategy itself, so live and the backtest decide the same way. From the stop-out analysis of two 16-day windows: stopped trades had a median prior-24h rise of +6.0% against +2.5% for TP trades. UI fields on the Wick Rejection card; both keys in the sweep catalog. Tests in `tests/test_wick_rejection.py` (+5).
+
 ## 2026-11-24
 - **wick_rejection: vol list refreshed before the entry, and a thin-coin volume floor.** From the missed-setup analysis of the 33 manual trades. The hourly vol list ranked on closed candles, so a coin pumping in the current hour only made the list an hour later, and the bot traded coins that had moved the previous hour.
   - `vol_refresh_seconds_before_close` (WR config, default 90, 0 = off): the trigger calls the new `MarketService.refresh_wr_vol_list` first (activity candles include the forming candle via `compute_recent_activity(include_forming=True)`). The refreshed list stands for the rest of the hour, and coins new to it get a snapshot before the entry. Timing helpers (`entry_mode`, `wake_lead_seconds`, `vol_refresh_lead_seconds`, `backtest_vol_refresh_cut_seconds`) moved to `strategies/wick_rejection.py`.

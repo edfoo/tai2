@@ -19,6 +19,9 @@ Funnel (§3.1), each stage vetoes before the next:
   5. High offset ``(H − P) / (H − L) × 100 <= max_high_offset_pct``.
   6. Big-body setup: at least ``min_big_bodies`` candles in the setup window
      with ``body_ratio >= min_body_ratio``.
+  6b. Prior rise (opt-in, ``max_prior_rise_pct``): skip when the coin already
+     rose more than that over the ``prior_rise_hours`` closed candles before
+     the forming one (a sustained uptrend, where the short gets stopped).
   7. Optional HTF regime gate (``htf_regime_preference``, default ``"off"``).
 
 ``P`` is the forming candle's close: in the backtest the close of the latest
@@ -77,6 +80,19 @@ def body_ratio(candles: list[dict[str, Any]], idx: int, window: int) -> float | 
     if avg <= 0:
         return None
     return (c - o) / avg
+
+
+def prior_rise_pct(closed: list[dict[str, Any]], hours: int) -> float | None:
+    """Percent change from the close ``hours`` candles before the last closed
+    candle to the last closed candle's close.  ``None`` without enough history.
+    """
+    if hours <= 0 or len(closed) < hours + 1:
+        return None
+    last = _f(closed[-1].get("close"))
+    ref = _f(closed[-1 - hours].get("close"))
+    if last is None or ref is None or ref <= 0:
+        return None
+    return (last / ref - 1.0) * 100.0
 
 
 def exit_price_pcts(cfg: dict[str, Any]) -> tuple[float | None, float | None]:
@@ -218,6 +234,22 @@ class WickRejectionStrategy:
             )
             return None
 
+        closed = [c for c in (block.get("ohlcv") or []) if isinstance(c, dict)]
+        # Defensive: never let a candle at/after the forming bar into "closed".
+        closed = [c for c in closed if (_f(c.get("ts")) or 0) < f_ts]
+
+        # ── 5b. Prior rise (opt-in) ─────────────────────────────────────
+        max_rise = _f(cfg.get("max_prior_rise_pct"))
+        if max_rise is not None:
+            hours = int(_f(cfg.get("prior_rise_hours")) or 24)
+            rise = prior_rise_pct(closed, hours)
+            if rise is None:
+                helpers.emit_debug(f"{tag}: veto prior rise unknown (< {hours + 1} closed candles)")
+                return None
+            if rise > max_rise:
+                helpers.emit_debug(f"{tag}: veto prior {hours}h rise {rise:.1f}% > {max_rise:g}%")
+                return None
+
         # ── 6. Big-body setup ───────────────────────────────────────────
         window = int(_f(cfg.get("body_avg_window")) or 8)
         lookback = int(_f(cfg.get("setup_lookback_candles")) or 0)
@@ -225,9 +257,6 @@ class WickRejectionStrategy:
         min_ratio = _f(cfg.get("min_body_ratio")) or 0.0
         min_big = int(_f(cfg.get("min_big_bodies")) or 0)
 
-        closed = [c for c in (block.get("ohlcv") or []) if isinstance(c, dict)]
-        # Defensive: never let a candle at/after the forming bar into "closed".
-        closed = [c for c in closed if (_f(c.get("ts")) or 0) < f_ts]
         series = list(closed)
         if include_forming:
             series.append({"ts": f_ts, "open": f_o, "high": high, "low": low, "close": p})

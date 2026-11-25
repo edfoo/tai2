@@ -4863,6 +4863,18 @@ def register_pages(app: FastAPI) -> None:
                                 label="Min candle range (%)", value=float(_wr_cfg["min_candle_range_pct"]),
                                 min=0, max=50, step=0.25, format="%.2f",
                             ).classes("w-44").props("dense")
+                            wr_max_prior_rise_input = ui.number(
+                                label="Max prior rise (%)",
+                                value=(None if _wr_cfg.get("max_prior_rise_pct") is None
+                                       else float(_wr_cfg["max_prior_rise_pct"])),
+                                min=0, max=500, step=0.5, format="%.1f",
+                            ).classes("w-44").props(
+                                "clearable dense hint='Skip coins already up more than this; blank = off' persistent-hint"
+                            )
+                            wr_prior_rise_hours_input = ui.number(
+                                label="Prior rise window (h)", value=int(_wr_cfg.get("prior_rise_hours") or 24),
+                                min=1, max=168, step=1, format="%.0f",
+                            ).classes("w-44").props("dense")
                             wr_require_green_switch = ui.switch(
                                 "Forming candle must be green", value=bool(_wr_cfg["require_forming_green"]),
                             ).props("dense color=primary")
@@ -5028,6 +5040,8 @@ def register_pages(app: FastAPI) -> None:
                     "vol_refresh_seconds_before_close": _num(wr_vol_refresh_input, d["vol_refresh_seconds_before_close"]),
                     "max_high_offset_pct": _num(wr_max_offset_input, d["max_high_offset_pct"]),
                     "min_candle_range_pct": _num(wr_min_range_input, d["min_candle_range_pct"]),
+                    "max_prior_rise_pct": _num(wr_max_prior_rise_input, None),
+                    "prior_rise_hours": _num(wr_prior_rise_hours_input, d["prior_rise_hours"], int),
                     "require_forming_green": bool(wr_require_green_switch.value),
                     "entry_mode": str(wr_entry_mode_select.value or "clock"),
                     "watch_seconds_before_close": _num(wr_watch_seconds_input, d["watch_seconds_before_close"]),
@@ -5100,6 +5114,8 @@ def register_pages(app: FastAPI) -> None:
                 wr_vol_refresh_input.value = d["vol_refresh_seconds_before_close"]
                 wr_max_offset_input.value = d["max_high_offset_pct"]
                 wr_min_range_input.value = d["min_candle_range_pct"]
+                wr_max_prior_rise_input.value = d["max_prior_rise_pct"]
+                wr_prior_rise_hours_input.value = d["prior_rise_hours"]
                 wr_require_green_switch.value = d["require_forming_green"]
                 wr_entry_mode_select.value = d["entry_mode"]
                 wr_watch_seconds_input.value = d["watch_seconds_before_close"]

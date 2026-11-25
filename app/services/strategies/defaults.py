@@ -426,6 +426,10 @@ DEFAULT_WICK_REJECTION: dict[str, Any] = {
     "require_forming_green": True,
     "min_candle_range_pct": 1.5,
     "max_high_offset_pct": 20.0,       # (H − P)/(H − L) × 100 (user's rule: 5–10)
+    # Skip coins already up more than this over the prior_rise_hours closed
+    # candles before the forming one (None = off; stops cluster on such coins).
+    "max_prior_rise_pct": None,
+    "prior_rise_hours": 24,
     # Exits (strategy-owned)
     "use_global_trade_management": False,
     "tp_pct": 0.5,
