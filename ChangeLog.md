@@ -1,5 +1,8 @@
 # Change Log
 
+## 2026-11-28
+- **STRATEGY page: fix the Wick Rejection risk read-out.** `_wr_update_risk` read equity from `snapshot["account"]`, which is the per-currency details list, and raised `'list' object has no attribute 'get'`, so the read-out never updated. New `pages.snapshot_equity()` reads `account_equity` / `total_eq_usd` / `total_equity` from the top of the snapshot (still accepting the older dict shape). Test in `tests/test_wick_rejection.py`.
+
 ## 2026-11-27
 - **wick_rejection: opt-in quiet-coin wake profile (stage 5c).** The user's manual method as a gate: the coin was quiet, then woke up, is still moving fast, and sits a little below the hour's high. `wake_profile_enabled` (default off) requires, against a quiet baseline of the `wake_base_hours` (48) closed hours before the `wake_recent_hours` (3) most recent:
   - baseline median hourly traded value ≤ `wake_max_base_volume_usd` (500k USDT);

@@ -103,6 +103,26 @@ if DEFAULT_FRONTEND_TIMEZONE not in TIMEZONE_OPTIONS:
     TIMEZONE_OPTIONS.insert(0, DEFAULT_FRONTEND_TIMEZONE)
 
 
+def snapshot_equity(snapshot: dict[str, Any] | None) -> float | None:
+    """Account equity from a MarketService snapshot, or None when unknown.
+
+    The equity figures sit at the top of the snapshot; ``snapshot["account"]``
+    is the per-currency details list (a dict only in older snapshots).
+    """
+    snapshot = snapshot or {}
+    account = snapshot.get("account")
+    sources = [snapshot] + ([account] if isinstance(account, dict) else [])
+    for src in sources:
+        for key in ("account_equity", "total_eq_usd", "total_equity"):
+            try:
+                value = float(src.get(key))
+            except (TypeError, ValueError):
+                continue
+            if value > 0:
+                return value
+    return None
+
+
 def register_pages(app: FastAPI) -> None:
     settings = get_settings()
     try:
@@ -5166,16 +5186,7 @@ def register_pages(app: FastAPI) -> None:
             def _wr_update_risk(*_args: Any) -> None:
                 """Show margin at risk, position size, stop loss in USDT and the caps."""
                 _ms = getattr(app.state, "market_service", None)
-                _acct = ((getattr(_ms, "_last_full_snapshot", None) or {}).get("account") or {}) if _ms else {}
-                _equity = None
-                for _k in ("account_equity", "total_eq_usd", "total_equity"):
-                    try:
-                        _v = float(_acct.get(_k))
-                    except (TypeError, ValueError):
-                        continue
-                    if _v > 0:
-                        _equity = _v
-                        break
+                _equity = snapshot_equity((getattr(_ms, "_last_full_snapshot", None) or {}) if _ms else {})
                 _guards = config.get("guardrails") or {}
                 wr_risk_label.text = wick_rejection_risk_summary(
                     merged_config(_wr_form_values(), "wick_rejection"), _guards, _equity

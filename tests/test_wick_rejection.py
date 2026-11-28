@@ -494,6 +494,16 @@ class TestRegistration:
         for key in (k for k in DEFAULT_STRATEGY_CONFIG["wick_rejection"] if k.startswith("wake_")):
             assert f'"{key}": ' in src, key
 
+    def test_risk_readout_reads_equity_from_live_snapshot_shape(self) -> None:
+        from app.ui.pages import snapshot_equity
+
+        # Live: equity at the top, "account" is the per-currency details list.
+        assert snapshot_equity({"account": [{"ccy": "USDT"}], "account_equity": 250.0}) == 250.0
+        assert snapshot_equity({"account": [], "account_equity": 0.0, "total_eq_usd": 90.0}) == 90.0
+        assert snapshot_equity({"account": {"total_equity": 40.0}}) == 40.0  # older dict shape
+        assert snapshot_equity({"account": []}) is None
+        assert snapshot_equity(None) is None
+
     def test_sweep_keys_exist_in_defaults(self) -> None:
         d = DEFAULT_STRATEGY_CONFIG["wick_rejection"]
         assert set(STRATEGY_SWEEP_PARAMS["wick_rejection"]) <= set(d)
