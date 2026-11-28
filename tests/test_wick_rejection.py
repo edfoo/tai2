@@ -620,3 +620,29 @@ def test_select_ranked_entries_ranks_and_caps() -> None:
         max_concurrent_positions=None, max_total_margin_pct=50.0,
     )
     assert keep == ["b", "c", "d", "a"]  # no caps: everything, ranked
+
+
+class TestAnalysisTimeframeLive:
+    """2026-11-28: live WR measured the 15m base candle and never fired."""
+
+    def test_base_15m_candle_is_vetoed_with_a_reason(self) -> None:
+        closed = _closed_hours(12)
+        f_ts = T0 + len(closed) * H
+        as_of = f_ts + H - 38_000
+        # Only the base (15m) block: its forming candle opened at H:45.
+        base = {"ohlcv": [], "forming_candle": {
+            "ts": f_ts + 45 * M, "open": 100.0, "high": 103.0, "low": 99.9,
+            "close": 102.8, "volume": 1.0}}
+        snap = {"as_of_ts": as_of, "market_data": {SYMBOL: {"indicators": base}}}
+        log: list[str] = []
+        assert _eval(snap, log) is None
+        assert any("forming candle is not a 1H candle" in m for m in log), log
+
+    def test_requested_timeframes_merge_the_defaults(self) -> None:
+        svc = MarketService.__new__(MarketService)
+        svc._launcher_config = {"strategies": {
+            "wick_rejection": {"enabled": True},          # saved without the key
+            "mean_reversion": {"enabled": False},
+        }}
+        svc._normalize_bar = lambda bar: MarketService._normalize_bar(svc, bar)
+        assert svc._requested_analysis_timeframes() == ["1H"]

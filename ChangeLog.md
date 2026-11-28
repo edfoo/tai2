@@ -1,6 +1,10 @@
 # Change Log
 
 ## 2026-11-28
+- **wick_rejection live: evaluate the 1H candle, not the 15m base candle.** At 10:59:22 (data in 2.3s, 38s before the close) all 10 coins gave no signal with no veto logged. `_requested_analysis_timeframes` read each enabled strategy's raw saved config; the STRATEGY page saves WR without `analysis_timeframe`, so no `timeframes["1H"]` block was built, `resolve_analysis_block` fell back to the base 15m block, and the strategy measured the 15m candle opened at H:45 as the hour's candle — failing the (silent) entry window every hour. Live WR could never have fired; the backtest merges defaults and was unaffected.
+  - `_requested_analysis_timeframes` merges each strategy's defaults (`merged_config`), as the strategies do.
+  - WR vetoes with a logged reason when the forming candle is not an `analysis_timeframe` candle in progress at `as_of` (UTC-aligned for bars up to 4H), instead of failing the window silently.
+  - Tests: `TestAnalysisTimeframeLive` (2) in `tests/test_wick_rejection.py`, `test_decision_when_saved_config_omits_analysis_timeframe` (real MarketService path); all three fail on the old code.
 - **Candle pools: drain a busy pool on every slot; a separate pool for the wick_rejection trigger.** Live 2026-11-28 the trigger's 1H and 1m candle fetches took up to 37s each (`timing … max_candles_1h 37.3s`), the vol refresh timed out at 50s every hour, and the 5s poller took 22–25s per cycle.
   - `_acquire_pool_slot`: once every slot was busy, each waiter awaited the *first* slot only, so a burst ran `pool size` calls in parallel and the rest one at a time on one client. It now waits for whichever slot frees first (cancel-safe; extra simultaneous grants are released).
   - `MarketService._wr_candle_pool` (`WR_CANDLE_CLIENT_POOL_SIZE` = 4 clients, rebuilt with the main pool): `refresh_timeframe_candles`, `fetch_wr_1m_candles` and the activity fetch in `refresh_wr_vol_list` run inside `_wr_candle_priority()` (a context variable that `_acquire_candle_slot` checks), so the entry never queues behind the poller.

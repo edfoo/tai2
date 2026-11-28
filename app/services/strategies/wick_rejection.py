@@ -385,9 +385,21 @@ class WickRejectionStrategy:
         low = min(f_l, p)
 
         # ── 2. Entry window ─────────────────────────────────────────────
-        # Not logged: outside the window this stage vetoes every tick.
         tf = str(cfg.get("analysis_timeframe") or "1H")
         bar_ms = timeframe_to_ms(tf)
+        # The forming candle must be a ``tf`` candle in progress at as_of.  A
+        # missing ``timeframes[tf]`` block makes resolve_analysis_block fall
+        # back to the base bar (live: 15m), whose candle would silently fail
+        # the window every hour.  Bars up to 4H open on UTC multiples of their
+        # length (OKX aligns 1D+ to UTC+8, so those skip the alignment test).
+        aligned = bar_ms > 4 * 3_600_000 or f_ts % bar_ms == 0
+        if bar_ms > 0 and (not aligned or not f_ts <= as_of < f_ts + bar_ms):
+            helpers.emit_debug(
+                f"WickRejection {symbol}: veto forming candle is not a {tf} candle "
+                f"in progress (opened {int(f_ts)}, as of {int(as_of)})"
+            )
+            return None
+        # Not logged: outside the window this stage vetoes every tick.
         seconds_to_close = (f_ts + bar_ms - as_of) / 1000.0
         min_s = _f(cfg.get("min_seconds_to_close")) or 0.0
         max_s = _f(cfg.get("max_seconds_to_close"))

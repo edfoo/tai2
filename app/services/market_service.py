@@ -3947,7 +3947,7 @@ class MarketService:
         """Return the distinct, normalized analysis timeframes requested by enabled strategies.
 
         Reads each enabled strategy's ``analysis_timeframe`` from the launcher
-        config.  ``None``/empty means "use the global LTF" and is skipped here
+        config, merged with that strategy's defaults.  ``None``/empty means "use the global LTF" and is skipped here
         (the global LTF is always computed anyway).  Returns normalized OKX bar
         strings (e.g. ``"15m"``, ``"1H"``) in a stable order.
         """
@@ -3958,7 +3958,11 @@ class MarketService:
                 continue
             if not bool(strat_cfg.get("enabled", False)):
                 continue
-            tf = strat_cfg.get("analysis_timeframe")
+            # Merged with the defaults, as the strategy itself reads it: the
+            # saved config may omit the key (the STRATEGY page does not save
+            # wick_rejection's), and the raw read then skipped WR's 1H block,
+            # so WR measured the 15m base candle and never fired (2026-11-28).
+            tf = merged_config(strat_cfg, str(name)).get("analysis_timeframe")
             if not tf:
                 continue
             bar = self._normalize_bar(str(tf))

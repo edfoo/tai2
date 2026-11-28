@@ -308,6 +308,20 @@ class TestFormingPricePatch:
         assert d["_rank_score"] > 0
 
 
+    def test_decision_when_saved_config_omits_analysis_timeframe(self) -> None:
+        """Live 2026-11-28: the STRATEGY page saves WR without
+        ``analysis_timeframe``; the 1H block must still be built (from the
+        defaults), not the 15m base candle measured."""
+        service = self._setup()
+        cfg = _wr(min_seconds_to_close=0, max_seconds_to_close=3600)
+        cfg.pop("analysis_timeframe")
+        service.set_launcher_config({"mode": "launcher_only",
+                                     "strategies": {"wick_rejection": cfg}})
+        decisions = service.build_launcher_decisions(
+            SYMBOL, strategies=["wick_rejection"], price=104.0
+        )
+        assert [d["_strategy_name"] for d in decisions] == ["wick_rejection"]
+
 class TestFetchTriggerPrice:
     def test_fresh_ws_price(self) -> None:
         service = _service()
