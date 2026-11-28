@@ -1,6 +1,10 @@
 # Change Log
 
 ## 2026-11-28
+- **Candle pools: drain a busy pool on every slot; a separate pool for the wick_rejection trigger.** Live 2026-11-28 the trigger's 1H and 1m candle fetches took up to 37s each (`timing … max_candles_1h 37.3s`), the vol refresh timed out at 50s every hour, and the 5s poller took 22–25s per cycle.
+  - `_acquire_pool_slot`: once every slot was busy, each waiter awaited the *first* slot only, so a burst ran `pool size` calls in parallel and the rest one at a time on one client. It now waits for whichever slot frees first (cancel-safe; extra simultaneous grants are released).
+  - `MarketService._wr_candle_pool` (`WR_CANDLE_CLIENT_POOL_SIZE` = 4 clients, rebuilt with the main pool): `refresh_timeframe_candles`, `fetch_wr_1m_candles` and the activity fetch in `refresh_wr_vol_list` run inside `_wr_candle_priority()` (a context variable that `_acquire_candle_slot` checks), so the entry never queues behind the poller.
+  - Tests: `tests/test_candle_pool.py` (6; the burst and slot-handover tests fail on the old code).
 - **wick_rejection trigger: late data after the close, timings, per-coin reasons; third equity read fixed.** Seen live 2026-11-28: the 09:00 cycle's data arrived 20s *after* the close, and the trigger's late check (`seconds_to_hour_close`) wrapped to the next hour's countdown, so it reported "ok" (the strategy's own window check still vetoed every coin; no wrong-candle entry was possible).
   - `TriggerResult.close_at` (set when the cycle starts, `hour_close_ts`) — the data and execution late checks measure against it, so data after the close reports `late (data ready Ns after the close)` and execution after the close is dropped.
   - `TriggerResult.timings`: `vol_refresh`, `data` (all fetches) and the slowest single fetch per kind (`max_candles_1h`, `max_candles_1m`, `max_price`), appended to the summary line.

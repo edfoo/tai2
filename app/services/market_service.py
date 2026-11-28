@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import functools
 import json
 import logging
@@ -182,6 +183,24 @@ def _sanitize_client_order_prefix(prefix: str) -> str:
     return "".join(ch for ch in (prefix or "") if ch.isalnum())
 
 
+# Set while a wick_rejection trigger fetch runs (vol refresh, 1H refresh, 1m
+# candles): ``_acquire_candle_slot`` then serves it from the trigger's own
+# candle pool, so the entry never queues behind the snapshot poller.  Tasks
+# created inside inherit it (asyncio copies the context).
+_WR_CANDLE_PRIORITY: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "wr_candle_priority", default=False
+)
+
+
+@contextlib.contextmanager
+def _wr_candle_priority() -> Iterator[None]:
+    token = _WR_CANDLE_PRIORITY.set(True)
+    try:
+        yield
+    finally:
+        _WR_CANDLE_PRIORITY.reset(token)
+
+
 class MarketService:
     """Streams OKX market data and publishes normalized snapshots to Redis."""
 
@@ -229,6 +248,10 @@ class MarketService:
     # (symbols × 2 candle endpoints) so the 15s per-call timeout is never
     # spent waiting for a free slot.
     CANDLE_CLIENT_POOL_SIZE = 8
+    # Separate candle clients reserved for the wick_rejection trigger (vol
+    # refresh, 1H refresh and 1m candles seconds before the close).  Sharing
+    # the main pool, those calls queued behind the poller for 30-40s.
+    WR_CANDLE_CLIENT_POOL_SIZE = 4
     # Pool size for the long/short-ratio TradingDataAPI clients. The L/S ratio
     # endpoint is fetched once per symbol per refresh (concurrently across
     # symbols), so a smaller pool than candles suffices; 4 keeps latency low
@@ -326,6 +349,9 @@ class MarketService:
         # the per-client Semaphore(1) on the shared candle client removed.
         # See CANDLE_CLIENT_POOL_SIZE and _build_candle_pool.
         self._candle_pool: list[tuple[Any, asyncio.Semaphore]] = self._build_candle_pool()
+        self._wr_candle_pool: list[tuple[Any, asyncio.Semaphore]] = self._build_candle_pool(
+            self.WR_CANDLE_CLIENT_POOL_SIZE
+        )
         # Long/short-ratio fetch pool: same pattern as the candle pool but
         # for TradingDataAPI clients, so the per-symbol L/S ratio calls
         # fetched concurrently each refresh don't serialize behind a single
@@ -6108,7 +6134,8 @@ class MarketService:
             tickers, self._screener_price_history, cfg, vol_ccy_is_quote=False,
         )
         candidates = merge_candidates(candidates, fast_lane)
-        activity = await self._fetch_recent_activity(candidates, cfg, include_forming=True)
+        with _wr_candle_priority():
+            activity = await self._fetch_recent_activity(candidates, cfg, include_forming=True)
         now = time.time()
         result = score_universe(
             tickers, cfg, vol_history=self._screener_vol_history,
@@ -7057,7 +7084,8 @@ class MarketService:
         wake profile.  Never falls back to a cache: a failed fetch returns
         ``[]`` and the strategy vetoes, rather than measuring stale candles.
         """
-        return await self._fetch_ohlcv_bar(symbol, "1m", {}, limit=max(1, int(limit)))
+        with _wr_candle_priority():
+            return await self._fetch_ohlcv_bar(symbol, "1m", {}, limit=max(1, int(limit)))
 
     async def refresh_timeframe_candles(self, symbol: str, bar: str) -> int:
         """Refetch ``bar`` candles for ``symbol`` into ``_latest_ohlcv_tf``.
@@ -7065,9 +7093,10 @@ class MarketService:
         Returns the number of rows now cached (the fetch falls back to the
         previous cache on error).
         """
-        rows = await self._fetch_ohlcv_bar(
-            symbol, bar, self._latest_ohlcv_tf, cache_key=(symbol, bar)
-        )
+        with _wr_candle_priority():
+            rows = await self._fetch_ohlcv_bar(
+                symbol, bar, self._latest_ohlcv_tf, cache_key=(symbol, bar)
+            )
         return len(rows or [])
 
     async def _fetch_funding_rate(self, symbol: str) -> dict[str, Any]:
@@ -12283,7 +12312,7 @@ class MarketService:
         except Exception:  # pragma: no cover - test stubs / non-httpx clients
             pass
 
-    def _build_candle_pool(self) -> list[tuple[Any, asyncio.Semaphore]]:
+    def _build_candle_pool(self, size: int | None = None) -> list[tuple[Any, asyncio.Semaphore]]:
         """Build the pool of independent MarketAPI clients used for candle fetches.
 
         Each pool member is a fresh ``OkxMarket.MarketAPI`` instance (so its
@@ -12299,7 +12328,7 @@ class MarketService:
         """
         if OkxMarket is None:
             return []
-        size = max(1, self.CANDLE_CLIENT_POOL_SIZE)
+        size = max(1, int(size if size is not None else self.CANDLE_CLIENT_POOL_SIZE))
         flag = "0" if self._okx_flag != "0" else self._okx_flag
         pool: list[tuple[Any, asyncio.Semaphore]] = []
         for _ in range(size):
@@ -12350,15 +12379,40 @@ class MarketService:
             if not sem.locked():
                 await sem.acquire()
                 return client, sem
-        # All slots busy: await the first slot in order. asyncio.Semaphore is
-        # FIFO-fair, so this avoids starvation and bounds total wait time.
-        for client, sem in pool:
-            await sem.acquire()
-            return client, sem
+        # All slots busy: wait for whichever slot frees first.  (Waiting on
+        # the first slot only serialised every queued call onto one client:
+        # a burst of N calls ran 8 in parallel, then the rest one at a time.)
+        while pool:
+            waiters = [asyncio.ensure_future(sem.acquire()) for _client, sem in pool]
+            try:
+                await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                for w in waiters:
+                    if not w.done():
+                        w.cancel()
+                await asyncio.gather(*waiters, return_exceptions=True)
+            won = [
+                i for i, w in enumerate(waiters)
+                if not w.cancelled() and w.exception() is None
+            ]
+            if won:
+                # Several may have been granted together: keep one, hand the
+                # others straight back.
+                for i in won[1:]:
+                    pool[i][1].release()
+                return pool[won[0]]
         return None
 
     async def _acquire_candle_slot(self) -> tuple[Any, asyncio.Semaphore] | None:
-        """Return a free candle-pool slot (thin wrapper over _acquire_pool_slot)."""
+        """Return a free candle-pool slot (thin wrapper over _acquire_pool_slot).
+
+        Inside ``_wr_candle_priority`` the wick_rejection trigger's own pool
+        serves the call.
+        """
+        if _WR_CANDLE_PRIORITY.get():
+            wr_pool = getattr(self, "_wr_candle_pool", None)
+            if wr_pool:
+                return await self._acquire_pool_slot(wr_pool)
         return await self._acquire_pool_slot(self._candle_pool)
 
     def _build_public_api(self) -> Any | None:
@@ -12441,6 +12495,7 @@ class MarketService:
         # Rebuild the candle client pool so the new flag/credentials take
         # effect and stale pool members aren't driven after a client swap.
         self._candle_pool = self._build_candle_pool()
+        self._wr_candle_pool = self._build_candle_pool(self.WR_CANDLE_CLIENT_POOL_SIZE)
         # Rebuild the long/short-ratio pool for the same reason.
         self._ls_ratio_pool = self._build_ls_ratio_pool()
 
