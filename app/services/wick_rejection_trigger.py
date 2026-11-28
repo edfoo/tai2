@@ -42,6 +42,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
+from app.services.launcher_tp_sl import snapshot_equity
 from app.services.strategies.defaults import merged_config
 from app.services.strategies.wick_rejection import (
     STRATEGY_NAME,
@@ -589,15 +590,7 @@ class WickRejectionTrigger:
 
 
 def _snapshot_equity(ms: Any) -> float | None:
-    account = (getattr(ms, "_last_full_snapshot", None) or {}).get("account") or {}
-    for key in ("account_equity", "total_eq_usd", "total_equity", "total_account_value"):
-        try:
-            value = float(account.get(key))
-        except (TypeError, ValueError):
-            continue
-        if value > 0:
-            return value
-    return None
+    return snapshot_equity(getattr(ms, "_last_full_snapshot", None))
 
 
 __all__ = [

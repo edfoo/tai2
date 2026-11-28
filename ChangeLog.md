@@ -1,7 +1,7 @@
 # Change Log
 
 ## 2026-11-28
-- **STRATEGY page: fix the Wick Rejection risk read-out.** `_wr_update_risk` read equity from `snapshot["account"]`, which is the per-currency details list, and raised `'list' object has no attribute 'get'`, so the read-out never updated. New `pages.snapshot_equity()` reads `account_equity` / `total_eq_usd` / `total_equity` from the top of the snapshot (still accepting the older dict shape). Test in `tests/test_wick_rejection.py`.
+- **wick_rejection: fix the entry crash when the account holds balances.** The trigger's `_snapshot_equity` (since Phase 6) and the STRATEGY card's risk read-out read equity from `snapshot["account"]`, which is the per-currency details list whenever the account holds balances (an empty account gave `{}` and worked). Both raised `'list' object has no attribute 'get'`; in the trigger this happened in `_execute_ranked`, after the strategy had passed, so the whole cycle failed and the entry was dropped (seen live at 2026-11-28 07:59:50 UTC). New shared `launcher_tp_sl.snapshot_equity()` reads `account_equity` / `total_eq_usd` / `total_equity` / `total_account_value` from the top of the snapshot (still accepting the older dict shape); the trigger and the card both use it. Tests: `test_entry_caps_read_equity_from_live_snapshot_shape` (fails on the old code) and a helper test in `tests/test_wick_rejection.py`.
 
 ## 2026-11-27
 - **wick_rejection: opt-in quiet-coin wake profile (stage 5c).** The user's manual method as a gate: the coin was quiet, then woke up, is still moving fast, and sits a little below the hour's high. `wake_profile_enabled` (default off) requires, against a quiet baseline of the `wake_base_hours` (48) closed hours before the `wake_recent_hours` (3) most recent:

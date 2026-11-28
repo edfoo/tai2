@@ -55,7 +55,7 @@ from app.services.openrouter_service import (
     list_openrouter_models,
 )
 from app.services.prompt_utils import sanitize_prompt_text
-from app.services.launcher_tp_sl import wick_rejection_risk_summary
+from app.services.launcher_tp_sl import snapshot_equity, wick_rejection_risk_summary
 from app.services.strategies.defaults import (
     WR_WAKE_PRESET,
     merged_config,
@@ -101,26 +101,6 @@ except Exception:  # pragma: no cover - fallback when tzdata unavailable
     ]
 if DEFAULT_FRONTEND_TIMEZONE not in TIMEZONE_OPTIONS:
     TIMEZONE_OPTIONS.insert(0, DEFAULT_FRONTEND_TIMEZONE)
-
-
-def snapshot_equity(snapshot: dict[str, Any] | None) -> float | None:
-    """Account equity from a MarketService snapshot, or None when unknown.
-
-    The equity figures sit at the top of the snapshot; ``snapshot["account"]``
-    is the per-currency details list (a dict only in older snapshots).
-    """
-    snapshot = snapshot or {}
-    account = snapshot.get("account")
-    sources = [snapshot] + ([account] if isinstance(account, dict) else [])
-    for src in sources:
-        for key in ("account_equity", "total_eq_usd", "total_equity"):
-            try:
-                value = float(src.get(key))
-            except (TypeError, ValueError):
-                continue
-            if value > 0:
-                return value
-    return None
 
 
 def register_pages(app: FastAPI) -> None:

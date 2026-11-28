@@ -495,7 +495,7 @@ class TestRegistration:
             assert f'"{key}": ' in src, key
 
     def test_risk_readout_reads_equity_from_live_snapshot_shape(self) -> None:
-        from app.ui.pages import snapshot_equity
+        from app.services.launcher_tp_sl import snapshot_equity
 
         # Live: equity at the top, "account" is the per-currency details list.
         assert snapshot_equity({"account": [{"ccy": "USDT"}], "account_equity": 250.0}) == 250.0

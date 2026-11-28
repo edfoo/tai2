@@ -459,3 +459,26 @@ def test_entry_caps_match_backtest(over: dict[str, Any], open_wr: int) -> None:
     }
     _run(_trigger(ms, cfg=cfg))
     assert ms.executed == _backtest_cap_pick(cfg, open_wr, equity)
+
+
+def test_entry_caps_read_equity_from_live_snapshot_shape() -> None:
+    """Live snapshots carry equity at the top and "account" as the details list.
+
+    The trigger once read equity from ``snapshot["account"]`` and crashed with
+    "'list' object has no attribute 'get'" whenever the account held balances,
+    dropping every entry that had passed the strategy.
+    """
+    equity = 100.0
+    cfg = _wr(max_concurrent_positions=0, max_total_margin_pct=50.0)
+    ms = _FakeMS(list(_CAP_RANKS), _CAP_RANKS, {s: 1.0 for s in _CAP_RANKS})
+    ms._last_full_snapshot = {
+        "account": [{"ccy": "USDT", "eq": "100"}],
+        "account_equity": equity,
+        "total_eq_usd": equity,
+    }
+    ms._launcher_in_position = {
+        "wick_rejection:X0-USDT-SWAP": {"strategy": "wick_rejection", "margin_usd": 20.0}
+    }
+    _run(_trigger(ms, cfg=cfg))
+    assert ms.executed == _backtest_cap_pick(cfg, 1, equity)
+    assert ms.executed
