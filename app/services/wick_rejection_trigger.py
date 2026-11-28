@@ -81,6 +81,11 @@ def seconds_to_hour_close(now: float) -> float:
     return (now // _HOUR_S + 1) * _HOUR_S - now
 
 
+def hour_close_ts(now: float) -> float:
+    """Epoch seconds of the close of the hour in progress at ``now``."""
+    return (now // _HOUR_S + 1) * _HOUR_S
+
+
 def launcher_execution_context(runtime_config: dict[str, Any], symbol: str) -> dict[str, Any]:
     """The context ``handle_llm_decision`` needs for a launcher decision.
 
@@ -115,6 +120,15 @@ class TriggerResult:
     signals: list[str] = field(default_factory=list)
     dropped: dict[str, str] = field(default_factory=dict)
     executed: list[str] = field(default_factory=list)
+    # Close of the hour this cycle enters on (set when the cycle starts), so
+    # a cycle whose data arrives after the close sees a negative time left
+    # instead of the next hour's countdown.
+    close_at: float | None = None
+    # Seconds per step: vol_refresh, data (all fetches), and the slowest
+    # single fetch per kind (candles_1h / candles_1m / price).
+    timings: dict[str, float] = field(default_factory=dict)
+    # Why each checked symbol gave no signal (last strategy/launcher veto).
+    no_signal: dict[str, str] = field(default_factory=dict)
 
     def summary(self) -> str:
         if self.status == "skipped":
@@ -132,7 +146,20 @@ class TriggerResult:
             )
         if self.reason:
             parts.append(self.reason)
+        if self.timings:
+            parts.append(
+                "timing " + ", ".join(f"{k} {v:.1f}s" for k, v in self.timings.items())
+            )
         return " | ".join(parts)
+
+    def no_signal_report(self) -> str:
+        """One line listing why each symbol gave no signal ('' when none)."""
+        if not self.no_signal:
+            return ""
+        label = "WR trigger" if self.mode == "clock" else f"WR trigger ({self.mode})"
+        return f"{label}: no signal — " + "; ".join(
+            f"{s}: {why}" for s, why in self.no_signal.items()
+        )
 
 
 class WickRejectionTrigger:
@@ -186,24 +213,31 @@ class WickRejectionTrigger:
                 now = self._clock()
                 wake = next_trigger_ts(now, lead)
                 refresh_lead = vol_refresh_lead_seconds(cfg)
+                vol_s: float | None = None
                 if refresh_lead is not None and refresh_lead > lead:
                     # Rescore the vol list first (skipped this hour when the
                     # task starts after the refresh moment).
                     refresh_at = wake - (refresh_lead - lead)
                     if refresh_at > now:
                         await self._sleep(refresh_at - now)
+                        t0 = self._clock()
                         await self.refresh_vol_list(timeout=max(1.0, wake - refresh_at))
                         now = self._clock()
+                        vol_s = now - t0
                 await self._sleep(max(0.0, wake - now))
                 if entry_mode(self._wr_config()) == "clock":
                     result = await self.run_once()
                 else:
                     result = await self.run_watch()
+                if vol_s is not None and result.status != "skipped":
+                    result.timings = {"vol_refresh": vol_s, **result.timings}
                 if not (result.status == "skipped" and result.reason == "disabled"):
                     self.last_result = result
                     self.last_run_at = self._clock()
                 if result.status != "skipped" or result.reason != "disabled":
                     self._log(result.summary())
+                    if result.no_signal:
+                        self._log(result.no_signal_report())
                 # Step past the trigger second so the next target is next hour.
                 await self._sleep(1.0)
             except asyncio.CancelledError:
@@ -327,9 +361,15 @@ class WickRejectionTrigger:
         cache[sym] = (minute, rows)
         return rows
 
+    def _left(self, result: TriggerResult) -> float:
+        """Seconds to the close this cycle enters on (negative once passed)."""
+        if result.close_at is None:
+            return seconds_to_hour_close(self._clock())
+        return result.close_at - self._clock()
+
     async def run_once(self) -> TriggerResult:
         """Evaluate and execute one clock trigger cycle now."""
-        result = TriggerResult()
+        result = TriggerResult(close_at=hour_close_ts(self._clock()))
         pre = self._preflight(result)
         if pre is None:
             return result
@@ -349,6 +389,15 @@ class WickRejectionTrigger:
         # ── 1. Data, concurrently: candles + price per symbol ──────────
         c1m_cache: dict[str, tuple[int, Any]] = {}
 
+        slowest: dict[str, float] = {}
+
+        async def _timed(kind: str, aw: Awaitable[Any]) -> Any:
+            t0 = self._clock()
+            try:
+                return await aw
+            finally:
+                slowest[kind] = max(slowest.get(kind, 0.0), self._clock() - t0)
+
         async def _gather(sym: str) -> tuple[str, tuple[float | None, str, float | None]]:
             async def _candles() -> None:
                 try:
@@ -357,13 +406,17 @@ class WickRejectionTrigger:
                     self._log(f"WR trigger: {sym} candle refresh failed: {exc}")
 
             _, _, price_info = await asyncio.gather(
-                _candles(),
-                self._candles_1m(ms, cfg, sym, c1m_cache),
-                ms.fetch_trigger_price(sym, max_age_seconds=max_age),
+                _timed(f"candles_{tf.lower()}", _candles()),
+                _timed("candles_1m", self._candles_1m(ms, cfg, sym, c1m_cache)),
+                _timed("price", ms.fetch_trigger_price(sym, max_age_seconds=max_age)),
             )
             return sym, price_info
 
+        t_data = self._clock()
         gathered = await asyncio.gather(*(_gather(s) for s in symbols), return_exceptions=True)
+        result.timings["data"] = self._clock() - t_data
+        for kind, secs in slowest.items():
+            result.timings[f"max_{kind}"] = secs
         for item in gathered:
             if isinstance(item, BaseException):
                 self._log(f"WR trigger: data fetch error: {item}")
@@ -377,10 +430,13 @@ class WickRejectionTrigger:
         )
         self._log(f"WR trigger: prices {price_txt}")
 
-        left = seconds_to_hour_close(self._clock())
+        left = self._left(result)
         if left < min_s:
             result.status = "late"
-            result.reason = f"data ready {left:.1f}s before close < {min_s:g}s"
+            result.reason = (
+                f"data ready {left:.1f}s before close < {min_s:g}s" if left >= 0
+                else f"data ready {-left:.1f}s after the close"
+            )
             return
 
         # ── 2. Decisions (all launcher guards apply) ────────────────────
@@ -390,12 +446,24 @@ class WickRejectionTrigger:
             if not price:
                 result.dropped[sym] = f"no price ({source})"
                 continue
+            capture = getattr(ms, "capture_debug", None)
+            notes: list[str] = []
             try:
-                for d in ms.build_launcher_decisions(
-                    sym, strategies=[STRATEGY_NAME], price=price,
-                    candles_1m=(c1m_cache.get(sym) or (0, None))[1],
-                ):
+                if capture is not None:
+                    with capture() as notes:
+                        made = ms.build_launcher_decisions(
+                            sym, strategies=[STRATEGY_NAME], price=price,
+                            candles_1m=(c1m_cache.get(sym) or (0, None))[1],
+                        )
+                else:
+                    made = ms.build_launcher_decisions(
+                        sym, strategies=[STRATEGY_NAME], price=price,
+                        candles_1m=(c1m_cache.get(sym) or (0, None))[1],
+                    )
+                for d in made:
                     decisions.append((sym, d))
+                if not made:
+                    result.no_signal[sym] = _no_signal_reason(sym, notes)
             except Exception as exc:  # pragma: no cover - defensive
                 result.dropped[sym] = f"decision error: {exc}"
         result.signals.extend(s for s, _ in decisions)
@@ -427,7 +495,7 @@ class WickRejectionTrigger:
 
         # ── 4. Execute sequentially under the shared lock ───────────────
         for sym, d in chosen:
-            left = seconds_to_hour_close(self._clock())
+            left = self._left(result)
             if left < min_s:
                 result.dropped[sym] = f"late ({left:.1f}s to close)"
                 continue
@@ -437,7 +505,7 @@ class WickRejectionTrigger:
                 result.dropped[sym] = "execute lock busy until the window closed"
                 continue
             try:
-                left = seconds_to_hour_close(self._clock())
+                left = self._left(result)
                 if left < min_s:
                     result.dropped[sym] = f"late ({left:.1f}s to close)"
                     continue
@@ -469,7 +537,7 @@ class WickRejectionTrigger:
         (and the strategy funnel agrees).  ``momentum_or_clock``: symbols not
         entered by ``entry_seconds_before_close`` get the clock evaluation.
         """
-        result = TriggerResult()
+        result = TriggerResult(close_at=hour_close_ts(self._clock()))
         pre = self._preflight(result)
         if pre is None:
             return result
@@ -587,6 +655,20 @@ class WickRejectionTrigger:
             ms.stop_wr_tape()
             self.watch["active"] = False
         return result
+
+
+def _no_signal_reason(symbol: str, notes: list[str]) -> str:
+    """The last veto the strategy or launcher logged for ``symbol``.
+
+    Stages that veto silently (entry window, missing forming candle) leave
+    no note; the trigger has already checked the window by then.
+    """
+    sym = symbol.upper()
+    for note in reversed(notes):
+        if sym in note.upper():
+            text = note.split(":", 1)[1].strip() if ":" in note else note
+            return text.removeprefix("veto ").strip() or note
+    return "no veto logged (entry window or forming candle)"
 
 
 def _snapshot_equity(ms: Any) -> float | None:

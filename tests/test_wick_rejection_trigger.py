@@ -482,3 +482,113 @@ def test_entry_caps_read_equity_from_live_snapshot_shape() -> None:
     _run(_trigger(ms, cfg=cfg))
     assert ms.executed == _backtest_cap_pick(cfg, 1, equity)
     assert ms.executed
+
+
+# ── Data after the close, timings, no-signal reasons (2026-11-28) ─────────────
+
+
+class _SlowMS(_FakeMS):
+    """Fetching the price moves the shared clock forward by ``delay`` seconds."""
+
+    def __init__(self, *args: Any, clock: list[float], delay: float, **kw: Any) -> None:
+        super().__init__(*args, **kw)
+        self._clock_ref = clock
+        self._delay = delay
+
+    async def fetch_trigger_price(self, sym: str, *, max_age_seconds: float):
+        self._clock_ref[0] += self._delay
+        return await super().fetch_trigger_price(sym, max_age_seconds=max_age_seconds)
+
+
+def _clocked_trigger(ms: _FakeMS, clock: list[float], cfg: dict[str, Any] | None = None):
+    rc = {"launcher": {"mode": "launcher_only", "strategies": {"wick_rejection": cfg or _wr()}},
+          "execution_enabled": True}
+    app = SimpleNamespace(state=SimpleNamespace(runtime_config=rc, market_service=ms))
+    return WickRejectionTrigger(app, asyncio.Lock(), clock=lambda: clock[0],
+                                is_enabled=lambda: True)
+
+
+class TestAfterTheClose:
+    def test_data_after_the_close_is_late_not_next_hour(self) -> None:
+        """Seen live 2026-11-28 09:00:20: data arrived 20s after the close and
+        the countdown wrapped to the next hour, so the cycle reported "ok"."""
+        clock = [H0 + HOUR - 40]
+        ms = _SlowMS(SYMS, {s: 1.0 for s in SYMS}, {s: 1.0 for s in SYMS},
+                     clock=clock, delay=20.0)  # 3 × 20s → 20s after the close
+        result = asyncio.run(_clocked_trigger(ms, clock).run_once())
+        assert clock[0] == H0 + HOUR + 20
+        assert result.status == "late"
+        assert "after the close" in result.reason
+        assert ms.built == [] and ms.executed == []
+
+    def test_execution_after_the_close_is_dropped(self) -> None:
+        """A decision whose execution would start after the close is dropped."""
+        clock = [H0 + HOUR - 40]
+
+        class _SlowBuild(_FakeMS):
+            def build_launcher_decisions(self, sym, strategies=None, *, price=None, candles_1m=None):
+                clock[0] = H0 + HOUR + 5
+                return super().build_launcher_decisions(
+                    sym, strategies, price=price, candles_1m=candles_1m)
+
+        ms = _SlowBuild(["A-USDT-SWAP"], {"A-USDT-SWAP": 1.0}, {"A-USDT-SWAP": 1.0})
+        result = asyncio.run(_clocked_trigger(ms, clock).run_once())
+        assert ms.executed == []
+        assert "late" in result.dropped["A-USDT-SWAP"]
+
+    def test_timings_reported(self) -> None:
+        clock = [H0 + HOUR - 40]
+        ms = _SlowMS(SYMS, {}, {s: 1.0 for s in SYMS}, clock=clock, delay=1.0)
+        result = asyncio.run(_clocked_trigger(ms, clock).run_once())
+        assert result.status == "ok"
+        assert result.timings["data"] == pytest.approx(3.0)
+        assert result.timings["max_price"] == pytest.approx(1.0)  # each fetch 1s
+        assert "max_candles_1h" in result.timings
+        assert "timing data 3.0s" in result.summary()
+
+
+class TestNoSignalReasons:
+    def test_reason_per_symbol_from_the_strategy_veto(self) -> None:
+        import contextlib
+
+        class _Vetoing(_FakeMS):
+            def __init__(self, *a: Any, **kw: Any) -> None:
+                super().__init__(*a, **kw)
+                self._caps: list[list[str]] = []
+
+            @contextlib.contextmanager
+            def capture_debug(self):
+                buf: list[str] = []
+                self._caps.append(buf)
+                try:
+                    yield buf
+                finally:
+                    self._caps.remove(buf)
+
+            def build_launcher_decisions(self, sym, strategies=None, *, price=None, candles_1m=None):
+                for buf in self._caps:
+                    if sym == "A-USDT-SWAP":
+                        buf.append(f"WickRejection {sym}: veto wake profile (recent volume 2.00x < 3x)")
+                return super().build_launcher_decisions(
+                    sym, strategies, price=price, candles_1m=candles_1m)
+
+        ms = _Vetoing(SYMS, {"C-USDT-SWAP": 1.0}, {s: 1.0 for s in SYMS})
+        result = _run(_trigger(ms))
+        assert result.no_signal == {
+            "A-USDT-SWAP": "wake profile (recent volume 2.00x < 3x)",
+            "B-USDT-SWAP": "no veto logged (entry window or forming candle)",
+        }
+        assert result.executed == ["C-USDT-SWAP"]
+        report = result.no_signal_report()
+        assert report.startswith("WR trigger: no signal — A-USDT-SWAP: wake profile")
+
+    def test_market_service_capture_debug_collects_only_inside(self) -> None:
+        ms = MarketService.__new__(MarketService)
+        ms._debug_captures = []
+        ms._log_sink = lambda _t: None
+        ms._emit_debug("before")
+        with ms.capture_debug() as notes:
+            ms._emit_debug("WickRejection X: veto range 1.00% < 1.5%")
+        ms._emit_debug("after")
+        assert notes == ["WickRejection X: veto range 1.00% < 1.5%"]
+        assert ms._debug_captures == []

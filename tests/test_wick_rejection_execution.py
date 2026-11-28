@@ -306,6 +306,21 @@ class TestBuildLauncherDecisions:
         assert wr["notional_usd"] == pytest.approx(500.0)
 
 
+    def test_pct_equity_reads_live_snapshot_shape(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Live: equity at the top of the snapshot, "account" the details list.
+
+        build_launcher_decisions once read ``snapshot["account"].get(...)``
+        and raised on the list, dropping every WR signal (2026-11-28).
+        """
+        service, _, _ = self._setup(monkeypatch)
+        service._last_full_snapshot["account"] = [{"ccy": "USDT", "eq": "1000"}]
+        service._last_full_snapshot["account_equity"] = 1000.0
+        service._launcher_config["strategies"]["wick_rejection"] = _wr(
+            margin_mode="pct_equity", margin_pct=10.0
+        )
+        wr = service.build_launcher_decisions(SYMBOL, strategies=["wick_rejection"])[0]
+        assert wr["_margin_usd"] == pytest.approx(100.0)
+
 # ── Live: handle_llm_decision ─────────────────────────────────────────────────
 
 

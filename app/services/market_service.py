@@ -11,7 +11,7 @@ import time
 from collections import deque
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any, Callable, Deque, Dict, Iterable, Optional
+from typing import Any, Callable, Deque, Dict, Iterable, Iterator, Optional
 
 import httpx
 import inspect
@@ -31,7 +31,7 @@ from app.db.postgres import (
 )
 from app.lib.volume_profile import value_area
 from app.models.trade import ExecutedTrade
-from app.services.launcher_tp_sl import resolve_launcher_tp_sl, strategy_exit_params
+from app.services.launcher_tp_sl import resolve_launcher_tp_sl, snapshot_equity, strategy_exit_params
 from app.services.screener import (
     activity_fetch_symbols,
     build_candidates,
@@ -550,6 +550,7 @@ class MarketService:
             TrendPullbackStrategy(),
             WickRejectionStrategy(),
         ]
+        self._debug_captures: list[list[str]] = []
         self._strategy_helpers = StrategyHelpers(
             extract_float=self._extract_float,
             emit_debug=self._emit_debug,
@@ -4475,13 +4476,8 @@ class MarketService:
         if not signals:
             return []
 
-        account_block = snapshot.get("account") or {}
-        account_equity = self._extract_float(
-            account_block.get("account_equity")
-            or account_block.get("total_eq_usd")
-            or account_block.get("total_equity")
-            or account_block.get("total_account_value")
-        )
+        # Equity sits at the top of the snapshot; "account" is the details list.
+        account_equity = snapshot_equity(snapshot)
 
         decisions: list[dict[str, Any]] = []
         for signal in signals:
@@ -8194,9 +8190,27 @@ class MarketService:
         except (TypeError, ValueError):
             return None
 
+    @contextlib.contextmanager
+    def capture_debug(self) -> Iterator[list[str]]:
+        """Collect the ``_emit_debug`` messages emitted inside the block.
+
+        The wick_rejection trigger wraps the synchronous
+        ``build_launcher_decisions`` call with it to report why each symbol
+        gave no signal; no other coroutine runs inside such a call, so the
+        list holds that symbol's messages only.
+        """
+        buf: list[str] = []
+        self._debug_captures.append(buf)
+        try:
+            yield buf
+        finally:
+            self._debug_captures.remove(buf)
+
     def _emit_debug(self, message: str, *, mirror_logger: bool = True) -> None:
         """Send human-friendly diagnostics to the injected sink and optionally the logger."""
         text = str(message)
+        for buf in getattr(self, "_debug_captures", ()):
+            buf.append(text)
         try:
             self._log_sink(text)
         except Exception:  # pragma: no cover - defensive
@@ -9636,7 +9650,9 @@ class MarketService:
         price_hints: dict[str, float] = {}
         if last_price and last_price > 0:
             price_hints[symbol] = last_price
-        account_block = context.get("account") or {}
+        account_block = context.get("account")
+        if not isinstance(account_block, dict):
+            account_block = {}
         account_equity = self._extract_float(
             account_block.get("account_equity")
             or account_block.get("total_eq_usd")

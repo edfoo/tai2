@@ -1,6 +1,12 @@
 # Change Log
 
 ## 2026-11-28
+- **wick_rejection trigger: late data after the close, timings, per-coin reasons; third equity read fixed.** Seen live 2026-11-28: the 09:00 cycle's data arrived 20s *after* the close, and the trigger's late check (`seconds_to_hour_close`) wrapped to the next hour's countdown, so it reported "ok" (the strategy's own window check still vetoed every coin; no wrong-candle entry was possible).
+  - `TriggerResult.close_at` (set when the cycle starts, `hour_close_ts`) — the data and execution late checks measure against it, so data after the close reports `late (data ready Ns after the close)` and execution after the close is dropped.
+  - `TriggerResult.timings`: `vol_refresh`, `data` (all fetches) and the slowest single fetch per kind (`max_candles_1h`, `max_candles_1m`, `max_price`), appended to the summary line.
+  - Per-coin no-signal reasons: `MarketService.capture_debug()` collects the `_emit_debug` messages inside the synchronous `build_launcher_decisions` call; the trigger logs a `WR trigger: no signal — SYM: reason; …` line with each symbol's last veto (silent stages: "no veto logged (entry window or forming candle)").
+  - `build_launcher_decisions` read equity from `snapshot["account"]` (the details list) too, so any WR signal on an account holding balances raised and was dropped as a decision error; it now uses `snapshot_equity`. The `handle_llm_decision` context read is guarded the same way.
+  - Tests: `TestAfterTheClose` (3), `TestNoSignalReasons` (2) in `tests/test_wick_rejection_trigger.py`; `test_pct_equity_reads_live_snapshot_shape` (fails on the old code).
 - **wick_rejection: fix the entry crash when the account holds balances.** The trigger's `_snapshot_equity` (since Phase 6) and the STRATEGY card's risk read-out read equity from `snapshot["account"]`, which is the per-currency details list whenever the account holds balances (an empty account gave `{}` and worked). Both raised `'list' object has no attribute 'get'`; in the trigger this happened in `_execute_ranked`, after the strategy had passed, so the whole cycle failed and the entry was dropped (seen live at 2026-11-28 07:59:50 UTC). New shared `launcher_tp_sl.snapshot_equity()` reads `account_equity` / `total_eq_usd` / `total_equity` / `total_account_value` from the top of the snapshot (still accepting the older dict shape); the trigger and the card both use it. Tests: `test_entry_caps_read_equity_from_live_snapshot_shape` (fails on the old code) and a helper test in `tests/test_wick_rejection.py`.
 
 ## 2026-11-27
