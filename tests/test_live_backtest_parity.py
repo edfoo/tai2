@@ -375,3 +375,75 @@ def test_wick_rejection_exit_timing_parity(stop_pct: float | None) -> None:
             break
     assert expected is not None
     assert (pos.close_ts, pos.close_reason) == expected
+
+
+# ── wick_rejection wake profile: live vs backtest inputs ──────────────────────
+#
+# Live attaches the contract size from ``_instrument_specs`` and the 1m candles
+# the trigger fetched (raw OKX rows, newest first); the backtest attaches the
+# spec from its config and its recent 1m eval candles.  Same snapshot, same
+# candles → same decision and the same measured profile.
+
+from collections import deque  # noqa: E402
+
+
+def _wake_snapshot() -> dict[str, Any]:
+    closed: list[dict[str, Any]] = []
+    for i in range(60):
+        o = 100.0
+        c = o + (0.2 if i % 2 == 0 else -0.2)
+        closed.append({"ts": _T0 + i * _H, "open": o, "high": max(o, c) + 0.05,
+                       "low": min(o, c) - 0.05, "close": c,
+                       "volume": 500.0 if i >= 57 else 100.0})
+    f_ts = _T0 + 60 * _H
+    forming = {"ts": f_ts, "open": 100.0, "high": 104.0, "low": 99.95,
+               "close": 103.0, "volume": 1000.0}
+    return {
+        "as_of_ts": f_ts + _H - 40_000,
+        "market_data": {SYMBOL: {"indicators": {}, "timeframes": {
+            "1H": {"ohlcv": closed, "forming_candle": forming}}}},
+        "positions": [],
+        "account": {"total_eq_usd": 1000.0},
+    }
+
+
+@pytest.mark.parametrize("ct_val,fires", [(10.0, True), (100.0, False)])  # 100k vs 1M USDT/h baseline
+def test_wick_rejection_wake_profile_parity(
+    monkeypatch: pytest.MonkeyPatch, ct_val: float, fires: bool
+) -> None:
+    cfg = {**strategy_defaults("wick_rejection"), "enabled": True, "wake_profile_enabled": True,
+           "min_big_bodies": 0, "max_high_offset_pct": 100.0}
+    launcher = {"mode": "launcher_only", "strategies": {"wick_rejection": cfg}}
+    snapshot = _wake_snapshot()
+    f_ts = _T0 + 60 * _H
+    minutes = [Candle(ts=f_ts + k * 60_000, open=103.0, high=103.0 * 1.006, low=103.0,
+                      close=103.0, volume=5.0) for k in range(43, 59)]
+    okx_rows = [[str(c.ts), str(c.open), str(c.high), str(c.low), str(c.close), "5", "0", "0", "1"]
+                for c in reversed(minutes)]
+
+    service = _make_service()
+    service._strategies = [WickRejectionStrategy()]
+    service._last_full_snapshot = snapshot
+    service._instrument_specs[SYMBOL] = {"ct_val": ct_val}
+    monkeypatch.setattr(service, "_build_closed_candle_snapshot", lambda snap, sym, **k: snap)
+    monkeypatch.setattr(service, "_strategy_allowed_on_symbol", lambda name, sym: True)
+    service.set_launcher_config(launcher)
+    live = service._launcher_evaluate_signals(SYMBOL, candles_1m=okx_rows)
+
+    engine = BacktestEngine(BacktestConfig(
+        symbols=[SYMBOL], timeframe="1H", start_ts=0, end_ts=1000,
+        strategy_names=["wick_rejection"], launcher_config=launcher,
+        guardrails_config=dict(_WR_GUARDS), initial_capital=1000.0,
+        evaluation_mode="finer_ltf", evaluation_timeframe="1m",
+        instrument_specs={SYMBOL: {"ct_val": ct_val}},
+    ))
+    bt = engine._evaluate_wick_rejection(
+        WickRejectionStrategy(), SYMBOL, snapshot, cfg, deque(minutes, maxlen=16),
+        snapshot["as_of_ts"],
+    )
+
+    assert bool(live) is fires and (bt is not None) is fires
+    if fires:
+        assert "wake: base 100k/h" in bt.rationale
+        assert live[0].rationale == bt.rationale
+        assert live[0].rank_score == bt.rank_score

@@ -22,6 +22,14 @@ Funnel (§3.1), each stage vetoes before the next:
   6b. Prior rise (opt-in, ``max_prior_rise_pct``): skip when the coin already
      rose more than that over the ``prior_rise_hours`` closed candles before
      the forming one (a sustained uptrend, where the short gets stopped).
+  6c. Quiet-coin wake profile (opt-in, ``wake_profile_enabled``): the coin
+     was quiet over ``wake_base_hours`` (median hourly traded value at most
+     ``wake_max_base_volume_usd``), its volume and range grew several times
+     in the recent hours and the forming hour, its 1m candles are still
+     moving, the price sits a little below the hour's high and the candle has
+     not risen ``wake_max_candle_pct`` or more.  Needs the caller's
+     ``WR_INPUTS_KEY`` (contract size + 1m candles); without it, veto.
+     Measured by ``wake_profile`` / ``wake_profile_fails``.
   7. Optional HTF regime gate (``htf_regime_preference``, default ``"off"``).
 
 ``P`` is the forming candle's close: in the backtest the close of the latest
@@ -34,6 +42,7 @@ This module is pure: no I/O, no clock reads.
 
 from __future__ import annotations
 
+import statistics
 from dataclasses import dataclass
 from typing import Any
 
@@ -93,6 +102,201 @@ def prior_rise_pct(closed: list[dict[str, Any]], hours: int) -> float | None:
     if last is None or ref is None or ref <= 0:
         return None
     return (last / ref - 1.0) * 100.0
+
+
+# ── Quiet-coin wake profile (opt-in, ``wake_profile_enabled``) ──────────────
+#
+# The user's manual method: a coin that was quiet for one to three days, whose
+# volume and candles grew several times over the last hours, that is still
+# moving fast, and that dips just below the hour's high near the close.  The
+# caller attaches what the 1H snapshot lacks — the contract size (OKX candle
+# volume is in contracts) and the recent 1m candles — under
+# ``sym_data[WR_INPUTS_KEY]`` (``attach_wr_inputs``); live the WR trigger
+# fetches them, the backtest takes its 1m eval candles.
+
+WR_INPUTS_KEY = "wr_inputs"
+MINUTE_MS = 60_000
+
+
+def _field(candle: Any, key: str) -> float | None:
+    if isinstance(candle, dict):
+        return _f(candle.get(key))
+    return _f(getattr(candle, key, None))
+
+
+def candles_1m_to_dicts(rows: Any) -> list[dict[str, float]]:
+    """1m candles as ``{ts, open, high, low, close}`` dicts, oldest first.
+
+    Accepts ``Candle``-like objects, dicts, or raw OKX rows
+    (``[ts, o, h, l, c, ...]``, strings, newest first).  Unparseable rows are
+    dropped.
+    """
+    out: list[dict[str, float]] = []
+    for row in rows or []:
+        if isinstance(row, (list, tuple)):
+            if len(row) < 5:
+                continue
+            vals = [_f(v) for v in row[:5]]
+        else:
+            vals = [_field(row, k) for k in ("ts", "open", "high", "low", "close")]
+        if any(v is None for v in vals):
+            continue
+        ts, o, h, lo, c = vals  # type: ignore[misc]
+        out.append({"ts": ts, "open": o, "high": h, "low": lo, "close": c})
+    out.sort(key=lambda r: r["ts"])
+    return out
+
+
+def attach_wr_inputs(
+    snapshot: dict[str, Any],
+    symbol: str,
+    *,
+    ct_val: float | None,
+    candles_1m: Any,
+) -> dict[str, Any]:
+    """Shallow copy of ``snapshot`` with ``market_data[symbol][WR_INPUTS_KEY]``."""
+    md = dict(snapshot.get("market_data") or {})
+    sym = dict(md.get(symbol) or {})
+    sym[WR_INPUTS_KEY] = {
+        "ct_val": _f(ct_val),
+        "candles_1m": None if candles_1m is None else candles_1m_to_dicts(candles_1m),
+    }
+    md[symbol] = sym
+    out = dict(snapshot)
+    out["market_data"] = md
+    return out
+
+
+def avg_1m_range_pct(candles_1m: Any, as_of_ms: float, minutes: int = 15) -> float | None:
+    """Mean ``(H − L) / L × 100`` of the 1m candles closed in the ``minutes``
+    before the start of the current minute.
+
+    Anchoring on the minute start makes the live trigger (H:59:20) and the
+    backtest (H:59:00) read the same candles (H:44–H:58 for 15).  ``None``
+    when fewer than half of them are available.
+    """
+    if minutes <= 0:
+        return None
+    end = (int(as_of_ms) // MINUTE_MS) * MINUTE_MS
+    start = end - minutes * MINUTE_MS
+    ranges: list[float] = []
+    for c in candles_1m_to_dicts(candles_1m):
+        if not (start <= c["ts"] < end):
+            continue
+        if c["low"] > 0 and c["high"] >= c["low"]:
+            ranges.append((c["high"] / c["low"] - 1.0) * 100.0)
+    if len(ranges) < max(1, minutes // 2):
+        return None
+    return sum(ranges) / len(ranges)
+
+
+@dataclass
+class WakeProfile:
+    """Quiet-coin wake measures at the entry moment.
+
+    ``*_x`` values are multiples of the quiet baseline: the median hourly
+    traded value (USDT) / range of the ``base_hours`` closed candles before
+    the ``recent_hours`` most recent ones.
+    """
+
+    base_volume_usd: float
+    recent_volume_x: float | None   # mean of the recent closed hours ÷ baseline
+    hour_volume_x: float | None     # forming hour's value per hour so far ÷ baseline
+    hour_range_x: float | None      # forming hour's range ÷ baseline range
+    avg_1m_range_pct: float | None  # "still moving"
+    below_high_pct: float           # (H / P − 1) × 100
+    candle_pct: float               # (P / O − 1) × 100
+
+    def describe(self) -> str:
+        def _x(v: float | None) -> str:
+            return "n/a" if v is None else f"{v:.1f}x"
+
+        m1 = "n/a" if self.avg_1m_range_pct is None else f"{self.avg_1m_range_pct:.2f}%"
+        return (
+            f"base {self.base_volume_usd / 1000:.0f}k/h, recent {_x(self.recent_volume_x)}, "
+            f"hour vol {_x(self.hour_volume_x)}, hour range {_x(self.hour_range_x)}, "
+            f"1m range {m1}, {self.below_high_pct:.2f}% below high, candle +{self.candle_pct:.2f}%"
+        )
+
+
+def wake_profile(
+    closed: list[dict[str, Any]],
+    forming: dict[str, Any],
+    as_of_ms: float,
+    ct_val: float,
+    candles_1m: Any,
+    *,
+    base_hours: int = 48,
+    recent_hours: int = 3,
+    m1_minutes: int = 15,
+) -> WakeProfile | None:
+    """Measure the wake profile.  ``closed`` are the closed 1H candles oldest
+    first; ``forming`` the in-progress candle with ``close`` = the entry price
+    and ``high``/``low`` already widened to it.  ``None`` without
+    ``base_hours + recent_hours`` closed candles or a usable forming candle.
+    """
+    if base_hours <= 0 or recent_hours <= 0 or len(closed) < base_hours + recent_hours:
+        return None
+    f_ts, f_o = _f(forming.get("ts")), _f(forming.get("open"))
+    f_h, f_l, p = _f(forming.get("high")), _f(forming.get("low")), _f(forming.get("close"))
+    f_v = _f(forming.get("volume")) or 0.0
+    if None in (f_ts, f_o, f_h, f_l, p) or not (p and p > 0 and f_o and f_o > 0 and f_l and f_l > 0):
+        return None
+    assert f_ts is not None and f_h is not None
+
+    def value(c: dict[str, Any]) -> float:
+        return (_f(c.get("volume")) or 0.0) * ct_val * (_f(c.get("close")) or 0.0)
+
+    def rng(c: dict[str, Any]) -> float:
+        h, lo = _f(c.get("high")), _f(c.get("low"))
+        return (h / lo - 1.0) * 100.0 if h is not None and lo and lo > 0 else 0.0
+
+    base = closed[-recent_hours - base_hours:-recent_hours]
+    recent = closed[-recent_hours:]
+    base_value = statistics.median(value(c) for c in base)
+    base_range = statistics.median(rng(c) for c in base)
+    minutes = max(1.0, (as_of_ms - f_ts) / MINUTE_MS)
+    hour_range = (f_h / f_l - 1.0) * 100.0
+    return WakeProfile(
+        base_volume_usd=base_value,
+        recent_volume_x=(sum(value(c) for c in recent) / len(recent) / base_value) if base_value > 0 else None,
+        hour_volume_x=(f_v * ct_val * p * 60.0 / minutes / base_value) if base_value > 0 else None,
+        hour_range_x=(hour_range / base_range) if base_range > 0 else None,
+        avg_1m_range_pct=avg_1m_range_pct(candles_1m, as_of_ms, m1_minutes),
+        below_high_pct=(f_h / p - 1.0) * 100.0,
+        candle_pct=(p / f_o - 1.0) * 100.0,
+    )
+
+
+def wake_profile_fails(profile: WakeProfile, cfg: dict[str, Any]) -> list[str]:
+    """Failed wake-profile conditions (empty = pass).  A blank threshold is off;
+    an unmeasurable value fails its condition."""
+    fails: list[str] = []
+
+    def _min(key: str, value: float | None, label: str, unit: str) -> None:
+        lim = _f(cfg.get(key))
+        if lim is None:
+            return
+        if value is None:
+            fails.append(f"{label} unknown")
+        elif value < lim:
+            fails.append(f"{label} {value:.2f}{unit} < {lim:g}{unit}")
+
+    max_base = _f(cfg.get("wake_max_base_volume_usd"))
+    if max_base is not None and profile.base_volume_usd > max_base:
+        fails.append(f"base volume {profile.base_volume_usd / 1000:.0f}k > {max_base / 1000:g}k USDT/h")
+    _min("wake_min_recent_volume_x", profile.recent_volume_x, "recent volume", "x")
+    _min("wake_min_hour_volume_x", profile.hour_volume_x, "hour volume", "x")
+    _min("wake_min_hour_range_x", profile.hour_range_x, "hour range", "x")
+    _min("wake_min_avg_1m_range_pct", profile.avg_1m_range_pct, "avg 1m range", "%")
+    _min("wake_min_below_high_pct", profile.below_high_pct, "below high", "%")
+    max_below = _f(cfg.get("wake_max_below_high_pct"))
+    if max_below is not None and profile.below_high_pct > max_below:
+        fails.append(f"below high {profile.below_high_pct:.2f}% > {max_below:g}%")
+    max_candle = _f(cfg.get("wake_max_candle_pct"))
+    if max_candle is not None and profile.candle_pct >= max_candle:
+        fails.append(f"candle +{profile.candle_pct:.2f}% >= {max_candle:g}%")
+    return fails
 
 
 def exit_price_pcts(cfg: dict[str, Any]) -> tuple[float | None, float | None]:
@@ -250,6 +454,35 @@ class WickRejectionStrategy:
                 helpers.emit_debug(f"{tag}: veto prior {hours}h rise {rise:.1f}% > {max_rise:g}%")
                 return None
 
+        # ── 5c. Quiet-coin wake profile (opt-in) ────────────────────────
+        wake: WakeProfile | None = None
+        if bool(cfg.get("wake_profile_enabled", False)):
+            inputs = sym_data.get(WR_INPUTS_KEY) or {}
+            ct_val = _f(inputs.get("ct_val"))
+            c1m = inputs.get("candles_1m")
+            if ct_val is None or ct_val <= 0 or c1m is None:
+                helpers.emit_debug(f"{tag}: veto wake profile inputs missing (contract size / 1m candles)")
+                return None
+            base_h = int(_f(cfg.get("wake_base_hours")) or 48)
+            recent_h = int(_f(cfg.get("wake_recent_hours")) or 3)
+            wake = wake_profile(
+                closed,
+                {"ts": f_ts, "open": f_o, "high": high, "low": low, "close": p,
+                 "volume": forming.get("volume")},
+                as_of, ct_val, c1m,
+                base_hours=base_h, recent_hours=recent_h,
+                m1_minutes=int(_f(cfg.get("wake_1m_minutes")) or 15),
+            )
+            if wake is None:
+                helpers.emit_debug(
+                    f"{tag}: veto wake profile history < {base_h + recent_h} closed candles"
+                )
+                return None
+            fails = wake_profile_fails(wake, cfg)
+            if fails:
+                helpers.emit_debug(f"{tag}: veto wake profile ({'; '.join(fails)})")
+                return None
+
         # ── 6. Big-body setup ───────────────────────────────────────────
         window = int(_f(cfg.get("body_avg_window")) or 8)
         lookback = int(_f(cfg.get("setup_lookback_candles")) or 0)
@@ -309,6 +542,8 @@ class WickRejectionStrategy:
             f"{offset_pct:.0f}% of {range_pct:.1f}% range, body "
             f"{ratio_max:.1f}x ({age_txt})"
         )
+        if wake is not None:
+            rationale += f"; wake: {wake.describe()}"
         if momentum is not None:
             rationale += f"; momentum: {momentum.describe()}"
         elif mode != "clock":

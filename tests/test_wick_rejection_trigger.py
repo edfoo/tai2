@@ -76,6 +76,8 @@ class _FakeMS:
         self.prices = prices
         self.refreshed: list[tuple[str, str]] = []
         self.built: list[tuple[str, Any, float | None]] = []
+        self.fetched_1m: list[str] = []
+        self.candles_1m: dict[str, Any] = {}
         self.executed: list[str] = []
         self.log: list[str] = []
         self._launcher_in_position: dict[str, dict[str, Any]] = {}
@@ -93,8 +95,13 @@ class _FakeMS:
         px = self.prices.get(sym)
         return (px, "ws", 0.4) if px else (None, "rest_failed", None)
 
-    def build_launcher_decisions(self, sym: str, strategies=None, *, price=None):
+    async def fetch_wr_1m_candles(self, sym: str, limit: int = 20):
+        self.fetched_1m.append(sym)
+        return [[str(1_000 + i), "1", "1", "1", "1"] for i in range(3)]
+
+    def build_launcher_decisions(self, sym: str, strategies=None, *, price=None, candles_1m=None):
         self.built.append((sym, strategies, price))
+        self.candles_1m[sym] = candles_1m
         if sym not in self.ranks:
             return []
         return [{"action": "SELL", "symbol": sym, "_rank_score": self.ranks[sym],
@@ -142,6 +149,37 @@ class TestRunOnce:
         assert sorted(ms.refreshed) == [(s, "1H") for s in SYMS]
         assert all(b[1] == ["wick_rejection"] and b[2] == 1.0 for b in ms.built)
         assert "entries 3" in res.summary()
+
+    def test_wake_profile_off_fetches_no_1m_candles(self) -> None:
+        ms = _FakeMS(SYMS, {"A-USDT-SWAP": 1.0}, {s: 1.0 for s in SYMS})
+        _run(_trigger(ms))
+        assert ms.fetched_1m == []
+        assert ms.candles_1m == {s: None for s in SYMS}
+
+    def test_wake_profile_fetches_and_passes_1m_candles(self) -> None:
+        ms = _FakeMS(SYMS, {"A-USDT-SWAP": 1.0}, {s: 1.0 for s in SYMS})
+        _run(_trigger(ms, cfg=_wr(wake_profile_enabled=True)))
+        assert sorted(ms.fetched_1m) == SYMS
+        assert all(len(ms.candles_1m[s]) == 3 for s in SYMS)
+
+    def test_1m_candles_fetched_once_per_minute(self) -> None:
+        ms = _FakeMS(SYMS, {}, {})
+        now = [H0 + HOUR - 100.0]
+        trig = WickRejectionTrigger(
+            SimpleNamespace(state=SimpleNamespace(runtime_config={}, market_service=ms)),
+            asyncio.Lock(), clock=lambda: now[0], is_enabled=lambda: True,
+        )
+        cfg, cache = _wr(wake_profile_enabled=True), {}
+
+        async def go():
+            await trig._candles_1m(ms, cfg, "A-USDT-SWAP", cache)
+            now[0] += 2.0  # same minute (H0 is minute-aligned; 3500 s in → 58:20)
+            await trig._candles_1m(ms, cfg, "A-USDT-SWAP", cache)
+            now[0] += 60.0
+            await trig._candles_1m(ms, cfg, "A-USDT-SWAP", cache)
+
+        asyncio.run(go())
+        assert ms.fetched_1m == ["A-USDT-SWAP", "A-USDT-SWAP"]
 
     def test_max_concurrent_counts_open_wr(self) -> None:
         ms = _FakeMS(SYMS, {"A-USDT-SWAP": 1.0, "B-USDT-SWAP": 3.0, "C-USDT-SWAP": 2.0},

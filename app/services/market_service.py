@@ -60,7 +60,7 @@ from app.services.strategies.mean_reversion import MeanReversionStrategy
 from app.services.strategies.spike_continuation import SpikeContinuationStrategy
 from app.services.strategies.trend_pullback import TrendPullbackStrategy
 from app.services.strategies.vwap_reversion import VWAPReversionStrategy
-from app.services.strategies.wick_rejection import WickRejectionStrategy
+from app.services.strategies.wick_rejection import WickRejectionStrategy, attach_wr_inputs
 from app.services.strategies.wr_momentum import MOMENTUM_MISSING, attach_momentum
 
 
@@ -4013,6 +4013,7 @@ class MarketService:
         *,
         forming_price: float | None = None,
         momentum: Any = None,
+        candles_1m: Any = None,
     ) -> list[StrategySignal]:
         """Return all strategy signals for a symbol (concurrent evaluation).
 
@@ -4053,6 +4054,13 @@ class MarketService:
             # or MOMENTUM_MISSING (tape gap) — see wr_momentum.attach_momentum.
             snapshot = attach_momentum(
                 snapshot, symbol, None if momentum is MOMENTUM_MISSING else momentum
+            )
+        if candles_1m is not None:
+            # wick_rejection wake profile: 1m candles + contract size (OKX
+            # candle volume is in contracts) — see wick_rejection.attach_wr_inputs.
+            spec = self._instrument_specs.get(symbol.upper()) or {}
+            snapshot = attach_wr_inputs(
+                snapshot, symbol, ct_val=spec.get("ct_val"), candles_1m=candles_1m
             )
         strategies_cfg = self._launcher_config.get("strategies") or {}
         only = {str(n) for n in strategies} if strategies is not None else None
@@ -4418,6 +4426,7 @@ class MarketService:
         *,
         price: float | None = None,
         momentum: Any = None,
+        candles_1m: Any = None,
     ) -> list[dict[str, Any]]:
         """Build decision dicts for all strategies that fire on a symbol.
 
@@ -4435,7 +4444,9 @@ class MarketService:
         caller: it replaces the cached last price and becomes the forming
         candle's close.  ``momentum`` (wick_rejection momentum mode) attaches
         the trigger's momentum measures — or ``MOMENTUM_MISSING`` — so the
-        strategy applies its momentum gate and window.
+        strategy applies its momentum gate and window.  ``candles_1m``
+        (wick_rejection wake profile, from ``fetch_wr_1m_candles``) attaches
+        the recent 1m candles and the contract size.
         """
         gov = self._launcher_config
         snapshot = self._last_full_snapshot
@@ -4459,7 +4470,7 @@ class MarketService:
 
         signals = self._launcher_evaluate_signals(
             symbol, strategies, forming_price=price if price and price > 0 else None,
-            momentum=momentum,
+            momentum=momentum, candles_1m=candles_1m,
         )
         if not signals:
             return []
@@ -7044,6 +7055,13 @@ class MarketService:
         self._latest_ticker[symbol] = data[0]
         rest_ts = self._extract_float(data[0].get("ts"))
         return px, "rest", (time.time() - rest_ts / 1000.0) if rest_ts else None
+
+    async def fetch_wr_1m_candles(self, symbol: str, limit: int = 20) -> list[Any]:
+        """The newest ``limit`` 1m candles (raw OKX rows) for the wick_rejection
+        wake profile.  Never falls back to a cache: a failed fetch returns
+        ``[]`` and the strategy vetoes, rather than measuring stale candles.
+        """
+        return await self._fetch_ohlcv_bar(symbol, "1m", {}, limit=max(1, int(limit)))
 
     async def refresh_timeframe_candles(self, symbol: str, bar: str) -> int:
         """Refetch ``bar`` candles for ``symbol`` into ``_latest_ohlcv_tf``.

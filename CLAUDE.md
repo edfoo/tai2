@@ -68,7 +68,7 @@ uv run pytest
 ```
 - `pytest-xdist` runs with `-n auto` by default (see `pyproject.toml`); the suite takes ~15s.
 - Tests marked `network` hit live services and are skipped by default.
-- All tests must pass (1053 passing, 0 pre-existing failures as of 2026-11-25). Any failure is a regression.
+- All tests must pass (1075 passing, 0 pre-existing failures as of 2026-11-27). Any failure is a regression.
 
 ---
 

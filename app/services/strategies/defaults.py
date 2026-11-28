@@ -430,6 +430,23 @@ DEFAULT_WICK_REJECTION: dict[str, Any] = {
     # candles before the forming one (None = off; stops cluster on such coins).
     "max_prior_rise_pct": None,
     "prior_rise_hours": 24,
+    # Quiet-coin wake profile (off by default; the thresholds are the values
+    # backtested over five windows Sep 6 – Nov 25, 2026).  A blank threshold
+    # turns that condition off.  Tested with min_big_bodies 0, max_high_offset
+    # 100 (off), 5% price stop / 2% price TP, no time stop, and the screener's
+    # vol_min_volume_usd 250k / vol_max_symbols 20.
+    "wake_profile_enabled": False,
+    "wake_base_hours": 48,                 # quiet baseline: closed hours before the recent ones
+    "wake_recent_hours": 3,
+    "wake_max_base_volume_usd": 500_000.0,  # median hourly traded value of the baseline
+    "wake_min_recent_volume_x": 3.0,       # recent hours' mean value ÷ baseline
+    "wake_min_hour_volume_x": 5.0,         # forming hour's value per hour ÷ baseline
+    "wake_min_hour_range_x": 3.0,          # forming hour's range ÷ baseline median range
+    "wake_1m_minutes": 15,
+    "wake_min_avg_1m_range_pct": 0.4,      # "still moving": mean 1m range
+    "wake_min_below_high_pct": 0.3,        # price below the hour's high, %
+    "wake_max_below_high_pct": 1.5,
+    "wake_max_candle_pct": 4.0,            # skip candles already up this much (stops cluster there)
     # Exits (strategy-owned)
     "use_global_trade_management": False,
     "tp_pct": 0.5,
@@ -451,6 +468,23 @@ DEFAULT_WICK_REJECTION: dict[str, Any] = {
 }
 
 # Registry keyed by strategy name.
+# The backtested quiet-wake setup for wick_rejection (STRATEGY page "Quiet-wake
+# preset"): the wake profile replaces the big-body and high-offset gates (100%
+# offset = off), with 5% price stop / 2% price TP and no time stop.  Five
+# 16-day windows Sep 6 – Nov 25, 2026, 20 USDT margin at 5x: +9.6, +18.7, +20.4,
+# +34.3, +20.7 (the first three were used to pick the candle cap).
+WR_WAKE_PRESET: dict[str, Any] = {
+    "wake_profile_enabled": True,
+    "min_big_bodies": 0,
+    "max_high_offset_pct": 100.0,
+    "tp_pct": 2.0,
+    "tp_unit": "price",
+    "emergency_stop_mode": "exchange",
+    "emergency_stop_pct": 5.0,
+    "emergency_stop_unit": "price",
+    "max_hold_minutes": 0,
+}
+
 DEFAULT_STRATEGY_CONFIG: dict[str, dict[str, Any]] = {
     "mean_reversion": DEFAULT_MEAN_REVERSION,
     "spike_continuation": DEFAULT_SPIKE_CONTINUATION,

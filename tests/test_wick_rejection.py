@@ -7,6 +7,7 @@ that the strategy reads the forming 1H candle at the right moment.
 
 from __future__ import annotations
 
+import statistics
 from typing import Any
 
 import pytest
@@ -17,12 +18,18 @@ from app.services.backtest.snapshot_builder import SnapshotBuilder
 from app.services.backtest.sweep_catalog import STRATEGY_SWEEP_PARAMS
 from app.services.market_service import MarketService
 from app.services.strategies import StrategyHelpers
-from app.services.strategies.defaults import DEFAULT_STRATEGY_CONFIG, strategy_defaults
+from app.services.strategies.defaults import DEFAULT_STRATEGY_CONFIG, WR_WAKE_PRESET, strategy_defaults
 from app.services.strategies.wick_rejection import (
+    WakeProfile,
     WickRejectionStrategy,
+    attach_wr_inputs,
+    avg_1m_range_pct,
     body_ratio,
+    candles_1m_to_dicts,
     exit_price_pcts,
     prior_rise_pct,
+    wake_profile,
+    wake_profile_fails,
 )
 
 SYMBOL = "TEST-USDT-SWAP"
@@ -285,6 +292,185 @@ class TestFunnel:
 # ── Registries ────────────────────────────────────────────────────────────────
 
 
+# ── Quiet-coin wake profile ───────────────────────────────────────────────────
+
+CT = 10.0  # contract size: candle volume is in contracts
+
+
+def _wake_hours(n: int = 60, *, base_vol: float = 100.0, recent_vol: float = 500.0) -> list[dict[str, Any]]:
+    """Quiet hours (0.5% range, ``base_vol`` contracts ≈ 100k USDT/h at CT 10),
+    then 3 busier closed hours of ``recent_vol``."""
+    out: list[dict[str, Any]] = []
+    for i in range(n):
+        o = 100.0
+        c = o + (0.2 if i % 2 == 0 else -0.2)
+        out.append({"ts": T0 + i * H, "open": o, "high": max(o, c) + 0.05,
+                    "low": min(o, c) - 0.05, "close": c,
+                    "volume": recent_vol if i >= n - 3 else base_vol})
+    return out
+
+
+def _wake_forming(closed: list[dict[str, Any]], *, open_: float = 100.0, high: float = 104.0,
+                  price: float = 103.0, volume: float = 1000.0) -> dict[str, Any]:
+    return {"ts": T0 + len(closed) * H, "open": open_, "high": high, "low": open_ - 0.05,
+            "close": price, "volume": volume}
+
+
+def _minutes_1m(f_ts: int, *, rng: float = 0.006, upto: int = 59) -> list[dict[str, Any]]:
+    """1m candles H:40 … H:``upto`` of the forming hour, each ``rng`` wide."""
+    return [{"ts": f_ts + k * M, "open": 103.0, "high": 103.0 * (1 + rng), "low": 103.0,
+             "close": 103.0} for k in range(40, upto + 1)]
+
+
+def _wake_snap(closed, forming, *, ct: float | None = CT, candles=None, seconds_to_close: float = 40.0):
+    snap = _snapshot(closed=closed, forming=forming, seconds_to_close=seconds_to_close)
+    if ct is None and candles is None:
+        return snap
+    c1m = _minutes_1m(forming["ts"]) if candles is None else candles
+    return attach_wr_inputs(snap, SYMBOL, ct_val=ct, candles_1m=c1m)
+
+
+_PRESET = {"wake_profile_enabled": True, "min_big_bodies": 0, "max_high_offset_pct": 100.0}
+
+
+class TestWakeHelpers:
+    def test_avg_1m_range_reads_closed_minutes_before_the_current_one(self) -> None:
+        f_ts = T0 + 60 * H
+        candles = _minutes_1m(f_ts, rng=0.01)
+        candles[-1]["high"] = 200.0  # H:59, still forming: never read
+        candles[4]["high"] = 200.0   # H:44, the first one read
+        live = avg_1m_range_pct(candles, f_ts + 59 * M + 20_000)  # trigger at H:59:20
+        bt = avg_1m_range_pct(candles, f_ts + 59 * M)             # backtest step at H:59:00
+        assert live == bt
+        want = ((200.0 / 103.0 - 1) * 100 + 14 * 1.0) / 15
+        assert live == pytest.approx(want)
+
+    def test_avg_1m_range_needs_half_the_minutes(self) -> None:
+        f_ts = T0 + 60 * H
+        assert avg_1m_range_pct(_minutes_1m(f_ts)[-7:], f_ts + 59 * M, 15) is None  # 6 closed
+        assert avg_1m_range_pct(_minutes_1m(f_ts)[-8:], f_ts + 59 * M, 15) is not None  # 7
+
+    def test_candles_1m_to_dicts_accepts_okx_rows_and_objects(self) -> None:
+        rows = [["2000", "1", "3", "0.5", "2", "9"], ["1000", "1", "2", "1", "1.5", "9"]]
+        assert candles_1m_to_dicts(rows) == [
+            {"ts": 1000.0, "open": 1.0, "high": 2.0, "low": 1.0, "close": 1.5},
+            {"ts": 2000.0, "open": 1.0, "high": 3.0, "low": 0.5, "close": 2.0},
+        ]
+        obj = Candle(ts=5, open=1.0, high=2.0, low=0.5, close=1.0, volume=3.0)
+        assert candles_1m_to_dicts([obj]) == [{"ts": 5.0, "open": 1.0, "high": 2.0, "low": 0.5, "close": 1.0}]
+
+    def test_wake_profile_measures(self) -> None:
+        closed = _wake_hours()
+        forming = _wake_forming(closed)
+        as_of = forming["ts"] + 59 * M
+        p = wake_profile(closed, forming, as_of, CT, _minutes_1m(forming["ts"]))
+        assert p is not None
+        base_value = statistics.median(c["volume"] * CT * c["close"] for c in closed[-51:-3])
+        assert p.base_volume_usd == pytest.approx(base_value)
+        assert p.recent_volume_x == pytest.approx(
+            sum(c["volume"] * CT * c["close"] for c in closed[-3:]) / 3 / base_value)
+        assert p.hour_volume_x == pytest.approx(1000.0 * CT * 103.0 * 60 / 59 / base_value)
+        base_range = statistics.median((c["high"] / c["low"] - 1) * 100 for c in closed[-51:-3])
+        assert p.hour_range_x == pytest.approx((104.0 / 99.95 - 1) * 100 / base_range)
+        assert p.avg_1m_range_pct == pytest.approx(0.6)
+        assert p.below_high_pct == pytest.approx((104.0 / 103.0 - 1) * 100)
+        assert p.candle_pct == pytest.approx(3.0)
+
+    def test_contract_size_scales_value_not_ratios(self) -> None:
+        closed = _wake_hours()
+        forming = _wake_forming(closed)
+        as_of = forming["ts"] + 59 * M
+        a = wake_profile(closed, forming, as_of, CT, [])
+        b = wake_profile(closed, forming, as_of, 2 * CT, [])
+        assert a is not None and b is not None
+        assert b.base_volume_usd == pytest.approx(2 * a.base_volume_usd)
+        assert (b.recent_volume_x, b.hour_volume_x) == pytest.approx((a.recent_volume_x, a.hour_volume_x))
+
+    def test_wake_profile_needs_history(self) -> None:
+        closed = _wake_hours(50)
+        assert wake_profile(closed, _wake_forming(closed), 0, CT, []) is None
+        assert wake_profile(closed, _wake_forming(closed), 0, CT, [], base_hours=47) is not None
+
+    def test_fails_each_threshold_and_blank_is_off(self) -> None:
+        d = strategy_defaults("wick_rejection")
+        good = WakeProfile(base_volume_usd=100_000, recent_volume_x=4, hour_volume_x=6,
+                           hour_range_x=4, avg_1m_range_pct=0.5, below_high_pct=1.0, candle_pct=3.0)
+        assert wake_profile_fails(good, d) == []
+        cases = {
+            "base_volume_usd": (600_000, "base volume 600k > 500k USDT/h"),
+            "recent_volume_x": (2.0, "recent volume 2.00x < 3x"),
+            "hour_volume_x": (4.0, "hour volume 4.00x < 5x"),
+            "hour_range_x": (2.0, "hour range 2.00x < 3x"),
+            "avg_1m_range_pct": (0.3, "avg 1m range 0.30% < 0.4%"),
+            "candle_pct": (4.0, "candle +4.00% >= 4%"),
+        }
+        for field, (value, msg) in cases.items():
+            bad = WakeProfile(**{**good.__dict__, field: value})
+            assert wake_profile_fails(bad, d) == [msg]
+        assert wake_profile_fails(WakeProfile(**{**good.__dict__, "below_high_pct": 0.2}), d) == [
+            "below high 0.20% < 0.3%"]
+        assert wake_profile_fails(WakeProfile(**{**good.__dict__, "below_high_pct": 1.6}), d) == [
+            "below high 1.60% > 1.5%"]
+        assert wake_profile_fails(WakeProfile(**{**good.__dict__, "avg_1m_range_pct": None}), d) == [
+            "avg 1m range unknown"]
+        off = {**d, "wake_max_candle_pct": None, "wake_max_base_volume_usd": None}
+        assert wake_profile_fails(WakeProfile(**{**good.__dict__, "candle_pct": 9.0,
+                                                 "base_volume_usd": 9e9}), off) == []
+
+
+class TestWakeFunnel:
+    def test_off_by_default_needs_no_inputs(self) -> None:
+        closed = _wake_hours()
+        snap = _wake_snap(closed, _wake_forming(closed), ct=None)
+        assert _eval(snap, min_big_bodies=0, max_high_offset_pct=100.0) is not None
+
+    def test_missing_inputs_veto(self) -> None:
+        closed = _wake_hours()
+        log: list[str] = []
+        assert _eval(_wake_snap(closed, _wake_forming(closed), ct=None), log, **_PRESET) is None
+        assert any("wake profile inputs missing" in m for m in log)
+
+    def test_signal_carries_the_profile(self) -> None:
+        closed = _wake_hours()
+        sig = _eval(_wake_snap(closed, _wake_forming(closed)), **_PRESET)
+        assert sig is not None
+        assert "wake: base 100k/h" in sig.rationale and "candle +3.00%" in sig.rationale
+
+    def test_candle_cap(self) -> None:
+        closed = _wake_hours()
+        forming = _wake_forming(closed, open_=99.0)  # +4.04%
+        log: list[str] = []
+        assert _eval(_wake_snap(closed, forming), log, **_PRESET) is None
+        assert any("candle +4.04% >= 4%" in m for m in log)
+        assert _eval(_wake_snap(closed, forming), **_PRESET, wake_max_candle_pct=None) is not None
+
+    def test_busy_baseline_veto(self) -> None:
+        closed = _wake_hours()
+        log: list[str] = []
+        assert _eval(_wake_snap(closed, _wake_forming(closed), ct=100.0), log, **_PRESET) is None
+        assert any("base volume 1000k > 500k" in m for m in log)
+
+    def test_no_wake_veto(self) -> None:
+        closed = _wake_hours(recent_vol=100.0)  # recent hours as quiet as the baseline
+        log: list[str] = []
+        assert _eval(_wake_snap(closed, _wake_forming(closed)), log, **_PRESET) is None
+        assert any("recent volume 1.00x < 3x" in m for m in log)
+
+    def test_still_moving_veto(self) -> None:
+        closed = _wake_hours()
+        forming = _wake_forming(closed)
+        log: list[str] = []
+        snap = _wake_snap(closed, forming, candles=_minutes_1m(forming["ts"], rng=0.002))
+        assert _eval(snap, log, **_PRESET) is None
+        assert any("avg 1m range 0.20% < 0.4%" in m for m in log)
+
+    def test_short_history_veto(self) -> None:
+        closed = _wake_hours(50)
+        log: list[str] = []
+        assert _eval(_wake_snap(closed, _wake_forming(closed)), log, **_PRESET) is None
+        assert any("wake profile history < 51 closed candles" in m for m in log)
+
+
 class TestRegistration:
     def test_defaults_registered(self) -> None:
         d = DEFAULT_STRATEGY_CONFIG["wick_rejection"]
@@ -294,6 +480,19 @@ class TestRegistration:
 
     def test_backtest_registry(self) -> None:
         assert "wick_rejection" in available_strategy_names()
+
+    def test_wake_profile_off_and_preset_keys_exist(self) -> None:
+        d = DEFAULT_STRATEGY_CONFIG["wick_rejection"]
+        assert d["wake_profile_enabled"] is False
+        assert set(WR_WAKE_PRESET) <= set(d)
+        assert WR_WAKE_PRESET["wake_profile_enabled"] is True
+
+    def test_strategy_page_saves_every_wake_key(self) -> None:
+        from pathlib import Path
+
+        src = (Path(__file__).resolve().parents[1] / "app" / "ui" / "pages.py").read_text()
+        for key in (k for k in DEFAULT_STRATEGY_CONFIG["wick_rejection"] if k.startswith("wake_")):
+            assert f'"{key}": ' in src, key
 
     def test_sweep_keys_exist_in_defaults(self) -> None:
         d = DEFAULT_STRATEGY_CONFIG["wick_rejection"]

@@ -374,7 +374,8 @@ class _WatchMS:
     async def fetch_trigger_price(self, sym: str, *, max_age_seconds: float):
         return self.prices[sym](self.clock.now - self.start), "ws", 0.1
 
-    def build_launcher_decisions(self, sym: str, strategies=None, *, price=None, momentum=None):
+    def build_launcher_decisions(self, sym: str, strategies=None, *, price=None, momentum=None,
+                                 candles_1m=None):
         self.built.append((sym, momentum))
         if momentum is None and not self.clock_signal:
             return []

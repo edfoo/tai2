@@ -1,5 +1,16 @@
 # Change Log
 
+## 2026-11-27
+- **wick_rejection: opt-in quiet-coin wake profile (stage 5c).** The user's manual method as a gate: the coin was quiet, then woke up, is still moving fast, and sits a little below the hour's high. `wake_profile_enabled` (default off) requires, against a quiet baseline of the `wake_base_hours` (48) closed hours before the `wake_recent_hours` (3) most recent:
+  - baseline median hourly traded value ≤ `wake_max_base_volume_usd` (500k USDT);
+  - recent hours' value ≥ `wake_min_recent_volume_x` (3×), forming hour's value per hour ≥ `wake_min_hour_volume_x` (5×), forming hour's range ≥ `wake_min_hour_range_x` (3×) the baseline;
+  - mean range of the last `wake_1m_minutes` (15) closed 1m candles ≥ `wake_min_avg_1m_range_pct` (0.4%);
+  - price `wake_min_below_high_pct`..`wake_max_below_high_pct` (0.3–1.5%) below the hour's high;
+  - candle rise below `wake_max_candle_pct` (4%), where stops clustered.
+  Blank thresholds are off. Pure helpers `wake_profile` / `wake_profile_fails` / `avg_1m_range_pct` in `strategies/wick_rejection.py`. The 1H snapshot lacks two inputs, attached under `sym_data["wr_inputs"]` (`attach_wr_inputs`): the contract size (OKX candle volume is in contracts) and the 1m candles. Live, the trigger fetches 1m candles (`MarketService.fetch_wr_1m_candles`, no cache fallback; at most once per minute in momentum mode) and passes them through `build_launcher_decisions(candles_1m=)`; the backtest attaches its 1m eval candles and the instrument spec in `_evaluate_wick_rejection`. The 1m window is anchored on the start of the current minute, so the H:59:20 trigger and the H:59:00 backtest step read the same candles.
+  - `WR_WAKE_PRESET` (defaults.py) and a "Quiet-wake preset" button on the card: profile on, `min_big_bodies` 0, `max_high_offset_pct` 100 (off), 5% price stop / 2% price TP, no time stop. Backtested with the vol list at `vol_min_volume_usd` 250k / `vol_max_symbols` 20, 20 USDT margin at 5×, 5 bps slippage, five 16-day windows Sep 6 – Nov 25: +9.6, +18.7, +20.4 (one split-distorted KIOXIA trade removed), +34.3, +20.7 USDT; 305 trades, 74–80% win rate. The candle cap was chosen on the first three windows; the last two were unseen.
+  - UI section and preset on the Wick Rejection card; all keys in the sweep catalog. Tests: `tests/test_wick_rejection.py` (+18), live/backtest parity `test_wick_rejection_wake_profile_parity`, trigger 1m fetching (+3).
+
 ## 2026-11-25
 - **wick_rejection: opt-in prior-rise gate.** `max_prior_rise_pct` (default None = off) skips a coin whose last closed 1H close is more than that above the close `prior_rise_hours` (default 24) candles earlier; with too little history it vetoes. Pure helper `prior_rise_pct` in `strategies/wick_rejection.py`, used by the strategy itself, so live and the backtest decide the same way. From the stop-out analysis of two 16-day windows: stopped trades had a median prior-24h rise of +6.0% against +2.5% for TP trades. UI fields on the Wick Rejection card; both keys in the sweep catalog. Tests in `tests/test_wick_rejection.py` (+5).
 

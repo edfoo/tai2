@@ -303,6 +303,29 @@ class WickRejectionTrigger:
             return None
         return rc, ms, cfg, symbols
 
+    async def _candles_1m(
+        self, ms: Any, cfg: dict[str, Any], sym: str, cache: dict[str, tuple[int, Any]]
+    ) -> Any:
+        """Recent 1m candles for the wake profile, or ``None`` when it is off.
+
+        Fetched at most once per minute per symbol (the profile reads only
+        candles closed before the current minute).  A failed fetch gives
+        ``[]``, which the strategy vetoes.
+        """
+        if not bool(cfg.get("wake_profile_enabled", False)):
+            return None
+        minute = int(self._clock() // 60)
+        hit = cache.get(sym)
+        if hit is not None and hit[0] == minute:
+            return hit[1]
+        try:
+            rows = await ms.fetch_wr_1m_candles(sym)
+        except Exception as exc:  # pragma: no cover - network safety
+            self._log(f"WR trigger: {sym} 1m candle fetch failed: {exc}")
+            rows = []
+        cache[sym] = (minute, rows)
+        return rows
+
     async def run_once(self) -> TriggerResult:
         """Evaluate and execute one clock trigger cycle now."""
         result = TriggerResult()
@@ -323,12 +346,21 @@ class WickRejectionTrigger:
         tf = str(cfg.get("analysis_timeframe") or "1H")
 
         # ── 1. Data, concurrently: candles + price per symbol ──────────
+        c1m_cache: dict[str, tuple[int, Any]] = {}
+
         async def _gather(sym: str) -> tuple[str, tuple[float | None, str, float | None]]:
-            try:
-                await ms.refresh_timeframe_candles(sym, tf)
-            except Exception as exc:  # pragma: no cover - network safety
-                self._log(f"WR trigger: {sym} candle refresh failed: {exc}")
-            return sym, await ms.fetch_trigger_price(sym, max_age_seconds=max_age)
+            async def _candles() -> None:
+                try:
+                    await ms.refresh_timeframe_candles(sym, tf)
+                except Exception as exc:  # pragma: no cover - network safety
+                    self._log(f"WR trigger: {sym} candle refresh failed: {exc}")
+
+            _, _, price_info = await asyncio.gather(
+                _candles(),
+                self._candles_1m(ms, cfg, sym, c1m_cache),
+                ms.fetch_trigger_price(sym, max_age_seconds=max_age),
+            )
+            return sym, price_info
 
         gathered = await asyncio.gather(*(_gather(s) for s in symbols), return_exceptions=True)
         for item in gathered:
@@ -358,7 +390,10 @@ class WickRejectionTrigger:
                 result.dropped[sym] = f"no price ({source})"
                 continue
             try:
-                for d in ms.build_launcher_decisions(sym, strategies=[STRATEGY_NAME], price=price):
+                for d in ms.build_launcher_decisions(
+                    sym, strategies=[STRATEGY_NAME], price=price,
+                    candles_1m=(c1m_cache.get(sym) or (0, None))[1],
+                ):
                     decisions.append((sym, d))
             except Exception as exc:  # pragma: no cover - defensive
                 result.dropped[sym] = f"decision error: {exc}"
@@ -455,6 +490,7 @@ class WickRejectionTrigger:
         early_logged: set[str] = set()
         last_refresh: dict[str, float] = {}
         last_veto: dict[str, str] = {}
+        c1m_cache: dict[str, tuple[int, Any]] = {}
 
         async def _refresh(sym: str) -> None:
             try:
@@ -514,8 +550,10 @@ class WickRejectionTrigger:
                     if self._clock() - last_refresh.get(sym, 0.0) >= 10.0:
                         await _refresh(sym)
                     try:
+                        c1m = await self._candles_1m(ms, cfg, sym, c1m_cache)
                         ds = ms.build_launcher_decisions(
-                            sym, strategies=[STRATEGY_NAME], price=m.last_px, momentum=m
+                            sym, strategies=[STRATEGY_NAME], price=m.last_px, momentum=m,
+                            candles_1m=c1m,
                         )
                     except Exception as exc:  # pragma: no cover - defensive
                         ds = []

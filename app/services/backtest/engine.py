@@ -57,6 +57,7 @@ from app.services.strategies.vwap_reversion import VWAPReversionStrategy
 from app.services.strategies.wick_rejection import (
     STRATEGY_NAME as WR_NAME,
     WickRejectionStrategy,
+    attach_wr_inputs,
     backtest_entry_timing,
     backtest_vol_refresh_cut_seconds,
     select_ranked_entries,
@@ -1051,8 +1052,21 @@ class BacktestEngine:
         1m approximation) and are attached to the snapshot, so the strategy
         applies the same gate and window as live.  ``momentum_or_clock`` falls
         back to the clock evaluation when the momentum one does not fire.
+
+        With the wake profile on, the contract size and the recent eval
+        candles (the 1m candles live fetches at the trigger) are attached
+        first; with a coarser eval timeframe there are no 1m candles, so the
+        strategy vetoes.
         """
         cfg = merged_config(strat_cfg, WR_NAME)
+        if bool(cfg.get("wake_profile_enabled", False)):
+            specs = self._config.instrument_specs or {}
+            spec = specs.get(symbol) or specs.get(symbol.upper()) or {}
+            eval_ms = timeframe_ms(self._eval_tf) if self._eval_tf else None
+            snapshot = attach_wr_inputs(
+                snapshot, symbol, ct_val=spec.get("ct_val"),
+                candles_1m=list(recent) if eval_ms == 60_000 else None,
+            )
         mode = str(cfg.get("entry_mode") or "clock").lower()
         if mode not in ("momentum", "momentum_or_clock"):
             return strategy.evaluate(symbol, snapshot, strat_cfg, self._helpers)

@@ -57,6 +57,7 @@ from app.services.openrouter_service import (
 from app.services.prompt_utils import sanitize_prompt_text
 from app.services.launcher_tp_sl import wick_rejection_risk_summary
 from app.services.strategies.defaults import (
+    WR_WAKE_PRESET,
     merged_config,
     screener_defaults,
     strategy_defaults,
@@ -4879,6 +4880,84 @@ def register_pages(app: FastAPI) -> None:
                                 "Forming candle must be green", value=bool(_wr_cfg["require_forming_green"]),
                             ).props("dense color=primary")
 
+                        # ── Quiet-coin wake profile ─────────────────────
+                        ui.separator().classes("my-2")
+                        ui.label("Quiet-coin wake profile (optional)").classes("text-xs font-bold text-slate-700")
+                        ui.label(
+                            "Only short a coin that was quiet (the baseline: median hourly traded value of "
+                            "the closed hours before the recent ones), whose volume and candles then grew "
+                            "several times, that is still moving fast on its 1m candles, and that sits a "
+                            "little below the hour's high. Multiples (x) are of the quiet baseline. The "
+                            "trigger fetches the last 1m candles for this (backtest: 1m evaluation). Blank "
+                            "thresholds are off. 'Quiet-wake preset' applies the backtested setup: this "
+                            "profile, no big-body or high-offset gate, 5% price stop / 2% price TP, no time "
+                            "stop — tested with the CFG vol list at 250k min volume and 20 symbols."
+                        ).classes("text-[11px] text-slate-400 mb-2")
+                        with ui.row().classes("w-full items-center gap-4 mt-1"):
+                            wr_wake_switch = ui.switch(
+                                "Require the wake profile", value=bool(_wr_cfg.get("wake_profile_enabled", False)),
+                            ).props("dense color=primary")
+                            ui.button(
+                                "Quiet-wake preset",
+                                icon="bolt",
+                                on_click=lambda _: _set_wr_wake_preset(),
+                            ).props("dense flat color=primary size=sm").tooltip(
+                                "Turn the profile on with the backtested thresholds and exits. "
+                                "You still need to click Save to persist."
+                            )
+                        with ui.row().classes("w-full flex-wrap gap-4 items-start mt-1"):
+                            def _wake_val(key: str) -> float | None:
+                                v = _wr_cfg.get(key)
+                                return float(v) if v is not None else None
+
+                            wr_wake_base_hours_input = ui.number(
+                                label="Quiet baseline (h)", value=_wake_val("wake_base_hours"),
+                                min=6, max=168, step=1, format="%.0f",
+                            ).classes("w-36").props("dense")
+                            wr_wake_recent_hours_input = ui.number(
+                                label="Recent hours", value=_wake_val("wake_recent_hours"),
+                                min=1, max=24, step=1, format="%.0f",
+                            ).classes("w-36").props("dense")
+                            wr_wake_max_base_input = ui.number(
+                                label="Max baseline volume (USDT/h)", value=_wake_val("wake_max_base_volume_usd"),
+                                min=0, step=50_000, format="%.0f",
+                            ).classes("w-52").props("clearable dense")
+                            wr_wake_recent_x_input = ui.number(
+                                label="Min recent volume (x)", value=_wake_val("wake_min_recent_volume_x"),
+                                min=0, max=1000, step=0.5, format="%.1f",
+                            ).classes("w-44").props("clearable dense")
+                            wr_wake_hour_x_input = ui.number(
+                                label="Min hour volume pace (x)", value=_wake_val("wake_min_hour_volume_x"),
+                                min=0, max=1000, step=0.5, format="%.1f",
+                            ).classes("w-44").props("clearable dense")
+                            wr_wake_range_x_input = ui.number(
+                                label="Min hour range (x)", value=_wake_val("wake_min_hour_range_x"),
+                                min=0, max=1000, step=0.5, format="%.1f",
+                            ).classes("w-44").props("clearable dense")
+                        with ui.row().classes("w-full flex-wrap gap-4 items-start mt-1"):
+                            wr_wake_1m_minutes_input = ui.number(
+                                label="1m window (min)", value=_wake_val("wake_1m_minutes"),
+                                min=2, max=60, step=1, format="%.0f",
+                            ).classes("w-36").props("dense")
+                            wr_wake_1m_range_input = ui.number(
+                                label="Min avg 1m range (%)", value=_wake_val("wake_min_avg_1m_range_pct"),
+                                min=0, max=20, step=0.05, format="%.2f",
+                            ).classes("w-44").props("clearable dense")
+                            wr_wake_min_below_input = ui.number(
+                                label="Min % below high", value=_wake_val("wake_min_below_high_pct"),
+                                min=0, max=20, step=0.05, format="%.2f",
+                            ).classes("w-40").props("clearable dense")
+                            wr_wake_max_below_input = ui.number(
+                                label="Max % below high", value=_wake_val("wake_max_below_high_pct"),
+                                min=0, max=20, step=0.05, format="%.2f",
+                            ).classes("w-40").props("clearable dense")
+                            wr_wake_max_candle_input = ui.number(
+                                label="Max candle rise (%)", value=_wake_val("wake_max_candle_pct"),
+                                min=0, max=100, step=0.5, format="%.1f",
+                            ).classes("w-40").props(
+                                "clearable dense hint='Skip candles already up this much' persistent-hint"
+                            )
+
                         # ── Momentum entry mode (§3.8) ──────────────────
                         ui.label("Momentum entry mode (optional)").classes("text-xs font-semibold text-slate-600 mt-3")
                         ui.label(
@@ -5043,6 +5122,19 @@ def register_pages(app: FastAPI) -> None:
                     "max_prior_rise_pct": _num(wr_max_prior_rise_input, None),
                     "prior_rise_hours": _num(wr_prior_rise_hours_input, d["prior_rise_hours"], int),
                     "require_forming_green": bool(wr_require_green_switch.value),
+                    "wake_profile_enabled": bool(wr_wake_switch.value),
+                    "wake_base_hours": _num(wr_wake_base_hours_input, d["wake_base_hours"], int),
+                    "wake_recent_hours": _num(wr_wake_recent_hours_input, d["wake_recent_hours"], int),
+                    "wake_1m_minutes": _num(wr_wake_1m_minutes_input, d["wake_1m_minutes"], int),
+                    # Blank = condition off.
+                    "wake_max_base_volume_usd": _num(wr_wake_max_base_input, None),
+                    "wake_min_recent_volume_x": _num(wr_wake_recent_x_input, None),
+                    "wake_min_hour_volume_x": _num(wr_wake_hour_x_input, None),
+                    "wake_min_hour_range_x": _num(wr_wake_range_x_input, None),
+                    "wake_min_avg_1m_range_pct": _num(wr_wake_1m_range_input, None),
+                    "wake_min_below_high_pct": _num(wr_wake_min_below_input, None),
+                    "wake_max_below_high_pct": _num(wr_wake_max_below_input, None),
+                    "wake_max_candle_pct": _num(wr_wake_max_candle_input, None),
                     "entry_mode": str(wr_entry_mode_select.value or "clock"),
                     "watch_seconds_before_close": _num(wr_watch_seconds_input, d["watch_seconds_before_close"]),
                     "momentum_entry_max_seconds_to_close": _num(
@@ -5117,6 +5209,8 @@ def register_pages(app: FastAPI) -> None:
                 wr_max_prior_rise_input.value = d["max_prior_rise_pct"]
                 wr_prior_rise_hours_input.value = d["prior_rise_hours"]
                 wr_require_green_switch.value = d["require_forming_green"]
+                _set_wr_wake_fields(d)
+                wr_wake_switch.value = d["wake_profile_enabled"]
                 wr_entry_mode_select.value = d["entry_mode"]
                 wr_watch_seconds_input.value = d["watch_seconds_before_close"]
                 wr_mom_entry_max_input.value = d["momentum_entry_max_seconds_to_close"]
@@ -5141,6 +5235,44 @@ def register_pages(app: FastAPI) -> None:
                 wr_max_concurrent_input.value = d["max_concurrent_positions"]
                 wr_max_total_margin_input.value = d["max_total_margin_pct"]
                 ui.notify("Wick Rejection fields set to recommended defaults — click Save to persist", color="info")
+
+            def _set_wr_wake_fields(d: dict[str, Any]) -> None:
+                """Fill the wake-profile thresholds from ``d``."""
+                wr_wake_base_hours_input.value = d["wake_base_hours"]
+                wr_wake_recent_hours_input.value = d["wake_recent_hours"]
+                wr_wake_max_base_input.value = d["wake_max_base_volume_usd"]
+                wr_wake_recent_x_input.value = d["wake_min_recent_volume_x"]
+                wr_wake_hour_x_input.value = d["wake_min_hour_volume_x"]
+                wr_wake_range_x_input.value = d["wake_min_hour_range_x"]
+                wr_wake_1m_minutes_input.value = d["wake_1m_minutes"]
+                wr_wake_1m_range_input.value = d["wake_min_avg_1m_range_pct"]
+                wr_wake_min_below_input.value = d["wake_min_below_high_pct"]
+                wr_wake_max_below_input.value = d["wake_max_below_high_pct"]
+                wr_wake_max_candle_input.value = d["wake_max_candle_pct"]
+
+            def _set_wr_wake_preset() -> None:
+                """The backtested quiet-wake setup (profile on, exits 5% / 2% price)."""
+                d = strategy_defaults("wick_rejection")
+                _set_wr_wake_fields(d)
+                wr_wake_switch.value = True
+                for key, value in WR_WAKE_PRESET.items():
+                    widget = {
+                        "min_big_bodies": wr_min_big_bodies_input,
+                        "max_high_offset_pct": wr_max_offset_input,
+                        "tp_pct": wr_tp_input,
+                        "tp_unit": wr_tp_unit_select,
+                        "emergency_stop_mode": wr_stop_mode_select,
+                        "emergency_stop_pct": wr_stop_input,
+                        "emergency_stop_unit": wr_stop_unit_select,
+                        "max_hold_minutes": wr_max_hold_input,
+                    }.get(key)
+                    if widget is not None:
+                        widget.value = value
+                ui.notify(
+                    "Quiet-wake preset applied — click Save to persist. It was tested with the CFG "
+                    "page's vol list at Vol min volume 250,000 and Vol max symbols 20.",
+                    color="info", multi_line=True,
+                )
 
             # ── Trend Pullback ────────────────────────────────────────────────────
             _tp_cfg = ((config.get("launcher") or {}).get("strategies") or {}).get("trend_pullback") or {}

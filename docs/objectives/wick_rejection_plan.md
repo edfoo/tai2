@@ -1,6 +1,6 @@
 # Design: Hourly Wick Rejection Short (`wick_rejection`)
 
-**Status:** In progress — Phase 1 done 2026-11-19 (closed-candle alignment + `forming_candle` + `as_of_ts`, live and backtest); Phase 2 done 2026-11-20 (strategy funnel, defaults, registration; disabled by default); Phase 3 done 2026-11-20 (TP/stop units, protection modes, per-strategy leverage + margin sizing, live and backtest); Phase 4 done 2026-11-20 (strategy-owned exits: time stop, software emergency stop, own re-entry cooldown, live and backtest); Phase 5 done 2026-11-20 (`vol` screener universe, live and backtest; also fixed a 1H look-ahead in the backtest universe); Phase 6 done 2026-11-20 (clock trigger at H:59:20, WR removed from the scheduler tick, backtest entry-timing diagnostics; restart re-hydration restores WR positions); Phase 7 done 2026-11-20 (STRATEGY card with risk read-out, CFG vol inputs, LIVE trigger countdown); Phase 8 done 2026-11-20 (parity tests, strategy reference); Phase 9 done 2026-11-20 except tape replay (momentum entry mode, live tape, 1m backtest approximation, trade-tape pagination fix). Vol refresh before the entry and a thin-coin volume floor added 2026-11-24 (§3.5), from the missed-setup analysis. Opt-in prior-rise gate (stage 5b) added 2026-11-25 from the stop-out analysis; validation pending. Redesigned 2026-11-18 from the manual-trade analysis (§1.1); vol screener §3.5; optional momentum entry mode §3.8 / Phase 9.
+**Status:** In progress — Phase 1 done 2026-11-19 (closed-candle alignment + `forming_candle` + `as_of_ts`, live and backtest); Phase 2 done 2026-11-20 (strategy funnel, defaults, registration; disabled by default); Phase 3 done 2026-11-20 (TP/stop units, protection modes, per-strategy leverage + margin sizing, live and backtest); Phase 4 done 2026-11-20 (strategy-owned exits: time stop, software emergency stop, own re-entry cooldown, live and backtest); Phase 5 done 2026-11-20 (`vol` screener universe, live and backtest; also fixed a 1H look-ahead in the backtest universe); Phase 6 done 2026-11-20 (clock trigger at H:59:20, WR removed from the scheduler tick, backtest entry-timing diagnostics; restart re-hydration restores WR positions); Phase 7 done 2026-11-20 (STRATEGY card with risk read-out, CFG vol inputs, LIVE trigger countdown); Phase 8 done 2026-11-20 (parity tests, strategy reference); Phase 9 done 2026-11-20 except tape replay (momentum entry mode, live tape, 1m backtest approximation, trade-tape pagination fix). Vol refresh before the entry and a thin-coin volume floor added 2026-11-24 (§3.5), from the missed-setup analysis. Opt-in prior-rise gate (stage 5b) added 2026-11-25 from the stop-out analysis; not confirmed out of sample, stays off. Opt-in quiet-coin wake profile (stage 5c) added 2026-11-27 from the user's manual method; positive in five backtest windows with `WR_WAKE_PRESET` (exits 5% / 2% price), not yet traded live. Redesigned 2026-11-18 from the manual-trade analysis (§1.1); vol screener §3.5; optional momentum entry mode §3.8 / Phase 9.
 **Date:** 2026-10-28 (revised 2026-11-18)
 **Scope:** New launcher strategy with a clock-aligned entry trigger, forming-candle
 exposure, strategy-owned exits (TP + emergency stop + time stop), per-strategy
@@ -196,6 +196,7 @@ before the next and emits a debug line with the measured value.
 | 4 | Range | `(H − L) / L × 100 >= min_candle_range_pct` | `1.5` |
 | 5 | High offset | `(H − P) / (H − L) × 100 <= max_high_offset_pct` | `20.0` |
 | 5b | Prior rise (opt-in) | `prior_rise_pct(closed, prior_rise_hours) <= max_prior_rise_pct` (last closed close vs the close `prior_rise_hours` candles earlier; vetoes when the history is shorter) | `None` (off), `24` |
+| 5c | Wake profile (opt-in) | `wake_profile_fails(wake_profile(...)) == []`: quiet `wake_base_hours` baseline (median hourly value ≤ `wake_max_base_volume_usd`), recent hours' value, forming hour's value pace and range ≥ multiples of it, mean 1m range of the last `wake_1m_minutes` ≥ `wake_min_avg_1m_range_pct`, price `wake_min/max_below_high_pct` below the hour's high, candle rise < `wake_max_candle_pct`. Needs `sym_data["wr_inputs"]` (contract size + 1m candles), else veto | off; `48`h / `3`h, `500k`, `3`×, `5`×, `3`×, `15` min, `0.4`%, `0.3`–`1.5`%, `4`% |
 | 6 | Big-body setup | count of candles with `body_ratio >= min_body_ratio` in the setup window `>= min_big_bodies` | `3.0`, `1` |
 | 7 | HTF regime (opt-in) | `htf_regime_allows(...)` | `"off"` |
 
@@ -1120,6 +1121,12 @@ DEFAULT_WICK_REJECTION = {
     "max_high_offset_pct": 20.0,      # (H − P)/(H − L) × 100 (user's rule: 5–10)
     "max_prior_rise_pct": None,       # skip coins already up > X% over prior_rise_hours (off)
     "prior_rise_hours": 24,
+    "wake_profile_enabled": False,    # quiet-coin wake profile (stage 5c), off
+    "wake_base_hours": 48, "wake_recent_hours": 3, "wake_1m_minutes": 15,
+    "wake_max_base_volume_usd": 500_000.0, "wake_min_recent_volume_x": 3.0,
+    "wake_min_hour_volume_x": 5.0, "wake_min_hour_range_x": 3.0,
+    "wake_min_avg_1m_range_pct": 0.4, "wake_min_below_high_pct": 0.3,
+    "wake_max_below_high_pct": 1.5, "wake_max_candle_pct": 4.0,
     # Exits (strategy-owned)
     "use_global_trade_management": False,
     "tp_pct": 0.5,

@@ -217,6 +217,7 @@ up to `max_concurrent_positions` / `max_total_margin_pct`.
 4. range `(H − L)/L ≥ min_candle_range_pct` (zero range vetoes)
 5. high offset `(H − P)/(H − L) ≤ max_high_offset_pct` (price above the recorded high counts as the new high)
 5b. optional prior rise: last closed close ≤ `max_prior_rise_pct` above the close `prior_rise_hours` (24) candles earlier (default off; too little history vetoes)
+5c. optional quiet-coin wake profile (`wake_profile_enabled`, default off): quiet 48h baseline (median value ≤ 500k USDT/h), recent 3h value ≥ 3×, forming hour value pace ≥ 5× and range ≥ 3× the baseline, last 15 closed 1m candles' mean range ≥ 0.4%, price 0.3–1.5% below the hour's high, candle rise < 4%. Needs the contract size + 1m candles attached (`attach_wr_inputs`; the live trigger fetches them, the backtest uses its 1m eval candles), else veto. `WR_WAKE_PRESET` / the card's "Quiet-wake preset" turns it on with `min_big_bodies` 0, offset gate off and exits 5% / 2% price, no time stop (backtested positive in five 16-day windows with the vol list at 250k / 20)
 6. at least `min_big_bodies` green bodies ≥ `min_body_ratio` × avg |body| of the prior `body_avg_window`, within `setup_lookback_candles` (+ the forming candle if `setup_include_forming`)
 7. optional `htf_regime_preference` (default off)
 
@@ -251,6 +252,8 @@ shows the resulting USDT risk.
 ### Tighten when
 - stops hit on candles that were still accelerating → lower `max_high_offset_pct`, raise `min_body_ratio`
 - stops cluster on coins in a sustained uptrend (already up several % over the prior 24h) → set `max_prior_rise_pct`
+- stops cluster on the biggest candles (already up 4%+ at entry) → lower `wake_max_candle_pct`
+- trades on coins that were already busy, not waking up → lower `wake_max_base_volume_usd`, raise the `wake_min_*_x` multiples
 - many trades on quiet coins → raise `vol_min_speed_pct_per_hour` / `min_candle_range_pct`
 
 ### Loosen when
